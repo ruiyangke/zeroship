@@ -125,6 +125,19 @@ impl PolicySource for ControlPolicies {
                             .map_err(|_| Error::Unavailable)?;
                     ticket.complete(observation?)
                 }
+                // Read again ahead of expiry. A failed read is answered by the
+                // observation it would have replaced, which is still valid and
+                // still the cache's own; a completion the cache refuses - the
+                // app was invalidated meanwhile - is refused here too.
+                cache::Reservation::Ahead(ticket, current) => {
+                    if let Ok(Ok(observation)) =
+                        compio::time::timeout(self.read_timeout, self.store.observe(app)).await
+                    {
+                        return ticket.complete(observation);
+                    }
+                    drop(ticket);
+                    Ok(current)
+                }
                 // A peer thread's refresh is already reading the source. A
                 // request that asked inside that window waits for its result
                 // instead of being refused: the observation it is waiting for is
@@ -134,9 +147,5 @@ impl PolicySource for ControlPolicies {
                 }
             }
         })
-    }
-
-    fn revalidate(&self, observation: &PolicyObservation) -> Result<Instant, Error> {
-        self.observations.cache().revalidate(observation)
     }
 }

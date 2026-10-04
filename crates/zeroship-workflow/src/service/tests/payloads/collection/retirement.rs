@@ -44,6 +44,7 @@ impl Manager {
         recovery
             .ensure(
                 app,
+                &zeroship_core::ZoneId::default_zone(),
                 &zeroship_core::workflow_jobs::DeploymentId::mint(),
                 1.try_into().unwrap(),
             )

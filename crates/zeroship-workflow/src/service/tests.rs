@@ -116,6 +116,7 @@ mod payloads;
 mod policy;
 mod propagation;
 pub(super) mod publication;
+pub(super) mod queue_owner;
 mod reconciliation;
 mod requests;
 mod restart_models;
@@ -308,7 +309,6 @@ impl JobGrant {
             delivery: zeroship_core::workflow_jobs::Delivery {
                 job: job.clone(),
                 worker_id: zeroship_core::workflow_coordination::WorkerId::mint(),
-                assignment_revision: 1.try_into().unwrap(),
                 attempt: 1.try_into().unwrap(),
                 deadline: 0.try_into().unwrap(),
             },
@@ -325,6 +325,9 @@ impl JobGrant {
 impl zeroship_core::workflow_jobs::JobLease for JobGrant {
     fn delivery(&self) -> &zeroship_core::workflow_jobs::Delivery {
         &self.delivery
+    }
+    fn attempt_remaining(&self) -> Option<std::time::Duration> {
+        zeroship_core::workflow_jobs::JobLease::remaining(self)
     }
     fn remaining(&self) -> Option<std::time::Duration> {
         self.expires

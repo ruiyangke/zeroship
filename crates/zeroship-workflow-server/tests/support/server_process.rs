@@ -40,7 +40,21 @@ impl ServerProcess {
         name: &str,
         client: &Client,
     ) -> Self {
-        Self::spawn_with(platform, peers, directory, name, client, true).await
+        Self::spawn_with(platform, peers, directory, name, client, true, serde_json::json!({}))
+            .await
+    }
+
+    /// The same process with `settings` added to its `workflow` table, for a
+    /// case whose subject is one setting's reach into the running process.
+    pub async fn start_with(
+        platform: &super::platform::Platform,
+        peers: &Path,
+        directory: &Path,
+        name: &str,
+        client: &Client,
+        settings: serde_json::Value,
+    ) -> Self {
+        Self::spawn_with(platform, peers, directory, name, client, true, settings).await
     }
 
     /// The same process with `workflow.maintenance_sweeps` off, so it composes no
@@ -49,7 +63,7 @@ impl ServerProcess {
     /// For a case whose subject is a route, a protocol or a duty rather than the
     /// lane: the lane asserts its own authority over every maintenance row of
     /// this queue, so a running one competes with the claim the case makes for
-    /// itself and there is no placement to expire that would stop it. The lane's
+    /// itself and nothing the case holds would stop it. The lane's
     /// own reach through the real cadence is bound by
     /// `crates/zeroship-workflow-server/tests/integration/maintenance_lane.rs`, which keeps
     /// it on.
@@ -60,7 +74,16 @@ impl ServerProcess {
         name: &str,
         client: &Client,
     ) -> Self {
-        Self::spawn_with(platform, peers, directory, name, client, false).await
+        Self::spawn_with(
+            platform,
+            peers,
+            directory,
+            name,
+            client,
+            false,
+            serde_json::json!({}),
+        )
+        .await
     }
 
     /// How many app-facts observations the Control peer has answered.
@@ -75,6 +98,7 @@ impl ServerProcess {
         name: &str,
         client: &Client,
         maintenance_sweeps: bool,
+        settings: serde_json::Value,
     ) -> Self {
         let config = directory.join(format!("{name}.toml"));
         let mut control =
@@ -87,21 +111,24 @@ impl ServerProcess {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let address = listener.local_addr().unwrap();
             drop(listener);
+            let mut workflow = serde_json::json!({
+                "listen":address.to_string(),"database_url":platform.runtime_url,"service_peers_file":peers,
+                "control_url":control.as_ref().unwrap().url(),"service_key_file":control.as_ref().unwrap().key_file,
+                // The payload store this process stages and collects objects
+                // through. ONE root for every process this fixture starts,
+                // because that is what a deployment owes: an object one replica
+                // wrote is one another replica and the workers must be able to
+                // read. A root per process would model a misconfiguration.
+                "storage_url":directory.join("payload-objects"),
+                "http_threads":2,"max_request_bytes":MAX_REQUEST_BYTES,
+                "maintenance_sweeps":maintenance_sweeps,
+            });
+            for (key, value) in settings.as_object().expect("settings are a table") {
+                workflow[key] = value.clone();
+            }
             super::platform::write_private(
                 &config,
-                toml::to_string(&serde_json::json!({"workflow":{
-                    "listen":address.to_string(),"database_url":platform.runtime_url,"service_peers_file":peers,
-                    "control_url":control.as_ref().unwrap().url(),"service_key_file":control.as_ref().unwrap().key_file,
-                    // The payload store this process stages and collects objects
-                    // through. ONE root for every process this fixture starts,
-                    // because that is what a deployment owes: an object one replica
-                    // wrote is one another replica and the workers must be able to
-                    // read. A root per process would model a misconfiguration.
-                    "storage_url":directory.join("payload-objects"),
-                    "http_threads":2,"max_request_bytes":MAX_REQUEST_BYTES,
-                    "maintenance_sweeps":maintenance_sweeps,
-                }}))
-                .unwrap(),
+                toml::to_string(&serde_json::json!({"workflow": workflow})).unwrap(),
             );
             let mut child = spawn(&config, &log);
             let url = format!("http://{address}");

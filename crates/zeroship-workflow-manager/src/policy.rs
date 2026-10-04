@@ -1,11 +1,11 @@
 //! Trusted platform policy observations, separate from creator execution storage.
 
 use crate::Error;
-use std::{fmt::Debug, future::Future, num::NonZeroU64, pin::Pin, sync::Arc, time::Instant};
+use std::{fmt::Debug, future::Future, pin::Pin, sync::Arc, time::Instant};
 use zeroship_core::{
     app_id::AppId,
-    workflow_coordination::{AssignedScope, Revision, WorkerId},
-    workflow_policy::{AppPolicy, PolicyLease},
+    workflow_coordination::Revision,
+    workflow_policy::AppPolicy,
     zone_id::ZoneId,
 };
 
@@ -86,6 +86,23 @@ impl PolicyObservation {
         self.deleted
     }
 
+    /// Whether the run and claim paths may serve `zone` this app.
+    ///
+    /// A deleted app is refused to every zone: deletion is terminal and has no
+    /// successor to hand the call to. A live app is served only by its own
+    /// frozen execution zone. The caller passes a zone it has already taken
+    /// from a verified credential; this type does not enforce that and cannot,
+    /// so both call sites name `VerifiedWorker::zone`.
+    ///
+    /// # Errors
+    /// `Denied` for a deleted app or a foreign zone.
+    pub fn admits_zone(&self, zone: &ZoneId) -> Result<(), Error> {
+        if self.deleted || &self.execution_zone_id != zone {
+            return Err(Error::Denied);
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub const fn expires_at(&self) -> Instant {
         self.expires_at
@@ -113,97 +130,4 @@ pub trait PolicySource: Debug {
         &'a self,
         app: &'a AppId,
     ) -> Pin<Box<dyn Future<Output = Result<PolicyObservation, Error>> + 'a>>;
-
-    /// Recheck the exact observation without blocking or performing source I/O.
-    ///
-    /// # Errors
-    /// Reject any invalidated observation, including after a later restoration.
-    /// A shortening can reduce validity; it must not later revive that retained
-    /// observation. A newer valid observation requires a new issuing attempt.
-    fn revalidate(&self, observation: &PolicyObservation) -> Result<Instant, Error>;
-}
-
-/// An issued lease retains source authority through response construction.
-/// There is no public constructor and no serde implementation for this handle.
-///
-/// The ingress epoch was committed before the grant was built.
-#[derive(Clone, Debug)]
-pub struct PolicyGrant<'a> {
-    observation: PolicyObservation,
-    source: &'a dyn PolicySource,
-    worker_id: WorkerId,
-    signing_key_id: String,
-    assignment_revision: Revision,
-    ingress_epoch: Option<Revision>,
-    expires_at: Instant,
-}
-
-impl<'a> PolicyGrant<'a> {
-    pub(crate) fn new(
-        observation: PolicyObservation,
-        source: &'a dyn PolicySource,
-        worker_id: WorkerId,
-        signing_key_id: String,
-        scope: &AssignedScope,
-        ingress_epoch: Option<Revision>,
-        expires_at: Instant,
-    ) -> Self {
-        Self {
-            observation,
-            source,
-            worker_id,
-            signing_key_id,
-            assignment_revision: scope.assignment_revision,
-            ingress_epoch,
-            expires_at,
-        }
-    }
-
-    /// The open or closing ingress epoch this grant carries, if any.
-    #[must_use]
-    pub const fn ingress_epoch(&self) -> Option<Revision> {
-        self.ingress_epoch
-    }
-
-    /// Convert after transaction settlement, charging all intervening waits.
-    ///
-    /// # Errors
-    /// Refuses unavailable source authority or exhausted remaining validity.
-    pub fn lease(&self) -> Result<PolicyLease, Error> {
-        let expires_at = self
-            .expires_at
-            .min(source_deadline(self.source, &self.observation)?);
-        let remaining_ms = u64::try_from(
-            expires_at
-                .saturating_duration_since(Instant::now())
-                .as_millis(),
-        )
-        .ok()
-        .and_then(NonZeroU64::new)
-        .ok_or(Error::Timeout)?;
-        Ok(PolicyLease {
-            app_id: self.observation.app_id.clone(),
-            worker_id: self.worker_id.clone(),
-            signing_key_id: self.signing_key_id.clone(),
-            assignment_revision: self.assignment_revision,
-            policy_revision: self.observation.revision,
-            policy: self.observation.policy.clone(),
-            ingress_epoch: self.ingress_epoch,
-            remaining_ms,
-        })
-    }
-}
-
-pub(crate) fn source_deadline(
-    source: &dyn PolicySource,
-    observation: &PolicyObservation,
-) -> Result<Instant, Error> {
-    let expires_at = source
-        .revalidate(observation)
-        .map_err(|_| Error::Unavailable)?
-        .min(observation.expires_at);
-    if expires_at <= Instant::now() {
-        return Err(Error::Unavailable);
-    }
-    Ok(expires_at)
 }

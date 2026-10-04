@@ -165,6 +165,7 @@ struct AppRow {
     manifest_json: Option<String>,
     lifecycle_revision: i64,
     archived_at: Option<UtcInstant>,
+    execution_zone_id: String,
 }
 
 #[derive(FromRow)]
@@ -317,7 +318,12 @@ pub async fn accept(
     let lifecycle_revision = if state.archived_at.is_none() {
         let revision = allocate_revision(tx, app, state.lifecycle_revision).await?;
         let registration =
-            serde_json::to_string(&command.deployment.registration(app, &deployment))
+            serde_json::to_string(&command.deployment.registration(
+                app,
+                &zeroship_core::ZoneId::parse(&state.execution_zone_id)
+                    .map_err(|_| CatalogError::Storage("invalid app execution zone"))?,
+                &deployment,
+            ))
                 .map_err(|_| CatalogError::Storage("schedule registration"))?;
         insert_intent(
             tx,
@@ -491,7 +497,12 @@ pub async fn restore(
                 "staged deployment is not in the catalog",
             ))?;
     let revision = allocate_revision(tx, app, state.lifecycle_revision).await?;
-    let registration = serde_json::to_string(&staged.registration(app, &deployment))
+    let registration = serde_json::to_string(&staged.registration(
+        app,
+        &zeroship_core::ZoneId::parse(&state.execution_zone_id)
+            .map_err(|_| CatalogError::Storage("invalid app execution zone"))?,
+        &deployment,
+    ))
         .map_err(|_| CatalogError::Storage("schedule registration"))?;
     insert_intent(
         tx,

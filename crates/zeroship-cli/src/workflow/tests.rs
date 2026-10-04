@@ -1,7 +1,9 @@
 use super::{manager::LocalTransport, *};
 use serde_json::json;
 use std::sync::Mutex;
-use zeroship_core::workflow_jobs::{JobId, JobOperation, JobOutcome, JobSpec, SettlementReceipt};
+use zeroship_core::workflow_jobs::{
+    ClaimJobs, JobId, JobOperation, JobOutcome, JobSpec, SettlementReceipt,
+};
 use zeroship_workflow::{
     backend::WorkflowBackend,
     operations::{RunState, RunStatus, SignalOptions, StartOptions},
@@ -12,7 +14,7 @@ use zeroship_workflow::{
     WorkflowServiceError,
 };
 use zeroship_workflow_runner::{
-    delivery::{Claimed, Completed, JobTransport, Renewed},
+    delivery::{ClaimedBatch, Completed, JobTransport, Renewed},
     ExecutionBudget, TaskExecution, TaskExecutor,
 };
 use zeroship_workflow_manager::{
@@ -55,13 +57,6 @@ fn local_configuration_rejects_unknown_and_invalid_limits() {
             },
             ..LocalConfig::default()
         },
-        LocalConfig {
-            manager: ManagerConfig {
-                placement_ttl_ms: 2,
-                ..ManagerConfig::default()
-            },
-            ..LocalConfig::default()
-        },
         // A grace inside the manager transaction budget could release a hold
         // before the dependency confirmed with it commits.
         LocalConfig {
@@ -79,6 +74,22 @@ fn local_configuration_rejects_unknown_and_invalid_limits() {
         valid.validate().unwrap().manager_options().hold_grace,
         Duration::from_millis(5_001)
     );
+}
+
+/// The local host's attempt cap is its own setting: a lease longer than the
+/// default cap is accepted beside a cap that covers it, and refused at
+/// configuration, not at startup, when the cap is left below it.
+#[test]
+fn local_configuration_carries_the_attempt_cap_its_lease_needs() {
+    let covered: LocalConfig =
+        toml::from_str("[manager]\nlease_ms = 400000\nmax_attempt_ms = 600000").unwrap();
+    let covered = covered.validate().unwrap();
+    assert_eq!(
+        covered.manager_options().max_attempt,
+        Duration::from_millis(600_000)
+    );
+    let uncovered: LocalConfig = toml::from_str("[manager]\nlease_ms = 400000").unwrap();
+    assert!(uncovered.validate().is_err());
 }
 
 /// `[payloads]` configures the budget this host reads staged payloads through,
@@ -829,7 +840,6 @@ async fn reported_ingress_counts_as_activity() {
     let config = LocalConfig {
         manager: ManagerConfig {
             driver_interval_ms: 50,
-            placement_ttl_ms: 300,
             recovery_interval_ms: 3_600_000,
             idle_close_ms: 3_600_000,
             ..ManagerConfig::default()
@@ -932,20 +942,20 @@ impl JobTransport for LossyTransport {
     /// This host holds the journal, so an attempt is scoped here rather than
     /// server-side.
     type Journal = AppWorkflows;
-    fn scope(
-        &self,
-        journal: &Self::Journal,
-        authority: &zeroship_workflow::service::PolicyAuthority,
-    ) -> Result<Self::Journal, WorkflowServiceError> {
-        zeroship_workflow_runner::delivery::scope_journal(journal, authority)
-    }
 
     async fn claim(
         &self,
-        journal: &zeroship_workflow::service::AppWorkflows,
-        scope: &zeroship_core::workflow_coordination::AssignedScope,
-    ) -> Result<Option<Claimed<DeliveryGrant>>, WorkflowServiceError> {
-        self.inner.claim(journal, scope).await
+        request: &ClaimJobs,
+    ) -> Result<ClaimedBatch<DeliveryGrant>, WorkflowServiceError> {
+        self.inner.claim(request).await
+    }
+
+    async fn give_back(
+        &self,
+        claimed: &zeroship_workflow_runner::delivery::Claimed<DeliveryGrant>,
+        why: zeroship_workflow_runner::delivery::Unstarted,
+    ) -> Result<(), WorkflowServiceError> {
+        self.inner.give_back(claimed, why).await
     }
 
     async fn heartbeat(
@@ -1106,7 +1116,7 @@ async fn submit_sweep(root: &Path, job: &JobSpec) {
             .await
             .map_err(manager::manager_error)?;
         queue
-            .register_scope(&job.app_id)
+            .register_scope(&job.app_id, &zeroship_core::ZoneId::default_zone())
             .await
             .map_err(manager::manager_error)?;
         queue.submit(job).await.map_err(manager::manager_error)
@@ -1137,7 +1147,7 @@ async fn sweepable(root: &Path) -> Vec<AppId> {
 
 /// The local host owns the journal its sweeps maintain, so it claims them as
 /// `Claimant::Maintenance` itself. Nothing else can: the consumer beside that
-/// lane claims as `Claimant::Placed`, which admits only `advance`.
+/// lane claims as `Claimant::Worker`, which admits only `advance`.
 ///
 /// No archive is published, so this host holds no creator code at all. The
 /// journal receipt therefore cannot have come from an executing task, and the
@@ -1213,4 +1223,83 @@ async fn the_local_host_claims_runs_and_settles_its_own_journal_sweeps() {
     drop(host);
     compio::time::sleep(lease * 2).await;
     assert_eq!(sweepable(root.path()).await, vec![unhosted.app_id]);
+}
+
+/// Fails the first execution start it sees, as an executor that cannot start
+/// would, and delegates every later one.
+struct FailFirstStart(Arc<Mutex<u32>>);
+
+impl Composition for FailFirstStart {
+    type Transport = LocalTransport;
+
+    fn transport(&self, transport: LocalTransport) -> LocalTransport {
+        transport
+    }
+
+    fn executor(&self, executor: Rc<dyn TaskExecutor>) -> Rc<dyn TaskExecutor> {
+        Rc::new(FailingOnce {
+            inner: executor,
+            starts: self.0.clone(),
+        })
+    }
+}
+
+struct FailingOnce {
+    inner: Rc<dyn TaskExecutor>,
+    starts: Arc<Mutex<u32>>,
+}
+
+impl TaskExecutor for FailingOnce {
+    fn start(
+        &self,
+        assignment: &TaskAssignment,
+        budget: ExecutionBudget,
+    ) -> Result<Box<dyn TaskExecution>, WorkflowServiceError> {
+        let first = {
+            let mut starts = self.starts.lock().unwrap();
+            *starts += 1;
+            *starts == 1
+        };
+        if first {
+            return Err(WorkflowServiceError::Unavailable(
+                "the executor could not start".into(),
+            ));
+        }
+        self.inner.start(assignment, budget)
+    }
+}
+
+/// An attempt the local host started and could not finish returns its row to
+/// the queue at once, so the run's next attempt does not wait out the lease the
+/// stopped attempt held. The lease here outlasts the convergence bound, so a
+/// release that left the row leased would never let the run reach its wait.
+#[compio::test]
+async fn an_interrupted_local_attempt_returns_its_row_at_once() {
+    let root = tempfile::tempdir().unwrap();
+    let bundle = publish(root.path(), "original", "10ms");
+    let app = AppId::mint();
+    let starts = Arc::new(Mutex::new(0));
+    let config = LocalConfig {
+        manager: ManagerConfig {
+            lease_ms: 120_000,
+            max_attempt_ms: 240_000,
+            ..ManagerConfig::default()
+        },
+        ..LocalConfig::default()
+    };
+    let host = start_with(
+        root.path(),
+        &app,
+        config,
+        Some(bundle.as_path()),
+        vec![],
+        FailFirstStart(starts.clone()),
+    );
+    let run = start_run(&host.backend, "interrupted").await;
+    state(&host.backend, &run, RunState::Waiting).await;
+    assert!(
+        *starts.lock().unwrap() >= 2,
+        "the run reached its wait without the failed start being retried"
+    );
+    drop(host);
 }

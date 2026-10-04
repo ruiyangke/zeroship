@@ -5,7 +5,7 @@
     reason = "platform fixtures use their compio runtime"
 )]
 
-use crate::support::{app_facts, holds, platform, zone};
+use crate::support::{app_facts, holds, platform, policies::GrantedPolicies};
 
 use std::{collections::BTreeSet, rc::Rc, time::Duration};
 use zeroship_core::{
@@ -181,7 +181,12 @@ async fn the_driver_abandons_deleted_apps_over_the_canonical_schema() {
     let scopes = Recovery::new(queue.clone(), recovery).unwrap();
     for app in [&live, &gone] {
         scopes
-            .ensure(app, &DeploymentId::mint(), 1.try_into().unwrap())
+            .ensure(
+                app,
+                &zeroship_core::ZoneId::default_zone(),
+                &DeploymentId::mint(),
+                1.try_into().unwrap(),
+            )
             .await
             .unwrap();
         platform
@@ -196,12 +201,13 @@ async fn the_driver_abandons_deleted_apps_over_the_canonical_schema() {
     delete(&platform, &gone).await;
     compio::time::sleep(Duration::from_millis(5)).await;
     let mut driver = Driver::new(
-        Coordinator::new(queue, CoordinatorOptions::default(), zone::trusted()).unwrap(),
+        Coordinator::new(queue, CoordinatorOptions::default()).unwrap(),
         DriverOptions {
             recovery,
             ..DriverOptions::default()
         },
         Rc::new(connect_lifecycle(&platform).await),
+        Rc::new(GrantedPolicies::default()),
         Rc::new(LocalCapacity),
     )
     .unwrap();

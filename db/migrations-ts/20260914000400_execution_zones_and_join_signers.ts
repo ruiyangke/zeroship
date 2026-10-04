@@ -16,11 +16,11 @@ import { grant, now, raw, t, table } from "@zeroship/migrate";
 // import, and crates/zeroship-core/src/worker_join.rs for the token and the
 // documents.
 //
-// THE ZONES TABLE IS SHARED WITH PLACEMENT. An execution zone is an
+// THE ZONES TABLE IS SHARED WITH APPS. An execution zone is an
 // operator-declared set of worker deployment units that share creator-side
-// connectivity; 20260914000600_placement_eligibility.ts pins
-// `apps.execution_zone_id` to this table and freezes the column, so placement
-// matches an app's zone to a worker's. A single-VPS deployment has exactly one
+// connectivity; 20260914000600_app_execution_zones.ts pins
+// `apps.execution_zone_id` to this table and freezes the column, so a worker
+// serves only the apps of its own zone. A single-VPS deployment has exactly one
 // zone, seeded by the next migration.
 export default {
   name: "execution_zones_and_join_signers",

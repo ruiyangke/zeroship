@@ -8,7 +8,6 @@ use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::{
     init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, Runtime, SettledFetch,
 };
-use zeroship_workflow_runner::ready::ReadyApps;
 use zeroship_workflow_v8::{is_excluded_workflow_property, WorkflowBinding};
 
 fn modules(source: &str) -> Vec<ModuleEntry> {
@@ -19,11 +18,19 @@ fn modules(source: &str) -> Vec<ModuleEntry> {
 }
 
 async fn run_workflow_app(app_id: AppId, source: &str) -> (u16, String) {
+    run_with(
+        WorkflowBinding::remote_workflows(crate::support::unreachable::unreachable_workflows()),
+        app_id,
+        source,
+    )
+    .await
+}
+
+async fn run_with(binding: WorkflowBinding, app_id: AppId, source: &str) -> (u16, String) {
     init_v8();
     let mut env_vars = HashMap::new();
     env_vars.insert("APP_ID".to_string(), app_id.as_str().to_owned());
-    let plugin: Arc<dyn NativePlugin> =
-        Arc::new(WorkflowBinding::ready(ReadyApps::default()));
+    let plugin: Arc<dyn NativePlugin> = Arc::new(binding);
     let runtime = Runtime::builder()
         .modules(modules(source))
         .env_vars(env_vars)
@@ -122,4 +129,41 @@ async fn v8_binding_getter_exclusions_are_undefined() {
     assert_eq!(value["symbolIsUndefined"], true, "body: {body}");
     assert_eq!(value["handleHasStart"], true, "body: {body}");
     assert_eq!(value["handleHasGet"], true, "body: {body}");
+}
+
+/// A process with no workflow service still gives every app `env.workflows`,
+/// and every call through it is refused with the retryable code, never a
+/// missing namespace. The control is that the namespace exists at all and its
+/// handles are the ordinary ones.
+#[compio::test]
+async fn an_unconfigured_namespace_refuses_every_call_as_retryable() {
+    let source = r#"
+        export default {
+          async fetch(_req, env) {
+            const handle = env.workflows.Checkout;
+            const codes = {};
+            for (const [name, call] of [
+              ["start", () => handle.start({})],
+              ["status", () => handle.get("run_03gzjh07tkcod6b28kcxxc0mx").status()],
+            ]) {
+              try {
+                await call();
+                codes[name] = "served";
+              } catch (error) {
+                codes[name] = error.code ?? null;
+              }
+            }
+            return Response.json({hasStart: typeof handle.start === "function", codes});
+          }
+        };
+    "#;
+    let (status, body) = run_with(WorkflowBinding::unavailable(), AppId::mint(), source).await;
+    assert_eq!(status, 200, "body: {body}");
+    let value: Value = serde_json::from_str(&body).expect("body json");
+    assert_eq!(value["hasStart"], true, "body: {body}");
+    let codes = value["codes"].as_object().expect("codes");
+    assert!(!codes.is_empty());
+    for (call, code) in codes {
+        assert_eq!(code, "workflow_unavailable", "{call}: {body}");
+    }
 }

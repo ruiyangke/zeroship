@@ -1,36 +1,39 @@
 # Workflow manager, durable job queue and workers
 
-**Status:** Agreed architecture with protocol decisions still identified below.
-Implementation is in progress. Native coordinator and queue operations share ORM
-transactions. Their database, authenticated host and platform-schema contracts
-have passed verification; remaining bounded creator operations are in progress.
-The local CLI host runs on the native manager and the ordinary job consumer.
-Manager scheduling, creator outbox publication and the simple worker consumer
-have not completed their production cutover.
+**Status:** Agreed architecture, implemented in the workflow service, the
+native manager, the runner and the worker, with the decisions still open listed
+under [remaining decisions](#decisions-still-requiring-an-explicit-contract).
+Workers pull claimable jobs from their execution zone, and nothing assigns an
+app to a worker. The local CLI host runs the same manager, claim and consumer in
+one process.
 
 The manager owns when work becomes runnable and how it is delivered. An ordinary
-app worker pulls an authorized job, executes a bounded operation against creator
-storage, commits the result and acknowledges closed metadata. A workflow can
-outlive the worker, isolate and delivery attempt that advanced it.
+app worker pulls a claimable job of its zone, executes a bounded operation, has
+the workflow service commit the result to the journal, and acknowledges closed
+metadata. A workflow can outlive the worker, isolate and delivery attempt that
+advanced it, and any worker of the app's execution zone may take its next job.
 
-The principal rule is process ownership: **workers access only authorized creator
-databases; Control and the workflow manager access only the Control database.**
-Production places these processes in separate zones with private databases.
-Neither side receives the other side's database credentials. Customer inputs,
-history and results stay in the creator zone throughout the protocol.
+The principal rule is process ownership: **workers run creator code and access
+only authorized creator databases; the workflow service holds the journal and
+the queue in its own platform schema; Control owns the control-plane catalog.**
+Neither side receives the other side's database credentials. A worker reaches
+the journal only through authenticated calls the service answers, and the
+service reaches no creator database.
 
 This proposal supersedes the earlier
 [control-plane design](2026-07-05-durable-workflows-design.md),
 [scheduler registration design](2026-07-08-durable-workflows-scheduler-worker-design.md)
 and [implementation plan](2026-07-05-durable-workflows-implementation-plan.md).
-The [workflow reference](../reference/workflows.md) describes existing APIs;
+The [journal relocation](2026-09-19-workflow-journal-relocation.md) records why
+the journal lives in the workflow service. The
+[workflow reference](../reference/workflows.md) describes creator-facing APIs;
 statements marked as target or required work here are not claims of shipment.
 
 Read by concern:
 
 - [Components and private zones](#components-and-private-zones),
-  [worker identity and placement](#worker-identity-registration-and-placement),
-  [policy bindings and leases](#policy-bindings-and-authenticated-leases).
+  [worker identity and zone-scoped pull](#worker-identity-and-zone-scoped-pull),
+  [policy bindings](#policy-bindings-and-the-service-side-binding).
 - [Storage and transactions](#storage-inventory-and-schema-ownership),
   [delivery protocol](#durable-job-protocol), [lifecycle state](#lifecycle-state-and-authority).
 - [Trigger sequences](#trigger-lifecycles),
@@ -47,19 +50,21 @@ Terms used throughout:
 
 | Term | Meaning |
 | --- | --- |
-| Scope | The app whose jobs and creator binding an operation may use. |
+| Execution zone | An operator-declared set of worker deployment units sharing creator-side connectivity. Every app and every enrolled worker instance belongs to exactly one, frozen at creation and at join. It is the isolation unit for workflow execution. |
+| Scope | An app and its frozen execution zone: the `queue_scopes` row whose lock every queue change for the app takes. |
+| Zone claim | A worker's request for up to its free execution slots of claimable `advance` jobs among its own zone's apps, continuing from a cursor. |
 | Run | A durable invocation of a workflow, independent of the process executing it. |
 | Generation | A run's execution incarnation, with its own pinned code and replay history. Restart creates another generation. |
 | Frontier | The current committed point from which execution may advance; its revision changes when the journal advances. |
 | Job | A durable instruction to perform a bounded operation. A run can require successive jobs. |
-| Attempt | A particular delivery of a job to a worker. Redelivery changes the attempt, not the job's meaning. |
+| Attempt | A particular delivery of a job. Redelivery changes the attempt, not the job's meaning. |
+| Give-back | Returning a claimed, unusable delivery to `ready` in the same request, with a back-off before it is claimable again. |
 | Fence | An identity or revision checked by a write so an obsolete execution cannot modify current state. |
 | Receipt | A durable record of an accepted operation or committed outcome, used to answer retries consistently. |
-| Publication intent | A creator transaction's durable instruction to publish metadata after commit; stored in an outbox. |
-| Recovery responsibility | The manager's obligation to revisit an app even when it cannot see unpublished creator work. |
-| Deployment hold | A durable reference preventing normal bundle reclamation while queued work or creator history still needs its code. |
+| Publication intent | A journal transaction's durable instruction to publish queue metadata after commit. |
+| Recovery responsibility | The manager's obligation to revisit an app even when it cannot see unpublished journal work. |
+| Deployment hold | A durable reference preventing normal bundle reclamation while queued work or journal history still needs its code. |
 | Policy binding | A trusted host's immutable association between an app handle and a local authority generation; replacement retires existing handles. |
-| Policy lease | Authenticated, time-bounded permission to apply a policy under an exact worker key and assignment. |
 
 ## Components and private zones
 
@@ -69,143 +74,188 @@ PLATFORM ZONE
   Creator management / normal deployment
                   |
                   v
-            +-----------+        metadata         +---------------------+
-            | Control   |------------------------>| Workflow manager    |
-            |           |<--- scoped hold API ----|                     |
-            | Authz     |                         | Cron and timers     |
-            | Deploys   |                         | Placement/recovery  |
-            | Retention |                         | Management commands |
-            +-----+-----+                         | Durable job queue   |
-                  |                               +----------+----------+
-                  |                                          |
-                  +---------------> Private Control DB <-----+
-                                       metadata only
+            +-----------+   lifecycle intents   +-------------------------+
+            | Control   |---------------------->| Workflow service        |
+            |           |<-- scoped hold API ---|                         |
+            | Authz     |---- app facts ------->| Cron and timers         |
+            | Deploys   |                       | Zone queue / recovery   |
+            | Retention |                       | Zone capacity targets   |
+            | Enrollment|                       | Management commands     |
+            +-----+-----+                       | Journal + maintenance   |
+                  |                             +-----------+-------------+
+                  v                                         |
+          Control database                     workflow_manager schema
+                                               (queue, scopes, journal)
 
 =================== authenticated service API ========================
-                Workers initiate polling and reporting
+          Workers pull claims and report; nothing is pushed to them
 
-CREATOR EXECUTION ZONE
+CREATOR EXECUTION ZONE (one per execution zone)
 
-  Normal app request                    Outbound poll / submit / ACK
+  Normal app request                  Zone claim / heartbeat / settle
           |                                          |
           v                                          v
   +------------------------------------------------------------------+
   | Ordinary zeroship-worker                                         |
   |                                                                  |
-  | App-scoped start / signal / reads     Bounded job consumer         |
-  |                                        |                         |
-  | Trusted app context -> customer engine -> pinned app code in V8    |
-  +-----------------------+-------------------------+------------------+
+  | env.workflows -> RemoteWorkflows    Batch claimer + slots        |
+  |   (any app of the zone)             PreparedApps (bounded cache) |
+  | Trusted app context -> pinned app code in a fresh V8 isolate     |
+  +-----------------------+-------------------------+----------------+
                           |                         |
                           v                         v
-                 Private creator DB          Creator object storage
-                 Runs, history, waits,       Inputs, outputs, signals,
-                 receipts and outbox         prepared payload objects
+                 Creator databases           Object storage
+                 (env.db)                    payload objects
 ```
 
-`zeroship-workflow-server` is the deployable manager host. Its queue is persisted
-in the Control database through the ORM. It introduces no broker service or
-separate workflow-worker executable. Deployment infrastructure starts ordinary
-`zeroship-worker` processes; the manager requests capacity through an injected
-host adapter.
+`zeroship-workflow-server` is the deployable workflow service. It hosts the
+native manager over its platform schema, the workflow journal in the same
+schema, and the maintenance lane that runs every job kind except creator code.
+It introduces no broker service or separate workflow-worker executable.
+Deployment infrastructure starts ordinary `zeroship-worker` processes; the
+manager computes a capacity target per execution zone and hands it to an
+injected provider.
 
-The worker retains a consumer loop, execution heartbeats and bounded transport
-retry. It has no cron evaluator, due-work scanner or independent maintenance
-scheduler. Reconciliation and collection can read the assigned creator journal,
-but they run because the manager delivered a bounded job. Waiting for a signal,
-child or deadline releases the execution slot and isolate.
+A worker retains one batch claimer, execution heartbeats and bounded transport
+retry. It has no cron evaluator, due-work scanner or maintenance scheduler, and
+it never claims a sweep: reconciliation, collection, fanout, propagation,
+activation, cron acceptance, management, hold release and closure run in the
+service, beside the journal they touch. Waiting for a signal, child or deadline
+releases the execution slot and isolate.
 
 | Component | Owns | Excludes |
 | --- | --- | --- |
-| Control | Creator authorization, enrollment, normal deployment publication, policy, routing metadata and deployment retention APIs. | Creator journal access and workflow advancement loops. |
-| Manager | Calendar evaluation, durable jobs and deadlines, placement, delivery attempts, command delivery, recovery responsibility and capacity demand. | Customer code, payload credentials and creator DB connections. |
-| Worker customer engine | App-scoped acceptance, replay, lifecycle decisions, journal fences, inputs, history, results and durable publication intents. | Platform tables and scheduling discovery. |
+| Control | Creator authorization, enrollment and execution zones, normal deployment publication, policy inputs, routing metadata and deployment retention APIs. | Journal access and workflow advancement loops. |
+| Workflow service and manager | Calendar evaluation, durable jobs and deadlines, the zone claim, delivery attempts and give-backs, command delivery, recovery responsibility, per-zone capacity targets, the journal and its maintenance sweeps. | Customer code and creator database connections. |
+| Worker | Pulling `advance` jobs of its own zone, preparing each claimed app on demand, executing pinned code under resource limits, and serving `env.workflows` for any app of its zone over the service. | Platform tables, the journal and scheduling discovery. |
 | V8 adapter | Creator-facing handles and execution of the selected app deployment under resource limits. | Queue credentials or direct manager persistence. |
 | Gateway | Normal routing and request authentication. | A workflow scheduler, journal reader or private workflow-advance control channel. |
-| Deployment host | Starting eligible workers and supplying trusted app context in the proper execution zone. | Deciding customer workflow transitions. |
+| Deployment host | Starting workers in the proper execution zone and supplying trusted app context. | Deciding customer workflow transitions. |
 
 The workflow subsystem checks app authority. Existing creator and app-request
 authorization still applies at their entrypoints; the queue adds no end-user
-permission model. An app-scoped native handle cannot select another app's journal,
-schema or object namespace. Follow the
+permission model. A worker acts only for apps of its own execution zone, which
+Control froze on its instance row; an app-scoped native handle cannot select
+another app's journal rows, schema or object namespace. Follow the
 [data-system contract](../architecture/data-system.md). Table naming and schema
-visibility are not platform authorization: creator-owned rows cannot grant
-placement, turn admission on or manufacture a platform deployment hold.
+visibility are not platform authorization: creator-owned rows cannot widen a
+worker's zone, turn admission on or manufacture a platform deployment hold.
 
-## Worker identity, registration and placement
+## Worker identity and zone-scoped pull
 
-Registration records a running process; it does not start a process. Enrollment,
-liveness, app placement and execution fencing answer different questions.
+A worker asks for work; nothing is assigned to it. This is the pull model of a
+Temporal task queue, with the zone's `advance` rows as the queue, the
+service's zone claim as the matcher, the delivery lease and its heartbeat as
+the liveness signal, and the app as the fairness key. Nothing records which
+worker serves which app, and there is no sticky affinity: correctness never
+depended on locality, because the journal drives replay, the pinned bundle is loaded by
+hash, and every execution builds a fresh isolate.
 
 ```text
-Deployment host          Worker              Control                 Manager
-      |                     |                    |                       |
-      |--- start ---------->|                    |                       |
-      |                     |-- enroll key ----->|                       |
-      |                     |<-- instance ID ----|                       |
-      |                     |                    |                       |
-      |                     |----- signed registration ---------------->|
-      |                     |                    |       verify enrolled |
-      |                     |                    |       instance/key;   |
-      |                     |                    |       record capacity |
-      |                     |<---- registration acknowledgement --------|
-      |                     |                    |                       |
-      |                     |                    |-- authorized scope -->|
-      |                     |                    |       select eligible |
-      |                     |                    |       worker placement|
-      |                     |----- poll assigned work ----------------->|
-      |                     |<---- job + delivery authority ------------|
-      |                     |                    |                       |
-      |                     | execute against creator DB/storage        |
-      |                     |----- committed outcome + ACK ------------>|
+Deployment host          Worker                 Control            Workflow service
+      |                     |                       |                      |
+      |--- start ---------->|                       |                      |
+      |                     |-- join token, key --->|                      |
+      |                     |<-- instance id -------|  zone frozen on row  |
+      |                     |                       |                      |
+      |                     |---- ClaimJobs {max, wait_ms, after, exclude} --->|
+      |                     |                       |  zone from the       |
+      |                     |                       |  verified instance;  |
+      |                     |                       |  page the zone's apps|
+      |                     |<--- ClaimedJobs {deliveries, after, lap_complete}|
+      |                     |                       |                      |
+      |                     | prepare app on demand (Control app reads)    |
+      |                     | execute in a fresh isolate                   |
+      |                     |---- heartbeat / settle (journal decides) ----->|
 ```
 
 | Authority | Record or capability | Meaning |
 | --- | --- | --- |
-| Enrollment | `zeroship.worker_instances` and the instance signing key. | Control authorized this instance identity; the presented key must match an active enrollment. |
-| Workflow registration | `workflow_manager.workers`. | The instance reports capacity, ready/draining state and liveness. |
-| Scoped assignment | `workflow_manager.assignments`. | A particular worker may consume this app's work under a revision and expiry. |
-| Delivery | A leased manager job and its attempt. | This instance may process this particular job under the current placement. |
-| Creator execution fence | Customer journal claim, generation and frontier revision. | This execution may publish the next customer transition. |
+| Enrollment | `zeroship.worker_instances`: the instance signing key, frozen execution zone and lease. | Control authorized this instance identity in that zone; the presented key must match an active, unexpired enrollment. |
+| Zone | `VerifiedWorker::zone`, read by `WorkerRegistry::active_instance` (`crates/zeroship-workflow-server/src/auth.rs`) from the same row as the key. | The apps this worker may claim jobs for and make run calls for: exactly those whose frozen zone equals it. |
+| Delivery | A leased `advance` job: `Delivery { job, worker_id, attempt, deadline }` with remaining lease and attempt durations. | This instance may process this job until its lease lapses or its attempt cap ends. |
+| Creator execution fence | Journal task claim, generation and frontier revision. | This execution may commit the next customer transition. |
 
 A worker uses its enrolled instance key for service assertions. The receiver
 verifies issuer, audience, permitted endpoint, assertion lifetime and replay
 protection before reading the buffered request. A worker ID in JSON is only a
-selector. A generic worker-role signer cannot substitute for an enrolled
-instance key. Every transport retry uses a fresh assertion and the same durable
-operation identity.
+selector, and a body never names a zone: the service takes both the worker and
+its zone from the verified instance row. A generic worker-role signer cannot
+substitute for an enrolled instance key. Every transport retry uses a fresh
+assertion and the same durable operation identity.
 
-The manager admits placement only within platform-authorized app and execution
-zone eligibility. Spare capacity is not authority to serve any app. Eligibility
-comes from Control's app and worker-instance zones, as
-[placement eligibility and capacity](#placement-eligibility-and-capacity-provider)
-describes; workers cannot nominate database locations or broaden eligibility by
-registration.
-The worker also verifies that its locally resolved creator binding matches the
-assigned app. Routing and database credentials cannot be supplied by the job.
+**The claim.** `WORKFLOW_JOB_CLAIM` takes a closed `ClaimJobs`
+(`crates/zeroship-core/src/workflow_jobs.rs`): the caller's free execution
+slots, how long it will wait for the reply, the last app its previous claim
+visited, and the apps it failed to prepare recently. It names no app. The
+server (`claim` in `crates/zeroship-workflow-server/src/api/jobs.rs`) passes
+the verified worker and zone to `Coordinator::claim_in_zone`
+(`crates/zeroship-workflow-manager/src/coordinator/jobs.rs`), which pages the
+zone's apps holding a claimable row in app id order after the cursor, takes at
+most one job per app per lap, and keeps lapping while the previous lap delivered
+something, until the slots are filled or its deadline passes. It starts no
+per-app attempt after `workflow.claim_budget_ms` or after the request's wait
+less the share kept back for the reply (`REPLY_RESERVE_DIVISOR`), whichever ends
+first, and every give-back it makes ends by half that reserve later without
+waiting for an app's lock (`Coordinator::claim_deadline`), so the reply leaves
+inside the wait. The worker waits exactly the wait it stated: its client bounds
+the claim exchange by `wait_ms`, not by its generic exchange bound. A request
+above `ClaimJobs::MAX_DELIVERIES` deliveries or `ClaimJobs::MAX_EXCLUDE`
+exclusions is refused before any work. A request without a cursor starts at a
+worker-stable rotation of the first page, so workers spread across apps rather
+than all starting at the same one. Per app it skips, naming the reason in its
+`ClaimReport`: an unavailable policy observation, an app the zone rule refuses,
+policy with admission or dispatch off or `max_running` zero, an app already at
+`max_running` live leases (counted before the app's lock and again under it), a
+scope another session holds locked, and an app with nothing claimable after
+management barriers and the delivery ceiling. The reply, `ClaimedJobs`, carries the deliveries, the cursor the next
+claim continues from, and whether this claim reached the end of the zone.
 
-Registration renewal does not revive an expired assignment. Assignment revisions
-and released rows are retained so delayed renewals cannot recreate old authority.
-Capacity admission is serialized across apps assigned to the same worker.
-Ready workers may receive new placements; draining workers may finish authorized
-work and reconcile committed outcomes without being selected for new placement.
-Draining is terminal for an enrolled worker instance. Registration serializes
-against the stored worker row and rejects any later ready heartbeat, including a
-request delayed past shutdown or liveness expiry. Restarted processes use a new
-enrolled instance identity; registration never resets the old process's drain.
+**Every claim re-authorizes.** The zone comes from the verified instance row and
+is frozen there; the app's zone is frozen on its scope and its policy
+observation; and `Queue::claim_authorized`
+(`crates/zeroship-workflow-manager/src/queue.rs`) rechecks the worker's
+enrolled key after taking the app's scope and again before commit. Freshness
+checks belong around the work they authorize: authenticate at ingress, then
+recheck enrollment after waiting for locks and before admitting the mutation to
+commit, reusing the verified request context rather than consuming its
+assertion replay identity again. An unavailable enrollment source is a
+retryable infrastructure failure, not a durable customer rejection.
 
-Freshness checks belong around the work they authorize. Authenticate at ingress,
-then recheck enrollment and stored placement after waiting for locks and before
-admitting the mutation to commit. Reuse the verified request context for these
-checks rather than consuming its assertion replay identity again. An unavailable
-enrollment source is retryable infrastructure failure, not a durable customer
-rejection. Existing placement TTL checks do not replace enrollment revocation.
+**The journal half rides the claim.** For each grant the service accepts the
+job into its own journal (`admit` in
+`crates/zeroship-workflow-server/src/api/jobs.rs`) before it builds the
+reply, and only then measures each lease, so the authority the worker receives
+is what remains after the service's own I/O. A grant the worker cannot use is
+given back in the same request instead of being handed out: a journal deferral
+returns the row to `ready` until the run is due, until the observation that
+switched dispatch off lapses, or after a short pause when the app is at its
+concurrency cap; a journal that could not be reached and a grant the journal
+work exhausted are given back with the growing back-off. None of these fails the
+batch, because an error reply would strand every delivery the request already
+committed. The reply holds at most `ClaimJobs::MAX_REPLY_BYTES`, room for one
+delivery at its largest, which both ends read: the first delivery is always
+sent, and one that would pass the bound goes back unsent and ends the batch.
 
-On graceful shutdown the worker reports draining, closes local admission and
-finishes or abandons bounded execution through the protocol. A crash expires
-liveness and delivery authority while durable work and scope responsibility
-remain. Healthy registration does not discharge an obligation to recover an
-unpublished creator intent.
+**The worker side.** One claimer per worker, not one per slot
+(`JobConsumer` in `crates/zeroship-workflow-runner/src/consumer.rs`): it asks
+for exactly its free slots, up to `ClaimJobs::MAX_DELIVERIES`, continues from
+the cursor the previous reply returned, claims again at once when a reply did
+not reach the end of the zone, and waits its idle interval only when a reply
+reached the end without filling what it asked for - less if a slot frees
+meanwhile, because the settlement that freed it may have published the run's
+next job. A worker that gives up before a reply arrives strands what the service
+committed for it: those deliveries are leased, their journal tasks hold a
+`max_running` unit, and they lapse and redeliver after one lease window,
+uncounted because they never renewed. So no stop cancels a pending claim: it
+runs to its reply, and what it brings goes back unstarted
+(`GiveBackReason::Unsent`).
+
+On graceful shutdown the worker stops claiming, lets its running executions
+finish and settle within its drain, cancels and releases what remains, then
+retires its instance; see [shutdown](#shutdown-and-crash-recovery). A crash
+expires delivery authority while durable work and scope responsibility remain,
+and the instance's identity lease lapses on its own.
 
 ### Enrollment bootstrap and revocation
 
@@ -294,13 +344,12 @@ before the identity lapses. The two quantities move together by construction;
 they are not two settings an operator can put out of order.
 
 What this replaces is one sentence: "an instance row is live until an operator
-says otherwise". It does NOT replace the manager's registration lease, which is
-a different fact - that a particular worker is currently carrying a particular
-app - asserted by a different service. A worker can hold a live instance
-identity and no placement, and losing a placement is not losing an identity.
+says otherwise". The instance lease is also the only liveness record a worker
+has: there is no workflow registration, and what lapses when a worker stops is
+each delivery lease it held, which any other worker of the zone may then claim.
 
 Every enrollment reader reads the authoritative row: Control on each internal
-request, the manager at ingress and again after lock waits and before commit,
+request, the workflow service at ingress and again after lock waits and before commit,
 and the CDC relay on its session recheck. Revocation therefore stops new
 admissions at the next check; leases already issued keep their original
 deadlines while creator fences stay authoritative. An unavailable registry is a
@@ -387,133 +436,139 @@ credential; compose mounts the import file and the signer credential into
 Control and the minted-token volume into the workers; and
 `docs/runbooks/worker-join-signers.md` holds the operator procedure with the two
 signer verbs side by side and instance retirement. A gracefully stopped worker retires
-its own instance through `CONTROL_WORKER_RETIRE`. The worker's version poll and
-the `env.workflows` HTTP backend still authenticate with the shared control key
-rather than a worker credential, so revoking a signer does not take that
-credential from a process that already holds it. The poll is on the POLLED tier
-that `docs/proposals/2026-09-05-app-metadata-distribution.md` replaces, and the
-backend goes with the workflow-server cutover. The instance's zone is recorded
-and foreign-keyed to `zeroship.execution_zones`; what reads it - production
-startup registration, consumer wiring, the manager's zone matching and capacity
-activation - remains cutover work.
+its own instance through `CONTROL_WORKER_RETIRE`. The worker's version poll still
+authenticates with the shared control key rather than a worker credential
+(`version_poll_authorization` in `crates/zeroship-worker/src/sync.rs`), so revoking
+a signer does not take that credential from a process that already holds it; the
+poll is on the POLLED tier that `docs/proposals/2026-09-05-app-metadata-distribution.md`
+replaces. Every workflow call, `env.workflows` included, is signed with the
+instance key through `WorkerCoordinator`. The instance's zone is recorded and
+foreign-keyed to `zeroship.execution_zones`, and the workflow service reads it
+beside the key on every authenticated call (`WorkerRegistry::active_instance` in
+`crates/zeroship-workflow-server/src/auth.rs`).
 
-### Placement eligibility and capacity provider
+### Zone eligibility and capacity from backlog
 
 Each app belongs to exactly one execution zone, named by Control in
-`zeroship.apps.execution_zone_id` when the app is created and frozen by trigger.
-An execution zone is an operator-declared set of deployment units that share
-creator-side connectivity. Control names an app's zone rather than letting a
-column default decide: it resolves the zone the creator asked for, or the
-deployment's one declared zone when none is named, and refuses to create an app
-in a deployment that declares several without saying which. A worker's zone is
-the `zone` claim of the join token Control verified when it joined, recorded on
-the instance and frozen there. Registration carries no zone; the
-manager copies it from Control's rows and nothing a worker sends can change it.
+`zeroship.apps.execution_zone_id` when the app is created and frozen by the
+`apps_frozen_execution_zone` trigger
+(`db/migrations-ts/20260914000600_app_execution_zones.ts`). An execution zone is
+an operator-declared set of deployment units that share creator-side
+connectivity. Control names an app's zone rather than letting a column default
+decide: it resolves the zone the creator asked for, or the deployment's one
+declared zone when none is named, and refuses to create an app in a deployment
+that declares several without saying which. A worker's zone is the `zone` claim
+of the join token Control verified when it joined, recorded on the instance and
+frozen there. Nothing a worker sends can change either fact.
 
-Control's host app reads are narrowed to the calling instance's zone. The
-version, environment and project data key endpoints verify which instance
-signed the call and answer only for apps in that instance's zone, because an
-app's environment is its decrypted secrets and its data key is a decryption
-capability.
+The service learns an app's zone twice, from Control and never from a worker.
+Every register, activate and disable message Control's lifecycle publisher
+delivers names it (`RegisterSchedules`, `ActivateSchedules`, `DisableSchedules`
+in `crates/zeroship-core/src/workflow_schedules.rs`), and `register_scope_in`
+(`crates/zeroship-workflow-manager/src/queue.rs`) records it on the app's
+`queue_scopes` row, refusing a later message naming another zone. Control's
+app facts carry it as well (`AppSourceFacts::execution_zone_id` in
+`crates/zeroship-core/src/workflow_app_facts.rs`), so every `PolicyObservation`
+(`crates/zeroship-workflow-manager/src/policy.rs`) retains the app's zone and
+its deletion marker from the same source read as its policy. Both copies can be
+cached because neither moves: the zone is frozen and deletion is terminal.
 
-The manager selects workers itself. It takes the app lock, then the worker
-lock, and admits a placement only when all of these hold: the app is not
-deleted, the zones match, the instance is active and its Control lease has not
-run out, the registration is ready and unexpired, and the worker has capacity.
-It reads these facts from Control-owned rows through column grants and an
-injected eligibility capability, after the lock waits and again before commit. A
-revocation that commits after the second read is caught by the next
-registration, renewal, ownership or delivery check, the same eventual admission
-fence enrollment has.
+**One zone rule serves both paths.** `PolicyObservation::admits_zone` refuses a
+deleted app to every zone and serves a live app only to its own zone. The run
+path (`bind` in `crates/zeroship-workflow-server/src/api/runs.rs`) calls it with
+the verified worker's zone before binding the journal, so start, status, signal,
+transition, restart, step output and output are served for any app of the
+caller's zone, whether or not that worker ever ran one of its jobs, and refused
+for any other. The claim path calls it for each app it visits. A run call issued
+after an app is deleted is refused within one observation's validity, the same
+bound as any policy revocation.
 
-The lease is the one fact there that moves both ways, because a worker renews
-it, and the manager reads it as a liveness hint rather than as authority: a
-worker whose lease has lapsed can no longer fetch an app's environment or
-project data key, so placing on it would stall instead of failing where a caller
-can see it. The fence stays Control's, which refuses a lapsed instance on every
-call it authenticates against its own clock.
-Archived apps remain placeable for maintenance jobs; policy still refuses their
-admission, dispatch and ingress. Deleted apps are abandoned.
+Observing an app reads Control and writes the policy ledger, and Control answers
+an unknown app differently from a known one, so the run path fences on the queue
+first: the app must hold a queue scope in the caller's zone
+(`Queue::require_scope_in_zone`), the queue's own frozen copy of the app's zone.
+An app with none - unknown, or of another zone - is refused `PermissionDenied`
+with no Control read and no ledger row, the same answer either way.
 
-A worker that cannot serve an assigned app releases it as refused, and the
-manager does not offer that app to that instance again. Release carries a
-closed reason and no wake hint, needs no responsible peer, and never discharges
-recovery responsibility. Refusal is for the one failure a retry cannot change:
-the host's preparation is not permitted for that app, so preparing it again on
-this instance would fail the same way forever. Unavailable storage, a timeout
-and an internal fault keep the placement and retry.
+Control's host app reads are narrowed to the calling instance's zone as well.
+The app metadata, environment, data-key and binding endpoints verify which instance
+signed the call and answer only for apps in that instance's zone
+(`zone_scoped_app_read` in `crates/zeroship-control/src/internal.rs`, through
+`instance_serves_app` in `crates/zeroship-control/src/worker_join.rs`), because
+an app's environment is its decrypted secrets and its data key is a decryption
+capability. The workflow reach of a worker therefore equals the credential reach
+its zone already grants; see the [trust statement](#observability-and-trust-limits).
 
-The manager owns placement outright. The endpoints Control used to drive it -
-nominated assignment, worker listing and the recovery-scope scan - are gone,
-along with the wire types and coordinator operations behind them, so the
-predicate above is the only way an app acquires an owner.
+**Capacity follows each zone's backlog.** `capacity_targets` holds one
+declarative target per execution zone, in execution slots, written by the
+driver's capacity lane (`capacity::Capacity` in
+`crates/zeroship-workflow-manager/src/capacity.rs`) and upserted whenever a
+scope is registered in a new zone. Each visit reads the zone's apps that hold
+an unsettled creator row, an idle scope costing nothing, through the lane's own
+policy source - the server composes one for the driver whether or not it runs
+its maintenance lane - outside any transaction lock. An
+admitted app's demand is its live `advance` leases plus as many claimable rows
+as its `max_running` leaves room for, and the claimable count runs the claim's
+own candidate query, so demand and claimability cannot disagree. Rows exhausted
+by `max_delivery_attempts`, rows inside a give-back back-off and every row of an
+app whose policy withholds dispatch or which Control deleted never count toward
+demand; a complete visit records them on the target row as `exhausted_jobs`,
+`backed_off_jobs` and `withheld_jobs`, beside `backlog_depth` and
+`oldest_available_at`. The target is computed whether or not any worker is
+claiming, so it does not oscillate at a zero floor.
 
-The driver's placement lanes key on claimable jobs; the recovery lanes turn due
-duties into jobs first, and a closing scope's Close job is a job. An app with
-claimable work and no ready eligible owner is placed on free eligible capacity
-first. Otherwise its demand is recorded durably in its zone. Each zone has one
-declarative capacity target in placement slots, its live placements plus its
-unplaced demand, so placing an app leaves the target unchanged. The target's
-revision advances only when that number changes, under the zone row's lock, and
-one request per revision is claimed in the same transaction. Operator
-configuration bounds the target between a floor that keeps capacity warm and a
-ceiling that leaves demand beyond it recorded and unplaced, and sets the
-hold-down, the claim deadline and the pacing. An injected provider applies the
-target outside every lock and replies with progress or a closed, durable,
-retryable refusal (`pool_exhausted`, `no_signer`, `unavailable`). Replies
-apply only to the revision and attempt they answered. A lower target applies
-only after the idle hold-down. Provider failure keeps jobs, demand and targets
-pending.
+The target's revision advances only when the desired slots change. Operator
+configuration bounds it between a floor and a ceiling and sets a hold-down: a
+rise applies at once, a fall only after the zone's demand stayed below the
+target for the hold-down. A visit cut off by its deadline leaves the zone's cycle
+where it stopped, and the next visit continues it, so a zone too large for one
+visit is measured over several; a cut visit may raise the target and never
+lowers it, and the visit that reaches the end completes the cycle, whose
+census has measured every app once and may lower it too. An unavailable policy
+observation freezes the target. The injected `CapacityProvider` receives
+`CapacityRequest { zone, revision, desired_slots }`, a function of the revision
+alone, and answers `Accepted` or a closed, durable, retryable refusal
+(`pool_exhausted`, `no_signer`, `unavailable`); a reply applies only to the
+revision it answered. A request is sent when the target changes, while a
+request is outstanding, and again after the retry interval as an idempotent
+resynchronization. Provider failure keeps jobs and the target pending.
 
-Scale-down is a drain. A lower target authorises removing nothing: the manager
-drains the least loaded registrations, and only while what remains still covers
-the target, because registered slots are lumpy and a zone must not shrink below
-its own demand. A drained registration is no placement candidate and no ready
-owner, so the lane moves its apps elsewhere as they fall due, while the
-placements it holds stay valid until the worker finishes or releases them. A
-capacity request names an instance as removable only once it holds no live
-placement, and an instance becoming removable is itself what makes a paced
-request due, since nothing else would tell the provider it may take it away.
+Scale-down is the orchestrator's. A lower target names no instance: the
+provider lowers its units, the orchestrator stops workers, and each stopping
+worker drains as [shutdown](#shutdown-and-crash-recovery) describes. Work cut
+off by a termination grace shorter than the drain runs again on another worker
+of the zone once its lease lapses, and the creator fences keep that
+at-least-once delivery safe.
 
 A provider holds only scale authority over worker units in one zone. It never
 receives creator credentials, secret-mount authority or queue messages. The
-local host injects an always-satisfied provider for its trusted in-process
-worker. Single-host deployments use a static pool that never starts processes
-and reports exhaustion durably.
-
-Per-app provisioning intents were the proof of concept's comparison and are
-not a shipping path. Racing replicas converge on one revision and one request
-under either contract, but a retried intent starts another worker unless the
-provider deduplicates it, and intents do not coalesce apps onto shared workers.
-The declarative target is a value rather than an instruction, so a lost reply's
-retry starts nothing.
+local host injects `LocalCapacity`, which accepts every target, for its trusted
+in-process worker. A deployment whose workers are started outside the platform
+uses `StaticPool`, which refuses exactly a target above its configured
+`workflow.static_pool_slots` and starts nothing.
 
 A workflow-only app - one that runs workflows and applies no creator
 migration - is provisioned with the same creator database objects the apply
-path would have given it: its schema and migrator role, the journal schema and
-its tables, and the per-app runtime role its host opens that database under.
-Before this, the journal reached PostgreSQL only through a creator migration's
-fold, so such an app had a placement it could not serve.
+path would give it: its schema and migrator role, and the per-app runtime role
+its host opens that database under.
 
 **Implementation boundary:** providers that start processes wait for the
-production orchestrator; the local provider and the static pool ship. A worker
-that is handed a request for an app it does not hold still refuses it
-retryably rather than asking for placement: the manager places an app that has
-claimable work, and wanting to serve one is not yet work it can see. Closing
-that needs an operation for "this app is wanted here", which is a contract this
-document has not settled.
+production orchestrator; `LocalCapacity` and `StaticPool` ship. The gateway's
+`HashRing` (`crates/zeroship-gateway/src/proxy.rs`) selects among one static
+worker list, so a deployment with more than one execution zone must route each
+app's requests only to its own zone's workers; the service refuses a run call
+from a worker of another zone, and Control refuses that worker the app's
+environment.
 
-## Policy bindings and authenticated leases
+## Policy bindings and the service-side binding
 
-**Native lifecycle, lease transport and Control source implemented; production
-worker refresh integration remains open.**
-The creator engine accepts trusted `PolicySnapshot` values through immutable
-`PolicyBinding` capabilities and ordered `PolicyRefresh` tickets. App handles,
-queued backend calls and delivered execution retain the original authority across
-asynchronous work. The shared closed raw policy, authenticated lease client and
-server route exist. The server installs the policy store over Control's facts
-capability and refuses missing or invalid operator policy. Production worker
-assignment and policy refresh still require host composition.
+**Implemented.** The creator engine accepts trusted `PolicySnapshot` values
+through immutable `PolicyBinding` capabilities and ordered `PolicyRefresh`
+tickets. App handles, queued backend calls and delivered execution retain the
+original authority across asynchronous work. The workflow service is the one
+production host that binds policy: it observes each app's policy over Control's
+facts capability and installs it into its own registry on every call that
+reaches the journal. Workers hold no policy binding and receive no policy.
 
 ### Native binding identity and policy revision
 
@@ -521,10 +576,10 @@ Keep these identities independent:
 
 | Identity | Authority and change rule |
 | --- | --- |
-| Source policy revision | Control's monotonic revision for the complete effective app policy. A revision identifies immutable policy values. |
-| Assignment revision | The manager's placement fence for this app and worker. Policy refresh cannot change or renew it. |
+| Source policy revision | The policy ledger's monotonic revision for the complete effective app policy. A revision identifies immutable policy values. |
 | Host binding generation | An opaque, process-local identity allocated by the trusted host when it replaces an app binding. It is unrelated to run generation or policy revision. |
-| Refresh ticket | A local ordering token for a metadata request under a particular binding. It grants no journal authority by itself. |
+| Refresh ticket | A local ordering token for an install under a particular binding. It grants no journal authority by itself. |
+| Ingress epoch | The manager's recovery responsibility the binding carries, obtained by establishment and fenced by the journal's closed epoch at use time. |
 
 `HostPolicies` issues a `PolicyBinding` capability containing its registry identity,
 app identity and opaque generation. Explicit replacement retires the previous
@@ -534,69 +589,62 @@ An operation through a retired capability also cannot revoke its replacement.
 Generation and ticket identities must not wrap or be reused. The customer engine
 does not store these capabilities in creator tables or reconstruct them from SQL.
 
-The production host associates a binding with the exact authorized app, worker,
-enrolled signing key and assignment revision. Changing any part of that association
-requires explicit replacement. Native `zeroship-workflow` does not need service-key
-types: its opaque binding is the local fence, while the host/client validates the
-transport identities before installing a snapshot through that binding.
-
 Construct `AppWorkflows` with `WorkflowService::register_app(&binding)` after
 installing a snapshot, or use `bind_app(&binding)` for an existing journal. An
 Activate job enters its app into the journal inside its own first transaction,
-so a host whose apps arrive by activation, as the workflow service's maintenance
-lane does, binds with `bind_app` alone. The handle retains that exact binding; cloning it does
-not resolve current authority by app ID. `AppBackend`, `ConsumerScope`, runtime
-contexts and queued backend calls preserve the same capability. A retained V8
-handle or old consumer cannot start a fresh mutation by borrowing a replacement's
-policy. An app selector in a signal capability likewise cannot create a binding;
-the trusted ingress host selects an existing authorized handle.
+so a host whose apps arrive by activation, as the workflow service does, binds
+with `bind_app` alone. The handle retains that exact binding; cloning it does
+not resolve current authority by app ID. `AppBackend`, runtime contexts and
+queued backend calls preserve the same capability. A retained handle cannot
+start a fresh mutation by borrowing a replacement's policy. An app selector in a
+signal capability likewise cannot create a binding; the trusted ingress host
+selects an existing authorized handle.
 
 Keep policy revision and content high water across local binding replacement and
 revocation. Installing a lower source revision fails; changed policy under an equal
 revision conflicts. Equal revision with identical values is valid for a newly
-authorized binding even when its assignment differs. This permits unchanged policy
-to serve a replacement without allowing the retired handle to refresh itself.
-After a process restart, the host must obtain fresh trusted authority; customer
-state and previously serialized metadata cannot restore a binding.
+authorized binding, which permits unchanged policy to serve a replacement without
+allowing the retired handle to refresh itself. After a process restart, the host
+must obtain fresh trusted authority; customer state and earlier serialized
+metadata cannot restore a binding.
 
 Local configuration uses the same capability lifecycle with an explicitly
-nonexpiring configuration snapshot. Remote and configured authority are distinct
-binding modes. Missing or expired remote metadata never falls back to configured
-defaults. Refreshing the current binding is different from replacing it, so normal
-refresh does not force healthy handles to acquire a new local identity.
+nonexpiring configuration snapshot: the local CLI host installs its configured
+`AppPolicy` once. Leased and configured authority are distinct binding modes.
+Missing or expired leased authority never falls back to configured defaults.
+Refreshing the current binding is different from replacing it, so normal refresh
+does not force healthy handles to acquire a new local identity.
 
 ### Ordered refresh and captured operations
 
-Create a refresh ticket before starting metadata I/O. It captures the current
-binding generation and expected transport association. Beginning a newer refresh
-supersedes older tickets. Installation atomically verifies the current binding,
-ticket, expected association, policy revision/content and remaining validity, then
-consumes the ticket. Ticket comparison and snapshot installation occur under the
-same host-state synchronization. Retrying transport uses a new ticket and assertion;
-it cannot apply a response through a ticket already consumed or superseded.
+Create a refresh ticket before installing. It captures the current binding
+generation. Beginning a newer refresh supersedes older tickets. Installation
+atomically verifies the current binding, ticket, policy revision/content and
+remaining validity, then consumes the ticket. Ticket comparison and snapshot
+installation occur under the same host-state synchronization; a ticket already
+consumed or superseded cannot apply a snapshot.
 
 ```text
-Host binding                 Metadata exchange                 Journal handle
-     |                              |                                |
-     |-- capture refresh ticket --->|                                |
-     |-- replace / revoke binding   |                                |
-     |                              |                                |
-     |<-- delayed valid response ---|                                |
-     |    reject retired ticket     |                                |
-     |                              |                 old mutation --|
-     |<----------------------------- check retained binding ---------|
-     |------------------------------ unavailable; no new authority -->|
+Host binding                 Install                           Journal handle
+     |                          |                                    |
+     |-- capture refresh ticket |                                    |
+     |-- replace / revoke binding                                    |
+     |                          |                                    |
+     |<-- delayed install ------|                                    |
+     |    reject retired ticket |                                    |
+     |                          |                     old mutation --|
+     |<---------------------------------- check retained binding ----|
+     |----------------------------------- unavailable; no new authority ->|
 ```
 
-Within the current binding, a fresh response with unchanged policy may extend the
-deadline for subsequent operations. A newer accepted response may also shorten it.
-An older response must not reverse that shortening, restore a prior policy or undo
-revocation. Serial refresh is a valid host optimization, but cancellation and
-replacement still require the ticket fence because an outstanding response can
-outlive its initiating loop.
+Within the current binding, a fresh install with unchanged policy may extend the
+deadline for subsequent operations. A newer accepted install may also shorten it.
+An older one must not reverse that shortening, restore a prior policy or undo
+revocation. Cancellation and replacement still require the ticket fence because an
+outstanding install can outlive its initiating call.
 
-Expiry alone does not replace a binding. A fresh authenticated response may admit
-new operations under the same still-current binding after an earlier snapshot
+Expiry alone does not replace a binding. A fresh observation may admit new
+operations under the same still-current binding after an earlier snapshot
 expired. Explicit revocation requires a new host-authorized binding; refresh cannot
 undo it. Neither case revives an operation captured under expired authority.
 
@@ -626,10 +674,39 @@ An operation's deadline includes database waits and commit acknowledgement. A
 timeout before terminal dispatch requires rollback; a dispatched COMMIT may still
 finish and must be resolved through its immutable receipt. Policy replacement
 does not retract an already dispatched database commit. Publication and delivery
-ACK use their own current metadata authority; reading a creator receipt alone
-does not authorize a manager write.
+acknowledgement use their own current metadata authority; reading a journal
+receipt alone does not authorize a queue write.
 
-### Authoritative source and authenticated exchange
+### The service-side binding
+
+`RunService::app` (`crates/zeroship-workflow-server/src/runs.rs`) is where a
+binding is made and refreshed. It observes the app's policy from the trusted
+`PolicySource`, takes the app's current binding or binds a new one, and installs
+the observation as a lease snapshot whose deadline is the observation's own
+validity. Installing on every call is deliberate: an unchanged revision with an
+unmoved deadline is inert, so a reinstall does not disturb operations already in
+flight, and there is no revision to read back and compare. The observation says
+nothing about recovery responsibility, so the binding's ingress epoch is carried
+forward across the reinstall rather than reset by it, and `require_open_epoch`
+rechecks the journal's closed epoch inside each mutation, which fences a
+carried-forward epoch the moment the journal closes it.
+
+Every route that reaches the journal binds through that call - the run calls
+after the zone rule, the claim for each grant it accepts, the heartbeat and
+settlement for the delivery they name - so the service re-applies current policy
+to each delivery exchange. A heartbeat under policy with admission or dispatch off
+extends nothing (`AppWorkflows::heartbeat_job` in
+`crates/zeroship-workflow/src/service/delivery.rs`), and the worker turns that
+into an interruption at that renewal. The journal's own dispatch check,
+`tasks::assign` in `crates/zeroship-workflow/src/service/tasks.rs`, refuses a
+task with admission or dispatch off, with `max_running` zero, or at
+`max_running`, and the claim gives the row back with the matching
+`DeferredReason`. Observing an app is policy I/O whose refusals differ by whether
+the app exists, so each route first proves against the queue that the caller
+holds the delivery it names, or for the task routes a live delivery of the app,
+before the policy source is asked.
+
+### Authoritative source
 
 Control owns the complete effective policy, including app lifecycle, entitlement,
 operator switches and applicable limits. Its policy revision must describe a
@@ -639,15 +716,15 @@ equivalent durable revisioned projection whose original source validity is expli
 A content hash without ordered source authority cannot distinguish a delayed
 observation from a new desired state.
 
-The manager obtains this policy through a trusted provider in the platform zone.
-The provider may read Control-owned storage or consume authenticated Control
-metadata; it never reads a creator journal. A provider grant contains the exact
-app, immutable source revision and values, and a finite original validity bound.
-Cached values retain that bound. Repeated worker requests, manager restart or
-rereading an unchanged projection cannot refresh source authority. Only a new
-authoritative source observation may issue a new validity bound. Unknown source
-freshness, inconsistent revisions and unavailable source storage fail closed with
-retryable infrastructure failure.
+The service obtains this policy through a trusted provider in the platform zone.
+The provider consumes authenticated Control facts; it never reads a creator
+database. A `PolicyObservation` contains the exact app, immutable source
+revision and values, the app's frozen execution zone, its deletion marker, and a
+finite original validity bound. Cached values retain that bound. Repeated
+requests, service restart or rereading an unchanged projection cannot refresh
+source authority. Only a new authoritative source observation may issue a new
+validity bound. Unknown source freshness, inconsistent revisions and unavailable
+source storage fail closed with retryable infrastructure failure.
 
 `zeroship_workflow_manager::policy::PolicySource` expresses this trusted provider
 contract. `PolicyObservation` validates the raw policy, retains its original
@@ -655,19 +732,17 @@ monotonic deadline and carries an opaque observation identity. Cached reads clon
 the retained observation. Equal values, revision and deadline do not make a new
 observation identical to an invalidated predecessor. The provider's nonblocking
 revalidation must reject that predecessor permanently across shortening,
-revocation and restoration. `PolicyGrant` retains the source through response
-construction and cannot serialize after source authority is lost.
+revocation and restoration.
 
 `policy::control::ControlPolicyStore` holds Control's app-facts capability and
 this service's own publication schema. It binds no `zeroship` schema: the app and
-plan facts arrive over `POST /v1/app-facts`, and the one platform binding left in
-the server is `connect_eligibility` in
-`crates/zeroship-workflow-server/src/coordinator.rs`, which serves placement
-rather than policy. It reads no creator database. Its inputs are:
+plan facts arrive over `POST /v1/app-facts`, and the only `zeroship` read left in
+the service is the worker registry lookup that authenticates each call. It reads
+no creator database. Its inputs are:
 
 | Input | Authority and contributing writers |
 | --- | --- |
-| `AppSourceFacts` - plan id, workflows enabled, archived | Registry app lifecycle and plan changes, billing plan-change transactions, and operator enablement, served by Control. The database constraint makes deletion imply archive. |
+| `AppSourceFacts` - plan id, workflows enabled, archived, deleted, execution zone | Registry app lifecycle and plan changes, billing plan-change transactions, and operator enablement, served by Control. The database constraint makes deletion imply archive, and the zone is frozen by trigger. |
 | `PlanSourceFacts` - the canonical policy | A complete canonical `AppPolicy`, written by the operator `set_plan_policy` API on `PlanPolicyStore` or equivalent operator provisioning. Missing or malformed JSON is unavailable, including for a disabled plan. |
 | `PlanSourceFacts` - entitlement and archival | Operator entitlement and catalog archival. Pricing updates omit the workflow policy column; startup seeding preserves archival and workflow authority. |
 | `workflow_manager.workflow_rollout_config` | The required global row contains dispatch/ingress switches and positive `source_validity_ms`. The `set_rollout` operation on `ControlPolicyStore` writes these together. Missing settings never select defaults. |
@@ -681,9 +756,11 @@ rather than one snapshot, and what orders them is `SourceWatermark`: `publish`
 refuses an observation carrying one below the watermark the ledger already holds.
 It validates the complete policy, masks enablement and operator
 switches, and publishes changed policy or source validity under an advanced
-revision. Unchanged values preserve the revision. The ledger retains its app ID
-as the sole primary key and has no cascading app deletion. Its unpublished state
-cannot issue authority. The host refuses unsupported isolation instead of silently
+revision. Unchanged values preserve the revision; the zone and the deletion
+marker move no revision, because the zone cannot change and deletion requires an
+archive that already masked admission. The ledger retains its app ID as the sole
+primary key and has no cascading app deletion. Its unpublished state cannot
+issue authority. The host refuses unsupported isolation instead of silently
 substituting a different transaction contract.
 
 Source validity begins before acquisition and ends at that original instant plus
@@ -693,8 +770,7 @@ a renewable source: every refresh rereads the contributing authoritative inputs.
 The ledger orders observations, not every intermediate writer transition. An
 unobserved disable followed by restore need not change its revision. Writer
 acknowledgement therefore promises bounded convergence, never immediate
-revocation or execution quiescence. A stricter acknowledgement would require a
-separate writer barrier and worker evidence.
+revocation or execution quiescence.
 
 `ControlPolicies` caches exact observations until their original expiry. A
 per-app refresh reservation prevents competing requests from independently
@@ -703,87 +779,40 @@ infrastructure failure. Cancellation, timeout, source failure, invalidation or
 capacity eviction removes the reservation. Opaque entry identity prevents a late
 completion or its cleanup from replacing a later entry. Revalidation accepts
 only the current exact observation and performs no I/O. Cache capacity is bounded
-by `workflow.policy_cache_entries`; evicting a captured observation refuses an
-unfinished grant, while already serialized worker leases retain their deadline.
-The production worker assignment and refresh loop still needs composition.
-
-The worker requests a lease using `AssignedScope`: app ID and assignment revision.
-The server authenticates the enrolled instance before buffering the body. Worker
-identity and signing-key thumbprint come from the verified assertion context, not
-request selectors. The closed `zeroship_core::workflow_policy::PolicyLease`
-response binds:
-
-```text
-appId
-workerId + signingKeyId
-assignmentRevision
-policyRevision + closed policy values
-remainingMs
-```
-
-`signingKeyId` is the thumbprint of the exact enrolled key used for verification.
-It is metadata, not a credential. The client compares it with the key that signed
-the request, and verifies app, worker and assignment revision before returning a
-private validated lease handle. Policy values are a closed, validated native
-contract shared through `zeroship-core`; the metadata client and manager do not
-depend on the customer engine. No database address, credential, customer input or
-history is admitted into the envelope. Existing TLS, endpoint/audience assertions,
-replay protection, bounded bodies and closed failures apply.
-
-Under the manager's app-before-worker lock order, verify placement and enrollment
-before requesting source metadata. Release those locks for source I/O, then take
-them again to verify current placement and source authority. Revalidate the
-originally authenticated enrolled key after waits and before issuing the grant.
-A replaced key is not equivalent to another
-active key on the same instance. Cap authority by the original verified source
-deadline, assignment/registration validity and configured policy-lease ceiling.
-Later checks can shorten the issuing attempt's bound. Requesting policy never
-renews registration or placement, and unavailable enrollment is not a permanent
-policy refusal.
-
-Convert to `remainingMs` only after charging manager clock queries, lock waits,
-source I/O and transaction settlement. Use the same conservative clock-resolution
-and monotonic conversion rules as delivery grants. The client anchors its deadline
-before sending the HTTP request, validates a positive representable remaining
-duration and rejects a reply already exhausted by the exchange. It does not compare
-Control or manager wall-clock timestamps with worker or creator database time.
-Cloning a lease preserves its deadline. Installing it consumes the original
-request's refresh ticket; client validation alone cannot bind it to a replacement.
-
-The native `AssignedPolicies` helper supplies that installation boundary. It owns
-an immutable client and `AssignedScope`; construction explicitly allocates a new
-binding generation, and cloning retains it. `refresh` reserves the ticket before
-transport and installs the exact client deadline without rebasing. A failed old
-request cannot revoke a newer successful refresh. Failed exchanges retain only
-the previous snapshot's original authority. The production host must keep the
-helper while signer and assignment are unchanged, replace it when either changes,
-and drive its bounded refresh lifecycle alongside assignment discovery.
+by `workflow.policy_cache_entries`. The server composes one provider for each HTTP
+thread, another for its maintenance lane, and another for the driver's capacity
+lane (`connect_policies` in `crates/zeroship-workflow-server/src/server.rs`).
 
 ### Archive acknowledgement and verification
 
 Calendar disable acknowledges the manager's durable calendar fence. Policy
 publication acknowledges a desired source revision. Neither result proves that
-workers observed revocation, stopped creator mutations or joined executions.
+running executions observed revocation, stopped creator mutations or joined.
 Control must not report execution quiescence from either acknowledgement.
 
-With finite leases, partitioned workers eventually lose permission for fresh
-mutations, provided the manager cannot renew from stale source authority. Expiry
-is an eventual admission fence, not an acknowledgement from an unreachable worker
-or proof that a dispatched commit rolled back. An explicit quiescence acknowledgement
-requires a separate protocol that accounts for affected bindings, stops renewal,
-joins their active work and resolves uncertain outcomes. That protocol remains
-open; archive responses must distinguish desired state, manager acknowledgement
-and any later verified quiescence result.
+With finite observations, revocation reaches execution within bounded time: the
+next heartbeat of an execution under revoked dispatch extends nothing and
+interrupts it, and a worker partitioned from the service loses its delivery
+lease at the lease's deadline without renewing it. Expiry is an eventual
+admission fence, not an acknowledgement from an unreachable worker or proof that
+a dispatched commit rolled back. An explicit quiescence acknowledgement requires
+a separate protocol that accounts for affected executions, joins their active
+work and resolves uncertain outcomes. That protocol remains open; archive
+responses must distinguish desired state, manager acknowledgement and any later
+verified quiescence result.
 
-Required native regressions cover retired `AppWorkflows` and `AppBackend` handles
+Native regressions cover retired `AppWorkflows` and `AppBackend` handles
 starting fresh calls, equal-policy-revision replacement, delayed refresh tickets,
 shortened grants, revocation during lock waits, and exact receipt replay without
-new authority. Transport tests cover app/worker/key/assignment substitution, key
-replacement during issuance, stale source renewal, delayed responses and unrelated
-absolute clocks. Host tests deny workers Control DB access and deny platform
-processes creator access. Native binding tests cover the local lifecycle; transport
-and production host verification remain required. Local policy tests alone do not
-prove remote authorization or private-zone deployment.
+new authority. The service's own contracts cover the carried-forward epoch
+(`an_established_epoch_survives_the_next_requests_policy_reinstall` and
+`closing_the_journals_epoch_retires_the_carried_forward_one` in
+`crates/zeroship-workflow-server/tests/integration/http_runs.rs`), a dispatch
+switch observed by a claim (`a_claim_finding_dispatch_off_waits_out_the_observation`
+in `tests/integration/http_claims.rs` of the same crate) and an interruption at
+a renewal that extends nothing
+(`a_renewal_that_extends_nothing_interrupts_the_execution_at_that_renewal` in
+`crates/zeroship-workflow-runner/src/delivery/tests.rs`).
 
 ## Storage inventory and schema ownership
 
@@ -794,22 +823,17 @@ The physical manager schema is generated by
 Rust models declare their ORM metadata natively in
 `crates/zeroship-workflow-manager/src/models/schema_definition.rs`; parity tests
 compare those declarations with the migration artifact.
-The production namespace is `workflow_manager` in the private Control database.
-The server migration consolidates the former `workflow_coordination` namespace
-with this queue namespace; it is not a second authoritative placement store.
+The production namespace is `workflow_manager` in the platform database, the
+same schema the workflow journal is installed into.
 
 | Table | Stored authority and purpose |
 | --- | --- |
 | `workflow_manager.schema_version` | Generated schema fingerprint. Runtime roles read it; provisioning owns changes. |
-| `workflow_manager.queue_scopes` | Registered apps and the shared app lock for queue and coordinator operations. |
-| `workflow_manager.workers` | Instance liveness, capacity, ready/draining state, the execution zone registration copied from Control, and serialization of worker-wide admission. |
-| `workflow_manager.assignments` | App/worker placement revision, expiry, release tombstone and refusal tombstone. A refused pair is never offered again during that instance's life. |
-| `workflow_manager.placement_receipts` | Immutable assignment/release request identity, release reason and recorded result. |
-| `workflow_manager.capacity_demands` | Apps with claimable work that free eligible capacity did not absorb, keyed by app and recorded with its zone. The committed input of every replica's target. |
-| `workflow_manager.capacity_targets` | One declarative target per execution zone in placement slots, with its revision, provider state, closed refusal, claimed attempt and pacing. Scale-down drains against it; `workflow_manager.workers.state` records the drain. |
+| `workflow_manager.queue_scopes` | One row per app: its frozen execution zone, indexed with the app id for the zone claim's page; the lock every queue change for the app takes; and the persistent dispatch cursor. Control's lifecycle messages and recovery activation register it, and a message naming another zone is refused. |
+| `workflow_manager.capacity_targets` | One declarative target per execution zone in execution slots: its revision, desired slots, provider state, closed refusal, retry pacing and hold-down start, and, from the last complete visit, `backlog_depth`, `oldest_available_at`, `exhausted_jobs`, `backed_off_jobs` and `withheld_jobs`. |
 | `workflow_manager.management` | Job-linked authorized command, original request provenance, per-run revision, provisional execution barrier and reported closed outcome. |
 | `workflow_manager.management_scopes` | Accepted and settled management revisions per app/run; independent of the creator's run existence. |
-| `workflow_manager.jobs` | Immutable job specification, checked operation/run/request projections, availability, current attempt, delivery fence and settlement digest/outcome. It also supplies submission and settlement deduplication. |
+| `workflow_manager.jobs` | Immutable job specification, checked operation/run/request projections, availability, dispatch ticket, current attempt and holder, lease deadline, `leased_at` (the start the attempt cap measures from), counted executions, `deferred_until` and the consecutive `deferrals` of a give-back back-off, and settlement digest/outcome. It also supplies submission and settlement deduplication. |
 | `workflow_manager.recovery_scopes` | Trusted activation provenance and revision for durable maintenance responsibility, its ingress epoch and state, the current closing attempt's watermark and Close job, its latest activity and closing pacing. The row outlives retirement and abandonment as the epoch's tombstone. |
 | `workflow_manager.recovery_duties` | Independent app/kind deadlines and retained pending reconciliation or collection jobs, linked to their owning scope and queue. |
 | `workflow_manager.schedule_deployments` | Immutable allowlisted schedule descriptors and the calendar interpretation for a normal deployment. No business input. |
@@ -818,17 +842,17 @@ with this queue namespace; it is not a second authoritative placement store.
 | `workflow_manager.schedule_scopes` | App lifecycle revision, calendar-enabled state and optional selected activation; historical receipts remain independently replayable. |
 | `workflow_manager.schedules` | Logical schedule identity across deployments, active descriptor and persisted due/catch-up frontier. |
 | `workflow_manager.schedule_occurrences` | Stable occurrence request, run and job identities bound to a schedule revision, instant and activation prerequisite. |
-| `zeroship.worker_instances` | Control-owned enrollment, public key, frozen execution zone, admitting signer and token id, identity expiry and revocation state; distinct from workflow registration. |
-| `zeroship.execution_zones`, `zeroship.worker_join_signers` | Control-owned zones and the trusted signers that may mint join tokens for them. The manager reads an instance's frozen zone and its status. |
+| `zeroship.worker_instances` | Control-owned enrollment, public key, frozen execution zone, admitting signer and token id, identity expiry and revocation state. The workflow service reads the id, status, key, zone and expiry it authenticates each call with, through column grants. |
+| `zeroship.execution_zones`, `zeroship.worker_join_signers` | Control-owned zones and the trusted signers that may mint join tokens for them. |
 | `zeroship.app_deploys` | Control-owned immutable deployment metadata and reclamation state. Out of the workflow role's reach: Control resolves deployments and names them on the wire. |
 | `zeroship.app_deploy_holds` | Control-owned app/deployment/holder generation and retention state. |
-| `zeroship.apps` | Control-owned lifecycle and each app's frozen execution zone. The manager reads `id`, `execution_zone_id` and `deleted_at` for placement; the policy inputs and `zeroship.plans` reach it over Control's app-facts endpoint. |
+| `zeroship.apps` | Control-owned lifecycle and each app's frozen execution zone. The workflow role holds no grant on it: the policy inputs, the zone and the deletion marker reach the service over Control's app-facts endpoint. |
 | `workflow_manager.workflow_rollout_config` | Operator dispatch/ingress switches and the finite source-validity bound. |
-| `workflow_manager.workflow_policy_ledger` | Durable per-app ordered policy publication. The manager locks and updates this row, without writing its app or plan inputs. An unpublished row grants nothing. |
+| `workflow_manager.workflow_policy_ledger` | Durable per-app ordered policy publication. The service locks and updates this row, without writing its app or plan inputs. An unpublished row grants nothing. |
 
-Capacity demand lives in `capacity_demands` and `capacity_targets`, beside the
-queue it describes. Prefer extending the owning manager models over adding
-another store; an in-memory map is not a substitute.
+The capacity census lives on `capacity_targets`, beside the queue it describes,
+and give-back state lives on the job row it delays. Prefer extending the owning
+manager models over adding another store; an in-memory map is not a substitute.
 
 A delayed job's `available_at` is sufficient for a simple timer. Separate timer
 rows are warranted only where calendar cursors, cancellation or coalescing need
@@ -842,12 +866,14 @@ Its Rust ORM models use native declarations in
 `crates/zeroship-workflow/src/service/models/schema_definition.rs`, with migration
 metadata parity checked by tests. Runtime model construction does not read the
 generated JSON artifact.
-The following names are in the app's resolved creator schema. Every name in this
-table has the `__zeroship_workflow_` prefix; none belongs in Control's schema.
+The journal is installed into the workflow service's `workflow_manager` schema by
+`db/migrations-ts/20260919000000_workflow_journal.ts`: one journal for every app,
+with its `app_id` columns as the tenant discriminator, reached only by the
+service. Every name in this table has the `__zeroship_workflow_` prefix.
 
 | Table suffix | Customer-owned content and target treatment |
 | --- | --- |
-| `schema_version` | Creator journal schema fingerprint, installed by creator-side provisioning. |
+| `schema_version` | Journal schema fingerprint, installed by the platform migration. |
 | `app_state` | App serialization, journal counters, the highest ingress epoch a delivered Close fenced, and the app's two paged sweeps. Trusted admission policy remains outside customer SQL. |
 | `deploys` | Locally accepted immutable app deployment and availability state. |
 | `deployment_holds` | Customer dependency intent and observed hold generation; not the platform hold ledger. |
@@ -864,7 +890,7 @@ table has the `__zeroship_workflow_` prefix; none belongs in Control's schema.
 | `propagation_pages` | Exact delivered propagation page, cursor transition, closed result and successor specifications linked to the retained job receipt and publication. |
 | `requests` | Durable app-operation request identity, body digest and original result. Age alone cannot retire an accepted request. |
 | `management_receipts` | Exact delivered job identity, requested run, management revision and durable lifecycle outcome, independently scoped from app requests. Its app/run/revision uniqueness carries the run's applied revision as the highest it holds, so the ordering fence reads the history itself. |
-| `schedules`, `occurrences` | Existing customer schedule definitions and accepted occurrences. Calendar discovery moves to the manager; customer acceptance, overlap state and input references remain customer-side. |
+| `schedules`, `occurrences` | Existing customer schedule definitions and accepted occurrences. Calendar discovery belongs to the manager; customer acceptance, overlap state and input references remain customer-side. |
 | `payloads`, `payload_refs` | Prepared upload metadata, ownership, integrity and committed references. |
 | `outbox` | Customer events and their payloads; distinct from manager queue metadata. |
 | `job_publications` | Closed immutable Advance, Fanout or Propagate specification and manager confirmation time. The row's key is derived from the work the specification names, so the primary key is also the deduplication key. Publications survive history removal. |
@@ -913,12 +939,12 @@ rather than comparing a second copy of those columns. A transition that advances
 an idle run invalidates its older
 frontier without retargeting already committed jobs. Task claim, heartbeat and
 release do not advance that logical revision. A new generation starts a fresh
-frontier. Advance-job acceptance now binds creator claims to the logical job,
-delivery attempt and assignment revision. Superseded frontiers produce a durable
+frontier. Advance-job acceptance binds journal claims to the logical job and
+delivery attempt. Superseded frontiers produce a durable
 rejection; a committed job replays its original semantic outcome across delivery
 attempts. Receipt records have no run/history foreign key and survive collection.
-There is no manager reader of these tables. A reconciliation job reads them
-through an app-bound worker, never through a platform connection.
+The queue reads none of these tables. A reconciliation job reads them in the
+service's maintenance lane, bound to one app, and no worker reaches them.
 
 Creator object storage holds large inputs, signals, results and prepared uploads.
 The normal bundle store holds `.zship` manifests and modules. Neither is a place
@@ -928,20 +954,23 @@ signed download URL, database URL, object key or credential.
 ### Models, migrations and transaction domains
 
 Every table has `id` as its sole primary key. Composite domain identities use
-unique indexes: for example app/worker, app/request and app/run/generation.
-Scoped foreign keys retain the app identity. IDs and cursors preserve bytewise
-ordering. New rows receive typed storage IDs; upserts preserve existing storage
-IDs, revision tombstones and immutable receipts.
+unique indexes: for example app/request and app/run/generation. Scoped foreign
+keys retain the app identity. IDs and cursors preserve bytewise ordering. New
+rows receive typed storage IDs; upserts preserve existing storage IDs, revision
+tombstones and immutable receipts.
 
-An app scope uses its `AppId` directly as `queue_scopes.id`; a worker registration
-uses its `WorkerId` as `workers.id`. Dependent `app_id` and `worker_id` foreign
-keys reference those primary keys. Do not duplicate the same identity in another
-uniquely indexed parent column: competing first-registration upserts must share
-the same conflict arbiter. Records with a composite domain identity, such as an
-assignment, retain their own storage ID and composite unique index.
+An app scope uses its `AppId` directly as `queue_scopes.id`, and dependent
+`app_id` foreign keys reference that primary key. Do not duplicate the same
+identity in another uniquely indexed parent column: competing first-registration
+upserts must share the same conflict arbiter, which is what lets two concurrent
+registrations of one app converge on one scope (`register_scope_in` inserts on
+conflict and decides from whichever row won). Records with a composite domain
+identity retain their own storage ID and composite unique index. A worker has no
+row in the manager schema: its identity is the enrolled instance, and a delivery
+names it in `jobs.worker_id`.
 
 The canonical migration DSL generates SQL and ORM descriptors. Both platform
-and creator persistence use native `zeroship-data-orm` models and collection
+and journal persistence use native `zeroship-data-orm` models and collection
 operations, including `schema!`, `FromRow`, `Insertable` and `Changeset` where
 appropriate. PostgreSQL/SQLite selection belongs to the ORM. Do not restore
 separate workflow backends or add workflow-specific ORM access exceptions.
@@ -952,34 +981,40 @@ Platform startup still verifies restricted role membership, required grants,
 read-only fingerprints and lack of customer authority. Connection authority is
 a binding mode, not proof that the supplied role is appropriately restricted.
 
-The manager's coordinator and queue use the same physical namespace and callback
-`Database` transaction. Internal placement checks receive that existing handle.
-Opening another coordinator transaction from a queue callback could wait on its
-own app lock and would separate authorization from mutation. Preserve
-app-lock-before-worker-lock ordering, and validate affected rows on fenced writes.
-Capacity counts cover the full matching set. Recovery pagination filters owners
-before ending a result page, so an owned page cannot conceal later missing owners.
+The coordinator and queue use the same physical namespace and callback
+`Database` transaction. Authorization callbacks receive that existing handle, so
+an enrollment recheck runs inside the transaction it authorizes; opening another
+transaction from a queue callback could wait on its own app lock and would
+separate authorization from mutation. The app's scope row is the one lock a
+queue operation takes, and fenced writes validate the rows they affect. Policy
+is observed before any app lock, never inside a queue transaction. Recovery
+pagination filters owners before ending a result page, so an owned page cannot
+conceal later missing owners.
 
 | Transaction | Operations that commit together |
 | --- | --- |
-| Manager placement | Scope registration, capacity admission, assignment revision and placement receipt. |
+| Manager scope registration | The app's scope and its frozen zone, refused when a stored zone differs, and the zone's capacity target row. |
 | Manager submission | Stable job specification, submission deduplication and owning scheduling/recovery metadata. |
+| Manager claim | Under the app's scope lock: enrollment rechecked, management validated, the delivery ceiling applied, the attempt numbered, `leased_at` and the lease deadline written, the job moved behind waiting work in the dispatch order, recovery re-armed for an intent-producing job, and enrollment rechecked again. |
+| Manager give-back | The live delivery's row returned to `ready`, its holder cleared, its back-off written, and a back-off counted toward the next one's length. |
 | Manager calendar turn | Selected occurrences/jobs and the schedule cursor/revision that produced them. |
-| Manager settlement | Exact delivery fence, immutable outcome, successor jobs and associated scheduling/barrier changes. |
-| Creator acceptance | Input/event reference, run or signal acceptance, request result and publication intent. |
-| Creator execution | Frontier transition, history, waits/children, promoted payload references, committed job outcome and successor intents. |
-| Creator management | Lifecycle transition or explicit refusal, request identity, durable outcome and resulting publication intents. |
+| Manager settlement | Exact delivery fence, the outcome the journal decided, and associated scheduling, recovery and barrier changes. A settlement publishes no successor. |
+| Manager abandonment | A deleted app's duties removed, its closing attempt cancelled and its unsettled creator jobs settled `Rejected`. |
+| Journal acceptance | Input/event reference, run or signal acceptance, request result and publication intent. |
+| Journal execution | Frontier transition, history, waits/children, promoted payload references, committed job outcome and successor intents. |
+| Journal management | Lifecycle transition or explicit refusal, request identity, durable outcome and resulting publication intents. |
 | Control retention | Deployment reclamation fence and hold mutation under the same deployment lock. |
 
-There is no distributed transaction across these owners. Durable intents,
-idempotency and reconciliation connect their commits. Object uploads likewise
-cannot join a database transaction; reference promotion supplies that boundary.
+There is no distributed transaction across these owners, even where the queue
+and the journal share a schema: durable intents, idempotency and reconciliation
+connect their commits. Object uploads likewise cannot join a database
+transaction; reference promotion supplies that boundary.
 
 Database clocks decide local expiry and due work. The manager uses its own
-independent clock connection to the same Control database, sampled after lock
-waits; it does not query through the transaction's held pool connection. Creator
-fences use the creator database and trusted host policy. Raw clock reads and
-host privilege inspection are narrow public-API gaps, not alternate SQL backends.
+independent clock connection to the same database, sampled after lock waits; it
+does not query through the transaction's held pool connection. Raw clock reads
+and host privilege inspection are narrow public-API gaps, not alternate SQL
+backends.
 
 A monotonic caller budget includes lock acquisition, authority checks and waiting
 for commit. Clock conversion includes elapsed clock-query and transport time;
@@ -989,31 +1024,33 @@ terminal dispatch must roll back. A timeout after COMMIT dispatch is ambiguous:
 settlement may finish, and the caller must read its durable receipt. It is never
 proof that the transaction rolled back.
 
-Delivery authority crosses zones as `DeliveryLease.remainingMs`. The manager
-captures a monotonic deadline when issuing the database lease, anchored before
-the database clock query and reduced by the clock sample's resolution. Later
-samples can only shorten that captured deadline.
-After commit, `DeliveryGrant::lease` subtracts all intervening elapsed time and
-refuses an exhausted grant. The client captures its own monotonic instant before
-starting the request and adds the returned remaining duration to that instant,
-conservatively charging the entire exchange. It never compares the manager's
-`Delivery.deadline` with a worker wall clock or creator database clock.
+Delivery authority crosses processes as `DeliveryLease.remaining_ms` and
+`DeliveryLease.attempt_remaining_ms`. The manager captures monotonic deadlines
+for the lease and for the attempt when issuing the database lease, anchored
+before the database clock query and reduced by the clock sample's resolution.
+Later samples can only shorten them. After commit, `DeliveryGrant::lease`
+subtracts all intervening elapsed time and refuses an exhausted grant. The client
+captures its own monotonic instant before starting the request and adds the
+returned remaining durations to that instant, conservatively charging the entire
+exchange. It never compares the manager's `Delivery.deadline` with a worker wall
+clock or a database clock.
 
 A heartbeat commits under the previously stored delivery lease and the original
-transaction budget. Its successful new grant has its own deadline; capping that
-grant by the old transaction budget would prevent renewal. The client still
-rejects the reply if its previously confirmed local grant expired while waiting.
-Renewal also cannot restore a cancelled execution or extend the executor's
-original hard deadline. Creator frontier fencing remains required independently
-of these delivery leases.
+transaction budget. Its successful new grant has its own deadline, never later
+than `leased_at` plus the attempt cap; capping that grant by the old
+transaction budget would prevent renewal. The client still rejects the reply if
+its earlier confirmed local grant expired while waiting. Renewal also cannot
+restore a cancelled execution or extend the executor's original hard deadline.
+Journal frontier fencing remains required independently of these delivery
+leases.
 
-The customer engine consumes the trusted Rust `JobLease` contract, implemented
-by the native `DeliveryGrant` and authenticated client's `LeasedJob`. Native
-grant identity is private; a mutable wire `Delivery` alone is not execution
+The journal consumes the trusted Rust `JobLease` contract, implemented by the
+native `DeliveryGrant` and the authenticated client's `LeasedJob`. Native grant
+identity is private; a mutable wire `Delivery` alone is not execution
 authority. This trait is a trusted host composition seam, not a cryptographic
-boundary against arbitrary Rust implementations. Creator acceptance captures
+boundary against arbitrary Rust implementations. Journal acceptance captures
 the grant and policy before opening its transaction. It translates remaining
-time into the creator clock conservatively and returns a private `DeliveredTask`
+time into the journal clock conservatively and returns a private `DeliveredTask`
 capped by the actual task deadline. Full-operation timeouts bound database waits
 and commit acknowledgement. Expired calls can recover committed receipts through
 bounded reads, while fresh mutations still require live captured authority.
@@ -1024,227 +1061,235 @@ bounded reads, while fresh mutations still require live captured authority.
 
 The current closed contract lives in
 [`workflow_jobs.rs`](../../crates/zeroship-core/src/workflow_jobs.rs):
-`SubmitJob`, `JobSpec`, `JobOperation`, `Delivery`, `DeliveryLease`, `Settlement`
-and `SettlementReceipt`.
+`JobSpec`, `JobOperation`, `Delivery`, `DeliveryLease`, `ClaimJobs`,
+`ClaimedJobs`, `JournalSettlement` and `SettlementReceipt`.
 It defines activation, advance, cron, management, fanout, propagation,
-reconciliation and collection operations.
+hold release, closure, reconciliation and collection operations.
 Executable operations carry their deployment prerequisite inside the operation;
 journal-only commands, fanout, propagation, reconciliation and collection carry
 none. Management names
 its lifecycle revision and a closed resolved command, including the immutable
 target for a latest restart. Shared restart validation derives the effective
 policy before that target is selected.
-`JobOutcome` is a closed tagged object: `Completed`, `Waiting`, `Rejected`, or
-`Management` containing the closed lifecycle outcome. Generic results belong to
-non-management jobs; a management job requires its lifecycle result. Unknown
-fields and the former string shape are refused. Successor jobs carry further
-availability. Activation names its platform revision; cron names the
-logical schedule identity and bundle declaration name alongside the occurrence's
-request, run, revision and instant. The input-free registration and activation
-envelopes live in `workflow_schedules.rs`. Creator activation and cron acceptance
-are implemented natively; production host composition, event delivery and
-paginated maintenance still need integration.
+`JobOutcome` is a closed tagged object: `Completed`, `Waiting`, `Rejected`,
+`Management` containing the closed lifecycle outcome, or `Closed` with its
+drain evidence. Generic results belong to non-management jobs; a management job
+requires its lifecycle result. Unknown fields are refused. Activation names its
+platform revision; cron names the logical schedule identity and bundle
+declaration name alongside the occurrence's request, run, revision and instant.
+The input-free registration and activation envelopes live in
+`workflow_schedules.rs`, and each names the app's execution zone.
 
 Keep the following identities distinct:
 
 | Identity | Retry rule |
 | --- | --- |
 | App request | Reuse for retried start/signal/management acceptance; changed body conflicts. |
-| Logical job | Reuse across publication retries, successor submission and delivery attempts. |
-| Assignment revision | Changes when placement changes; registration renewal cannot restore an old revision. |
+| Logical job | Reuse across publication retries and delivery attempts. |
 | Host policy binding/source revision | Binding replacement retires existing handles; policy refresh preserves source revision only for identical values and cannot reinstall a retired binding. |
-| Delivery attempt | Changes on redelivery; a stale attempt cannot settle the new attempt. |
+| Delivery attempt | Changes on every claim of the job; a stale attempt cannot heartbeat, settle or give back the new one. |
 | Run generation/frontier | Fences customer history and identifies the next admissible transition. |
 | Wait/event/occurrence | Identifies the semantic trigger even if several delivery attempts observe it. |
-| Hold generation | Fences retention acquisition/release independently of task and assignment leases. |
+| Hold generation | Fences retention acquisition/release independently of task and delivery leases. |
 
 Bodies and nested variants are closed and bounded. The manager receives only
 allowlisted scheduling metadata: app, job, deployment, run/reference identity,
 revision, operation, deadline and closed outcome. Workflow export identities,
 cron expressions, timezone and declared scheduling policy can be allowlisted
 deployment metadata. Arbitrary inputs, result JSON, signal bodies, stack traces,
-customer connection details and free-form error messages never cross this API.
-Detailed run reads terminate at an authorized worker through normal app routing.
+customer connection details and free-form error messages never enter the queue.
 
 An identifier parsed from a body grants no authority. Host authentication selects
-the worker and allowable app; all referenced jobs, deployments and successors
-must agree with that scope. Unknown or cross-app references must not become a
-probe into another tenant's state through differing payloads or diagnostics.
+the worker and its zone; all referenced jobs and deliveries must agree with
+what the queue recorded for that worker. Unknown or cross-app references must not
+become a probe into another tenant's state through differing payloads or
+diagnostics.
 
 ### Authenticated delivery boundary
 
 The server and typed client expose the following worker requests through the
-bounded, authenticated metadata transport. Worker startup and the production
-consumer still need to use them at cutover.
+bounded, authenticated metadata transport (`crates/zeroship-workflow-server/src/api/jobs.rs`,
+`crates/zeroship-workflow-client/src/jobs.rs`).
 
 | Operation | Request metadata | Authority and reply checks |
 | --- | --- | --- |
-| `POST /v1/jobs/submit` | Assigned app/revision and immutable job specification. | Current enrolled signer and stored placement; exact specification in the receipt. |
-| `POST /v1/jobs/claim` | Assigned app/revision. | Current enrolled signer and stored placement; delivered app, worker and assignment revision must match. |
-| `POST /v1/jobs/heartbeat` | Delivery identity. | Stored attempt and live lease; reply preserves the immutable job, worker, assignment revision and attempt. |
-| `POST /v1/jobs/settle` | Delivery, and the execution to commit when the holder has one; never an outcome or successors. | The signing worker must be the delivery's; the journal decides the outcome, from the execution it commits or, with no execution, from the receipt it already holds once the queue's latest fence for the job has matched. Active delivery authority for writes, or original-worker enrollment for an exact stored receipt; reply matches app, job and attempt, and its outcome is a family the operation admits. |
+| `POST /v1/jobs/claim` | `ClaimJobs`: free slots, the caller's wait, cursor and exclusions; no app. | The verified instance's frozen zone decides the apps paged; enrollment is rechecked after each app's lock and before commit. Each delivery names the caller, carries remaining lease and attempt durations measured at reply time, and an acceptance exactly for `advance`. Unusable grants are given back, never returned. |
+| `POST /v1/jobs/heartbeat` | Delivery identity and, for a task, the journal task. | Fence `(job, worker, attempt)` on a live lease plus enrollment; the new lease never passes the attempt cap; the journal extends nothing when policy has admission or dispatch off. |
+| `POST /v1/jobs/settle` | Delivery, and the execution to commit when the holder has one; never an outcome or successors. | The signing worker must be the delivery's and the delivery the queue's latest for the job. The journal decides the outcome, from the execution it commits or, with no execution, from the receipt it already holds. Active delivery authority for writes, or original-worker enrollment for an exact stored receipt; reply matches app, job and attempt, and its outcome is a family the operation admits. |
+| `POST /v1/jobs/release` | Delivery, the journal task when there is one, and a closed `GiveBackReason`. | The signing worker must be the delivery's and the delivery the queue's latest. The journal releases the task and the queue returns the row to `ready` with the growing back-off. |
+| `POST /v1/jobs/receipt` | The logical job. | Served only to the worker the queue last delivered the job to; absence is a null reply. |
+| `POST /v1/tasks/payload`, `/v1/tasks/executable`, `/v1/tasks/payload/reserve` | App, task id and task token. | Served only to a worker holding a live delivery of that app; the task token is the authority within it, and the worker identity is substituted from the credential. |
 
 Derive worker identity from the verified instance signer. An echoed worker must
-match it. A request cannot supply its own assignment expiry. Resolve placement
-from manager records, and perform revalidation inside the queue transaction after
-the app lock and before commit. The enrollment check retains the originally
-verified key identity; a replacement key under the same worker ID must not keep
-an earlier key's pending request authorized. Revalidation queries registry state
-without consuming the signed assertion's replay token again.
+match it. A request cannot supply its own lease or attempt deadline. Perform
+revalidation inside the queue transaction after the app lock and before commit.
+The enrollment check retains the originally verified key identity; a replacement
+key under the same worker ID must not keep an earlier key's pending request
+authorized. Revalidation queries registry state without consuming the signed
+assertion's replay token again. Every check that reads the queue comes before any
+journal is asked, because observing an app's policy is I/O whose refusals differ
+by whether the app exists.
 
-App placement grants scoped execution and publication, not manager scheduling
-authority. Worker submission must reject manager-origin cron and management
-operations unless they resolve to matching authoritative manager records, and a
-worker settlement names no successors at all. Normal manager scheduling uses the
-trusted native submission path. Operation provenance is additional to the
-queue's app and identity checks.
+A worker's claim is execution authority, not scheduling authority. No worker
+request path publishes a job: committed journal intents reach the queue through
+the service's own publication, and a settlement names no successors at all.
+Operation provenance is additional to the queue's app and identity checks.
 
-An exact settled receipt may outlive its original placement. Do not reject it in
-a current-placement preflight before the queue can select its receipt-replay
-branch. That branch checks current enrollment of the original worker, compares
-the stored complete settlement identity and admits no new successor writes.
-Changing the job, attempt, outcome or successor contents is a conflict.
+An exact settled receipt may outlive the lease that produced it. Do not reject it
+in a live-lease preflight before the queue can select its receipt-replay branch.
+That branch checks current enrollment of the original worker, compares the stored
+complete settlement identity and admits no new writes. Changing the job, attempt
+or outcome is a conflict.
 
 Control scheduling uses the same bounded authenticated transport through
-`POST /v1/schedules/register` and `POST /v1/schedules/activate`. The server checks
-the exact `svc/control` issuer before buffering either request. Worker placement
-and instance credentials grant neither operation. Registration returns the
-accepted typed declaration, which the client compares in full; native storage
-canonicalizes its ordering independently. Activation returns the stable job,
-whose app, deployment, operation and revision must match the original request.
-These routes require no enrolled or assigned worker. Control's lifecycle
-publisher is their production caller, delivering the durable intents described
-under [normal deployment publication](#normal-deployment-publication).
+`POST /v1/schedules/register`, `POST /v1/schedules/activate` and
+`POST /v1/schedules/disable`. The server checks the exact `svc/control` issuer
+before buffering each request. Instance credentials grant none of these
+operations. Registration returns the accepted typed declaration, which the
+client compares in full, the app's zone included; native storage canonicalizes
+its ordering independently. Activation returns the stable job, whose app,
+deployment, operation and revision must match the original request. These routes
+require no enrolled worker. Control's lifecycle publisher is their production
+caller, delivering the durable intents described under
+[normal deployment publication](#normal-deployment-publication).
 
 ### Delivery, execution and settlement
 
 ```text
 Manager job:
 
-  durable ready -- available_at reached + authorized claim --> leased
-       ^                                                    /      |
-       |                         expiry / recoverable loss /       |
-       +-------------------------------------------------+        |
-                                                        exact ACK |
-                                                                  v
-                                                               settled
-                                                                  |
-                                           immutable replay <-----+
+  durable ready -- available, not backed off + zone claim --> leased
+       ^      ^                                            /   |   \
+       |      |      give-back: deferral, exhausted grant,     |    \
+       |      +------ preparation failure, release ----+       |     |
+       |                                                       |     |
+       +------------- lease lapse (no heartbeat) -------------+      |
+                                                      exact settle   |
+                                                                     v
+                                                                  settled
+                                                                     |
+                                                  immutable replay <-+
 
-Creator transition:
+Journal transition:
 
-  delivered job -> existing committed receipt? -> report same outcome
+  delivered job -> existing committed receipt? -> settle with that outcome
                         |
                         no
                         v
               claim expected frontier
                         |
-              execute bounded operation
+              worker executes bounded turn
                         |
-              commit state + receipt + intents
+              journal commits state + receipt + intents
                         |
-              report closed outcome / publish intents
+              queue settles with the journal's outcome
 ```
 
 ```text
-Manager/queue                  Worker                       Creator DB
-      |                           |                              |
-      |<---- authenticated poll --|                              |
-      | lock app; verify current placement/enrollment             |
-      | persist delivery attempt |                              |
-      |---- job + authority ---->|                              |
-      |                           |-- receipt/fence transaction ->|
-      |                           |<-- prior outcome or claim ----|
-      |                           |                              |
-      |                           | load pin; execute bounded turn|
-      |<---- heartbeat ----------|                              |
-      |---- bounded authority -->|                              |
-      |                           |-- checkpoint + receipt ------>|
-      |                           |   + payload refs + intents    |
-      |                           |<-- confirmed commit ----------|
-      |<---- outcome + ACK -------|                              |
-      | lock app; verify fence; settle with the journal outcome   |
-      |---- settlement receipt -->|                              |
-      |                           |-- mark publication confirmed ->|
+Workflow service (queue + journal)              Worker
+      |                                             |
+      |<---- ClaimJobs (free slots, cursor) --------|
+      | per app of the caller's zone: lock scope,   |
+      | recheck enrollment, lease, accept into      |
+      | the journal; measure leases at reply time   |
+      |---- ClaimedJobs (leases + acceptances) ---->|
+      |                                             | prepare app; load pin;
+      |                                             | execute bounded turn
+      |<---- heartbeat (queue lease + task) --------|
+      |---- renewed lease and task, or nothing ---->|
+      |                                             |
+      |<---- settle (delivery + execution) ---------|
+      | journal commits frontier, receipt, intents; |
+      | queue settles with that outcome             |
+      |---- settlement receipt ------------------->|
+      | publication wake drains the new intents     |
 ```
 
 The queue provides at-least-once delivery. It deduplicates immutable submission
-and settlement content. A heartbeat can update the
-stored deadline; the mutable echoed deadline is not part of immutable delivery
+and settlement content. A heartbeat can update the stored deadline, never past
+the attempt cap; the mutable echoed deadline is not part of immutable delivery
 identity. Retrying after a lost heartbeat reply must remain possible.
 
 Renewal cannot revive expired execution. A retry can observe a still-live stored
 manager lease, but the worker rejects renewal after its local guard has expired
-or been cancelled. A later lease never extends the original execution deadline.
-Redelivery requires a fresh attempt and admission, including a check for a
-previously committed customer outcome.
+or been cancelled. A later lease never extends the original execution deadline:
+the hard bound is the smaller of the worker's local ceiling and the attempt
+remainder the delivery carried (`DeliverySlot::run` in
+`crates/zeroship-workflow-runner/src/delivery.rs`), and the guard is also held
+to the current lease, which each renewal moves. Redelivery requires a fresh claim
+and admission, including a check for an outcome an earlier attempt committed.
 
-The creator journal checks a committed receipt before running app code. A job
-that already committed returns that result. Otherwise the worker claims the
-expected app/run/generation/frontier, captures trusted policy and pins execution
+The journal checks a committed receipt before running app code. A job that
+already committed returns that result. Otherwise the task claims the expected
+app/run/generation/frontier, captures trusted policy and pins execution
 authority. Competing jobs for the same frontier cannot both advance it. A new
 attempt must not reuse another attempt's write authority.
 
-The manager's lease alone cannot stop an old process writing a private creator
-DB. Creator transactions check the execution fence and current frontier, and a
-replacement serializes with any earlier transaction on that frontier. If an
-older COMMIT was already dispatched, recovery reads its result after settlement;
-it cannot assume the older execution did nothing merely because delivery expired.
-Synchronous JavaScript is interrupted through the execution budget. Quarantine
-prevents isolate reuse and initiates cancellation; it does not prove that native
-work has stopped. The executor must join native operations through runtime
-shutdown before releasing the slot or publishing completion. Rejection of a
-JavaScript promise alone is insufficient. Already dispatched COMMIT remains
-supervised until its outcome is settled or explicitly uncertain.
+The manager's lease alone cannot stop an old process writing a creator database
+through its own `env.db`. Journal transactions check the execution fence and
+current frontier, and a replacement serializes with any earlier transaction on
+that frontier. If an older COMMIT was already dispatched, recovery reads its
+result after settlement; it cannot assume the older execution did nothing merely
+because delivery expired. Synchronous JavaScript is interrupted through the
+execution budget. Quarantine prevents isolate reuse and initiates cancellation;
+it does not prove that native work has stopped. The executor must join native
+operations through runtime shutdown before releasing the slot or publishing
+completion. Rejection of a JavaScript promise alone is insufficient. Already
+dispatched COMMIT remains supervised until its outcome is settled or explicitly
+uncertain.
 
-A fresh delivery may find a customer outcome committed by an older attempt. It
-settles that semantic outcome using its own current delivery fence. The stored
-creator outcome must therefore be independent of the old delivery envelope.
-Conversely, exact replay of an already settled manager attempt returns its
-immutable receipt after placement expiry, but still requires current enrollment
-of the original worker. Changed content, another worker or a superseded unsettled
-attempt cannot use receipt replay to admit new writes.
+A fresh delivery may find an outcome committed by an older attempt. It settles
+that semantic outcome using its own current delivery fence. The stored journal
+outcome must therefore be independent of the old delivery envelope. Conversely,
+exact replay of an already settled manager attempt returns its immutable receipt
+after the lease lapsed, but still requires current enrollment of the original
+worker. Changed content, another worker or a superseded unsettled attempt cannot
+use receipt replay to admit new writes.
 
 ### Publication and receipt retention
 
-Successor identities and content are generated once in the creator transaction.
-ACK publication and outbox reconciliation use the same IDs and immutable
-specifications. They may race; manager submission and settlement share the same
-deduplication domain. Neither path substitutes a fresh ID after a lost response.
+Successor identities and content are generated once in the journal transaction.
+The service's publication wake and delivered reconciliation use the same IDs and
+immutable specifications. They may race; manager submission deduplicates them.
+Neither path substitutes a fresh ID after a lost response.
 
-The creator delivery API settles the semantic outcome the journal committed and
+The delivery API settles the semantic outcome the journal committed and
 publishes no successor through settlement. Committed successor intents use the
-independent publication path above, and a settlement neither captures nor
-confirms them. Delivered reconciliation publishes those records; production
-manager dispatch and scope-duty admission are still required to make eventual
-publication a production guarantee.
+independent publication path, and a settlement neither captures nor confirms
+them. After every mutating commit the service wakes one coalescing drain for the
+app (`PublicationWake` in `crates/zeroship-workflow-server/src/publication.rs`),
+which publishes pending intents through `AppWorkflows::publish_pending_jobs`
+into its own queue; the manager's reconciliation duty catches any drain that
+was cut off.
 
-Creator state commits before its ACK. If the manager is unavailable or full,
-intents remain pending. Marking publication confirmed happens only after a
+Journal state commits before its acknowledgement. If the queue is unavailable or
+full, intents remain pending. Marking publication confirmed happens only after a
 manager receipt is validated against app, job and content. A lost confirmation
 write merely causes another idempotent publication attempt.
 
-`AppWorkflows::pending_jobs` pages creator-owned advance intents under trusted
+`AppWorkflows::pending_jobs` pages journal-owned advance intents under trusted
 app policy. `publish_job` reads and commits locally before calling its
 host-bound `JobPublisher`, validates the entire immutable specification, then
-confirms it under the app lock in a new creator transaction. Concurrent
+confirms it under the app lock in a new journal transaction. Concurrent
 publishers may submit the same job; a confirmed intent remains as a durable
-receipt. `AssignedPublisher` uses the authenticated worker client and its
-current app assignment. These methods do not discover apps or schedule work.
-Delivered reconciliation uses the same confirmation path with additional captured
-delivery and policy checks around publication, lock waits and commit.
+receipt. The service's publisher is `LanePublisher`
+(`crates/zeroship-workflow-server/src/sweeps.rs`), which refuses a job naming
+any app but its own and submits through `Queue::submit`; no worker publishes.
+These methods do not discover apps or schedule work. Delivered reconciliation
+uses the same confirmation path with additional captured delivery and policy
+checks around publication, lock waits and commit.
 
 Starts, child/continuation creation, task checkpoints, restart and runnable
-lifecycle/signal/dependency wake-ups record their advance intent in the creator
+lifecycle/signal/dependency wake-ups record their advance intent in the journal
 transaction. A checkpoint publication failure rolls back history and its task
-receipt together. Pending intents prevent creator deployment-hold release even
-if run history has been removed. Confirmed records do not retain that customer
-hold by themselves; the manager's queue and retention fences then own delivery
-dependencies. The production collector cutover remains required.
+receipt together. Pending intents prevent journal deployment-hold release even
+if run history has been removed. Confirmed records do not retain that hold by
+themselves; the manager's queue and retention fences then own delivery
+dependencies.
 
 App request receipts and delivery receipts have separate identities. Both retain
 their deduplication state until an explicit retirement protocol proves that the
-relevant submissions and redeliveries are no longer admissible. The creator
+relevant submissions and redeliveries cannot be admitted again. The journal's
 `requests` table records creation time without an expiry, and `AppPolicy` offers
 no request-receipt TTL. A repeated request returns its original result or rejects
 changed content, including after later lifecycle changes. Capability receipt
@@ -1259,30 +1304,29 @@ the default design.
 These states describe different objects. A settled queue job can leave its run
 waiting for a later job; a live worker does not imply a running workflow. Manager
 observations of customer lifecycle are reported metadata, never permission to
-reconstruct or overwrite creator history.
+reconstruct or overwrite journal history.
 
 | Object and owner | State and transition responsibility |
 | --- | --- |
-| Worker registration, manager | Ready admits placement; draining stops new placement. Expiry removes live eligibility without deleting pending work or recovery responsibility. |
-| Assignment, manager | An active revision can renew until expiry or explicit release. Reassignment advances the revision; retained tombstones fence delayed messages. |
-| Job, manager | Pending work becomes deliverable at its deadline, receives a leased attempt, and settles against that attempt. Expiry permits redelivery of the same job. |
-| Run generation, creator | The journal owns `queued`, `running`, `sleeping`, `waiting`, `paused`, `stalled`, `compensating`, `completed`, `failed` and `cancelled`. The existing lifecycle rules determine legal transitions. |
-| Publication intent, creator | A committed pending intent remains recoverable until a matching manager receipt confirms publication. An unknown remote result remains pending. |
+| Worker instance, Control | Active while its lease is renewed; retired on graceful exit or by purge, expired when its lease lapses. Its zone is frozen. It holds no workflow state of its own: losing a worker loses only the leases it held. |
+| Job, manager | Pending work becomes claimable at its availability once any give-back back-off has passed, receives a leased attempt, and settles against that attempt. A lapsed lease permits redelivery of the same job; a give-back returns it to `ready` at once. A job whose counted executions reached the delivery ceiling stays unsettled and unclaimed. |
+| Run generation, journal | The journal owns `queued`, `running`, `sleeping`, `waiting`, `paused`, `stalled`, `compensating`, `completed`, `failed` and `cancelled`. The existing lifecycle rules determine legal transitions. |
+| Publication intent, journal | A committed pending intent remains recoverable until a matching manager receipt confirms publication. An unknown remote result remains pending. |
 | Lifecycle intent, Control | A committed pending intent blocks later revisions of its app and, for activation, retains its deployment until the manager's exact receipt confirms it. |
-| Management request, both owners | Manager acceptance creates delivery responsibility. Creator application/refusal produces the durable outcome; manager confirmation reports that outcome and settles the matching barrier. |
-| Deployment, both owners | Platform activation selects code for new work; creator activation confirms local prerequisites. A run's existing pin changes only through an explicit lifecycle operation. |
+| Management request, both owners | Manager acceptance creates delivery responsibility. Journal application/refusal produces the durable outcome; manager settlement reports that outcome and settles the matching barrier. |
+| Deployment, both owners | Platform activation selects code for new work; journal activation confirms local prerequisites. A run's existing pin changes only through an explicit lifecycle operation. |
 
 The run-state vocabulary lives in
 [`workflow_coordination/lifecycle.rs`](../../crates/zeroship-core/src/workflow_coordination/lifecycle.rs).
-The customer lifecycle engine owns its transition matrix. Moving scheduling to
-the manager does not give queue handlers a parallel run-state machine. In
+The customer lifecycle engine owns its transition matrix. Scheduling in the
+manager does not give queue handlers a parallel run-state machine. In
 particular, job `Completed` means the bounded operation committed; it does not
 necessarily mean the workflow returned a terminal result.
 
 Terminal completion and collection are separate. A terminal generation can still
 retain history, restartable checkpoints, dependent child results, payloads and
 deduplication receipts. Management acceptance likewise does not promise immediate
-quiescence: its creator transition and fence determine when cancellation or pause
+quiescence: its journal transition and fence determine when cancellation or pause
 has actually taken effect.
 
 ## Trigger lifecycles
@@ -1290,7 +1334,7 @@ has actually taken effect.
 Each trigger follows the commit and delivery rules above. The origin determines
 which owner first has durable work and which database can contain its data.
 
-| Trigger | First durable write | Manager receives | Worker commits before ACK |
+| Trigger | First durable write | Manager receives | Journal commits before settlement |
 | --- | --- | --- | --- |
 | Explicit start | Creator run, input reference, request receipt and intent. | Stable advance job and run identity. | Next frontier, receipt and successor intents. |
 | Cron/interval | Manager occurrence and job under activated schedule revision. | Normal deployment schedule metadata. | Occurrence acceptance and run creation, or a durable overlap refusal. |
@@ -1302,47 +1346,52 @@ which owner first has durable work and which database can contain its data.
 
 ### Explicit start and input acceptance
 
-`start(input)` runs through the app-scoped native handle in its ordinary runtime.
-Rust code in the creator zone can call that same handle. Platform services do
-not import it to write customer data.
+`start(input)` runs through the app-scoped native handle in its ordinary
+runtime. On a worker that handle is a `RemoteBackend`, which carries the call to
+the workflow service; on the local host it is an in-process `AppBackend`.
+Platform services do not import either to write customer data.
 
 ```text
-App code              Worker / creator DB                 Manager
-   |                           |                             |
-   |-- start(input, request) ->|                             |
-   |                           |-- establish scope duty ---->|
-   |                           |<-- durable responsibility ---|
-   |                           |                             |
-   |                           | prepare input; transaction: |
-   |                           | run + request result + intent|
-   |                           | COMMIT                      |
-   |<-- accepted run handle ---|                             |
-   |                           |-- submit same job ID ------->|
-   |                           |<-- submission receipt -------|
-   |                           | mark intent confirmed        |
-   |                           |                             |
-   |                           |-- poll -------------------->|
-   |                           |<-- advance job --------------|
-   |                           | commit bounded turn          |
-   |                           |-- outcome + ACK ------------>|
+App code         Worker (any of the zone)      Workflow service (queue + journal)
+   |                     |                                  |
+   |-- start(input) ---->|                                  |
+   |                     |-- /v1/runs/start (app id) ------>|
+   |                     |                                  | zone rule; bind policy
+   |                     |                                  | establish ingress epoch
+   |                     |                                  | stage input; transaction:
+   |                     |                                  | run + request result + intent
+   |                     |                                  | COMMIT
+   |<-- run handle ------|<-- started run ------------------|
+   |                     |                                  | publication wake ->
+   |                     |                                  | Queue::submit (advance)
+   |                     |                                  |
+   |           any worker of the zone:                       |
+   |                     |-- zone claim ------------------->|
+   |                     |<-- advance job + acceptance -----|
+   |                     | execute bounded turn             |
+   |                     |-- settle (execution) ----------->| journal decides; queue settles
 ```
 
-Creator commit is durable acceptance. The returned handle means accepted work,
+Journal commit is durable acceptance. The returned handle means accepted work,
 not completion or immediate queue visibility. Request retries return the same
-accepted run; a changed input under the same identity conflicts. If input upload
-or the creator transaction fails, there is no accepted run. If the response is
+accepted run; a changed input under the same identity conflicts. If input staging
+or the journal transaction fails, there is no accepted run. If the response is
 lost after commit, the request receipt resolves the uncertainty.
 
-Before accepting a start or signal, the worker must hold a manager-recorded scope
-responsibility covering unpublished intents. A scope-registration record without
-a recovery deadline and drain protocol is insufficient. This obligation is
-established before customer acceptance, so failure between databases can leave
-extra reconciliation responsibility but cannot leave accepted work undiscoverable.
+Before accepting a start or signal, the service holds a manager-recorded scope
+responsibility covering unpublished intents: the binding's ingress epoch, which
+the service establishes through `Recovery::establish` before the first
+acceptance and again above an epoch the journal refused. This obligation is
+established before customer acceptance, so a failure between the two can leave
+extra reconciliation responsibility but cannot leave accepted work
+undiscoverable.
 
-If no worker can receive the request, the platform requests authorized capacity
-and retries the customer-side ingress through normal routing. The metadata-only
-manager cannot durably accept the input on behalf of the creator. A request that
-never reached creator storage is not accepted.
+The worker that served the request need not be the one that executes the run:
+the `advance` job is claimable by every worker of the app's zone, and a worker
+that never claimed a job of the app serves its starts and reads. If the zone has
+no worker free to claim, the accepted job waits in the queue, where the zone's
+capacity target counts it as demand. A request that never reached the service is
+not accepted.
 
 ### Deployment schedules, activation and cron
 
@@ -1672,7 +1721,7 @@ App ingress          Worker / Creator DB                    Manager
 Signal bodies and topic subscription details remain customer data. Direct signals
 publish the affected runnable frontier through Advance. Fanout jobs name an opaque
 broadcast identity and page revision; recipient cursors stay in the creator DB.
-A worker cannot use those references outside the assigned app. Target generation
+A delivery cannot use those references outside its own app. Target generation
 and wait revision are verified before consumption.
 
 Signal-before-wait is safe because events are durable and wait registration checks
@@ -1785,7 +1834,7 @@ Continuation and compensation use the same pattern: a committed semantic
 transition produces stable successors. Partial progress and retry state live in
 the journal. Cascading cancellation and large dependency sets yield bounded
 continuation jobs rather than an unbounded worker loop. All relationships remain
-within the assigned app; cross-app workflow calls are ordinary authenticated app
+within one app; cross-app workflow calls are ordinary authenticated app
 integration, not a bypass around these journal boundaries.
 
 ### Stable continuation identity
@@ -1878,8 +1927,8 @@ names its next bounded page. The manager sees no obligation kind, source run,
 cursor, affected run or count. Its scoped submission, delivery, fairness and
 settlement protocol applies unchanged. Propagate has no deployment prerequisite
 or run projection, acquires no hold and creates no maintenance duty, so an
-execution barrier cannot delay the cancellation it must finish. Workers publish
-it through the outbox like Fanout. `Waiting` confirms a committed successor page;
+execution barrier cannot delay the cancellation it must finish. The service
+publishes it from the journal's publication intents like Fanout. `Waiting` confirms a committed successor page;
 `Completed` means the obligation is discharged.
 
 Each obligation has exactly one source generation and one kind:
@@ -1978,7 +2027,7 @@ return the recorded closed outcome; changed bodies conflict without altering the
 receipt. Explicit lifecycle refusals may be durable `NotFound`, `Conflict` or
 `Denied`. Database errors, capacity exhaustion and expired/missing host authority
 remain retryable and create no permanent refusal. In particular, expiry of an
-admission-policy lease is not equivalent to valid policy with admission disabled.
+an expired policy observation is not equivalent to valid policy with admission disabled.
 
 Delivered management must carry the complete immutable command and a manager-issued
 per-run management revision. This order is distinct from deployment activation,
@@ -2154,77 +2203,72 @@ the authoritative command/job/order linkage and commits its lifecycle outcome,
 settled revision and queue receipt together. Exact settled replay validates the
 retained linkage before its final enrollment check; it cannot clear a newer
 barrier. Public queue submission and successors cannot create management jobs.
-Only authorized manager acceptance creates those jobs. The separate inbox polling
-and acknowledgement wire routes, client methods and worker grants are removed.
-The creator management handler carries its closed outcome through the exact
-receipt and ordinary queue settlement without starting an executor. Collection
-delivery remains to be implemented. The manager must never query the customer
+Only authorized manager acceptance creates those jobs, and the service's
+maintenance lane claims and applies them; there is no separate polling or
+acknowledgement route. The journal's management handler carries its closed
+outcome through the exact receipt and ordinary queue settlement without starting
+an executor. The manager must never query the customer
 journal to fill a deployment gap.
 
 ## Recovery responsibility and execution capacity
 
-A creator outbox cannot recover itself when its last worker disappears. The manager
-therefore owns a durable obligation for every ingress-enabled app, established
-before accepting customer data. It survives registration expiry, deployment
-replacement and manager restart.
+Journal intents cannot publish themselves if every drain that would carry them
+is cut off. The manager therefore owns a durable obligation for every
+ingress-enabled app, established before accepting customer data. It survives
+worker loss, deployment replacement and service restart.
 
 ```text
-Creator commit exists; publication was lost
+Journal commit exists; its publication was lost
                     |
                     v
 Manager scope obligation + reconciliation deadline
                     |
-          +---------+--------------------+
-          |                              |
-   eligible worker exists        no eligible worker exists
-          |                              |
-          |                     persist capacity demand
-          |                              |
-          |                     host starts authorized worker
-          |                              |
-          +<--------- enrollment / registration / placement
-          |
-          v
-Deliver bounded reconciliation job
-          |
-Worker reads its app's pending intents -> submit stable identities
-          |
-Commit confirmed progress -> ACK + continuation or next recovery deadline
+                    v
+Reconcile job in the queue -> claimed by the service's maintenance lane
+                    |
+Lane reads the app's pending intents -> Queue::submit with stable identities
+                    |
+Commit confirmed progress -> settle + continuation or next recovery deadline
+                    |
+                    v
+Advance jobs claimable by every worker of the app's zone;
+the zone's capacity target counts them as demand
 ```
 
 Each obligation has a manager-owned deadline even when no job is visibly pending.
 Healthy heartbeats cannot postpone it indefinitely because the manager cannot
-observe an unpublished customer commit. Bounded immediate publication retry is
-an optimization; periodic manager-issued reconciliation supplies correctness.
+observe an unpublished journal commit. The publication wake is an optimization;
+periodic manager-issued reconciliation supplies correctness.
 The native `recovery::Recovery` ledger supplies independent deadlines and pending
-jobs for reconciliation and collection. `ensure` registers a trusted activation
-and establishes both duties atomically. Repeated activation validates the complete
-retained pair without postponing either duty; a newer activation changes only
-provenance. Both duties remain app-scoped and require no retained executable.
-`dispatch` serializes with queue operations under the app lock and commits the
-chosen duty's job identity with its next deadline. A pending job is returned
-unchanged across retries and replicas until it settles. A fresh `Waiting`
-settlement advances only its matching duty's deadline to manager time without
-postponing an earlier deadline. A completed scan preserves the periodic deadline.
-Receipt replay and unrelated jobs cannot modify the current obligation. Scoped
-pending-job foreign keys prevent deleting a job that still carries a duty or
-substituting another app's job.
+jobs for reconciliation and collection. `ensure` registers a trusted activation,
+records the app's scope in its zone, and establishes both duties atomically.
+Repeated activation validates the complete retained pair without postponing
+either duty; a newer activation changes only provenance. Both duties remain
+app-scoped and require no retained executable. `dispatch` serializes with queue
+operations under the app lock and commits the chosen duty's job identity with its
+next deadline. A pending job is returned unchanged across retries and replicas
+until it settles. A fresh `Waiting` settlement advances only its matching duty's
+deadline to manager time without postponing an earlier deadline. A completed scan
+preserves the periodic deadline. Receipt replay and unrelated jobs cannot modify
+the current obligation. Scoped pending-job foreign keys prevent deleting a job
+that still carries a duty or substituting another app's job.
 
 `due` pages each duty kind by app identity using manager database time and includes
 healthy owners. The scheduler resumes after the last returned app, then begins
 another sweep after an empty page; newly due work behind the cursor joins that sweep.
 Job publication failure leaves the prior deadline and pending identity intact.
-The server drives these duties through independently bounded lanes, and its
-placement lanes give every app with a claimable duty job an eligible owner or
-record its capacity demand. Ingress epochs tie this responsibility to creator
-acceptance, and the closing lane retires it once an app idles or is archived;
-see [ingress epochs and scope retirement](#ingress-epochs-and-scope-retirement).
+The server drives these duties through independently bounded lanes; its
+maintenance lane claims every duty job, and the advance jobs they publish are
+claimable by any worker of the app's zone, while the capacity lane turns that
+backlog into each zone's target. Ingress epochs tie this responsibility to
+journal acceptance, and the closing lane retires it once an app idles or is
+archived; see [ingress epochs and scope retirement](#ingress-epochs-and-scope-retirement).
 
 A reconciliation job processes an app-scoped page without loading app code.
 The persisted scan alternates between publication intents and deployment-hold
 intents. Its immutable job receipt captures the phase, selected IDs, current scan
 revision and a stable upper boundary before external I/O. These cursors stay in
-creator storage; the manager receives only a closed outcome. Selection reads IDs
+the journal; the queue receives only a closed outcome. Selection reads IDs
 rather than decoding the whole page's specifications or hold records, so a
 malformed intent does not prevent attempts on later IDs. Each phase has a captured
 boundary, so publication churn cannot indefinitely defer hold recovery.
@@ -2258,40 +2302,36 @@ native metadata turn does not renew itself or run an independent timer.
 ### Ingress epochs and scope retirement
 
 A scope's recovery responsibility carries a monotonic ingress epoch and a state:
-open, closing, retired or abandoned. Activation opens it. A worker obtains the
-epoch with its policy lease, bound to its exact key and placement; a plain
-refresh never reopens responsibility. An establishment request names the epoch
-the creator journal refused, or none when the host holds no epoch and the
-journal closed none, as at startup. The manager returns an open epoch above the
-named one, reopening a retired scope or advancing a closing one, and recreates
-reconciliation and collection duties under the app lock after enrollment,
-placement and admission checks and before the lease is issued. Establishment
-follows the admission policy; archive masks admission, so an archived app
-cannot be reopened by ingress. An epoch the manager never issued is a conflict.
+open, closing, retired or abandoned. Activation opens it. An establishment
+request names the epoch the journal refused, or none when the binding holds no
+epoch and the journal closed none, as at startup. The manager returns an open
+epoch above the named one, reopening a retired scope or advancing a closing
+one, and recreates reconciliation and collection duties under the app lock.
+Establishment follows the admission policy; archive masks admission, so an
+archived app cannot be reopened by ingress. An epoch the manager never issued is
+a conflict.
 
-Hosts establish an epoch before they accept ingress. The local host does so
-after registering its startup activation's responsibility and before it
-announces readiness, through `Recovery::establish`, because it is its app's
-platform authority and holds no policy lease. A worker's `AssignmentBindings`
-establishes on the first preparation of a placement and falls back to a plain
-lease when policy refuses establishment or the app has no responsibility yet, so
-an archived app still serves delivered work such as its own closure; later
-refreshes only renew. Both hosts attach their establishment to the app
-(`AppWorkflows::with_ingress` with `IngressEpochs`; the worker's
-`CreatorFactory` receives the placement's `AssignedPolicies`). An acceptance the
-journal refuses for a closed epoch establishes an epoch above the refused one
-and retries once under the same request identity, capturing the binding's newly
-installed authority rather than the authority the request isolate captured.
-Concurrent establishments serialize, and one that finds a newer epoch already
-installed does not ask again. Hosts report accepted ingress as activity: a
-worker through its next lease exchange, the local host with each placement
-renewal.
+Hosts establish an epoch before they accept ingress, and attach their
+establishment to the app handle (`AppWorkflows::with_ingress` with
+`IngressEpochs`). The workflow service owns the recovery scope in its own
+process, so `ServiceIngress` in `crates/zeroship-workflow-server/src/runs.rs`
+calls `Recovery::establish` directly with the observed admission, and installs
+the epoch into the binding `RunService::app` carries forward. The local host
+establishes after registering its startup activation's responsibility and before
+it announces readiness, through its manager client, because it is its app's
+platform authority. An acceptance the journal refuses for a closed epoch
+establishes an epoch above the refused one and retries once under the same
+request identity, capturing the binding's newly installed authority rather than
+the authority the request captured. Concurrent establishments serialize, and one
+that finds a newer epoch already installed does not ask again. Hosts report
+accepted ingress as activity through `Recovery::note_ingress`, coalesced so a
+burst of acceptances costs one report.
 
 Every creator ingress acceptance captures the epoch with its policy and, under
 the app state lock before commit, requires it to exceed the journal's closed
 epoch: start, direct signal, broadcast, signal ingestion to a run or a topic,
 the pause, resume and cancel transitions, and restart. The fence runs after the
-authority, admission and lifecycle checks, so an expired lease or disabled
+authority, admission and lifecycle checks, so an expired observation or disabled
 admission reports its own refusal; a missing or closed epoch is a retryable
 refusal. Issuing and revoking signal capabilities commit no run, publication
 intent, payload or hold, so they are not fenced; redeeming a capability is.
@@ -2302,20 +2342,20 @@ claim that the drain predicates count.
 The manager driver's closing lane visits attempts in progress and open scopes
 past their backoff that are idle or whose calendar Control disabled, as archive
 does. A scope is idle after `recovery::Options::idle_after` without activity:
-its epoch's opening, reported ingress, a worker publication or an
-intent-producing claim; maintenance and closure never count. The manager begins
-closing only when no job for the app is leased, no maintenance job is pending
-and no earlier Close is unsettled. It records the app's dispatch cursor as the
-closing watermark, suspends the scope's periodic duties for the attempt, and
-delivers a manager-origin Close job for the current epoch. An attempt whose
-Close has not settled within `closing_timeout` returns the scope to open. Each
-attempt defers the next until its timeout plus `closing_backoff` have passed,
-the backoff doubling per consecutive attempt up to `closing_backoff_max`; live
-work that refuses an attempt defers the next by the backoff alone, and
-reopening resets the pacing. The server maps the `workflow.closing_*` settings
-and the local host its `[manager]` settings into these options.
+its epoch's opening, reported ingress, a publication or an intent-producing
+claim; maintenance and closure never count. The manager begins closing only
+when no job for the app is leased, no maintenance job is pending and no earlier
+Close is unsettled. It records the app's dispatch cursor as the closing
+watermark, suspends the scope's periodic duties for the attempt, and delivers a
+manager-origin Close job for the current epoch. An attempt whose Close has not
+settled within `closing_timeout` returns the scope to open. Each attempt defers
+the next until its timeout plus `closing_backoff` have passed, the backoff
+doubling per consecutive attempt up to `closing_backoff_max`; live work that
+refuses an attempt defers the next by the backoff alone, and reopening resets
+the pacing. The server maps the `workflow.closing_*` settings and the local host
+its `[manager]` settings into these options.
 
-Under the same app state lock the worker raises the closed epoch and evaluates
+Under the same app state lock the journal raises the closed epoch and evaluates
 the drain predicates in one transaction: no unconfirmed publication intent, no
 hold in transition, no payload in preparation or deletion, no live task claim,
 and no deletion tombstone still owed its final resweep. Settlement retires the
@@ -2323,66 +2363,62 @@ scope only when it is still closing at that epoch, the result is drained and no
 job was published or claimed above the watermark. Claims during closing do not
 cancel the attempt; the watermark refuses its retirement at settlement.
 
-Claiming an intent-producing job or a worker publication reopens a retired scope
-before execution. Workers cannot publish Reconcile, Collect or Close, and Close
-is never a settlement successor. Registration expiry, release, empty polling,
-healthy heartbeats, completed scans and calendar or policy acknowledgements
-never retire responsibility. A creator snapshot restore must reopen
-responsibility for the restored apps.
+Claiming an intent-producing job or publishing one reopens a retired scope before
+execution. Only the manager publishes Reconcile, Collect or Close, and Close is
+never a settlement successor. Worker loss, release, empty claims, healthy
+heartbeats, completed scans and calendar or policy acknowledgements never retire
+responsibility. A snapshot restore must reopen responsibility for the restored
+apps.
 
 Deletion abandons responsibility instead of closing it. For each candidate page
-the closing lane reads Control's terminal deletion marker through the manager's
-column grant on `zeroship.apps`, and abandons each deleted candidate: its duties
-are deleted, a closing attempt is cancelled and the scope row stays as the
-epoch's tombstone. Nothing reopens an abandoned scope; establishment and
-activation are refused, and claims and publications leave it abandoned. A page
-whose deletion state cannot be read visits nothing. The local host has no
-Control catalog, so its app is never abandoned; idleness still retires it.
+the closing lane reads Control's terminal deletion marker over the app-facts
+capability (`FactsLifecycle` in
+`crates/zeroship-workflow-manager/src/lifecycle.rs`), and abandons each deleted
+candidate (`Recovery::abandon` in `crates/zeroship-workflow-manager/src/recovery.rs`):
+its duties are deleted, a closing attempt is cancelled, its unsettled creator
+jobs are settled `Rejected` in the same transaction, and the scope row stays as
+the epoch's tombstone. No worker may run a deleted app, so those rows would
+otherwise stay unsettled and be passed on every claim lap and capacity visit; a
+holder of a live lease on one finds it settled at its next heartbeat or
+settlement. Maintenance kinds stay with the lane that owns them. Nothing reopens
+an abandoned scope; establishment and activation are refused, and claims and
+publications leave it abandoned. A page whose deletion state cannot be read
+visits nothing. The local host has no Control catalog (`lifecycle::Undeletable`),
+so its app is never abandoned; idleness still retires it.
 
-Native PostgreSQL and SQLite contracts cover this protocol. Manager contracts
-fence a still-valid lease after Close, refuse retirement in both orders of a
-racing acceptance and Close, keep a scope open when a job is claimed or
-published above the watermark, reopen exactly once across retries and racing
-replicas, converge lost acknowledgements and redelivery on one retirement,
-drain archived apps, and hold duties that fall due during closing. The closing
-lane's contracts cover the idle and archive triggers, expiry, the doubling
-backoff and its reset, deferral by live work, abandonment that nothing reopens,
-and a driver pass that closes an idle scope while abandoning a deleted one; the
-server repeats abandonment over the canonical platform schema and its column
-grant. Creator contracts refuse each fenced path under a closed epoch and admit
-it under the next, and pin one establishment and one retry per acceptance,
-including through a request isolate's backend. The local host retires an idle
-app through a delivered Close, and its next start is fenced, establishes a newer
-epoch and completes. An app that deleted a payload retires once the tombstone's
-resweep made it final.
+Native PostgreSQL and SQLite contracts cover this protocol in
+`crates/zeroship-workflow-manager/tests/integration/closing.rs`,
+`recovery.rs` and `retirement.rs`: a still-valid lease fenced after Close,
+retirement refused in both orders of a racing acceptance and Close, a scope kept
+open when a job is claimed or published above the watermark, reopening exactly
+once across retries and racing replicas, lost acknowledgements and redelivery
+converging on one retirement, archived apps drained, duties that fall due during
+closing held, the idle and archive triggers, expiry, the doubling backoff and its
+reset, deferral by live work, abandonment that nothing reopens, and a driver pass
+that closes an idle scope while abandoning a deleted one. The service's
+`an_established_epoch_survives_the_next_requests_policy_reinstall` and
+`closing_the_journals_epoch_retires_the_carried_forward_one`
+(`crates/zeroship-workflow-server/tests/integration/http_runs.rs`) cover its
+establishment. The local host retires an idle app through a delivered Close, and
+its next start is fenced, establishes a newer epoch and completes.
 
-**Remaining before production:** the production worker executable must compose
-`AssignmentBindings` and the creator factory, which carry this establishment,
-and publish the request isolates' backend from them (slice four). Control does
-not yet publish deletion as a lifecycle intent, so the lane learns of a deletion
-only for the candidates it visits: a deleted app whose scope had already retired
-is abandoned only after a re-arm reopens it and the next pass visits it. Snapshot
-restore still needs its reopening contract.
-
-The capacity provider takes a zone's declarative target and returns progress or
-a durable, retryable refusal, as
-[placement eligibility and capacity](#placement-eligibility-and-capacity-provider)
-describes. Repeated requests from manager replicas converge on the same target;
-provider failure keeps jobs, demand and the target pending. A provider that
-starts processes starts the ordinary worker and supplies authorized creator
-connectivity through the normal deployment host, not through a queue message.
-No new workflow infrastructure service is assumed.
+**Remaining before production:** Control does not publish deletion as a
+lifecycle intent, so the lane learns of a deletion only for the candidates it
+visits: a deleted app whose scope had already retired is abandoned only after a
+re-arm reopens it and the next pass visits it. Snapshot restore still needs its
+reopening contract.
 
 Manager maintenance schedules journal reconciliation, payload collection and
-customer retention checks as explicit jobs. Such a job examines customer records
-only inside the worker. Its failure retains responsibility and references; it
-does not permit platform SQL to inspect the journal or declare the app drained.
+customer retention checks as explicit jobs, and the service's maintenance lane
+runs them beside the journal. Their failure retains responsibility and
+references; it does not permit a creator process to read the journal or declare
+the app drained.
 
 ### Delivered payload collection
 
-The manager duties, creator handler and server driver implement this contract,
-and the local CLI host consumes the delivered jobs. The production worker still
-requires consumer composition.
+The manager duties, the journal handler and the service's maintenance lane
+implement this contract, and the local host's maintenance lane runs the same
+delivered jobs.
 
 Collection starts with abandoned payload preparations and deletion tombstones.
 The manager retains a periodic Collect duty independently of reconciliation.
@@ -2400,7 +2436,7 @@ admission disabled permits cleanup. Missing, replaced or expired authority
 cannot authorize fresh deletion; an exact committed receipt remains readable
 without fresh authority or a configured object store.
 
-The creator journal owns the `collection_*` columns of `app_state` and immutable
+The journal owns the `collection_*` columns of `app_state` and immutable
 `collection_pages`, both under its `__zeroship_workflow_` table prefix. Each page has a scoped foreign
 key to its job receipt and no run reference. The manager's `recovery_scopes`
 retains activation provenance; `recovery_duties` owns independent per-app/kind
@@ -2412,7 +2448,7 @@ indefinitely. A page stores its exact job linkage, immutable plan and reserved
 item offset. Collection does not reuse reconciliation's fields or expose object
 identities and cursors to the manager.
 
-Before attempting an item, the worker advances the durable offset under the app
+Before attempting an item, the handler advances the durable offset under the app
 lock. It then rereads that payload's current state, expiry and reference absence.
 Only eligible unreferenced objects may enter `deleting`; this state commits
 before external deletion and fences uploads and reference promotion. Object
@@ -2439,7 +2475,7 @@ outcome proves every object was deleted or the app drained.
 This cleanup does not retire terminal history, creator request receipts,
 management history, job receipts or deployment holds. Those require their own
 retention and drain contracts. The local host has no collector of its own; the
-manager's Collect duty delivers collection to its consumer.
+manager's Collect duty delivers collection to its maintenance lane.
 
 ## Deployment pins, upgrades and retention
 
@@ -2483,13 +2519,14 @@ history still needs the deployment. These holders use distinct authenticated
 classes and generation sequences.
 
 Control derives holder identity from the authenticated service role and scoped
-app. A body cannot choose another holder. Replacement workers preserve the stable
-journal holder; manager replicas share their stable logical queue holder. Releasing
-a queue dependency cannot release a journal dependency, or vice versa. The queue
-hold endpoints accept the workflow service role and derive `HoldScope::for_queue`;
-the worker endpoints retain their enrolled-worker checks and derive
-`HoldScope::for_app`. Queue requests carry the app, deployment and generation,
-without choosing a holder or claiming worker placement.
+app. A body cannot choose another holder. The workflow service holds each app's
+stable journal holder, and its replicas share the stable logical queue holder.
+Releasing a queue dependency cannot release a journal dependency, or vice versa.
+Both hold pairs accept the workflow service role alone (`asserted_caller` in
+`crates/zeroship-control/src/deployment_hold_api.rs` for the journal pair):
+the queue pair derives `HoldScope::for_queue` and the journal pair
+`HoldScope::for_app`. Requests carry the app, deployment and generation, without
+choosing a holder; a worker holds neither pair.
 
 The manager records acquiring, held, releasing and released intents in its own
 database. A fresh publication confirms the hold before committing an executable
@@ -2527,7 +2564,7 @@ with no dependency on the platform ledger implementation.
 
 Acquisition and reclamation serialize on the deployment record. Confirm retention
 before admitting a new dependency. Before releasing a journal hold, a bounded
-worker job closes admission for that deployment, checks all customer dependencies
+maintenance job closes admission for that deployment, checks all customer dependencies
 under its app lock, and commits release intent; the
 [journal hold release policy](#journal-hold-release-policy) is how that job is
 asked for and answered. Generation tombstones reject stale release/reacquire
@@ -2536,8 +2573,8 @@ under manager serialization.
 
 A lost acquire reply causes an idempotent retry before admission. A lost release
 reply retains intent until reconciliation; it must not turn into a new release
-generation. Reclamation never reads customer journals, and placement expiry or
-worker death never proves that code is unreferenced.
+generation. Reclamation never reads the journal, and worker loss or an empty
+queue never proves that code is unreferenced.
 
 #### Queue hold release policy
 
@@ -2599,8 +2636,8 @@ projects it, and it is older than `hold_grace`. `Queue::maintain_deployment`
 then publishes one `JobOperation::ReleaseHold` for it through the ordinary
 durable job path. That operation names a deployment but reports no
 `JobSpec::deployment_id`, because a release is exactly the case where no hold
-remains to confirm; `worker_operation` and the client's `worker_publication`
-refuse it from a worker, so only a manager publishes one.
+remains to confirm; no worker publishes any job, so only the manager publishes
+one.
 
 The creator engine answers it in `AppWorkflows::release_hold_job`, which runs
 `WorkflowService::release_deployment_hold` under the app state lock: close
@@ -2625,7 +2662,7 @@ its deployment's journal hold, because a partial restart replays against it.
 Reclaiming that deployment needs journal history retention, which is a separate
 contract, not a release decision.
 
-The manager's `tests/hold_release.rs` contracts run on PostgreSQL and SQLite:
+The manager's `tests/integration/hold_release.rs` contracts run on PostgreSQL and SQLite:
 replacement, archive and restore through holder-aware reclamation, an activation
 reacquiring its hold while another replica's lane passes, stale candidate pages,
 a hold without a recorded time, one release publication per grace with its
@@ -2701,24 +2738,25 @@ metadata and authentication, not either side's persistence.
 
 | Crate | Responsibility and native surface |
 | --- | --- |
-| `zeroship-core` | Closed workflow metadata and transport-independent capability contracts; canonical entity identities are supplied by `zeroship-id`. No ORM, HTTP implementation or customer replay envelopes. |
+| `zeroship-core` | Closed workflow metadata and transport-independent capability contracts; canonical entity identities, `ZoneId` among them, are supplied by `zeroship-id`. No ORM, HTTP implementation or customer replay envelopes. |
 | `zeroship-workflow-calendar` | Shared schedule definitions and pure cron/interval calculations with an explicit interpretation identity. No clock owner, ORM, runtime or scheduling loop. |
-| `zeroship-workflow` | `WorkflowService`, bound `AppWorkflows`, creator journal transitions, replay, payloads, bounded job acceptance/execution and publication intents. `management_job` applies delivered lifecycle commands in the creator journal. |
-| `zeroship-workflow-manager` | `Queue`, native `coordinator::Coordinator`, scheduling/recovery modules and platform `deployments` ledger. No creator engine, V8 or listener. |
-| `zeroship-workflow-client` | `WorkerCoordinator`, `ControlCoordinator` and bounded authenticated transport, extended with the job/hold protocol as callers cut over. No ORM or scheduler. |
+| `zeroship-workflow` | `WorkflowService`, bound `AppWorkflows`, journal transitions, replay, payloads, bounded job acceptance and the maintenance operations, and publication intents. |
+| `zeroship-workflow-manager` | `Queue`, `coordinator::Coordinator` and its zone claim, scheduling, recovery, capacity, the policy source and the platform `deployments` ledger. No creator engine, V8 or listener. |
+| `zeroship-workflow-client` | `WorkerCoordinator`, `ControlCoordinator` and the bounded authenticated transport. No ORM or scheduler. |
+| `zeroship-workflow-runner` | The worker's half: `JobConsumer` and `DeliverySlot` over `JobTransport`, `PreparedApps`, `WorkerHost`, `RemoteWorkflows` and `RemoteBackend`. |
 | `zeroship-workflow-v8` | `WorkflowBinding`, V8 argument conversion, trusted app binding and executor shutdown barrier over the customer engine. |
-| `zeroship-workflow-server` | HTTP routes, enrollment/service authentication, configuration, readiness and manager lifecycle composition. |
-| `zeroship-worker` | Existing executable hosting normal requests and the bounded workflow consumer with trusted creator context. |
+| `zeroship-workflow-server` | HTTP routes, enrollment and zone authentication, configuration, readiness, the journal it serves, its maintenance lane and manager lifecycle composition. |
+| `zeroship-worker` | The executable hosting normal requests and the workflow host, its creator-resource provider and `AppResidency`. |
 
 ```text
 Normal Cargo dependencies; arrows are not network calls
 
 workflow-server --> workflow-manager --> data-orm [platform binding]
-       |
+       +----------> workflow         --> data-orm [platform binding, journal]
        +----------> workflow-client  --> authenticated metadata transport
 
-worker ----------> workflow --------> data-orm [creator binding]
-   |                   +-----------> storage / bundle
+worker ----------> workflow-runner --> workflow-client
+   |                      +---------> workflow [no store opened]
    +-------------> workflow-v8 -----> workflow + runtime
    +-------------> workflow-client
 
@@ -2726,7 +2764,8 @@ Control ---------> workflow-client
    +-------------> workflow-manager::deployments [authorized platform binding]
 
 CLI -------------> workflow-manager [local platform metadata]
-   +-------------> workflow         [normal app database]
+   +-------------> workflow         [local journal]
+   +-------------> workflow-runner
    +-------------> workflow-v8
 
 All workflow contracts use core / canonical typed identities
@@ -2735,37 +2774,41 @@ Schedule calculation uses workflow-calendar without either persistence owner
 
 Manager and customer engine do not depend on each other. The client depends on
 neither persistence implementation. Hosts inject metadata capabilities; local
-composition can invoke native manager operations with a trusted local caller,
-while production uses the client. Customer replay envelopes, inputs, payload types
-and detailed execution errors remain in the customer library and V8 adapter.
+composition invokes native manager operations with a trusted local caller, while
+a worker uses the client. Customer replay envelopes, inputs, payload types and
+detailed execution errors remain in the customer library and V8 adapter.
 Owner-specific errors are mapped to closed boundary failures rather than making
-the manager depend on `WorkflowServiceError`.
+the manager depend on `WorkflowServiceError`. The manager links neither the
+runner nor payload storage; the server holds the payload store its sweeps write
+and delete through, and never the runner; the engine, the runner and the worker
+never reach the manager or the server.
+`workflow_process_dependencies_follow_crate_ownership`
+(`xtask/tests/workflow/mod.rs`) holds those boundaries.
 
-The target keeps queue, scheduling, management and recovery as modules of the
-manager. `zeroship-workflow-scheduler` is replaced, including its old binary and
-configuration surface. The bundle crate continues to own artifact formats and
+The target keeps queue, scheduling, management, recovery and capacity as modules
+of the manager. The bundle crate continues to own artifact formats and
 verification, not ORM deployment persistence. A generic deployment service or
 additional ledger crate is outside this restructuring.
 
-`WorkflowService` is a library handle, not a new deployable service. Its existing
-scheduler methods do not justify retaining discovery in workers. Keep customer
-transitions and bounded runner mechanics while replacing `WorkerTasks` local
-polling and maintenance sweeps with delivered-job acceptance. Runtime-loader
+`WorkflowService` is a library handle, not a new deployable service. Runtime-loader
 interfaces should match actual I/O; constructing an already loaded runtime can
 remain synchronous. `async-trait` is not an architectural requirement. Shipped
 I/O stays on compio; no additional async runtime is introduced.
 
-The delivered-job slot retains the current manager grant, creator `DeliveredTask`
-and executor handle together. It renews the manager grant first, then the creator
-claim, and updates the execution guard only when both succeed. The original hard
-execution deadline remains fixed through code loading, input reads, execution
-and the executor's payload preparation. Joined shutdown and final journal writes
-have a bounded finalization budget with live lease checks. Cancellation drains native
-operations before creator release or slot reuse. After a durable creator outcome,
-the slot retries immutable settlement metadata without running app code again.
-`WorkerCoordinator::release` releases an app assignment; it is not a job NACK.
-A deferred or abandoned job stops renewal and remains eligible for redelivery
-after its manager lease expires.
+The delivered-job slot (`DeliverySlot` in
+`crates/zeroship-workflow-runner/src/delivery.rs`) retains the current manager
+grant, journal `DeliveredTask` and executor handle together. One heartbeat
+renews the queue lease and the journal task in one exchange, and the slot updates
+the execution guard only when both succeed. The hard execution bound - the
+smaller of the local ceiling and the delivered attempt remainder - stays fixed
+through code loading, input reads, execution and the executor's payload
+preparation. Joined shutdown and final journal writes have a bounded finalization
+budget with live lease checks. Cancellation drains native operations before the
+task is released or the slot reused. After a durable journal outcome, the slot
+retries immutable settlement metadata without running app code again. A release
+gives the delivery back: the journal releases its task and the queue returns the
+row to `ready` with a back-off, so an interrupted execution is redelivered
+without waiting out its lease.
 
 Update Cargo declarations, configuration registration, schema generation,
 container build inputs, xtask selection and dependency gates with each move.
@@ -2775,137 +2818,144 @@ Use main's shared ORM API and coordinate its changes with the ORM owner.
 
 ### Executable host composition
 
-`WorkerHost`, `AssignmentBindings`, `JobConsumer` and `WorkflowCreatorFactory`
-are the native composition seams, and `zeroship-worker`'s `workflow_host` module
-constructs them. The production host owns its enrolled identity, configured
-capacity and assignment registry on a dedicated compio thread. HTTP runtime
-threads call fixed `AppBackend` senders published by that owner, resolved
-through the process-wide `ReadyApps` registry the worker's isolate kernel
-carries. Starting independent hosts under the same enrolled identity in every
-HTTP thread would duplicate capacity and let their policy generations retire
-each other, so a worker starts exactly one. Its manager origin and capacity
-arrive through the configuration contract, as the enrollment settings do; with
-no manager origin no host runs and the registry stays empty.
+`WorkerHost` (`crates/zeroship-workflow-runner/src/host.rs`) composes one
+`JobConsumer`, its execution slots and a `PreparedApps` cache, and
+`zeroship-worker`'s `workflow_host` module constructs it on a dedicated compio
+thread with the enrolled instance signer, a creator-resource provider and the
+version feed. A worker starts exactly one host: the slot count is the process's,
+and independent hosts would each claim a full batch for it. Its manager origin,
+slots and prepared-app bound arrive through the configuration contract
+(`worker.workflow_manager_url`, `worker.workflow_slots`,
+`worker.workflow_prepared_apps`, which must be at least the slots); with no
+manager origin no host runs and `env.workflows` refuses retryably.
 
-`AssignmentBindings` publishes a ready backend only after assignment
-preparation's final current-entry and original-authority checks. Successful
-resource construction alone is not readiness: its association may retire before
-installation. Installation and removal carry the immutable app and binding
-identity, and `ReadyApps::retire` withdraws a generation only while it is still
-the published one, so a retired generation cannot withdraw its replacement.
-Removal closes admission synchronously; previously cloned handles retain their
-retired generation. An unknown or unready app receives a retryable refusal. It
-cannot acquire an ambient policy binding, and there is no Control workflow
-backend left to fall back to: slice 6 deleted the replay path, its plugin set
-and the shared control key it ran under, so the worker builds ONE plugin set
-and every isolate resolves the ready registry. Preparation takes the
-placement's policy lease at a single point ahead of that publication, and that
-point is the one place
-[ingress epoch](#ingress-epochs-and-scope-retirement) establishment attaches
-to.
+**Apps are prepared when a job arrives.** For each claimed delivery the slot
+calls `PreparedApps::get_or_prepare`
+(`crates/zeroship-workflow-runner/src/prepared.rs`) for the delivery's app. A
+miss runs under the delivery's own remaining lease, never longer than the host's
+operation bound, and calls `CreatorFactory::open` for the app:
+`WorkflowCreatorFactory` (`crates/zeroship-worker/src/workflow_creator.rs`)
+resolves the app's metadata and environment from Control, which answers only
+for apps in this instance's zone, and builds the payload store, the loader and
+the V8 executor around a `RemoteBackend` for that app. The entry keeps the app's
+journal type (`()` on a worker, because the journal is the service's), its
+executor and a residency guard as one object. The cache is a bounded LRU that
+evicts only idle entries: an entry an execution holds is shared with it, so
+evicting it would free nothing. An app the version feed stops listing leaves the
+cache on the next claim cycle, while an execution holding it keeps it alive until
+it finishes. Nothing is designed around warmth; the cache keeps reusable objects,
+and one fresh isolate per execution is built either way.
 
-The creator-resource provider supplies the exact `ConnectionFactory`,
-`ProjectKeySource`, `DbBinding`, object store, deployment capability and signal
-authority independently of manager metadata. In the worker these are the
-process's own: the `env.db` service's connection and project keys, the `env.storage`
-object store, and the app metadata Control serves this enrolled instance.
-Assignment scope cannot select credentials or a schema. Context refresh may
-supply environment and runtime limits under explicit freshness, while the
-workflow backend remains fixed. Production journal provisioning belongs to the
-migration path; the worker does not run local schema initialization. Signal
-authority is optional to the resources, and an app without one refuses
-capability issuance and ingestion rather than running unsigned; its provisioning
-and rotation, and resource eligibility, remain explicit host contracts.
+**A preparation failure is a failure of that attempt, not of the app.** The slot
+gives the claim back - journal task included, with `GiveBackReason::PreparationFailed`
+- and the queue returns the row with a back-off that grows with each consecutive
+back-off. The claimer adds the app to a local skip list whose expiry doubles per
+consecutive failure up to a ceiling, and sends the live entries as
+`ClaimJobs.exclude`, bounded by `ClaimJobs::MAX_EXCLUDE`. Nothing is written
+server-side; the list only narrows this worker's offers and dies with the
+process, and the given-back row is excluded from capacity demand while its
+back-off runs.
 
-The authenticated manager client is built from the enrolled instance signer, the
-validated manager origin and bounded transport options. A scope-only retention
-adapter accepts an `AssignedScope` and its fixed signer; `RemoteDeploymentHolds`
-takes exactly that and checks the signer is an enrolled instance, rather than
-fabricating a complete `Assignment` or expiry to satisfy a constructor. Control
-revalidates the actual assignment when authorizing each hold operation.
+**Credentials are resident only while something holds the app.** `AppResidency`
+(`crates/zeroship-worker/src/residency.rs`) counts the holders of each app on
+the worker: every prepared app and every execution running from it, every HTTP
+isolate and the requests in flight on it, and a reconcile swap. A holder takes
+its `Residency` before checking whether the app's material is supplied, and a
+refresh that holds nothing asks `reside_held`, so a refresh racing the last drop
+cannot resurrect what that drop withdrew. Dropping the last holder withdraws the
+app's project key, database bindings and `SharedEnvs` entry under the registry's
+lock. A worker therefore holds decrypted environment and data keys only for the
+apps it currently holds, not for every app of its zone it ever served.
 
-Shutdown is joined and ordered. SIGTERM drains HTTP first, so no request can
-resolve a published backend; then the host closes its bindings, which withdraws
-every backend and revokes its policy generation, reports draining to the manager
-while delivered executions join, and its thread is joined; only then does the
-instance retire, because the host's final manager exchange is signed with the
-instance key. A host that stops on its own stops the request server with it and
-exits non-zero, so the orchestrator replaces a process that can no longer serve
-the durable work it accepted.
+**The request path needs no preparation.** `RemoteWorkflows`
+(`crates/zeroship-workflow-runner/src/remote.rs`) holds the enrolled
+`WorkerCoordinator`, the payload object store and the read limit, and answers
+`backend(app)` for any app. The host builds it before it claims anything and
+hands it to every HTTP thread, whose isolates bind through
+`WorkflowBinding::remote_workflows`, selecting the backend by the runtime's own
+trusted app identity. The first `env.workflows.start` on a worker that never
+claimed a job of the app is one authenticated call admitted by the zone rule.
+Workflow-execution isolates bind through `WorkflowBinding::remote`, fixed to the
+one app being executed.
 
-A consequence to close with placement: a deployed app reaches `env.workflows`
-only once a manager has placed it on the worker serving the request, and nothing
-places an app on its own yet. The manager's assign route is a Control-authorized
-peer call, so today a placement exists only where something acts as Control and
-makes it - which the fleet process contract does and the example fleets, which
-run no manager at all, do not. Both workflow examples therefore serve
-`workflow_unavailable` on their deployed tier while their local tier, whose CLI
-host places its own app, is unaffected. The fix belongs to
-[placement](#placement-eligibility-and-capacity-provider): a driver that places
-an app with workflows enabled on a ready worker gives the examples their deployed
-tier back without a second placement path. Assigning from the fixtures would mean
-minting platform service assertions outside the one implementation that mints
-them, which is the property `service_peers` exists to hold.
+The creator-resource provider (`ProductionResources` in
+`crates/zeroship-worker/src/workflow_host.rs`) supplies the process's own
+capabilities: the `env.db` service's connection and project keys, the
+`env.storage` object store, the artifact store and the app metadata Control
+serves this enrolled instance. A claimed app's id selects them; it cannot select
+credentials or a schema. Context refresh may supply environment and runtime
+limits under explicit freshness, while the workflow backend remains fixed. The
+retention hold on a pinned artifact is the service's: `resolve_task_executable`
+takes it where the pin is resolved.
+
+Shutdown is joined and ordered (`drain` in
+`crates/zeroship-worker/src/workflow_host.rs`). On SIGTERM HTTP and the workflow
+host drain side by side, both within `worker.shutdown_timeout`. The host stops
+claiming at the signal; a claim already pending runs to its reply and gives back
+unstarted what it brings, beside the executions already running, which are
+driven throughout and finish and settle until one deadline:
+`worker.shutdown_timeout` less one operation bound after the signal. Whatever is
+still running then is cancelled, its native work joined and its delivery released
+within that last bound, and the host drops its prepared apps and their
+residency. Only then does the instance retire, because the host's last exchanges
+are signed with the instance key. A host that stops on its own stops the request
+server with it and exits non-zero, so the orchestrator replaces a process whose
+workflow host has stopped serving the durable work it accepted.
 
 The local host uses the same `JobConsumer` with a CLI-owned native `JobTransport`
-over the manager coordinator's real delivery grants. The manager, its Driver and
-the platform metadata file live on a dedicated manager thread; the consumer,
-creator engine and V8 executor live on the workflow host thread and reach the
-manager through a `Send` client. This mirrors the production zone split and keeps
-thread-local state of app isolates, such as the ORM usage meter an `env.db`
-isolate stamps on its thread, away from platform metadata. There is no journal
-polling or maintenance loop. The normal creator storage and retained app archive
-remain unchanged. `zeroship_workflow_manager::local::LocalPlatform` is the one
-explicit combined bootstrap for the local platform file: it installs the
-deployment catalog and manager schemas together and refuses any other stored DDL,
-including a deployment-only catalog. This adds no deployable service or
-workflow-only database or bundle switch.
+(`LocalTransport` in `crates/zeroship-cli/src/workflow/manager.rs`) over the
+manager coordinator's real delivery grants and its zone claim, with
+`ConfiguredPolicies` as its policy source and `LocalCapacity` as its provider.
+Its `PreparedApps` serves exactly its one configured app, whose journal is the
+local `AppWorkflows`. The manager, its driver and the platform metadata file live
+on a dedicated manager thread; the consumer, journal and V8 executor live on the
+workflow host thread and reach the manager through a `Send` client, and the host
+runs its own maintenance lane for the sweeps. This keeps thread-local state of
+app isolates, such as the ORM usage meter an `env.db` isolate stamps on its
+thread, away from platform metadata. `zeroship_workflow_manager::local::LocalPlatform`
+is the one explicit combined bootstrap for the local platform file: it installs
+the deployment catalog and manager schemas together and refuses any other stored
+DDL, including a deployment-only catalog.
 
-The production cutover landed. Worker database posture no longer asks for
-Control catalog reads or workflow-owner membership: it refuses a login that can
-reach the platform schema at all, and the grants those checks stood on are
-gone with their callers. Control holds no creator-journal access and the
-Control/Gateway advance transport is deleted. The decisive process contract
-uses isolated creator and Control databases, ordinary app ingress, manager
-delivery, revocation of retained request handles and joined shutdown. Native
-library availability alone does not prove this boundary.
+Worker database posture refuses a login that can reach the platform schema at
+all. Control holds no journal access and there is no Control or gateway advance
+transport. The decisive process contracts use isolated creator and platform
+databases, ordinary app ingress, zone-pulled delivery and joined shutdown.
+Native library availability alone does not prove this boundary.
 
 ### Service operation inventory
 
-This inventory defines responsibility and success semantics. Existing coordinator
-routes are registered in
-[`workflow-server/src/api.rs`](../../crates/zeroship-workflow-server/src/api.rs).
-Authenticated job submission, claim, heartbeat and settlement routes are in
-[`workflow-server/src/api/jobs.rs`](../../crates/zeroship-workflow-server/src/api/jobs.rs).
-Control schedule preparation, activation and disable routes are in
+This inventory defines responsibility and success semantics. Coordinator routes
+are registered in
+[`workflow-server/src/api.rs`](../../crates/zeroship-workflow-server/src/api.rs);
+job, claim and task routes are in
+[`workflow-server/src/api/jobs.rs`](../../crates/zeroship-workflow-server/src/api/jobs.rs),
+run calls in
+[`workflow-server/src/api/runs.rs`](../../crates/zeroship-workflow-server/src/api/runs.rs),
+and Control schedule preparation, activation and disable in
 [`workflow-server/src/api/schedules.rs`](../../crates/zeroship-workflow-server/src/api/schedules.rs).
 Control's lifecycle publisher is the durable handoff for normal deployment
-publication. Ingress-scope host composition remains cutover work; endpoint
-availability alone does not provide its durable handoff.
-The inventory includes required semantics beyond the currently available routes.
+publication.
 
 | Operation | Authorized caller and receiving owner | Successful result |
 | --- | --- | --- |
-| Enroll/replace instance | Deployment host and worker bootstrap to Control. | An instance identity bound to its enrolled key and authorized deployment context. |
-| Register/drain instance | Enrolled worker to manager. | Recorded liveness/capacity; grants no app assignment by itself. |
-| Place app | Manager placement lane, reading Control's zone and enrollment rows. | Durable app/worker revision admitted under capacity and zone constraints. |
-| Apply capacity target | Manager to the injected zone capacity provider. | Progress or a durable, retryable refusal for that target revision. |
-| Poll/renew/release assignment | Enrolled worker to manager. | Only that worker's authorized scopes and current revision outcomes; release does not retire the app's recovery duty. |
-| Register/activate deployment | Control to manager. | Idempotent immutable schedule metadata and monotonic activation state; dispatch readiness remains distinct. |
-| Disable calendar | Control to manager. | Durable app revision fence and historical receipt; accepted jobs, recovery and creator policy remain independent. |
-| Obtain policy lease | Enrolled worker under its current assignment to manager. | Validated policy bound to the exact app, worker key and placement revision, capped by original source freshness and remaining authority. Native Control source, server route and client exist; production worker refresh integration remains open. |
-| Establish/close ingress scope | Trusted creator host through manager policy. | Durable recovery responsibility or an explicit fenced drain result. A worker cannot create authority for an arbitrary app. |
-| Submit job/intents | Assigned worker or native manager scheduling logic to manager queue. | Receipt for the stable immutable specification; changed content under the same job identity conflicts. |
-| Claim job | Enrolled worker with current assignment to manager queue. | A persisted delivery attempt and bounded authority, or no eligible work. |
-| Heartbeat delivery | Its worker to manager queue. | Current bounded lease authority after fresh identity/placement checks; cannot revive a replaced attempt, expired execution or elapsed execution budget. |
-| Settle delivery | Its worker to manager queue. | Atomic outcome and scheduling/barrier changes, or replay of the matching receipt. |
-| Submit/read management command | Creator-authorized Control to manager. | Durable command acceptance or closed delivery outcome; no customer history or result body. |
-| Acquire/release deployment hold | Authorized queue or journal holder to Control. | Generation-fenced retention result for that holder class and app. |
-| Start/signal/read run | App code or Rust caller through an authorized creator-bound handle. | Creator-side acceptance or detailed state. Customer bodies stay on this path. |
+| Join, renew and retire instance | Worker to Control. | An instance identity bound to its enrolled key and frozen execution zone, with a renewable lease. |
+| Register/activate/disable deployment schedules | Control to the workflow service. | Idempotent immutable schedule metadata and monotonic activation state for the app's scope in its zone; dispatch readiness remains distinct. |
+| Apply capacity target | Driver's capacity lane to the injected zone capacity provider. | `Accepted`, or a durable, retryable refusal for that target revision. |
+| Establish/close ingress scope | The workflow service's own run path, or the local host, through the manager's recovery ledger. | Durable recovery responsibility or an explicit fenced drain result. A worker cannot create authority for an app. |
+| Claim jobs | Enrolled worker to the workflow service's zone claim. | Up to its free slots of leased `advance` deliveries of its own zone with their journal acceptances, the next cursor and whether the zone was exhausted; unusable grants given back. |
+| Heartbeat delivery | Its worker. | Current bounded lease, never past the attempt cap, and the journal task renewed, or no extension when policy withholds dispatch; cannot revive a replaced attempt, expired execution or elapsed execution budget. |
+| Settle delivery | Its worker. | The journal commits the reported execution, or answers from its receipt, and the queue settles with that outcome atomically with its scheduling and barrier changes; or replay of the matching receipt. |
+| Release delivery | Its worker. | The journal task released and the row returned to `ready` with a growing back-off. |
+| Read job receipt | The worker the queue last delivered the job to. | The journal's committed outcome, or none yet. |
+| Submit/read management command | Creator-authorized Control to the workflow service. | Durable command acceptance or closed delivery outcome; no customer history or result body. |
+| Acquire/release deployment hold | The workflow service, as queue holder or journal holder, to Control. | Generation-fenced retention result for that holder class and app. |
+| Start/signal/transition/restart/read run | App code through the worker's `RemoteBackend`, admitted by the worker's zone. | Journal acceptance or detailed state. Customer bodies stay on this path. |
 
-The worker requests work through outbound authenticated calls. Polling is bounded
-and backs off when no eligible work exists; transport reconnection never changes
-a logical operation's identity. The manager does not reach into V8 through a
+The worker requests work through outbound authenticated calls. Claims are
+bounded by the caller's own wait and back off only when a claim reached the end
+of the zone without filling its slots; transport reconnection never changes a
+logical operation's identity. The manager does not reach into V8 through a
 private advance endpoint. Network loss changes delivery availability, not the
 ownership of customer data or the durability of already accepted work.
 
@@ -2925,20 +2975,20 @@ fallbacks.
 
 | Configuration owner | Relevant settings and boundary |
 | --- | --- |
-| Manager host | `WorkflowSettings` supplies listener, service peers, platform DB binding, body/page bounds and worker/assignment policy. `workflow.database_url` is a platform credential. |
-| Native coordinator | `coordinator::Options::{worker_ttl, assignment_ttl, batch_limit, max_pending_management}` bounds placement and command behavior. |
-| Native queue | `Options::{max_connections, lease, transaction_timeout, max_metadata_bytes}` bounds storage concurrency, delivery and metadata transactions. |
-| Native manager driver | `driver::Options::{page_limit, lane_timeout, hold_grace, scheduling, recovery}` bounds each calendar, recovery, retention and closing lane; `hold_grace` is the minimum age before the [queue hold release policy](#queue-hold-release-policy) may release a hold, and `recovery::Options::{idle_after, closing_timeout, closing_backoff, closing_backoff_max}` pace closing. The server maps `workflow.batch_limit` to the candidate page, owns cadence through `workflow.driver_interval_ms` and derives the grace from `workflow.database_command_timeout_ms` so that it exceeds that budget; `workflow.driver_lane_timeout_ms` bounds each lane's complete turn, and the `workflow.closing_*` settings map to the closing bounds. |
-| Metadata client | Client `Options::{timeout, max_request_bytes, max_response_bytes}` bounds the complete exchange. Each call uses the host signer. |
-| Customer host | Normal creator DB/storage, trusted app identity and policy snapshot. `ConsumerOptions` bounds slots, assigned scopes, claim polling and backoff; `DeliveryOptions` bounds execution and finalization. Worker maintenance scheduling settings disappear with their loops. |
-| Local CLI host | `--workflow-config` TOML: `[consumer]` maps to `ConsumerOptions` and `DeliveryOptions`; `[manager]` maps to the queue lease, the local worker's registration and placement lifetime, driver cadence and lane bound, the hold release grace (`hold_grace_ms`, which must exceed the queue transaction timeout), the recovery interval, and closing idleness, timeout and backoff; `[payloads]` maps to `TaskPayloadLimits`. Unknown keys, including database or bundle settings, are refused. |
-| Scheduling/recovery host policy | Explicit misfire, overlap, reconciliation and capacity/backpressure bounds. New setting names are finalized with those modules, not invented CLI switches. |
+| Workflow service host | `WorkflowSettings` (`crates/zeroship-workflow-server/src/config.rs`) supplies listener, service peers, platform DB binding, body/page bounds, the payload store and the queue, claim and capacity settings below. `workflow.database_url` is a platform credential. |
+| Native queue | `Options::{max_connections, lease, max_attempt, transaction_timeout, max_metadata_bytes, defer_backoff, defer_backoff_max}` bounds storage concurrency, delivery, one attempt across heartbeats, metadata transactions and the give-back back-off. `Options::validate` refuses an attempt cap shorter than the lease. The server maps `workflow.delivery_lease_ms` and `workflow.max_attempt_ms`. |
+| Native coordinator | `coordinator::Options::{batch_limit, max_pending_management, claim_budget}` bounds the claim's page and exclusion list, pending commands, and the work a claim may start inside the wait its request states. The server maps `workflow.batch_limit` and `workflow.claim_budget_ms`. |
+| Native manager driver | `driver::Options::{page_limit, lane_timeout, hold_grace, scheduling, recovery, capacity}` bounds each calendar, recovery, retention, closing and capacity lane; `hold_grace` is the minimum age before the [queue hold release policy](#queue-hold-release-policy) may release a hold, and `recovery::Options::{idle_after, closing_timeout, closing_backoff, closing_backoff_max}` pace closing. The server owns cadence through `workflow.driver_interval_ms`, derives the grace from `workflow.database_command_timeout_ms` so that it exceeds that budget, bounds each lane's complete turn by `workflow.driver_lane_timeout_ms`, and maps the `workflow.closing_*` settings to the closing bounds. |
+| Capacity | `capacity::Options::{min_slots, max_slots, idle_hold_down, request_timeout, retry_interval}` from `workflow.capacity_min_slots`, `workflow.capacity_max_slots`, `workflow.capacity_hold_down_ms`, `workflow.capacity_request_timeout_ms` and `workflow.capacity_retry_interval_ms`; `workflow.static_pool_slots` is the static pool's size. |
+| Metadata client | Client `Options::{timeout, max_request_bytes, max_journal_request_bytes, max_response_bytes}` bounds the complete exchange. Each call uses the host signer. |
+| Worker host | `worker.workflow_manager_url`, `worker.workflow_slots` (deliveries executing at once) and `worker.workflow_prepared_apps` (prepared apps kept, at least the slots). The host's execution ceiling, operation bound, idle poll and error back-off are constants of `crates/zeroship-worker/src/workflow_host.rs`; `worker.shutdown_timeout` is refused below `MIN_SHUTDOWN_TIMEOUT`. |
+| Local CLI host | `--workflow-config` TOML: `[consumer]` maps to `ConsumerOptions` and `DeliveryOptions`; `[manager]` maps to the queue lease, the claim budget, driver cadence and lane bound, the hold release grace (`hold_grace_ms`, which must exceed the queue transaction timeout), the recovery interval, and closing idleness, timeout and backoff; `[payloads]` maps to `TaskPayloadLimits`. Unknown keys, including database or bundle settings, are refused. |
 
-Policy snapshots are host-owned and revisioned. Expired remote metadata does not
-become self-renewing authority through a retry, a customer row or a mutable
-`APP_ID` environment value. Runtime identity comes from the immutable trusted app
-context. Enrollment, policy refresh, code availability and recovery eligibility
-are separate readiness concerns.
+Policy snapshots are host-owned and revisioned. Expired metadata does not become
+self-renewing authority through a retry, a customer row or a mutable `APP_ID`
+environment value. Runtime identity comes from the immutable trusted app
+context. Enrollment, policy observation, code availability and recovery
+responsibility are separate readiness concerns.
 
 ```text
 zeroship serve / Vite local host
@@ -2948,51 +2998,50 @@ zeroship serve / Vite local host
        |          +--> .zeroship/platform/metadata.sqlite
        |               (deployment catalog + manager metadata)
        |
-       +--> workflow host thread: native consumer + creator engine
-                  |
-                  +--> normal app database + app storage
+       +--> workflow host thread: zone claim consumer + maintenance lane
+                  |                 + journal + V8 executor
+                  +--> local journal + app storage
                   +--> same V8 executor and normal app bundle
 
                shared protocol, separate storage bindings
 ```
 
 The CLI composes these libraries in process with normal app configuration. Local
-calls omit network and enrollment ceremony while preserving scope checks, grants,
-receipts, fences and recovery. The CLI owns setup, startup and shutdown; it
-contains no bespoke cron evaluator, workflow bundle loader, deployment watcher or
-journal scheduler. Supporting multiple app deployments in the CLI is a separate
-concern.
+calls omit network and enrollment ceremony while preserving scope checks, zone
+claims, receipts, fences and recovery. The CLI owns setup, startup and
+shutdown; it contains no bespoke cron evaluator, workflow bundle loader,
+deployment watcher or journal scheduler. Supporting multiple app deployments in
+the CLI is a separate concern.
 
-Startup opens the creator journal, starts the manager thread and registers a
-freshly minted worker identity as ready. The trusted host places exactly the
-configured app on that worker, so local eligibility is that one app. Serving an
-archive ingests it into the retained store, records the normal deployment in the
-catalog, prepares its schedule descriptors, which carry no creator input, and
-activates it at the next revision unless it is already the enabled selection.
-The creator applies that Activation as a delivered job; the CLI establishes
-recovery responsibility for the selected activation, establishes and installs
-its ingress epoch, and accepts requests only after the creator has committed the
-activation receipt. A request the journal later fences establishes a newer
-epoch through the local manager and is retried once. Serving a plain script
-keeps the existing selection. Direct creator activation is not used.
+Startup opens the journal, starts the manager thread and mints a worker identity
+for the local consumer. The local host is its app's platform authority:
+`ConfiguredPolicies` (`crates/zeroship-workflow-manager/src/local.rs`) answers for
+exactly the configured app, in the default zone, never deleted, and its claims
+use the same `claim_in_zone` as a deployed worker's. Serving an archive ingests
+it into the retained store, records the normal deployment in the catalog,
+prepares its schedule descriptors, which carry no creator input and name the
+default zone, and activates it at the next revision unless it is already the
+enabled selection. The host's maintenance lane applies that Activation as a
+delivered job; the CLI establishes recovery responsibility for the selected
+activation, establishes and installs its ingress epoch, and accepts requests
+only after the journal has committed the activation receipt. A request the
+journal later fences establishes a newer epoch through the local manager and is
+retried once. Serving a plain script keeps the existing selection. Direct
+creator activation is not used.
 
-The host renews its registration and placement on an interval derived from the
-placement lifetime (`LocalConfig::renew_interval`), reports the ingress it
-accepted since the previous renewal, and places the app again under the next
-revision when the manager refuses the old one. The HTTP and
+The host reports the ingress it accepted on its driver cadence. The HTTP and
 workflow isolates share one app backend whose commit hint wakes a publication
 pass after every start, signal, transition or restart; the transport wakes it
 after every settled delivery, and startup wakes it once for intents a previous
 process left behind. A failed pass leaves intents pending for the manager's
-reconciliation job. Shutdown joins execution, reports draining and stops the
-manager thread after its in-flight operations and current pass.
+reconciliation job. Shutdown joins execution and stops the manager thread after
+its in-flight operations and current pass.
 
-Customer history stays in the normal app database. The manager uses the normal
-local platform metadata/catalog binding alongside deployment identities and
-holds, not the customer binding. There is no dedicated workflow SQLite file,
-workflow database environment variable or `--workflow-bundle`. Creators need not
-supply `APP_ID`. Local co-location does not change the production database
-boundary.
+The local journal is the dev-local file the CLI binds. The manager uses the
+normal local platform metadata/catalog binding alongside deployment identities
+and holds, not the customer binding. There is no workflow database environment
+variable or `--workflow-bundle`. Creators need not supply `APP_ID`. Local
+co-location does not change the production database boundary.
 
 Restart preserves queue metadata, journal receipts, pending intents and retained
 bundles. Vite's hot reload republishes the archive and restarts the CLI, which
@@ -3004,110 +3053,178 @@ queue with an in-memory shortcut would defeat that parity.
 
 ### Startup and readiness
 
-The manager validates configuration, schema fingerprints, least-privilege grants,
-authentication/replay storage and required host capabilities before admitting new
-work. It recovers durable jobs, scheduling cursors and responsibility state from
-its own DB. Startup does not scan customer databases or depend on a resident worker.
-A health endpoint reports process liveness; readiness reports whether the host can
-perform its required authenticated metadata operations.
+The workflow service validates configuration, schema fingerprints,
+least-privilege grants, authentication/replay storage and required host
+capabilities before admitting new work. It recovers durable jobs, scheduling
+cursors and responsibility state from its own schema. Startup does not scan
+creator databases or depend on a running worker. A health endpoint reports
+process liveness; readiness reports whether the host can perform its required
+authenticated metadata operations, including the worker-registry columns its
+authentication reads.
 
-The worker obtains its authorized runtime identity and creator context, enrolls,
-registers and receives eligible assignments. It validates creator schema, policy,
-bundle and payload capabilities before accepting ingress or execution. A workflow
-whose artifact is unavailable remains observable and durable; it does not silently
-run another deployment. Authentication or migration failure is a startup/readiness
-failure, not permission to fall back to elevated credentials.
+A worker obtains its trusted runtime identity, joins with its token, and starts
+its workflow host, which claims from the zone queue on its own; a claim against
+a service that is not yet reachable is retried rather than fatal. There is no
+registration and nothing to be assigned before the first claim. A workflow whose
+artifact is unavailable remains observable and durable; it does not silently
+run another deployment. Authentication or migration failure is a
+startup/readiness failure, not permission to fall back to elevated credentials.
 
 ### Shutdown and crash recovery
 
-Workers stop new claims and ingress, report draining, and finish bounded executions
-or cancel them through the executor shutdown barrier. Quarantine closes isolate
-admission; runtime shutdown must still join native operations before capacity is
-reused or completion is published. Committed outcomes and
-intents remain publishable even if shutdown cannot contact the manager. Unfinished
-jobs may expire for redelivery, while the app's durable recovery duty remains.
+On SIGTERM a worker drains HTTP and its workflow host side by side, both within
+`worker.shutdown_timeout`. The host stops claiming at once; a claim already
+pending runs to its reply, and every delivery it brings goes back unstarted, so
+its row is claimable at once. Beside that claim the executions already running
+are driven throughout, and finish and settle until one deadline counted from the
+signal: `worker.shutdown_timeout` less one operation bound. Whatever is still
+running then is cancelled, its native work joined through the executor shutdown
+barrier and its delivery released within that last bound, so its row returns to
+the queue at once rather than after its lease lapses; then the instance retires
+itself at Control. Quarantine closes isolate admission; runtime shutdown must
+still join native operations before capacity is reused or completion is
+published. Committed outcomes and intents remain publishable even if shutdown
+cannot reach the service.
 
-Managers stop new admission, stop initiating capacity work, and allow owned
-transactions to settle or become explicitly uncertain. Timers, job leases,
-submission receipts and obligations live in storage, so another replica can
-continue. Neither shutdown path deletes durable work merely to make a process
-exit cleanly.
+The orchestrator's termination grace is a deployment requirement: it must cover
+the drain and the retirement call. The worker refuses at boot a
+`worker.shutdown_timeout` shorter than `MIN_SHUTDOWN_TIMEOUT`: one delivery
+claimed just before the stop - its app's preparation, its execution at the
+host's ceiling and its settlement - or, if longer, a claim pending at the stop
+and the give-back of what it brings, plus the operation bound that releases
+what the grace could not finish (`validate_shutdown_timeout` in
+`crates/zeroship-worker/src/workflow_host.rs`). The worker states the grace it
+needs as `termination_grace_secs` in its `--check-config` report, and
+`deploy/compose/docker-compose.yml` sets the worker's `stop_grace_period` to
+cover it. Work cut off by a shorter grace re-runs on another worker of the zone
+once its lease lapses; that at-least-once delivery is the contract creator steps
+already carry through their step idempotency keys
+(`crates/zeroship-workflow/src/execution.rs`).
+
+A crash expires delivery authority while durable work and the app's recovery
+duty remain: unrenewed leases lapse and their rows are claimed again, and the
+instance's identity lease lapses on its own. Service replicas stop new
+admission, stop initiating capacity work, and allow owned transactions to settle
+or become explicitly uncertain. Timers, job leases, submission receipts and
+obligations live in storage, so another replica can continue. Neither shutdown
+path deletes durable work merely to make a process exit cleanly.
 
 ### Backup, restore and disaster recovery
 
-Each database owner backs up its own state. Creator recovery includes journal
-records and referenced payloads; platform recovery includes queue, schedules,
-scope responsibility, enrollment, deployment metadata and holds. Retained bundles
-must remain available for every recovered pin. Backup access does not give a
-platform workflow process permission to read a creator database.
+Each database owner backs up its own state. Platform recovery includes the
+queue, schedules, scope responsibility, the journal and its payload references,
+enrollment, deployment metadata and holds; creator recovery includes the
+creator's own data and objects. Retained bundles must remain available for every
+recovered pin. Backup access does not give a platform workflow process
+permission to read a creator database.
 
 A process restart is different from restoring an older database snapshot. An old
-snapshot can resurrect already settled jobs, lose receipts or reinstate old
-assignment authority. At-least-once delivery and ordinary lease expiry alone do
-not repair that loss. Independent database restores also cannot be treated as a
+snapshot can resurrect already settled jobs, lose receipts or reinstate
+withdrawn leases. At-least-once delivery and ordinary lease expiry alone do not
+repair that loss. Independent database restores also cannot be treated as a
 consistent snapshot of both zones.
 
-Restore therefore closes admission and fences prior process/placement authority
-before replay resumes. Operators must reconcile manager obligations and creator
-receipts through authenticated worker jobs, validate payload and code availability,
-and retain deployment holds while dependencies are uncertain. Never advance a
-manager cursor or mark an app drained merely because restored metadata is empty.
-If customer receipts were lost, external-effect duplication must be handled by
-the destination's durable idempotency contract or explicit operator remediation.
+Restore therefore closes admission and fences prior process and lease authority
+before replay resumes. Operators must reconcile manager obligations and journal
+receipts through delivered maintenance jobs, validate payload and code
+availability, and retain deployment holds while dependencies are uncertain.
+Never advance a manager cursor or mark an app drained merely because restored
+metadata is empty. If receipts were lost, external-effect duplication must be
+handled by the destination's durable idempotency contract or explicit operator
+remediation.
 
 The restore-epoch and reconciliation handshake is a required operational protocol
 still to be defined and tested with the storage owners. Routine crash-recovery
 tests are not evidence for snapshot-restore safety. No operator recovery path may
-replace the private-zone boundary with direct Control access to creator storage.
+replace the private-zone boundary with direct platform access to creator storage.
 
 ### Backpressure and fairness
 
-Bound request/response metadata, successor sets, claim batches, payload
-preparation, live runs, replay/frontier size and worker slots through their owning
-options. Placement capacity bounds assigned scopes; execution slots separately
-bound simultaneous jobs. A worker claims only what it can start within valid
-authority. Queue depth is not permission to overcommit the creator database.
+Bound request/response metadata, claim batches, payload preparation, live runs,
+replay/frontier size and worker slots through their owning options. A worker
+claims at most its free execution slots, and `worker.workflow_prepared_apps`
+bounds the apps it keeps prepared. Queue depth is not permission to overcommit
+a creator database.
 
-Reject new unaccepted work before its durable customer commit when local admission
+**Fairness across apps is a per-worker round robin.** Each worker visits its
+zone's apps with claimable work in app id order from its own cursor, one job per
+app per lap; within an app, the persistent dispatch ticket orders jobs FIFO.
+That is a task queue's fairness with the key fixed to the app, equal weights and
+one partition. A hot app alone may fill a whole batch; beside a quiet app it
+takes one job per lap like every other. The cursor gets liveness by
+construction, because it passes an app that was skipped, and it keeps policy
+checks off the database and adds no mutable state to `queue_scopes`; fairness is
+per worker rather than global, which still bounds every app's wait by one lap
+per worker. A stored global least-recently-served order was considered and
+rejected: a skipped app would never move in it and would pin the head of every
+page without a park state of its own, and every claim would write the scope row.
+
+**Per-app concurrency is `max_running` across the zone.** The claim counts an
+app's live `advance` leases before it locks the app and passes an app at its
+cap; the journal's `tasks::assign` remains the authoritative fence, and a claim
+that loses that race is deferred and given back with a short pause. A busy app's
+claims, heartbeats and settlements contend on its scope row: claims skip that
+contention, heartbeats and settlements wait as any lock does.
+
+**Work that cannot run now goes back instead of sitting leased.** A journal
+deferral, an exhausted grant and a preparation failure each give the row back
+in the same request, with `deferred_until` set: exactly the instant a run is due,
+the remaining validity of a policy observation that switched dispatch off, a
+short pause at the concurrency cap, or a back-off that doubles with each
+consecutive back-off up to a ceiling. Only a back-off counts toward the next
+one's length, and the count resets when an attempt is counted: on its first
+renewal or its interrupted release. A give-back never counts toward
+`max_delivery_attempts`, so pressure cannot exhaust a job's budget.
+
+**Work that will never deliver stays durable and is excluded, never deleted.**
+Rows exhausted by `max_delivery_attempts` stay unsettled and are never claimed
+again unless policy raises the budget; rows of a deployment the journal keeps
+reporting unavailable and of an app no worker can prepare keep backing off; and
+every row of an app whose policy withholds dispatch is passed. None of them
+counts toward capacity demand, and each zone's target row counts them as
+`exhausted_jobs`, `backed_off_jobs` and `withheld_jobs`. Live apps resolve them
+through management (cancel or restart), a redeploy or an environment fix; a
+deleted app's unsettled creator jobs are settled `Rejected` when the closing lane
+abandons it. Silent deletion on retry exhaustion is not acceptable.
+
+Reject new unaccepted work before its durable journal commit when local admission
 limits require it. After acceptance, queue or transport pressure leaves publication
 pending; it cannot erase the run. Manager rejection must distinguish invalid
-metadata, capacity pressure and temporary storage/authentication unavailability.
+metadata, capacity pressure, contention and temporary storage or authentication
+unavailability. Scheduling and recovery process bounded pages and yield between
+app scopes. Management and reconciliation run in the service's maintenance lane,
+so they progress while execution admission is paused or saturated.
 
-Scheduling and recovery process bounded pages and yield between app scopes.
-Management and reconciliation need progress even while execution admission is
-paused or saturated. Retry backoff and fair dispatch belong to manager/host policy;
-a hot app or repeated broken deployment must not starve other eligible work.
 Within an app, the queue issues a persistent dispatch ticket when publishing a
 new job and on each successful claim. Both use the app's `dispatch_cursor` under
 the app lock and in the transaction that inserts or leases the job. Candidate
-selection filters due times, live leases and calendar prerequisites before ordering
-by `dispatch_order` and storage identity. A delivered job whose lease expires
-therefore retries behind already waiting work, and later arrivals receive later
-tickets so they cannot continually displace that retry. `available_at` remains
-immutable eligibility metadata; it is not rewritten to rotate work.
-
-Exact submission replay, heartbeat and settled acknowledgement replay allocate
-no ticket. Failed or cancelled claim transactions roll back the cursor and job
-together; a lost response after commit preserves the rotation across host restart.
-Counter exhaustion refuses the operation rather than wrapping or reusing tickets.
-This provides progress among successfully claimed jobs that later fail or expire.
-Failures before a successful claim, including invalid stored metadata or a missing
-retention prerequisite, still need an observable retry or parking policy. Cross-app
-host fairness and management priority remain separate policies. Silent deletion
-on retry exhaustion is not acceptable.
+selection filters due times, live leases, give-back back-offs and calendar
+prerequisites before ordering by `dispatch_order` and storage identity. A
+delivered job whose lease expires therefore retries behind already waiting work,
+and later arrivals receive later tickets so they cannot continually displace that
+retry. `available_at` remains immutable eligibility metadata; it is not rewritten
+to rotate work. Exact submission replay, heartbeat and settled acknowledgement
+replay allocate no ticket. Failed or cancelled claim transactions roll back the
+cursor and job together; a lost response after commit preserves the rotation
+across host restart. Counter exhaustion refuses the operation rather than
+wrapping or reusing tickets.
 
 ### Observability and trust limits
 
-Correlate app, deployment, job, delivery attempt, assignment revision, run generation
-and command identity where relevant. Emit closed reason codes for authentication,
-capacity, stale fences, unavailable artifacts, publication backlog and recovery.
-Measure queue age, due-work lag, retries, publication progress, capacity demand,
-execution budget termination and hold/collection progress through native metrics.
-Identifiers belong in appropriately scoped traces; avoid unbounded metric labels.
+Correlate app, zone, deployment, job, delivery attempt, run generation and
+command identity where relevant. Emit closed reason codes for authentication,
+capacity, stale fences, contention, unavailable artifacts, publication backlog
+and recovery. Each claim names every app it skipped and why in its
+`ClaimReport`, which the service logs at debug level. Each zone's capacity target
+row records its backlog depth, the oldest claimable row's availability and the
+undeliverable counts. Measure queue age, retries, give-backs, publication
+progress, capacity demand, execution budget termination and hold/collection
+progress through native metrics. Identifiers belong in appropriately scoped
+traces; avoid unbounded metric labels.
 
 Platform logs and metrics contain no customer inputs, outputs, history, signals,
 raw database diagnostics, credentials, signed assertions or remote response bodies.
-Detailed workflow errors stay in creator storage and authorized worker views.
+Detailed workflow errors stay in the journal and authorized creator views.
 Metering remains trusted runtime infrastructure, never a customer-supplied result.
 
 Remote service transport uses authenticated TLS and validates the intended
@@ -3118,42 +3235,69 @@ Internal TLS is the end state that allowlist defers rather than replaces. Body
 closure and response identity checks apply to nested metadata as well as
 top-level envelopes.
 
-Crate boundaries make authority reviewable; database grants, network isolation,
-trusted runtime bindings and transaction predicates enforce it. The protocol
-defends against stale/foreign requests and malicious app selectors. It cannot
-protect creator databases that a compromised native worker process is already
-authorized to access. Untrusted app code must stay behind its app-bound V8/native
-handles; the native host is trusted to select bindings and enforce those handles.
-If deployment policy requires isolation from another app's compromised host,
-place those apps in separate worker processes with disjoint credentials. A
-registration or job must never expand a process's authorized app set or give it
-Control database credentials or another holder's platform authority.
+**The execution zone is the isolation unit.** Crate boundaries make authority
+reviewable; database grants, network isolation, trusted runtime bindings and
+transaction predicates enforce it. A compromised worker in zone Z can read the
+environment (decrypted secrets), project data key, bindings and metadata of every
+Z app, because Control answers those reads for any live instance of the zone,
+though it holds them in memory only for the apps it currently holds. It can reach
+the creator databases and payload store the process is configured with; claim
+`advance` jobs of any Z app and report forged executions, which the journal
+validates before committing (fences, frontier, sizes, payload references), so a
+forged report can make a run appear to have done anything its creator code could
+have done and no more; start, signal, transition and restart any Z app's runs and
+read their outputs; and hold Z leases up to the attempt cap to delay runs.
+
+It cannot reach another zone: the claim pages only the zone frozen on its
+instance row, the run path refuses an app of another zone, and Control refuses
+it another zone's app reads. It holds no Control or journal credential. It
+cannot claim a maintenance kind, because `Claimant::Worker` refuses them in the
+query; publish anything, because no worker path publishes and a settlement
+carries no outcome or successors; settle, renew or release another worker's
+delivery; read a receipt of a job it does not hold; or outlive revocation,
+because every call re-reads the instance row and `PURGE` retires a signer's
+fleet. Its journal reach therefore equals the credential reach the zone already
+grants. If deployment policy requires isolation from another app's compromised
+host, place those apps in separate execution zones. A job or a body must never
+expand a process's authorized app set or give it platform database credentials
+or another holder's platform authority.
 
 ## Failure behavior and verification
 
 | Failure or race | Required behavior |
 | --- | --- |
-| Input upload or acceptance transaction fails | Return failure without an accepted run; retain collectible preparation state where needed. |
-| Acceptance commits but enqueue or response is lost | Request receipt preserves the run; its intent and pre-existing scope duty recover publication. |
-| Worker remains healthy while publication repeatedly fails | Manager reconciliation deadline still produces recovery work. |
-| Last worker disappears before publication | Durable scope duty requests authorized capacity and dispatches reconciliation. |
+| Input staging or acceptance transaction fails | Return failure without an accepted run; retain collectible preparation state where needed. |
+| Acceptance commits but publication or response is lost | Request receipt preserves the run; its intent and pre-existing scope duty recover publication. |
+| Publication wake keeps failing | The manager's reconciliation deadline still produces recovery work in the service's maintenance lane. |
+| No worker of the zone is free | Accepted jobs wait in the queue; the zone's capacity target counts them as demand and asks the provider for slots. |
+| A worker of another zone claims or calls for an app | The claim never pages that app and the run path refuses it `PermissionDenied`; Control refuses that worker the app's environment. |
+| A deleted app's handle is still held | Run calls are refused to every worker within one policy observation's validity; claims pass the app; the closing lane settles its unsettled creator jobs `Rejected`. |
 | Manager crashes after submitting a job but before replying | Same job identity returns the stored submission result. |
-| Worker crashes before customer commit | Redelivery reclaims the frontier without assuming a result exists. |
-| Customer COMMIT is uncertain | Read the creator receipt after settlement; never infer rollback from timeout. |
-| Worker commits then loses ACK | Redelivery reads its customer outcome without executing the committed turn again. |
-| Outbox publishes successors | Shared immutable IDs deduplicate; changed successor content conflicts atomically. |
+| Worker crashes before the journal commits | The lease lapses and any worker of the zone claims the job again, reclaiming the frontier without assuming a result exists. |
+| Worker gives up on a claim before its reply arrives | The deliveries the service committed stay leased and lapse after one lease window, uncounted because they never renewed. |
+| The journal defers a claimed job | The claim gives the row back in the same request with a `deferred_until` matching the reason; the attempt counts nothing. |
+| The worker cannot prepare a claimed app | The delivery is given back with a back-off that grows per consecutive back-off, and the worker excludes the app from its own claims until a local expiry; the row counts toward no attempt and no capacity demand while it backs off. |
+| Another session holds an app's scope locked during a claim | On PostgreSQL the claim skips the app as contended and serves the next one inside the same batch; on SQLite the database-wide write lock serializes the claim. |
+| A claim's grant is exhausted by the journal work before the reply | The grant is given back, not returned. |
+| An execution runs toward its attempt cap | Heartbeats never extend the lease past `leased_at` plus the cap, and the worker's hard bound is the smaller of its local ceiling and the delivered attempt remainder. |
+| Dispatch is switched off while an execution runs | Its next heartbeat extends nothing and the execution is interrupted at that renewal; its delivery is released back to the queue. An attempt that renewed before the interruption was counted at that renewal. |
+| The last holder of an app on a worker drops | The app's project key, bindings and environment are withdrawn from the worker under the residency lock; a holder still executing keeps them. |
+| Journal COMMIT is uncertain | Read the journal receipt after settlement; never infer rollback from timeout. |
+| Worker's execution commits then loses its acknowledgement | Redelivery settles from the journal's receipt without executing the committed turn again. |
+| Publication races reconciliation | Shared immutable IDs deduplicate; changed successor content conflicts atomically. |
 | Manager COMMIT is uncertain | Retry exact settlement; the stored receipt determines whether it committed. |
-| Placement changes or enrollment is revoked during a lock wait | Fresh authorization rejects new mutation; database clock and original budget remain binding. |
-| An old app handle or delayed policy reply survives binding replacement | The retained binding/ticket fails; neither captures the replacement's authority. |
-| A manager's cached policy source expires | Further leases fail closed; worker polling cannot refresh stale source validity. |
+| Enrollment is revoked during a lock wait | Fresh authorization rejects new mutation; database clock and original budget remain binding. |
+| An old app handle or delayed install survives binding replacement | The retained binding/ticket fails; neither captures the replacement's authority. |
+| The service's cached policy source expires | Further admissions fail closed until a new observation; a worker's requests cannot refresh stale source validity. |
 | Old heartbeat reply is lost | Retry can observe/renew a still-live stored lease; it cannot revive locally expired execution or restore elapsed budget. |
-| Old delivery tries to settle a replacement | Attempt and assignment fences reject it; settled-receipt replay admits no new writes. |
+| Old delivery tries to settle or give back a replacement | The `(job, worker, attempt)` fence rejects it; settled-receipt replay admits no new writes. |
 | Concurrent cron replicas or delayed activation | Occurrence/cursor transaction and activation revision prevent duplicate or retargeted work. |
-| Signal races timer, restart or child completion | Creator wait/generation predicates select the valid transition and preserve durable events. |
-| Pause is rejected or an old command ACK arrives | Only the matching provisional barrier changes; newer lifecycle authority survives. |
-| Payload promotion races collection | Serialized eligibility prevents deletion of committed references. |
+| Signal races timer, restart or child completion | Journal wait/generation predicates select the valid transition and preserve durable events. |
+| Pause is rejected or an old command acknowledgement arrives | Only the matching provisional barrier changes; newer lifecycle authority survives. |
+| Payload promotion races collection | Serialized collection state prevents deletion of committed references. |
 | Artifact reclamation races hold acquisition | Deployment fence decides admission; pending jobs/history retain their distinct holds. |
-| Capacity adapter or creator DB is unavailable | Demand and accepted jobs remain durable; no cross-zone database fallback occurs. |
+| Capacity provider or creator database is unavailable | Demand and accepted jobs remain durable; no cross-zone database fallback occurs. |
+| A worker is stopped mid-execution | It cancels, joins and gives back the execution within its drain; one cut off by a shorter termination grace re-runs after its lease lapses. |
 | A database is restored to an older snapshot | Fence prior authority and reconcile both owners' durable state before reopening admission; missing receipts require explicit duplicate-effect handling. |
 
 Native Rust tests exercise behavior through the owning crate, with PostgreSQL and
@@ -3165,607 +3309,168 @@ selection rather than adding bash orchestration or source-text gates.
 
 | Test owner | Required evidence |
 | --- | --- |
-| Core/identity | Closed nested variants, malformed IDs/revisions, stable wire identity and no customer fields. |
-| Manager | Concurrent capacity/claims, sparse recovery pages, atomic command/queue changes, stable receipts and storage IDs, authority after lock waits, shortened budgets and uncertain-commit retry. |
-| Scheduling | Calendar/DST parity, catch-up and overlap semantics, activation without a resident worker, schedule replacement/disable, stable occurrences and due-work recovery. |
-| Customer engine | Acceptance/outbox atomicity, duplicate delivered jobs, stale frontiers, receipt retention, policy expiry, signal/child races and generation-safe restart. |
-| Worker/V8 | Pinned complete module graph, immutable app context, bounded synchronous and async execution, stopped-native-work barrier and a consumer with local scheduling removed. |
-| Client/server | Real authenticated HTTP, instance-versus-role keys, replay protection, enrollment changes during waits, scope/order validation, TLS, streamed bounds and reuse after cancellation. |
+| Core/identity | Closed nested variants, malformed IDs/revisions, stable wire identity and no customer fields, including `ClaimJobs`/`ClaimedJobs`. |
+| Manager | The zone claim on PostgreSQL and SQLite: only the caller's zone, one job per app per lap from a cursor, a null cursor starting at an existing app, exclusions, skips for disabled, capped, deleted, exhausted and barrier-blocked apps, a cap counted again under the app's lock, contention reported as `Contended` on PostgreSQL and never on SQLite while a maintenance claim waits for the lock, the delivery and exclusion bounds, an enrollment check that cannot be answered skipping only its app, and the batch deadline with give-backs bound by it and never waiting for a lock. Give-back back-off counted only by back-offs and reset, an elapsed deferral claimable at once, the attempt cap, capacity census over the apps with creator work and its cycle across passes, target rules, sparse recovery pages, atomic command/queue changes, stable receipts and storage IDs, authority after lock waits, shortened budgets and uncertain-commit retry. |
+| Scheduling | Calendar/DST parity, catch-up and overlap semantics, activation without a running worker, schedule replacement/disable, stable occurrences and due-work recovery. |
+| Customer engine | Acceptance/outbox atomicity, duplicate delivered jobs, stale frontiers, deferral reasons, a run no clock will wake settled rather than deferred, receipt retention, policy expiry, signal/child races and generation-safe restart. |
+| Worker/runner/V8 | Batch claims for the free slots, up to the delivery bound, continuing from the cursor, a stop that lets a pending claim reach its reply and gives back what it brings, prepare on first delivery and reuse, idle-only eviction, preparation bounded by the lease, give-back and exclusion on preparation failure, residency withdrawal, pinned complete module graph, bounded execution at the delivered attempt bound with its settlement reserved inside it, a namespace that refuses every call without a manager, and a stopped-native-work barrier. |
+| Client/server | Real authenticated HTTP, instance-versus-role keys and zones, replay protection, enrollment changes during waits, zone refusals on run calls with an unknown app refused like a foreign one before any observation, give-backs in the claim request, a claim exchange bounded by its stated wait, a reply at the protocol bound received, TLS, streamed bounds and reuse after cancellation. |
 | Retention/payloads | Upload failure, corrupt reads, uncertain reference promotion, concurrent collection, queue-versus-journal holders and delayed generation messages. |
-| Host integration | Private disjoint DB access, no forbidden grants, zero-worker capacity recovery, ongoing-heartbeat publication failure and restart across both commit boundaries. |
-| Local/examples | Same protocol and durability with local native composition; each example's creator-facing behavior through its own tests. |
+| Host integration | Private disjoint database access, no forbidden grants, a worker that never ran an app serving and executing it, and restart across both commit boundaries. |
+| Local/examples | Same protocol and durability with local native composition; each example's creator-facing behavior through its own tests, on both tiers. |
 
 Lock/cancellation tests observe the actual blocked operation and its storage
 result rather than sleep and assume progress. Preserve the distinction between
 rollback before COMMIT and uncertainty after terminal dispatch. Dependency gates
-inspect normal Cargo edges so production workers cannot import manager/server
-persistence, platform services cannot reach the customer engine/V8, and clients
-cannot reach either ORM store. Test fixtures may compose both zones.
+inspect normal Cargo edges so workers cannot import manager/server persistence,
+platform services cannot reach the runner or V8, and clients cannot reach either
+ORM store. Test fixtures may compose both zones.
 
 ## Implementation progress and remaining decisions
 
 ### Implemented foundations and current gaps
 
-The branch contains the customer-bound ORM journal, replay/lifecycle operations,
-durable creator management receipts, payload preparation, bounded runner, V8
-binding/executor, normal verified bundle loading and deployment-hold foundations.
-The local CLI host composes that journal with the native manager and the
-ordinary job consumer; see
-[configuration and local development](#configuration-and-local-development).
+**Zone-scoped pull, end to end.** A worker claims batches of its zone's
+claimable `advance` jobs, prepares each claimed app on demand and executes it;
+the service authorizes run calls by the worker's zone and runs every other job
+kind in its own maintenance lane. The decisive process contract is
+`a_worker_that_never_ran_the_app_serves_and_executes_it`
+(`crates/zeroship-control/tests/workflow_two_worker_e2e.rs`): with W1 stopped and
+no claimable `advance` row left for the app, a second worker that never held a
+job of the app reads the first worker's run and has a fresh start admitted and
+completed, which only the zone can authorize.
+`a_worker_host_runs_a_run_started_through_ordinary_app_ingress`
+(`crates/zeroship-control/tests/workflow_worker_host_e2e.rs`) completes a run
+started through ordinary app ingress, and
+`the_two_zones_run_a_workflow_without_reaching_each_other`
+(`crates/zeroship-control/tests/workflow_private_zones_e2e.rs`) holds the
+private-zone boundary with the journal in the platform zone.
 
-Local host contracts in `crates/zeroship-cli/src/workflow/tests.rs` start the
-host on a real compiled archive. The delivered Activation selects the archive at
-the first revision and settles as dispatch ready, and a run started through the
-host's ingress completes through manager delivery while the workflow thread runs
-metered `env.db` isolates. A sleeping run resumes after a host restart from queue
-metadata alone. A republished archive activates at the next revision while
-existing runs finish on their pinned code, including after a restart without an
-archive. Reconciliation publishes an intent committed outside the host, and an
-acknowledgement lost before the manager replays the committed turn without
-executing it again. An idle app retires through a delivered Close; its next
-start is fenced, establishes a newer epoch and completes, and a restarted host
-reopens the retired scope. `crates/zeroship-cli/tests/e2e/workflow_local.rs` repeats restart
-after process death through the real `zeroship serve` binary, and
-`zeroship-workflow-manager` tests the combined platform bootstrap and its
-refusal of partial or changed files.
+**The workflow service.** `crates/zeroship-workflow-server/tests/integration/http_claims.rs`
+drives batch claim, heartbeat and settle through real authentication
+(`a_batch_claim_heartbeat_and_settle_round_trip`), gives a deferred claim's row
+back in the same request, backs a preparation failure off further with each
+give-back, passes an app whose scope another session holds locked, passes a
+deleted app, keeps an exhausted grant out of the reply, and waits out the
+observation that switched dispatch off. `tests/integration/http_runs.rs` pins
+the zone rule (`a_worker_that_never_claimed_the_app_serves_its_zones_apps`,
+`a_run_call_from_another_zone_is_refused`,
+`a_deleted_app_is_refused_to_every_worker`, `a_retired_instance_is_unauthenticated`,
+`an_unknown_app_and_a_foreign_app_are_refused_alike_before_any_observation`) and
+the carried-forward ingress epoch. `tests/integration/worker_zone.rs`
+verifies two instances in two zones with their own zones and fails readiness when
+the zone column grant is revoked. `tests/integration/maintenance_lane.rs` covers
+the lane's claims, its staged objects, its bounded turns and the process cadence
+reaching it; `tests/integration/publication_wake.rs` publishes starts, signals,
+settlements and child completions before reconciliation. `apps_are_out_of_reach`
+and `deployment_catalog_is_out_of_reach`
+(`tests/integration/platform_schema.rs`) hold the role's reach into `zeroship`
+to the instance columns authentication reads, and `tests/e2e/config.rs` refuses
+an attempt cap shorter than the lease. All of these are in the
+`crates/zeroship-workflow-server` test target.
 
-Creator management now consumes ordered deliveries and commits lifecycle state,
-publication, applied order, command history and the job receipt atomically. The
-manager accepts the command and settles the reported outcome in its separate
-queue transaction. The creator native suite passes, including PostgreSQL and
-SQLite lifecycle, atomic receipt/order application, original-authority expiry,
-exact deployment retention and lost-acknowledgement coverage. Generated schemas
-match the migration DSL, and changed code has no Clippy diagnostics. The
-production host cutover remains separate from these native handlers.
+**The manager.** `crates/zeroship-workflow-manager/tests/integration/` holds the
+queue contracts on PostgreSQL and SQLite (`queue.rs`: competing claims,
+concurrent scope registration, redelivery, receipts, revocation rollback, a
+refused kind at the head not hiding the rows behind it, sweeps left to the
+claimant owning the journal, and the delivery budget), dispatch fairness within
+an app (`dispatch_fairness.rs`), the capacity rules (`capacity.rs`: demand up to
+`max_running`, undeliverable rows counted and never demanded, a disabled app
+without demand, a frozen target on an unavailable observation, a partial visit
+that raises and never lowers, a zone measured across visits whose completed
+cycle lets the target fall, an idle scope never observed, hold-down, the steady resynchronization and the
+static pool refusing exactly above its slots), closing, recovery and
+retirement, management, retention and scheduling. `storage_classification.rs`
+reports lock contention as `Contended`.
 
-Creator collection verification covers fixed-cutoff paging, original policy and
-delivery deadlines, failed or malformed items, concurrent deletion confirmation,
-receipt rollback and exact replay without live storage. Native PostgreSQL and
-SQLite cases verify recovery when deletion succeeds but its reply or database
-confirmation fails. Referenced history stays intact, and a tombstone resweeps
-late uploads once and then becomes final. Delivery-slot and separate-database
-consumer tests verify collection without executable work; the shared payload
-regression suite also passes.
+**The runner and the worker.**
+`crates/zeroship-workflow-runner/src/delivery/tests/consumer.rs` asks for the
+free slots and continues from the cursor, gives back and excludes an app that
+failed to prepare until its expiry, and keeps an abandoned host's execution and
+app until the drain finishes; `src/prepared/tests.rs` prepares on first delivery
+and reuses the entry, evicts only idle entries, keeps a pruned entry resident
+while an execution holds it and bounds preparation by the delivery lease;
+`src/delivery/tests.rs` cuts an execution at the delivered attempt bound under a
+longer local bound and interrupts at a renewal that extends nothing;
+`src/host/tests.rs` claims the zone for every free slot.
+`crates/zeroship-worker/src/residency/tests.rs` withdraws the key, bindings and
+environment when the last holder drops, keeps a request reading encrypted data
+after the cache drops the app, and lets a refresh hold only an app something
+already holds; `src/workflow_host/tests.rs` refuses a shutdown timeout below one
+execution at the ceiling plus its settlement.
 
-Started restart validates the locked run against its current generation's
-deployment, then checks that deployment's registration and existing held journal
-retention. An inactive available deployment remains usable; source inconsistency
-is a retryable infrastructure failure. This path uses only the creator journal
-and requires no artifact client.
+**The customer engine** keeps its native PostgreSQL and SQLite contracts:
+ordered management with atomic receipt and order application, delivered
+collection with fixed cutoffs and a final resweep, topic fanout pages, dependency
+propagation pages, activation and cron acceptance against retained bundles,
+restart against the journal's own deployment holds, publication intents and
+their exact confirmation, and delivered advance acceptance with retained
+semantic replay. The service runs every one of those maintenance operations
+through `AppWorkflows::maintenance_job`; a worker runs only `advance`.
 
-Restart preparation now borrows the caller's app-locked transaction through its
-lifecycle draft and bound plan. The plan captures app, run and observation time;
-applying it cannot substitute another transaction or target. Ordinary latest
-restart uses the same exact-target binding needed by delivered commands. That
-binding validates the complete locally verified registration, availability and
-journal hold without reselecting the current deployment. Existing lifecycle
-refusal precedence remains before deployment binding and counter exhaustion.
-The delivered handler obtains and verifies its frozen target outside the journal
-transaction, then prepares again under the final creator app lock with the
-original captured authority. Started delivery remains code free.
+**Local host.** `crates/zeroship-cli/src/workflow/tests.rs` starts the host on a
+real compiled archive: the delivered Activation selects the archive, a run
+started through the host's ingress completes through the zone claim while the
+workflow thread runs metered `env.db` isolates, a sleeping run resumes after a
+restart from queue metadata alone, a republished archive activates at the next
+revision while existing runs finish on their pinned code, and an idle app retires
+through a delivered Close and reopens on its next start.
+`crates/zeroship-cli/tests/e2e/workflow_local.rs` repeats restart after process
+death through the real `zeroship serve` binary.
 
-The crate split includes the metadata client, closed job/delivery contracts,
-manager ORM queue and platform deployment ledger. Native coordinator placement
-and management now share the queue's ORM namespace and transaction handle.
-Deployment prerequisites belong to executable operations, with an optional native
-queue projection checked against the operation and immutable digest. Recovery
-keeps activation provenance without retaining its bundle; each pending duty job
-must decode as its recorded maintenance kind. Closed management commands carry
-the management revision and resolved restart policy. The deployment Control names
-on the wire, the queue hold that must already cover it and server readiness checks
-are composed into authoritative acceptance. Management request anchors, per-run
-ordering and provisional barriers share the queue transaction; barrier and
-command eligibility filters precede candidate limiting. Linked management
-settlement and creator
-management delivery and bounded payload collection are implemented.
+**Gaps, each a contract still to write or a decision still open:**
 
-Native management contracts exercise frozen selection, refused acceptance, a
-refused wire deployment, deployment presence under the deploy policy and
-competing acceptance in
-`crates/zeroship-workflow-manager/tests/integration/management/acceptance.rs`, and damaged
-request anchors, pending barriers and ordered settlement in its `barriers.rs`
-neighbour. Backlog cases cross native page boundaries under the normal queue
-transaction deadline. PostgreSQL lock observations verify that status waits
-behind acceptance before reading the linked command and job; SQLite exercises
-the same receipt and
-unknown-scope behavior. These tests live in
-`crates/zeroship-workflow-manager/tests/integration/management.rs` and its companion modules.
-
-Canonical parent primary keys eliminate the conflicting duplicate identities in
-concurrent first registration. Native PostgreSQL/SQLite coordinator and queue
-contracts, authenticated server processes, actual platform migration/grants and
-normal-dependency ownership checks have passed. Authenticated job submission,
-claim, renewal and settlement now have server routes and a typed client. Real
-HTTP tests cover scope denial, enrollment revocation and key replacement during
-lock waits, process restart and receipt replay after placement expiry. These
-checks do not establish a completed distributed workflow system.
-
-Native recovery contracts cover replica races, absence of workers, restart,
-activation changes, deadline persistence and atomic publication rollback for each
-maintenance kind. Independent-duty tests verify mixed due pages, exact settlement
-effects, damaged pending identities and refusal of missing responsibility. The
-server process tests prove failed reconciliation cannot suppress collection,
-including restart and signed receipt replay without executable holds. Canonical
-platform migration tests execute these duties and scheduling with the runtime
-role and check table ownership, scoped constraints and denial of worker, gateway
-and app access. Authenticated queue HTTP tests and the runtime's combined plugin and
-lazy-bundle import regressions pass after the native ORM and module ownership
-merge. These checks do not establish the final production host composition or
-ambient worker-login isolation.
-
-The ORM owner's cancellation fix passes the creator lifecycle and receipt tests
-with their database barriers still held. The shared ORM typed-read allocation
-fix also passes the complete workflow library test target on the normal test
-thread stack, including the creator journal, management, payload and runner
-contracts on PostgreSQL and SQLite. Request receipt tests cover aged records,
-reopen, later lifecycle changes and revoked signal capabilities. Host integration
-and distributed acceptance remain separate verification obligations.
-
-Ordinary creator ingress now captures its host policy before journal I/O and
-rechecks the captured authority after lock waits and before commit. Its original
-deadline bounds the entire attempt, including database cancellation; a concurrent
-host refresh cannot extend that attempt. Native tests force policy replacement
-after staged writes and expiry during a blocked write, and verify rollback and
-durable receipt replay. These local fences do not establish assignment-bound
-remote policy delivery or a distributed archive acknowledgement. The native
-binding and authenticated lease contract is specified in
-[policy bindings and leases](#policy-bindings-and-authenticated-leases); its
-native capabilities are implemented. Native tests exercise retired app/backend
-handles, delayed and consumed refresh tickets, shortening followed by extension,
-blocked database cancellation, queued calls retaining their original deadline,
-and returned payload streams stopping under revoked authority. Delivery tests
-revoke policy while retaining the same consumer scope and keep occupied capacity
-until native shutdown joins. Exact semantic receipts and status remain readable
-through the retained app scope after execution authority is gone. Authenticated
-transport accepts an injected finite source and retains original deadlines across
-manager transactions and HTTP. The server now uses the native Control policy
-ledger and finite cache. Production worker refresh composition remains required.
-
-Workflow provisioning preserves an existing creator schema's migrator ownership.
-Native PostgreSQL container tests exercise both provisioning orders, repeated
-runtime provisioning and actual table creation through a confined migrator login.
-They also check the scoped app runtime role's data access and DDL/sibling denials.
-These scoped-role checks do not prove ambient worker-login isolation: existing
-platform migrations still grant the workflow owner role to worker and Control,
-and workflow provisioning still grants that role schema creation authority.
-Remove those obsolete edges with the legacy journal provisioning paths.
-
-Creator publication contracts cover acceptance and checkpoint rollback, changed
-acknowledgements, lost replies, confirmation failure, concurrent publication,
-reopen, scope isolation and generation/frontier changes. Queue submission in
-these tests uses a separate native manager database. Creator advance delivery
-now has exact-run acceptance, task renewal/release, atomic checkpoint/outcome
-receipts and retained semantic replay. The old poller excludes manager-owned
-runs both during candidate selection and again under the app lock; old task APIs
-refuse job-bound claims. This exclusion is temporary cutover protection, not a
-production execution mode to preserve.
-
-Native creator delivery tests use PostgreSQL containers and SQLite journals
-with a separate manager database. They cover competing frontiers, duplicate
-live acceptance, receipt-write rollback, shorter creator leases, expiry and
-policy changes during lock waits, stale completion/release after reclaim, and
-lost-ACK redelivery without another execution. Retained outcomes survive creator
-history removal and reopening. These contracts do not prove the production
-scope-duty admission handshake or the executor/queue consumer integration.
-
-`runner::delivery::DeliverySlot` now drives an already authorized advance job
-through the existing executor and payload pipeline. SQLite journal tests with
-deterministic metadata/executor fixtures cover paired renewal, retained ACK
-content, redelivery without execution, changed lease identity, hard execution
-limits and a blocked shutdown that stops renewing without freeing its slot.
-The remote metadata adapter uses `WorkerCoordinator`; authenticated executor
-integration remains a separate verification obligation.
-
-`runner::consumer::JobConsumer` now drives manager claims through that slot.
-Its trusted host supplies a bounded snapshot of `ConsumerScope` values, each
-pairing an app-bound creator handle with its own executor and task payload store.
-Cloning a binding preserves its local identity. Replacing or removing it cancels
-its in-flight claim and execution; the occupied slot stays unavailable until
-native shutdown joins. A caller that abandons the consumer future must drain it
-before discarding it; restarting consumption also drains first. Other free slots
-may serve current bindings. Manager and creator fences remain authoritative when
-an old and replacement attempt overlap across different slots or workers.
-Retirement is retained by the `ConsumerScope` identity, including external clones.
-Reapplying a cached snapshot cannot restore a scope rejected by manager authority
-or removed by the host. Fresh host authorization creates a new binding; ordinary
-refreshes preserve live bindings and do not interrupt their execution.
-
-Claim selection rotates between eligible apps with per-app idle and failure
-delays. Concurrent claim I/O for the same app is serialized locally; execution
-capacity is shared across all bindings. The consumer validates returned app,
-worker and assignment identities before creator acceptance. It does not derive
-policy leases from wall-clock placement timestamps, register its own app scope,
-scan the creator journal or retire durable recovery responsibility on shutdown.
-The placement/runtime host must authenticate and refresh binding snapshots;
-manager claim and heartbeat operations verify current placement and enrollment.
-
-Consumer tests cover separate creator databases, foreign delivery rejection,
-capacity and scope rotation, atomic binding replacement, claim cancellation,
-and execution retained through a blocked drain. A native coordinator/queue test
-drives publication, creator execution, checkpointing and exact ACK retry through
-separate ORM databases. These tests use a deterministic executor; they do not
-establish V8, authenticated network or production host composition.
-
-`runner::assignments::AssignmentBindings` now composes the authenticated worker
-client, remote policy bindings and consumer snapshots. It reads assignment pages
-until an empty page, with a cumulative scope bound and a deadline for the complete
-scan. Failed, oversized or superseded scans preserve installed bindings. Pages
-are not a transactional snapshot: fresh scoped policy and job exchanges remain
-the authority, and a later scan discovers concurrent placement changes.
-
-Unchanged assignments retain their policy generation and live consumer identity.
-Complete scans retire removed or replaced generations before preparation I/O.
-An injected `CreatorFactory` resolves independently authorized creator resources;
-the reconciler verifies its returned app and exact policy binding. Each app's
-renewal, policy refresh and setup progress independently, with setup bounded by
-its captured original policy deadline. Cancelled setup is retryable, and a late
-completion cannot reinstall a retired association. Closure cancels preparation
-and revokes local admission; it does not release placement or discharge durable
-recovery responsibility, and the host must still join consumer execution.
-
-`runner::host::WorkerHost` composes the runtime-local registration and refresh
-lifecycle with this reconciler and the authenticated job consumer. Initial
-registration succeeds before discovering placements. Registration, placement
-scans, policy renewal and job consumption then progress independently. Each loop
-waits after its operation instead of replaying missed ticks. Advertised capacity
-counts app placements, with execution slots bounded separately. Transient
-transport and service outages retry; identity refusal and invalid registration
-responses stop the host. No registration receipt creates local creator authority
-or a readiness promise for an app whose resources have not been prepared.
-
-Shutdown drops pending ready-registration and refresh futures before publishing
-draining. Local bindings close synchronously, and bounded draining publication
-runs alongside joined consumer shutdown. A failed manager exchange cannot skip
-joining execution or turn the same host ready again. Cancelling the lifecycle
-future also retires local authority; the owner must call `drain` to join retained
-slots before discarding their capacity. The manager's terminal worker tombstone
-fences a delayed ready registration whose outcome was unknown to the host.
-Shutdown does not fabricate assignment-release or recovery-completion evidence.
-
-This native composition leaves the production creator resource provider with the
-host. It does not replace enrollment bootstrap, zone eligibility, normal
-deployment recovery handoff or the private-zone cutover.
-The worker's `WorkflowCreatorFactory` implements creator assembly over an injected
-`WorkflowResourceProvider`. The provider receives an `AssignedScope` so it can
-bind artifact retention to the current assignment revision, but database and
-storage capabilities must come from independent deployment-host authorization.
-Before journal I/O, the factory checks the resolved storage app, runtime app and
-physical schema and validates native peers and network policy. It opens and
-verifies the already provisioned ORM journal; it never applies creator DDL.
-
-`HostPolicies::run_bound` captures the factory registry's original policy authority
-before polling resource preparation. Foreign-registry bindings cannot start I/O;
-refreshes do not extend an existing preparation deadline. The registered
-`AppWorkflows` produces both its app-scoped `WorkerTasks` payload/artifact handle
-and its V8 backend. The runtime loader retains that backend instead of accepting
-one from refreshable metadata. Runtime contexts may update env, limits, network
-rules and ordinary peers, but must retain the original app and creator schema.
-Replacing a policy generation therefore cannot route an old executor through a
-newly authorized workflow backend. The injected provider and startup installation
-remain production integration work; this adapter creates no enrollment, placement
-eligibility or platform database capability.
-
-Native factory tests reject wrong app, registry and physical schema before
-creator I/O, verify missing journals remain unprovisioned, and cancel pending
-resource resolution when its policy generation retires. Delivered activation
-and bounded Advance tests execute a retained bundle in V8 and stage/read blob
-step output through the supplied creator object store. Loader tests rotate env
-metadata across policy replacement and verify retained workflow authority stays
-retired until the host explicitly constructs a replacement loader.
-
-Native HTTP tests verify signed endpoint assertions and replay rejection while
-creator fixtures open isolated SQLite journals. They cover failed and superseded
-scans, exact factory authority, replacement, cancellation, closure and independent
-policy refresh while another app's setup is stalled. Runner tests separately
-retain execution capacity until native shutdown joins.
-Host lifecycle tests cover startup ordering, registration retry, malformed and
-refused receipts, independent registration during a stalled scan, cancellation
-before startup and terminal draining. Creator fixtures verify that cancellation
-retires in-progress setup and that registration refusal revokes retained app
-authority before draining waits on the network.
-
-Native manager scheduling now prepares immutable deployment descriptors, records
-monotonic activation and publishes due cron/interval occurrences through the ORM.
-Activation and recovery responsibility commit together. Occurrence publication
-commits stable jobs and the catch-up cursor together, and readiness depends on
-each occurrence's own completed activation. Stored descriptor and job linkage
-checks reject inconsistent records before publication, replay or delivery.
-Pure calendar calculations live in `zeroship-workflow-calendar`; the worker and
-manager share their interpretation without sharing persistence.
-PostgreSQL and SQLite scheduling contracts cover immutable preparation,
-activation replay, blocked delivery, replacement and removal with pending work,
-replica races, restart, persisted catch-up limits, due pagination and transaction
-rollback. Corruption regressions reject changed descriptors, substituted jobs
-and missing occurrence linkage. Native schema declarations also pass parity
-checks against the migration artifacts.
-
-Native schedule disable/restore shares the activation revision order. Disabling
-an app preserves its calendar cursor, frozen catch-up allowance and accepted
-jobs. Restoring the same deployment creates a fresh readiness activation while
-preserving calendar progress; replacing it selects the replacement's calendar.
-Historical command replay cannot undo a newer selection. Disabled scopes are
-excluded before due-page limits. Exact-Control authenticated register, activate
-and disable routes expose these native operations independently of workers.
-Control's deploy, archive and restore commands reach them through committed
-lifecycle intents that its publisher delivers in revision order.
-
-Creator activation now resolves the immutable deployment hash through the
-authenticated journal hold receipt and verifies the normal app artifact. Its
-readiness history, current selection and completed job receipt share a creator
-transaction. Late older activations remain ready for their queued jobs without
-replacing newer selection. Exact retries validate the stored readiness and
-replay without loading or reacquiring the artifact. The bounded delivery slot
-acknowledges activation without starting an executor. Captured delivery and
-policy authority fence lock waits, external I/O and journal commits. Once manager
-activation selects code, direct local activation cannot replace it.
-PostgreSQL and SQLite activation contracts cover delayed delivery, lost replies,
-expired authority, policy replacement, missing artifacts, readiness corruption
-and transaction rollback. Retention tests cover unresolved hash recovery,
-concurrent replies and stale generations. The full creator library passes,
-including schema parity, object storage and executor-free activation delivery.
-
-Creator cron acceptance now consumes manager-delivered occurrences. It verifies
-the selected activation and ordinary retained bundle, resolves static input from
-that deployment, and binds the manager's schedule identity to its logical name.
-The app transaction checks overlap and admission, creates the exact run and
-Advance publication intent, and retains the occurrence and completed receipt.
-An overlap skip is durable; capacity, policy and unavailable prerequisites remain
-retryable. Journal hold reacquisition and the final generation check preserve
-retention across delayed delivery. Exact retries validate receipt linkage before
-performing artifact I/O.
-
-The creator's calendar loop and its reconciliation metadata have been removed.
-Creator schedule rows hold acceptance identity; occurrence rows require the
-manager revision and receipt link. The delivery slot acknowledges cron acceptance
-without starting an executor, and a lost acknowledgement replays the retained
-result. Paired native contracts cover historical input, conflicting identities,
-overlap through continuation, admission changes, retained code, expired authority
-and rollback of the run, publication and occurrence together.
-
-Queue retention is required by executable queue and scheduler operations.
-Journal-only jobs and recovery responsibility need no deployment hold. Release
-validates unsettled job specifications through native ORM pages, so inconsistent
-deployment projections fail before any external release request.
-PostgreSQL and SQLite tests cover lost hold replies, stale generations,
-failed publication, schedule replacement, pending jobs after replacement and
-independent journal retention. They use a separate deployment catalog and ordinary
-app artifacts. Authorization tests preserve post-write revocation and cancellation
-rollback while also refusing unauthorized hold preparation. The Control collector
-now uses the same native retention ledger and protects the normal deployment
-pointer in its reclamation transaction. Its canonical platform grant, deletion
-recovery and activation-race regressions pass. The tests also verify independent
-queue and journal holders, app scope, archived current deployments and denial of
-creator-schema access. The collector is the production caller of manifest
-deletion; it no longer delegates deletion authority to creator journal scans.
-
-The native manager driver now runs in the workflow server independently of
-worker registration and placement. Its calendar, reconciliation, collection,
-retention and closing lanes each share an original deadline across their scans
-and candidate page.
-Each lane captures an upper storage identity and advances past an attempted
-candidate before external work, preserving progress through malformed metadata,
-timeouts and cancellation. Failed candidates retain their durable jobs or
-intents and retry after the finite sweep wraps. New rows and work becoming due
-behind the cursor join a subsequent sweep. The host delays between completed
-passes and joins its current bounded pass during shutdown.
-
-The retention lane resumes acquiring and releasing queue hold intents and runs
-the [queue hold release policy](#queue-hold-release-policy) in the workflow
-server and the local CLI host. It never takes an empty queue or an expired
-worker as permission to release held code or retire an ingress responsibility:
-every release checks all manager dependencies under the app lock, after the
-hold outlived its grace, and only a delivered Close with drained evidence
-retires a responsibility. Capacity activation and production worker consumer
-composition remain to integrate.
-The consumer accepts activation, cron, advance, reconciliation, management,
-collection, fanout, propagation and closure jobs. Collection uses the assigned
-creator journal and object store without loading an executable, creating a task
-or publishing unrelated intents.
-Fanout uses the assigned creator journal without an executable or object store;
-its bounded page commits recipient signals, affected frontiers and the successor
-intent together. The former creator broadcast scanner has been removed. The queue
-claim is not filtered by operation.
-The paired native fanout contracts cover reordered delivery, immutable page
-replay, signal ordering under timestamp regression, expired original authority,
-counter exhaustion, corrupt progress and atomic rollback. Delivery tests verify
-deferral and lost acknowledgements without an executor or storage access, and
-the consumer contract progresses a published broadcast through separate creator
-and manager databases. The full creator library and changed-code lint pass.
-
-Stable continuation heads replace the eager parent rewrites. Paired native
-contracts cover repeated continuation with paused and keyed joiners, current
-and historical restart, inherited cancellation and compensation, rollback,
-retired authority and scope refusal. Provenance contracts retain inline and
-referenced child results through a later child restart, a parent prefix copy
-and delivered collection of an abandoned preparation. Checkpoint references
-keep their members and generations until the checkpoint itself is removed.
-Terminal-history retirement remains open.
-
-Delivered dependency propagation replaces the inline cascade and parent wakeup.
-Settlement and terminal completion record only an obligation and its first
-Propagate intent; `AppWorkflows::propagation_job` commits each bounded page, and
-the delivery slot and consumer route it without an executor or object store.
-Paired PostgreSQL and SQLite contracts page cascades and notification past
-`MAX_ROW_LIMIT`, replay pages exactly after later pages and with exhausted
-authority, wake a parent with several waits once per page, and supersede a
-notify page after a head restart. They leave a restarted cascade source's new
-children untouched, cancel continuation and child creation mid-propagation
-through the fence, refuse restart until the obligation finishes, report the
-fence at delivered and legacy renewal, and fail closed on damaged projections,
-obligations and page records. Injected page failures roll back the cursor,
-effects and receipt together. Manager contracts accept worker-published
-Propagate pages and successors without holds or run projections, keep them
-deliverable behind blocking management commands, and leave maintenance duties
-unchanged; the consumer contract settles a page through separate manager and
-creator databases.
-The server injects an authenticated Control hold client into its native queue.
-Control's deployment transaction records a lifecycle intent at a stable app
-revision, and its publisher delivers registration, activation and disable
-afterwards, so no HTTP attempt after commit is the only handoff. The collector
-keeps a pending activation's code until the manager's exact receipt discharges
-the intent. The manager acquires its queue hold through Control outside
-Control's deployment transaction, so the callback never waits on the
-transaction that initiated it. Control contracts drive the signed manager routes
-over the canonical platform schema: revision order across deploy, archive,
-staged deploy, restore and rollback; empty schedule removal; a publisher killed
-after commit, a reply lost after remote activation and a failed confirmation;
-a manager conflict; a blocked app beside others; retention until the queue hold
-takes over; and rollback of every staged catalog write.
-Publication intents and advance-job receipts exist in the journal; their
-delivered reconciliation and queue settlement are integrated natively. Creator
-reconciliation tests exercise persisted progress, failed publication, lost hold
-replies, stale generations, malformed intents, policy replacement, concurrent
-scans, receipt rollback and expired-authority receipt replay on PostgreSQL and SQLite.
-Manager contracts cover continuation deadlines, periodic responsibility, old ACK
-replay and atomic rollback. Consumer tests connect manager-issued reconciliation
-to outbox publication and subsequent execution in separate ORM databases. The
-production dispatch/activation host and ingress responsibility handshake remain
-unwired. No host polls the creator journal or runs journal maintenance loops any
-longer. Direct task polling (`RunnerSlot`), direct activation (`activate_deploy`)
-and the synchronous payload collector remain in the creator library only for
-executor and journal tests.
-
-Legacy production paths still include Control journal access, worker platform
-queries, grants incompatible with private zones and Control/Gateway workflow
-advancement. Remove their producers, consumers, schema/grant dependencies and
-configuration together at cutover. Do not describe the production boundary as
-complete while those paths remain. There are no production users requiring
-compatibility aliases or parallel legacy modes.
-
-The V8 executor still calls `Runtime::call_workflow_dispatch`, and runtime startup
-still supplies its workflow replay entry. The bootstrap package has been removed;
-the live interpreter remains in the runtime's private workflow bridge. Coordinate
-changes to `crates/zeroship-runtime/src/core/init.rs` and
-`crates/zeroship-runtime/src/core/runtime.rs` with their startup owner. Verify
-outcome batches, task-bound payload reads, interruption and joined shutdown through
-the replacement before deleting that interpreter.
-
-Retained-entry workflow lookup now captures the constructor-to-export binding
-before invoking a workflow. Parent lookup and child frontiers use the same
-binding; neither minification nor mutation of `Function.name` changes a target.
-Named exports and explicit `default.workflows` entries must agree, and ambiguous
-aliases or unexported child constructors fail dispatch. The native module-graph
-contract verifies generic named-export forwarding without a Vite collector.
-Vite now forwards creator named exports through the ordinary app bundle and
-provides native development HTTP/RPC entry snapshots without a workflow lookup
-callback. Local workflow tasks use ordinary retained bundles independently of
-those replaceable snapshots. The development host continues publishing its app
-archive and retains the last valid deployment when current sources fail to build.
+- Providers that start processes wait for the production orchestrator, and the
+  gateway routes over one static worker list, so a deployment with more than one
+  execution zone needs zone-aware routing.
+- Control does not publish deletion as a lifecycle intent, and snapshot restore
+  still needs its reopening contract.
 
 ### Decisions still requiring an explicit contract
 
 | Decision | Fixed requirement and remaining choice |
 | --- | --- |
-| Placement eligibility and capacity provider | Decided: Control's frozen app and enroller zones, read under the placement locks, and a declarative per-zone target applied by an injected provider. Providers that start processes remain, pending the production orchestrator. |
+| Zone eligibility and capacity | Decided: an app's and an instance's frozen execution zone authorize claims and run calls through one rule, and each zone's declarative target follows its policy-filtered backlog through an injected provider. Providers that start processes remain, pending the production orchestrator. |
+| Dispatch fairness and persistent failure | Decided: a per-worker cursor visits a zone's apps in round robin, one job per app per lap, FIFO within an app. Work that cannot run now is given back with a back-off; work that will never deliver stays durable, is excluded from claims and demand, and is counted per zone on the target row; a deleted app's unsettled creator jobs are settled `Rejected`. Management is a maintenance kind the service claims, so it never competes with worker claims. |
+| Scale-down and termination grace | Decided: scale-down is the orchestrator's, and the termination grace is a stated deployment requirement; work below it re-runs under the at-least-once contract creator steps carry. Deriving the grace from the attempt cap and validating it where deployment configuration is generated remains. |
 | Archive acknowledgement | Control's facts capability provides bounded convergence under original observation validity. Define any stronger execution-quiescence evidence separately from calendar acknowledgement or lease expiry. |
-| Complete job envelopes | Operation-specific deployment prerequisites, frozen manager restart targets and linked management outcomes are implemented. Collection, topic fanout and dependency propagation have durable pages, receipts and delivered consumers. |
+| Complete job envelopes | Operation-specific deployment prerequisites, frozen manager restart targets and linked management outcomes are implemented. Collection, topic fanout and dependency propagation have durable pages, receipts and the service's delivered handlers. |
 | Receipt retirement | Define admissibility fences and publication/settlement watermarks before deleting job deduplication state. Retain it until that proof exists. |
-| Dispatch fairness and persistent failure | Per-app dispatch tickets rotate successfully claimed jobs behind waiting work without changing due times. Define cross-app host fairness, management priority and observable parking/retry policy for failures before claim without deleting accepted work. |
 | Snapshot restore | Define restore epochs, fenced admission and cross-owner reconciliation with the storage owners; process-restart recovery alone cannot protect lost receipts or resurrected authority. |
 
 These are design decisions, not unspecified permission to improvise in separate
 implementations. They do not reopen the database boundary or require another
 broker/service. Mid-run upgrade has its own unresolved semantic contract and is
-outside the queue cutover.
+outside this design.
 
 ### End-to-end path
 
-The local CLI host composes the native libraries, as slice one below describes;
-the production executables do not yet. Remaining work proceeds as vertical
-slices. Each slice ends with an executable path that its owning native suites
-and the workflow examples exercise, instead of adding further library breadth
-first. Slices that touch disjoint crates may proceed in parallel; the numbering
-is the merge order.
+The production executables and the local host compose the same native
+libraries, and each path ends in a process contract rather than library breadth:
 
-1. **Local host on the native manager (implemented).** `zeroship serve` and
-   the Vite development host compose the manager `Coordinator`, queue,
-   scheduling, recovery and `Driver` over the local platform metadata file on a
-   manager thread, and the ordinary `JobConsumer` over the app's creator
-   storage on the workflow host thread. A CLI-owned `JobTransport` calls native
-   coordinator operations for a trusted local worker, with real delivery
-   grants and no enrollment ceremony. `LocalPlatform` is the one explicit
-   bootstrap holding the deployment catalog and manager metadata together.
-   Publishing a bundle registers and activates its schedules through the
-   native manager, so creator activation arrives as a delivered job. Startup
-   establishes the app's recovery responsibility before the host accepts
-   requests. `WorkflowWorker` polling, its maintenance loops and the host's
-   direct activation are gone. Proof: the CLI `workflow::` contracts and the
-   local tier of both example suites run through delivered jobs, including
-   restart with a sleeping run, a lost acknowledgement and a republished
-   bundle.
-2. **Bounded dependency delivery.** Cascading cancellation and failure, and
-   parent notification, become paged jobs with durable progress in the creator
-   journal, following the fanout and collection pattern. This touches only the
-   creator engine and manager job contracts, so it can proceed alongside the
-   next slice. The native contracts are implemented; see
-   [delivered dependency propagation](#delivered-dependency-propagation). The
-   local host delivers these pages once slice one's consumer runs there.
-3. **Normal deployment publication (implemented).** Control's deploy
-   transaction records an idempotent command receipt and a lifecycle intent
-   together. A Control publisher delivers register, activate and disable to the
-   manager and confirms only exact receipts. Pending activations keep their
-   bundle until confirmed. Archive and restore use the same intents, and the
-   CLI and `@zeroship/control` carry the command identity. The legacy schedule
-   reconciler is deleted. Proof: Control's deploy HTTP contracts for replay,
-   conflict, concurrent duplicates, rollback and refusal; its publication
-   contracts against the signed manager routes; and the CLI and SDK command
-   contracts.
-4. **Worker executable (implemented).** The production worker runs `WorkerHost`
-   on a dedicated compio thread with a trusted creator-resource provider, the
-   enrolled instance signer and joined shutdown. `WorkerHost` publishes an app's
-   backend to request isolates only after assignment preparation passes its
-   final authority checks, and retires it synchronously on removal; an unknown
-   or unready app receives a retryable refusal. `WorkflowBinding` uses that
-   ready registry instead of the old Control backend, which no request isolate
-   can reach any more; only the advance path's replay isolates still hold the
-   Control origin and the shared control key, until slice 6 removes them. The
-   worker enrolls and registers as
-   [enrollment](#enrollment-bootstrap-and-revocation) describes. Releasing an
-   app this worker cannot serve belongs to the next slice, with the placement
-   provider that would re-place it. Proof: the worker's host configuration and
-   ready-registry contracts, the assignment host's publication contracts, the
-   `env.workflows` binding contracts that refuse an unready or foreign app, and
-   the fleet process contract that starts a run through ordinary app ingress and
-   sees it complete through manager delivery. When this slice landed the example
-   fleets ran no manager, so their deployed tier refused `env.workflows` until
-   placement arrived; slice five gave them one, and the sentence is kept in that
-   tense rather than deleted because it is the reason slice five names both
-   example fleets as its proof. See
-   [executable host composition](#executable-host-composition).
-5. **Ingress responsibility and capacity.** The ingress epoch gates every
-   creator acceptance, hosts establish it at startup and after a fenced
-   refusal, and the closing lane retires idle or archived responsibility and
-   abandons deleted apps, as
-   [ingress epochs and scope retirement](#ingress-epochs-and-scope-retirement)
-   describes; the local host runs it end to end and the worker library carries
-   it for slice four. The capacity half ships: the manager owns placement, the
-   old Control-driven assign, worker-listing and recovery routes are deleted,
-   Control names an app's zone at creation and narrows its host app reads to
-   the calling instance's zone, each zone's declarative target is configured
-   and applied through an injected provider, and scale-down drains before
-   anything becomes removable, as
-   [placement eligibility and capacity](#placement-eligibility-and-capacity-provider)
-   describes, so due work with no eligible owner gets one. The host gives back
-   a placement it is not permitted to serve, and a workflow-only app is
-   provisioned with the creator database objects its host opens. Both example
-   fleets run a manager and pass on their deployed tier, which is the proof
-   this slice exists to deliver. A provider that starts real processes waits
-   for the production orchestrator.
-6. **Atomic legacy removal and private-zone proof (implemented).** One change
-   deleted the worker's claim, provisioning and advance paths, Control's
-   workflow advancement and the gateway's advance and signal-ingress edges,
-   Control's creator-journal access and its scheduler store, the cross-zone
-   grants, and the worker's platform-catalog reach. The runtime workflow
-   bridge entry STAYS: `zeroship-workflow-v8`'s task executor is a live second
-   caller of `Runtime::call_workflow_dispatch`, so the condition that would have
-   retired it is not met. The worker's boot posture now refuses a login that can
-   reach the platform schema at all, which is the privilege half of the zone
-   split. Proof: the fleet runs a platform PostgreSQL and a creator PostgreSQL,
-   and the process contract starts a run through ordinary app ingress, sees the
-   manager deliver it back, finds the completed run only in the creator server,
-   watches a retained request handle be revoked with the app, and joins the
-   worker's shutdown.
+1. **Local host on the native manager.** `zeroship serve` and the Vite
+   development host compose the manager, its driver and the zone claim over the
+   local platform metadata file, with `ConfiguredPolicies` and `LocalCapacity`,
+   and run the ordinary `JobConsumer` and their own maintenance lane beside the
+   journal. Proof: the CLI `workflow::` contracts and the local tier of both
+   example suites.
+2. **Normal deployment publication.** Control's deploy transaction records an
+   idempotent command receipt and a lifecycle intent together, and its publisher
+   delivers register, activate and disable, each naming the app's zone, and
+   confirms only exact receipts. Proof: Control's deploy and publication
+   contracts against the signed manager routes.
+3. **Workers pull from their zone.** The production worker runs one `WorkerHost`
+   on a dedicated compio thread with the enrolled instance signer, prepares apps
+   on demand under `AppResidency`, serves `env.workflows` for any app of its zone
+   through `RemoteWorkflows`, and drains on SIGTERM. Proof: the two-worker,
+   worker-host and private-zone process contracts above.
+4. **Capacity from the zone backlog.** The driver's capacity lane keeps each
+   zone's target from its policy-filtered backlog and applies it through
+   `StaticPool` in deployments that start their own workers. Proof: the
+   manager's capacity contracts and the server's driver contracts. Both example
+   fleets start a workflow service (`examples/workflow-probe/tests/fixture/settings.ts`,
+   `examples/workflows-order/tests/fixture/settings.ts`); their deployed tier passing
+   under zone pull is the proof this path still owes.
 
 Integrate shared ORM changes from their owner rather than introducing
-workflow-specific replacements. Report the production cutover complete only
-after slice six's process contract and both example suites pass.
+workflow-specific replacements.

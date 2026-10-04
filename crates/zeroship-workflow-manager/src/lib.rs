@@ -7,7 +7,6 @@ mod clock;
 pub mod coordinator;
 pub mod deployments;
 pub mod driver;
-pub mod eligibility;
 mod error;
 pub mod lifecycle;
 pub mod local;
@@ -26,4 +25,4 @@ pub use models::{collections, Claimant};
 /// schema directly. `collections` is the metadata a host composes into its
 /// binding.
 pub use models::schema;
-pub use queue::{DeliveryGrant, Options, Queue};
+pub use queue::{DeliveryGrant, GiveBack, Options, Queue};

@@ -98,11 +98,10 @@ export class WorkflowPlatform extends PlatformBase {
     });
     await this.waitFor("control", () => this.httpReady(`${control.url}/readyz`));
 
-    // The workflow manager owns placement: a deployed app reaches env.workflows
-    // only once the manager's placement lane has given it an owner, so the
-    // deployed tier needs one. It holds no creator database - it reads the
-    // platform metadata under its own login, which the migration creates
-    // without a password.
+    // The workflow service owns the journal and the zone queue the worker pulls
+    // from, so the deployed tier needs one. It holds no creator database - it
+    // reads the platform metadata under its own login, which the migration
+    // creates without a password.
     assert(this.postgres, "PostgreSQL must be owned by this fixture");
     const managerRole = await this.postgres.exec(["psql", "-U", "postgres", "-d", this.settings.database.name, "-v", "ON_ERROR_STOP=1", "-c",
       "ALTER ROLE zeroship_workflow WITH PASSWORD 'zeroship_workflow'"]);
@@ -126,7 +125,7 @@ export class WorkflowPlatform extends PlatformBase {
       // A workflow host reaches the journal through the manager and stages
       // payloads in the app object store, so the worker needs both.
       ZEROSHIP_WORKER_WORKFLOW_MANAGER_URL: manager.url,
-      ZEROSHIP_WORKER_WORKFLOW_CAPACITY: "8", ZEROSHIP_WORKER_WORKFLOW_SLOTS: "2",
+      ZEROSHIP_WORKER_WORKFLOW_PREPARED_APPS: "8", ZEROSHIP_WORKER_WORKFLOW_SLOTS: "2",
       ZEROSHIP_WORKER_STORAGE_URL: payloads,
       ...(settings.workerEnv?.(backing) ?? {}),
     });

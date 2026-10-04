@@ -40,6 +40,7 @@ fn signer(issuer: ServiceIssuer) -> Arc<ServiceAuth> {
 fn registration() -> RegisterSchedules {
     RegisterSchedules {
         app_id: AppId::mint(),
+        execution_zone_id: zeroship_core::ZoneId::default_zone(),
         deployment_id: DeploymentId::mint(),
         schedules: ["later", "earlier"]
             .into_iter()
@@ -60,6 +61,7 @@ fn registration() -> RegisterSchedules {
 fn activation(registration: &RegisterSchedules) -> ActivateSchedules {
     ActivateSchedules {
         app_id: registration.app_id.clone(),
+        execution_zone_id: zeroship_core::ZoneId::default_zone(),
         deployment_id: registration.deployment_id.clone(),
         revision: 1.try_into().unwrap(),
     }
@@ -354,6 +356,7 @@ async fn schedule_failures_keep_the_closed_transport_contract() {
 async fn disable_preserves_revision_and_rejects_changed_or_open_receipts() {
     let command = DisableSchedules {
         app_id: AppId::mint(),
+        execution_zone_id: zeroship_core::ZoneId::default_zone(),
         revision: 7.try_into().unwrap(),
     };
     let mut foreign = json!(command);
@@ -414,6 +417,7 @@ async fn control_instance_credentials_cannot_publish_schedules() {
             client
                 .disable_schedules(&DisableSchedules {
                     app_id: command.app_id.clone(),
+        execution_zone_id: zeroship_core::ZoneId::default_zone(),
                     revision: 1.try_into().unwrap(),
                 })
                 .await,

@@ -25,6 +25,7 @@ use std::{
 pub use zeroship_core::workflow_jobs::{JobReceipt, JournalSettlement};
 use zeroship_core::{
     app_id::AppId,
+    workflow_coordination::UnixMillis,
     workflow_jobs::{
         valid_outcome, Delivery, JobLease, JobOperation, JobOutcome, JobSpec, SettlementRefusal,
     },
@@ -74,7 +75,17 @@ pub enum JobAcceptance {
     Settled(Box<JobReceipt>),
     /// The job remains unsettled: code, policy, a live task or creator time
     /// prevents execution. This is not a durable rejection or an ACK.
-    Deferred,
+    Deferred { reason: DeferredReason },
+}
+
+/// Why the journal cannot begin this delivery now.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum DeferredReason {
+    PolicyOff,
+    AtCap,
+    NotDue { until: UnixMillis },
+    DeploymentUnavailable,
 }
 
 /// What the journal needs to act on a task its holder already has: which task,
@@ -290,7 +301,7 @@ pub enum AcceptedJob {
     Settled {
         receipt: Box<JobReceipt>,
     },
-    Deferred {},
+    Deferred { reason: DeferredReason },
 }
 
 impl AcceptedJob {
@@ -314,7 +325,7 @@ impl AcceptedJob {
                 started,
             )?))),
             Self::Settled { receipt } => Ok(JobAcceptance::Settled(receipt)),
-            Self::Deferred {} => Ok(JobAcceptance::Deferred),
+            Self::Deferred { reason } => Ok(JobAcceptance::Deferred { reason }),
         }
     }
 }
@@ -331,7 +342,7 @@ impl JobAcceptance {
                 assignment: Box::new(task.assignment),
             }),
             Self::Settled(receipt) => Ok(AcceptedJob::Settled { receipt }),
-            Self::Deferred => Ok(AcceptedJob::Deferred {}),
+            Self::Deferred { reason } => Ok(AcceptedJob::Deferred { reason }),
         }
     }
 }
@@ -544,6 +555,9 @@ impl JobLease for ReportedGrant {
             .checked_duration_since(Instant::now())
             .filter(|duration| !duration.is_zero())
     }
+    fn attempt_remaining(&self) -> Option<Duration> {
+        self.remaining()
+    }
 }
 
 /// The journal payloads a merged job exchange carries for this engine.
@@ -651,6 +665,9 @@ impl JobLease for CapturedLease {
         self.expires
             .checked_duration_since(Instant::now())
             .filter(|duration| !duration.is_zero())
+    }
+    fn attempt_remaining(&self) -> Option<Duration> {
+        self.remaining()
     }
 }
 
@@ -812,12 +829,23 @@ impl AppWorkflows {
         let Some(run) = reclaim(&mut tx, &self.app, run.ok_or_else(invalid)?, now).await? else {
             lease.check(self)?;
             tx.commit().await?;
-            return Ok(JobAcceptance::Deferred);
+            return Ok(JobAcceptance::Deferred {
+                reason: DeferredReason::AtCap,
+            });
         };
-        if run.optional_integer("due_at")?.is_none_or(|due| due > now) {
+        // A RUN NO CLOCK WILL WAKE IS NOT DEFERRED. A deferral returns the row
+        // until an instant, and a run with no `due_at` has none: it is paused or
+        // waiting on something only a signal or a transition ends. The frontier
+        // below settles this job for it, and whatever wakes the run publishes
+        // its next advance at a new revision.
+        if let Some(until) = run.optional_integer("due_at")?.filter(|due| *due > now) {
             lease.check(self)?;
             tx.commit().await?;
-            return Ok(JobAcceptance::Deferred);
+            return Ok(JobAcceptance::Deferred {
+                reason: DeferredReason::NotDue {
+                    until: until.try_into().map_err(|_| invalid())?,
+                },
+            });
         }
         if !frontier::prepare(&mut tx, &self.app, &run, policy, now).await? {
             publication::advance(&tx, &self.app, run_id.as_str(), now).await?;
@@ -839,8 +867,7 @@ impl AppWorkflows {
                 ReadyClaim::Task(task) => {
                     tx.database().collection(models::tasks::Entity::COLLECTION)?.update(
                     value!({"app_id":self.app.as_str(), "id":task.id.clone()}),
-                    value!({"job_id":job.id.as_str(), "delivery_attempt":delivery.attempt.get(),
-                        "assignment_revision":delivery.assignment_revision.get()}),
+                    value!({"job_id":job.id.as_str(), "delivery_attempt":delivery.attempt.get()}),
                 ).await?;
                     let expires = creator_deadline(&mut tx, task.deadline, lease.expires).await?;
                     JobAcceptance::Execute(Box::new(DeliveredTask {
@@ -849,7 +876,15 @@ impl AppWorkflows {
                         expires,
                     }))
                 }
-                ReadyClaim::Unavailable | ReadyClaim::Busy => JobAcceptance::Deferred,
+                ReadyClaim::DeploymentUnavailable => JobAcceptance::Deferred {
+                    reason: DeferredReason::DeploymentUnavailable,
+                },
+                ReadyClaim::PolicyOff => JobAcceptance::Deferred {
+                    reason: DeferredReason::PolicyOff,
+                },
+                ReadyClaim::AtCap => JobAcceptance::Deferred {
+                    reason: DeferredReason::AtCap,
+                },
             };
         lease.check(self)?;
         tx.commit().await?;
@@ -1077,7 +1112,7 @@ impl AppWorkflows {
     /// so a holder whose task and grant arrive in one reply satisfies it by
     /// construction. What refuses a task that does not belong to this delivery
     /// is `authorize_task`, inside the journal transaction, against the STORED
-    /// row: its job id, delivery attempt, assignment revision, run, generation
+    /// row: its job id, delivery attempt, run, generation
     /// and frontier revision. This check keeps a caller holding two live
     /// deliveries at once from pairing one's task with the other's grant.
     fn grant_delivery(
@@ -1090,7 +1125,6 @@ impl AppWorkflows {
         let held = task.delivery();
         if delivery.job != held.job
             || delivery.worker_id != held.worker_id
-            || delivery.assignment_revision != held.assignment_revision
             || delivery.attempt != held.attempt
         {
             return Err(conflict());
@@ -1224,7 +1258,6 @@ fn authorize_task(
     if claim.app != delivery.job.app_id
         || claim.task.job_id.as_deref() != Some(delivery.job.id.as_str())
         || claim.task.delivery_attempt != Some(delivery.attempt.get())
-        || claim.task.assignment_revision != Some(delivery.assignment_revision.get())
         || claim.task.run_id != run_id.as_str()
         || claim.task.generation != i64::from(*generation)
         || claim.task.frontier_revision != revision.get()

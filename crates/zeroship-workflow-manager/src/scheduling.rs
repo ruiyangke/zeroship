@@ -89,7 +89,7 @@ impl Options {
 }
 
 /// The platform host supplies verified deployment metadata and activation order.
-/// No creator database or worker registration is required to produce due jobs.
+/// No creator database or worker is required to produce due jobs.
 #[derive(Clone, Debug)]
 pub struct Scheduler {
     queue: Queue,
@@ -290,7 +290,7 @@ impl Scheduler {
             String::from_utf8(self.queue.encode(&request)?).map_err(|_| Error::Invalid)?;
         self.queue
             .transact(|tx| async move {
-                queue::register_scope_in(&tx, &request.app_id).await?;
+                queue::register_scope_in(&tx, &request.app_id, &request.execution_zone_id).await?;
                 queue::lock_scope(&tx, &request.app_id).await?;
                 if let Some(existing) =
                     prepared(&tx, &request.app_id, &request.deployment_id).await?
@@ -327,7 +327,7 @@ impl Scheduler {
     pub async fn disable(&self, request: &DisableSchedules) -> Result<DisableSchedules, Error> {
         self.queue
             .transact(|tx| async move {
-                queue::register_scope_in(&tx, &request.app_id).await?;
+                queue::register_scope_in(&tx, &request.app_id, &request.execution_zone_id).await?;
                 queue::lock_scope(&tx, &request.app_id).await?;
                 if activation_at_revision(&tx, &request.app_id, request.revision)
                     .await?
@@ -400,6 +400,12 @@ impl Scheduler {
             let result = self
                 .queue
                 .transact_for(budget.clone(), |tx| async move {
+                    queue::register_scope_in(
+                        &tx,
+                        &request.app_id,
+                        &request.execution_zone_id,
+                    )
+                    .await?;
                     queue::lock_scope(&tx, &request.app_id).await?;
                     if disabled(&tx, &request.app_id, request.revision.get())
                         .await?
@@ -1337,7 +1343,57 @@ fn claimable_rows(
         .and(
             job.column(jobs::operation_kind)
                 .not_in_values(claimant.denied())?,
+        )
+        .and(
+            job.column(jobs::deferred_until)
+                .is_null()
+                .or(job.column(jobs::deferred_until).lte(Some(now))?),
         ))
+}
+
+/// Distinct apps with claimable rows in one frozen execution zone.
+pub(crate) async fn claimable_apps_in_zone(
+    tx: &Database,
+    now: i64,
+    zone: &zeroship_core::zone_id::ZoneId,
+    after: Option<&AppId>,
+    exclude: &[AppId],
+    limit: usize,
+) -> Result<Vec<AppId>, Error> {
+    use crate::models::{jobs, queue_scopes};
+    let job = tx.entity::<jobs::Entity>()?.alias("j")?;
+    let scope = tx.entity::<queue_scopes::Entity>()?.alias("s")?;
+    let key = scope.column(queue_scopes::id);
+    let mut filter = scope
+        .column(queue_scopes::execution_zone_id)
+        .eq(zone.as_str())?
+        .and(claimable_rows(&job, now, crate::models::Claimant::Worker)?)
+        .and(key.not_in_values(exclude.iter().map(AppId::as_str))?);
+    if let Some(after) = after {
+        filter = filter.and(key.gt(after.as_str())?);
+    }
+    let rows = tx
+        .from(&scope)
+        .inner_join(
+            &job,
+            job.column(jobs::app_id).eq(scope.column(queue_scopes::id))?,
+        )?
+        .filter(filter)
+        .group_by(scope.column(queue_scopes::id))
+        .order_by(scope.column(queue_scopes::id).asc())
+        .select(scope.row::<ClaimableScope>())?
+        .limit(i64::try_from(limit).map_err(|_| Error::Invalid)?)?
+        .all()
+        .await?;
+    rows.into_iter()
+        .map(|row| AppId::parse(&row.id).map_err(|_| Error::Storage))
+        .collect()
+}
+
+#[derive(FromRow)]
+#[orm(entity = crate::models::queue_scopes)]
+struct ClaimableScope {
+    id: String,
 }
 
 /// The claimable rows `claimant` could take, as the app id each one names, in
@@ -1406,6 +1462,156 @@ pub(crate) async fn candidate(
     ceiling: Option<i64>,
 ) -> Result<Option<String>, Error> {
     use crate::models::jobs;
+    let (job, query) = candidates(tx, app, now, claimant, ceiling)?;
+    Ok(query
+        .order_by(job.column(jobs::dispatch_order).asc())
+        .order_by(job.column(jobs::id).asc())
+        .select(job.row::<Candidate>())?
+        .limit(1)?
+        .all()
+        .await?
+        .into_iter()
+        .next()
+        .map(|row| row.id))
+}
+
+/// What one app's queue holds for the capacity lane at `now`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Backlog {
+    /// Rows [`candidate`] would admit: the same predicate, counted.
+    pub claimable: i64,
+    /// The earliest `available_at` among those rows.
+    pub oldest_available_at: Option<i64>,
+    /// Creator rows a claim would take but for the delivery budget.
+    pub exhausted: i64,
+    /// Creator rows given back and still inside their back-off.
+    pub backed_off: i64,
+}
+
+/// Count what [`candidate`] would admit for a worker under `ceiling`, and the
+/// creator rows that cannot deliver now. The claimable count shares
+/// `candidate`'s query, so backlog and claimability cannot disagree.
+pub(crate) async fn backlog(
+    tx: &Database,
+    app: &AppId,
+    now: i64,
+    ceiling: i64,
+) -> Result<Backlog, Error> {
+    use crate::models::{jobs, Claimant};
+    let (job, query) = candidates(tx, app, now, Claimant::Worker, Some(ceiling))?;
+    let (claimable, oldest_available_at) = query
+        .select((
+            job.column(jobs::id).count_distinct(),
+            job.column(jobs::available_at).min::<i64>(),
+        ))?
+        .all()
+        .await?
+        .into_iter()
+        .next()
+        .unwrap_or((0, None));
+    let rows = tx.entity::<jobs::Entity>()?;
+    let creator = || -> Result<zeroship_data_orm::orm::Filter<jobs::Entity>, Error> {
+        Ok(jobs::app_id
+            .eq(app.as_str())?
+            .and(jobs::operation_kind.eq("advance")?))
+    };
+    let exhausted = rows
+        .count(
+            creator()?
+                .and(jobs::execution_attempts.gte(ceiling)?)
+                .and(
+                    jobs::state
+                        .eq("ready")?
+                        .or(jobs::state
+                            .eq("leased")?
+                            .and(jobs::lease_deadline.lte(Some(now))?)),
+                ),
+        )
+        .await?;
+    let backed_off = rows
+        .count(
+            creator()?
+                .and(jobs::state.eq("ready")?)
+                .and(jobs::deferred_until.gt(Some(now))?),
+        )
+        .await?;
+    Ok(Backlog {
+        claimable,
+        oldest_available_at,
+        exhausted,
+        backed_off,
+    })
+}
+
+/// Distinct apps of one frozen execution zone that hold an unsettled creator
+/// row, in app id order after `after`: the apps a capacity census counts. An
+/// app whose every creator row has settled, or that never had one, is not
+/// listed.
+pub(crate) async fn apps_with_creator_work_in_zone(
+    tx: &Database,
+    zone: &zeroship_core::zone_id::ZoneId,
+    after: Option<&AppId>,
+    limit: usize,
+) -> Result<Vec<AppId>, Error> {
+    use crate::models::{jobs, queue_scopes};
+    let job = tx.entity::<jobs::Entity>()?.alias("j")?;
+    let scope = tx.entity::<queue_scopes::Entity>()?.alias("s")?;
+    let key = scope.column(queue_scopes::id);
+    let mut filter = scope
+        .column(queue_scopes::execution_zone_id)
+        .eq(zone.as_str())?
+        .and(job.column(jobs::operation_kind).eq("advance")?)
+        .and(job.column(jobs::state).ne("settled")?);
+    if let Some(after) = after {
+        filter = filter.and(key.gt(after.as_str())?);
+    }
+    let rows = tx
+        .from(&scope)
+        .inner_join(
+            &job,
+            job.column(jobs::app_id).eq(scope.column(queue_scopes::id))?,
+        )?
+        .filter(filter)
+        .group_by(scope.column(queue_scopes::id))
+        .order_by(scope.column(queue_scopes::id).asc())
+        .select(scope.row::<ClaimableScope>())?
+        .limit(i64::try_from(limit).map_err(|_| Error::Invalid)?)?
+        .all()
+        .await?;
+    rows.into_iter()
+        .map(|row| AppId::parse(&row.id).map_err(|_| Error::Storage))
+        .collect()
+}
+
+/// Unsettled creator rows of `app`, the work a withheld or deleted app leaves.
+pub(crate) async fn unsettled_creator_rows(tx: &Database, app: &AppId) -> Result<i64, Error> {
+    use crate::models::jobs;
+    Ok(tx
+        .entity::<jobs::Entity>()?
+        .count(
+            jobs::app_id
+                .eq(app.as_str())?
+                .and(jobs::operation_kind.eq("advance")?)
+                .and(jobs::state.ne("settled")?),
+        )
+        .await?)
+}
+
+/// The rows [`candidate`] chooses among, before ordering and paging.
+fn candidates(
+    tx: &Database,
+    app: &AppId,
+    now: i64,
+    claimant: crate::models::Claimant,
+    ceiling: Option<i64>,
+) -> Result<
+    (
+        EntityAlias<crate::models::jobs::Entity>,
+        zeroship_data_orm::orm::ReadBuilder,
+    ),
+    Error,
+> {
+    use crate::models::jobs;
     use zeroship_core::workflow_jobs::JobOutcome;
     let job = tx.entity::<jobs::Entity>()?.alias("j")?;
     let occurrence = tx.entity::<schedule_occurrences::Entity>()?.alias("o")?;
@@ -1452,16 +1658,26 @@ pub(crate) async fn candidate(
                     )),
             ),
     );
-    Ok(management_eligibility(tx, &job, query)?
-        .order_by(job.column(jobs::dispatch_order).asc())
-        .order_by(job.column(jobs::id).asc())
-        .select(job.row::<Candidate>())?
-        .limit(1)?
-        .all()
-        .await?
-        .into_iter()
-        .next()
-        .map(|row| row.id))
+    let query = management_eligibility(tx, &job, query)?;
+    Ok((job, query))
+}
+
+pub(crate) async fn live_advance_count(
+    tx: &Database,
+    app: &AppId,
+    now: i64,
+) -> Result<i64, Error> {
+    use crate::models::jobs;
+    Ok(tx
+        .entity::<jobs::Entity>()?
+        .count(
+            jobs::app_id
+                .eq(app.as_str())?
+                .and(jobs::operation_kind.eq("advance")?)
+                .and(jobs::state.eq("leased")?)
+                .and(jobs::lease_deadline.gt(Some(now))?),
+        )
+        .await?)
 }
 
 fn management_eligibility(

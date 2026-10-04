@@ -15,13 +15,14 @@ use zeroship_data_orm::resolved_bindings::ResolvedBinding;
 /// STORE, and no session is opened against the cluster it names.
 async fn deployed_with_database() -> DeployedApp {
     let kernel = crate::cache::KernelConfig {
-        workflows: zeroship_workflow_runner::ready::ReadyApps::default(),
+        workflows: None,
         db_service: Some(crate::cache::fixture::database_service(
             "postgresql://fixture:fixture@localhost/unused",
         )),
         kv_store: None,
         storage_backend: None,
         meter: Arc::new(zeroship_metering::Meter::new()),
+        residency: None,
     };
     DeployedApp::with_worker(crate::worker_fixture::Worker::with_kernel(10, kernel)).await
 }
@@ -545,4 +546,211 @@ async fn reconcile_keeps_the_previous_app_until_replacement_bytes_are_available(
             .deploy_hash,
         case.version.deploy_hash
     );
+}
+
+/// A deployed app on a worker that accounts for app credentials as `main`
+/// composes it, with the app's project key supplied beside its binding and
+/// environment.
+async fn held_with_database(root: [u8; 32]) -> DeployedApp {
+    let kernel = crate::cache::KernelConfig {
+        workflows: None,
+        db_service: Some(crate::cache::fixture::database_service(
+            "postgresql://fixture:fixture@localhost/unused",
+        )),
+        kv_store: None,
+        storage_backend: None,
+        meter: Arc::new(zeroship_metering::Meter::new()),
+        residency: None,
+    };
+    let case = DeployedApp::with_worker(crate::worker_fixture::Worker::holding(10, kernel)).await;
+    crate::cache::project_keys()
+        .expect("the kernel installed a database service")
+        .supply(
+            case.worker.app_id.as_str(),
+            zeroship_core::ProjectId::mint().as_str(),
+            root,
+        )
+        .expect("the app's project key");
+    case
+}
+
+/// Which of the app's credentials this worker holds: key, bindings, env.
+fn supplied(case: &DeployedApp) -> [bool; 3] {
+    let app = case.worker.app_id.as_str();
+    [
+        crate::cache::project_keys()
+            .expect("the kernel installed a database service")
+            .is_bound(app)
+            .expect("key store"),
+        binding_store().is_bound(app).expect("binding store"),
+        get_env(&case.worker.envs, &case.worker.app_id).is_some(),
+    ]
+}
+
+/// A reload holds its app across the whole swap, so an eviction of the isolate
+/// it is replacing withdraws nothing, and the replacement then serves without
+/// Control being asked for anything again.
+///
+/// Every await of a swap hands this thread to other dispatches, and a dispatch
+/// loading another app into a full cache evicts the least recently used
+/// isolate - possibly the one being replaced, which was the app's only holder.
+/// Control holds its answer to the swap's binding read while that eviction
+/// happens, so it lands after the swap checked what was supplied and before it
+/// built the replacement.
+#[compio::test]
+async fn a_reload_holds_its_app_across_the_swap() {
+    let mut case = held_with_database([8; 32]).await;
+    let registry = case.worker.residency.clone().expect("the case accounts for credentials");
+    assert_eq!(
+        registry.holders(&case.worker.app_id),
+        1,
+        "the premise: the isolate alone holds the app"
+    );
+    assert_eq!(supplied(&case), [true; 3]);
+
+    let replacement = br#"export default { fetch() { return new Response("replacement"); } }"#;
+    let hash = write_blob(&case.worker.config.blob_store, replacement).await;
+    case.version.deploy_hash = Some("replacement-deploy".into());
+    case.version
+        .manifest
+        .as_mut()
+        .unwrap()
+        .worker
+        .as_mut()
+        .unwrap()
+        .modules
+        .insert("index.js".into(), hash);
+    let served = vec![
+        case.resolved_binding(),
+        ResolvedBinding {
+            database: DatabaseId::mint(),
+            binding: BindingId::mint(),
+            capability: DatabaseCapability::ReadWrite,
+        },
+    ];
+    case.version.live_bindings = live_bindings(&served);
+    let bindings_route = route(endpoints::CONTROL_APP_BINDINGS, &case.worker.app_id);
+    let (control, mut gate) = ControlPlane::gated(
+        1,
+        vec![(bindings_route.clone(), binding_body(&served))],
+        bindings_route.clone(),
+    );
+    case.control_url = control.base_url.clone();
+
+    {
+        let mut reconciling = Box::pin(case.reconcile());
+        match futures::future::select(Box::pin(gate.arrived()), reconciling.as_mut()).await {
+            futures::future::Either::Left(((), _)) => {}
+            futures::future::Either::Right(((), _)) => {
+                panic!("the reload finished before Control answered its binding read")
+            }
+        }
+        // Another dispatch's eviction of the isolate being replaced.
+        cache::evict_app(&case.worker.app_id);
+        assert!(cache::get_runtime(&case.worker.app_id).is_none());
+        gate.release();
+        reconciling.await;
+    }
+
+    assert_eq!(control.served(), vec![bindings_route]);
+    assert_eq!(
+        supplied(&case),
+        [true; 3],
+        "the swap's own hold kept the key, the bindings and the environment"
+    );
+    assert_eq!(case.installed_bindings(), case.version.live_bindings);
+    assert_eq!(
+        case.body().await,
+        b"replacement",
+        "the replacement serves, and Control is not asked for anything again"
+    );
+    assert_eq!(registry.holders(&case.worker.app_id), 1);
+}
+
+/// An environment refresh holds the app while it supplies, and skips an app
+/// nothing holds.
+///
+/// The refresh walks a snapshot of the environments present; an app whose last
+/// holder dropped after that snapshot had its material withdrawn, and
+/// refreshing it would supply a key and an environment no holder will ever
+/// withdraw. The fixture's app is exactly that: its environment is present and
+/// nothing holds it. The control is the same refresh with the app held, which
+/// does fetch.
+#[compio::test]
+async fn an_environment_refresh_skips_an_app_nothing_holds() {
+    let kernel = crate::cache::KernelConfig {
+        workflows: None,
+        db_service: Some(crate::cache::fixture::database_service(
+            "postgresql://fixture:fixture@localhost/unused",
+        )),
+        kv_store: None,
+        storage_backend: None,
+        meter: Arc::new(zeroship_metering::Meter::new()),
+        residency: None,
+    };
+    let worker = crate::worker_fixture::Worker::holding(10, kernel);
+    let app = worker.app_id.clone();
+    let registry = worker.residency.clone().expect("the case accounts for credentials");
+    let keys = crate::cache::project_keys().expect("the kernel installed a database service");
+    assert_eq!(registry.holders(&app), 0, "the premise: nothing holds the app");
+    assert_eq!(cached_env_version(&worker.envs, &app), Some(0));
+    let env = r#"{"vars":{"API_TOKEN":"rotated"},"secrets":{},"expose":[]}"#;
+    let routes = vec![
+        (
+            route(endpoints::CONTROL_APP_DATA_KEY, &app),
+            serde_json::to_string(&zeroship_core::project_data_key::ProjectDataKey::new(
+                zeroship_core::ProjectId::mint(),
+                [9; 32],
+            ))
+            .expect("project key"),
+        ),
+        (route(endpoints::CONTROL_APP_ENV, &app), env.to_owned()),
+    ];
+    let versions = VersionMap::from([(
+        app.clone(),
+        AppVersionInfo {
+            deploy_hash: None,
+            plan_id: "starter".into(),
+            runtime: AppRuntimeLimits::default(),
+            env_version: 2,
+            manifest: None,
+            net_policy: AppNetPolicy::default(),
+            live_bindings: binding_store().live_bindings_for(app.as_str()),
+        },
+    )]);
+    let config = |control_url: &str| crate::WorkerConfig {
+        service_auth: worker.config.service_auth.clone(),
+        control_url: control_url.to_owned(),
+        control_key: String::new(),
+        kv_store: None,
+        storage_backend: None,
+        max_isolates: worker.config.max_isolates,
+        poll_interval_secs: worker.config.poll_interval_secs,
+        shutdown_timeout_secs: worker.config.shutdown_timeout_secs,
+        blob_store: worker.config.blob_store.clone(),
+    };
+
+    // Served if asked, so a refresh that went ahead would leave its mark.
+    let unheld = ControlPlane::serving(2, routes.clone());
+    reconcile_once(&config(&unheld.base_url), &versions, &worker.envs)
+        .await
+        .expect("reconcile");
+    assert_eq!(cached_env_version(&worker.envs, &app), Some(0), "nothing refreshed");
+    assert!(!keys.is_bound(app.as_str()).unwrap(), "and no key was supplied");
+
+    // THE CONTROL: the same refresh with the app held.
+    let _held = registry.reside(app.clone());
+    let control = ControlPlane::serving(2, routes);
+    reconcile_once(&config(&control.base_url), &versions, &worker.envs)
+        .await
+        .expect("reconcile");
+    assert_eq!(
+        control.served(),
+        vec![
+            route(endpoints::CONTROL_APP_DATA_KEY, &app),
+            route(endpoints::CONTROL_APP_ENV, &app),
+        ]
+    );
+    assert_eq!(cached_env_version(&worker.envs, &app), Some(2));
+    assert!(keys.is_bound(app.as_str()).unwrap());
 }

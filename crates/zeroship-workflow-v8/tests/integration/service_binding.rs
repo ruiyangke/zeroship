@@ -6,8 +6,8 @@
 use crate::support::{deployment_fixture, orm as orm_fixture};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::{rc::Rc, sync::Arc, time::Duration};
-use zeroship_core::{app_id::AppId, typed_id, workflow_coordination::AssignedScope};
+use std::{cell::RefCell, rc::Rc, sync::Arc, time::Duration};
+use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_runtime::{
     CancelFlag, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, Runtime, SettledFetch,
 };
@@ -22,7 +22,7 @@ use zeroship_workflow::{
     WorkflowExecution,
 };
 use zeroship_workflow_runner::{
-    ready::ReadyApps, remote::RemoteBackend, ObjectStepOutputs, PayloadObjects, WorkerPayloads,
+    remote::RemoteWorkflows, ObjectStepOutputs, PayloadObjects, WorkerPayloads,
 };
 use zeroship_workflow_v8::WorkflowBinding;
 
@@ -91,51 +91,6 @@ impl Fixture {
         }
     }
 
-    /// The placement a published backend is installed and retired by.
-    fn placement(&self, app: &AppId, revision: i64) -> AssignedScope {
-        AssignedScope {
-            app_id: app.clone(),
-            assignment_revision: revision.try_into().unwrap(),
-        }
-    }
-
-    /// A backend for `app` that reaches the workflow service at `origin`.
-    fn remote(&self, app: &AppId, revision: i64, origin: &str) -> RemoteBackend {
-        let issuer = zeroship_core::service_assertion::ServiceIssuer::parse(&format!(
-            "spiffe://zeroship.ai/svc/worker/{}",
-            zeroship_core::workflow_coordination::WorkerId::mint().as_str()
-        ))
-        .unwrap();
-        let auth = Arc::new(zeroship_core::service_peers::ServiceAuth::new(
-            zeroship_core::service_peers::ServiceKeyring::from_parts(
-                issuer,
-                zeroship_core::service_assertion::ServiceSigningKey::generate(),
-                zeroship_core::service_assertion::ServiceTrustBundle::new(),
-            )
-            .unwrap(),
-            Arc::new(
-                zeroship_core::service_assertion::TransportAssertionVerifier::new(
-                    zeroship_core::service_assertion::ServiceTrustBundle::new(),
-                ),
-            ),
-        ));
-        RemoteBackend::new(
-            zeroship_workflow_client::WorkerCoordinator::new(
-                origin,
-                auth,
-                zeroship_workflow_client::Options {
-                    timeout: Duration::from_millis(250),
-                    ..zeroship_workflow_client::Options::default()
-                },
-            )
-            .unwrap(),
-            self.placement(app, revision),
-            self.objects.clone(),
-            64 * 1024,
-        )
-        .unwrap()
-    }
-
     fn step_outputs(&self) -> zeroship_workflow::SharedStepOutputs {
         Arc::new(ObjectStepOutputs::new(self.objects.clone(), 1024).unwrap())
     }
@@ -145,16 +100,24 @@ impl Fixture {
         Arc::new(self.objects.clone())
     }
 
-    /// A request isolate whose `env.workflows` resolves published backends.
-    fn ready_runtime(&self, apps: &ReadyApps, identity: &AppId, source: &str) -> Runtime {
+    /// A request isolate whose `env.workflows` resolves the request path's
+    /// registry for the runtime's own identity.
+    fn remote_workflows_runtime(
+        &self,
+        workflows: &RemoteWorkflows,
+        identity: &AppId,
+        source: &str,
+    ) -> Runtime {
         zeroship_runtime::init_v8();
         Runtime::builder()
             .modules(vec![ModuleEntry {
                 specifier: "index.js".into(),
                 source: source.into(),
             }])
-            .plugins(vec![Arc::new(WorkflowBinding::ready(apps.clone()))])
-            // Mutable input naming the other app must not select its backend.
+            .plugins(vec![Arc::new(WorkflowBinding::remote_workflows(
+                workflows.clone(),
+            ))])
+            // Mutable input naming the other app must not select the app.
             .env_vars([("APP_ID".into(), self.other.app_id().as_str().to_owned())].into())
             .app_id(identity.clone())
             .build()
@@ -448,27 +411,19 @@ async fn mismatched_or_missing_host_identity_rejects_before_creator_evaluation()
     }
 }
 
-/// A published backend serves only the runtime identity it names.
+/// A request-path registry serves the runtime's OWN app, with no publication.
 ///
-/// The registry holds backends that reach the workflow service, so a resolved
-/// backend and an unresolved one BOTH surface as `workflow_unavailable` to
-/// creator code -- one because nothing is published, the other because the
-/// service could not be reached. The code alone therefore cannot tell them
-/// apart, and what does is whether the call left this process at all: each
-/// installed backend is pointed at its own listener, and the connection count is
-/// the evidence.
-///
-/// The value-staging half of the creator start now happens at the far end, and is
-/// bound in `zeroship-workflow-runner`'s
-/// `a_remote_start_refuses_a_creator_supplied_payload_descriptor`.
+/// The app the call names is the IMMUTABLE runtime identity, never the mutable
+/// `APP_ID` environment value -- which here names the other app. The call
+/// leaves for the registry's client, and the request body is the evidence: a
+/// refusal alone cannot tell a served app from an unreachable service, because
+/// both surface as `workflow_unavailable`.
 #[compio::test]
-async fn ready_binding_reaches_only_the_published_backend_of_its_runtime_identity() {
+async fn remote_workflows_serves_the_runtimes_own_app() {
     let fixture = Fixture::new().await;
-    let apps = ReadyApps::default();
+    let recorder = Recorder::new().await;
+    let workflows = crate::support::unreachable::workflows_at(&recorder.url);
     let identity = fixture.app.app_id().clone();
-    let other = fixture.other.app_id().clone();
-    let mine = Dialled::new().await;
-    let theirs = Dialled::new().await;
     let source = r"
         export default { async fetch(_request, env) {
             try {
@@ -477,84 +432,83 @@ async fn ready_binding_reaches_only_the_published_backend_of_its_runtime_identit
             } catch (error) { return Response.json({code:error.code}); }
         }};
     ";
-    let refused = json!({"code":"workflow_unavailable"});
-    // Nothing published: a retryable refusal, and no call leaves.
     assert_eq!(
-        fetch(fixture.ready_runtime(&apps, &identity, source)).await,
-        refused
-    );
-    assert_eq!((mine.dialled(), theirs.dialled()), (0, 0));
-    // Another app's published backend never serves this identity, whatever the
-    // mutable environment names.
-    apps.install(fixture.remote(&other, 1, &theirs.url));
-    assert_eq!(
-        fetch(fixture.ready_runtime(&apps, &identity, source)).await,
-        refused
+        fetch(fixture.remote_workflows_runtime(&workflows, &identity, source)).await,
+        json!({"code":"workflow_unavailable"})
     );
     assert_eq!(
-        (mine.dialled(), theirs.dialled()),
-        (0, 0),
-        "another app's backend must not be reached for this identity"
-    );
-    // This identity's own backend is resolved, and the call leaves for the
-    // service it names.
-    apps.install(fixture.remote(&identity, 1, &mine.url));
-    assert_eq!(
-        fetch(fixture.ready_runtime(&apps, &identity, source)).await,
-        refused
-    );
-    assert_eq!((mine.dialled(), theirs.dialled()), (1, 0));
-    // Retiring the other app's placement leaves this one published.
-    apps.retire(&fixture.placement(&other, 1));
-    assert_eq!(
-        fetch(fixture.ready_runtime(&apps, &identity, source)).await,
-        refused
-    );
-    assert_eq!((mine.dialled(), theirs.dialled()), (2, 0));
-    apps.retire(&fixture.placement(&identity, 1));
-    assert_eq!(
-        fetch(fixture.ready_runtime(&apps, &identity, source)).await,
-        refused
-    );
-    assert_eq!(
-        (mine.dialled(), theirs.dialled()),
-        (2, 0),
-        "a retired placement must stop being reached"
+        recorder.app_id().as_deref(),
+        Some(identity.as_str()),
+        "the request must name the runtime's immutable identity"
     );
 }
 
-/// A listener that counts the connections a backend opens to it and closes each.
-///
-/// No protocol: what is being asserted is that the call LEFT, which a creator
-/// error code cannot show because a transport failure and an unpublished app
-/// answer alike.
-struct Dialled {
+/// A listener that records the app one creator call names.
+struct Recorder {
     url: String,
-    dialled: Rc<std::cell::Cell<usize>>,
+    app_id: Rc<RefCell<Option<String>>>,
     _handle: compio::runtime::JoinHandle<()>,
 }
 
-impl Dialled {
+impl Recorder {
     async fn new() -> Self {
         let listener = compio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        let dialled = Rc::new(std::cell::Cell::new(0usize));
-        let counted = dialled.clone();
+        let app_id = Rc::new(RefCell::new(None));
+        let recorded = app_id.clone();
         let handle = compio::runtime::spawn(async move {
-            while let Ok((stream, _)) = listener.accept().await {
-                counted.set(counted.get() + 1);
-                drop(stream);
+            while let Ok((mut stream, _)) = listener.accept().await {
+                if let Some(body) = read_request(&mut stream).await {
+                    *recorded.borrow_mut() = body["appId"].as_str().map(str::to_owned);
+                }
+                let reply = br#"{"code":"unavailable"}"#;
+                let mut response = format!(
+                    "HTTP/1.1 503 Test\r\nContent-Type: application/json\r\n\
+                     Connection: close\r\nContent-Length: {}\r\n\r\n",
+                    reply.len()
+                )
+                .into_bytes();
+                response.extend_from_slice(reply);
+                let _ = compio::io::AsyncWriteExt::write_all(&mut stream, response).await;
             }
         });
         Self {
             url,
-            dialled,
+            app_id,
             _handle: handle,
         }
     }
 
-    fn dialled(&self) -> usize {
-        self.dialled.get()
+    fn app_id(&self) -> Option<String> {
+        self.app_id.borrow().clone()
+    }
+}
+
+async fn read_request(stream: &mut compio::net::TcpStream) -> Option<Value> {
+    let mut seen = Vec::new();
+    loop {
+        let compio::BufResult(read, buffer) =
+            compio::io::AsyncRead::read(stream, vec![0; 4096]).await;
+        let read = read.ok()?;
+        if read == 0 {
+            return None;
+        }
+        seen.extend_from_slice(&buffer[..read]);
+        let Some(at) = seen.windows(4).position(|window| window == b"\r\n\r\n") else {
+            continue;
+        };
+        let headers = String::from_utf8_lossy(&seen[..at]).to_lowercase();
+        let length: usize = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.trim()
+                    .eq("content-length")
+                    .then(|| value.trim().parse().ok())?
+            })?;
+        if seen.len() >= at + 4 + length {
+            return serde_json::from_slice(&seen[at + 4..at + 4 + length]).ok();
+        }
     }
 }
 

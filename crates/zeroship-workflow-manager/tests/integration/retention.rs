@@ -4,6 +4,7 @@
 )]
 
 use crate::support;
+use crate::support::QueueCalls;
 use crate::support::retention as catalog_support;
 
 use catalog_support::{Catalog, Published};
@@ -15,10 +16,10 @@ use std::{
     rc::Rc,
     time::Duration,
 };
-use crate::support::{Admin, Backend, Fixture};
+use crate::support::{Admin, Backend, Fixture, Owner};
 use zeroship_core::{
     app_id::AppId,
-    workflow_coordination::{Assignment, RunId, WorkerId},
+    workflow_coordination::{RunId, WorkerId},
     workflow_deployments::{HoldGeneration, HoldReceipt, HoldScope, HoldState},
     workflow_jobs::{DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, JournalSettlement},
     workflow_schedules::{ActivateSchedules, RegisterSchedules, ScheduleDescriptor, ScheduleId},
@@ -188,13 +189,8 @@ fn job(app: &AppId, deployment: &DeploymentId) -> JobSpec {
     }
 }
 
-fn assignment(app: &AppId) -> Assignment {
-    Assignment {
-        app_id: app.clone(),
-        worker_id: WorkerId::mint(),
-        revision: 1.try_into().unwrap(),
-        expires_at: i64::MAX.try_into().unwrap(),
-    }
+fn assignment(app: &AppId) -> Owner {
+    Owner::new(app.clone(), WorkerId::mint())
 }
 
 /// Which host takes a row. Every operation is named, so a new one cannot
@@ -202,7 +198,7 @@ fn assignment(app: &AppId) -> Assignment {
 /// model about delivers nothing rather than delivering to the wrong host.
 const fn claimant(operation: &JobOperation) -> Claimant {
     match operation {
-        JobOperation::Advance { .. } => Claimant::Placed,
+        JobOperation::Advance { .. } => Claimant::Worker,
         JobOperation::Activate { .. }
         | JobOperation::Cron { .. }
         | JobOperation::Management { .. }
@@ -219,15 +215,16 @@ const fn claimant(operation: &JobOperation) -> Claimant {
 /// on to heartbeat or settle the delivery themselves.
 async fn claim_as(
     queue: &Queue,
-    authority: &Assignment,
+    authority: &Owner,
     claimant: Claimant,
 ) -> Result<Option<DeliveryGrant>, Error> {
     queue
         .claim_authorized(
-            &authority.into(),
+            &authority.app_id,
+            &authority.worker_id,
             claimant,
             Ok(support::delivery_ceiling()),
-            |_| std::future::ready(Ok(authority.clone())),
+            |_| std::future::ready(Ok(authority.worker_id.clone())),
         )
         .await
 }
@@ -235,16 +232,16 @@ async fn claim_as(
 /// Claim as the host that may take `spec`.
 async fn claim_for(
     queue: &Queue,
-    authority: &Assignment,
+    authority: &Owner,
     spec: &JobSpec,
 ) -> Result<Option<DeliveryGrant>, Error> {
     claim_as(queue, authority, claimant(&spec.operation)).await
 }
 
 /// Discharge the app's next row through the host that may take it: a sweep is
-/// claimed as the lane and creator work under the placement `authority` states.
+/// claimed as the lane and creator work as the worker `authority` names.
 /// Both settle on that same authority, so its caller can replay the receipt.
-async fn finish(queue: &Queue, authority: &Assignment, expected: &JobSpec) -> JournalSettlement {
+async fn finish(queue: &Queue, authority: &Owner, expected: &JobSpec) -> JournalSettlement {
     let delivery = claim_for(queue, authority, expected).await.unwrap().unwrap();
     assert_eq!(delivery.delivery().job, *expected);
     let settlement =
@@ -273,7 +270,7 @@ async fn lost_replies(fixture: &Fixture) {
     let faults = FaultClient::new(catalog.client());
     let queue = queue(fixture, faults.clone()).await;
     let app = AppId::mint();
-    queue.register_scope(&app).await.unwrap();
+    queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     assert_eq!(
         queue.submit(&job(&app, &DeploymentId::mint())).await,
         Err(Error::Denied),
@@ -323,7 +320,7 @@ async fn stale_replies(fixture: &Fixture) {
     let queue = queue(fixture, faults.clone()).await;
     let peer = self::queue(fixture, catalog.client()).await;
     let app = AppId::mint();
-    queue.register_scope(&app).await.unwrap();
+    queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     for release in [false, true] {
         let deployment = catalog
             .publish(
@@ -400,7 +397,7 @@ async fn publication_rollback(fixture: &Fixture) {
     let catalog = Catalog::new(fixture).await;
     let queue = queue(fixture, catalog.client()).await;
     let app = AppId::mint();
-    queue.register_scope(&app).await.unwrap();
+    queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     let deployment = catalog.publish(&app, "failed publication", &[]).await;
     let spec = job(&app, &deployment.id);
     publication_fault(fixture, true).await;
@@ -451,6 +448,7 @@ async fn activate(
     scheduler
         .prepare(&RegisterSchedules {
             app_id: app.clone(),
+                execution_zone_id: zeroship_core::ZoneId::default_zone(),
             deployment_id: deployment.id.clone(),
             schedules: descriptors,
         })
@@ -459,6 +457,7 @@ async fn activate(
     scheduler
         .activate(&ActivateSchedules {
             app_id: app.clone(),
+                execution_zone_id: zeroship_core::ZoneId::default_zone(),
             deployment_id: deployment.id.clone(),
             revision: revision.try_into().unwrap(),
         })
@@ -495,7 +494,6 @@ async fn scheduling_retention(fixture: &Fixture) {
         .unwrap();
     let page = scheduler.dispatch(&app, &schedule_id).await.unwrap();
     assert_eq!(page.jobs.len(), 1);
-    assert!(rows(fixture, "workers", value!({})).await.is_empty());
     catalog.assert_retained(&app, &old).await;
     assert_eq!(
         queue.release_deployment(&app, &old.id).await,
@@ -506,7 +504,7 @@ async fn scheduling_retention(fixture: &Fixture) {
     finish(&queue, &authority, &activation).await;
     let cron = finish(&queue, &authority, &page.jobs[0]).await;
     recovery
-        .ensure(&app, &replacement.id, 2.try_into().unwrap())
+        .ensure(&app, &zeroship_core::ZoneId::default_zone(), &replacement.id, 2.try_into().unwrap())
         .await
         .unwrap();
     // Recovery provenance changes leave the old future schedule as a pin.

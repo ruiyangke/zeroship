@@ -30,7 +30,7 @@ async fn prelimit_barriers(fixture: &Fixture) {
     let host = Host::new(fixture).await;
     let app = AppId::mint();
     let run = RunId::mint();
-    host.queue.register_scope(&app).await.unwrap();
+    host.queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     let deployment = host.source.publish(&app, "advance").await;
     enqueue_blocked_advances(&host, &app, &run, &deployment.deployment_id).await;
     let first = command(&app, &run, RunOperation::Pause);
@@ -151,7 +151,7 @@ async fn enqueue_blocked_advances(
 
 async fn damaged(
     host: &Host,
-    authority: &Assignment,
+    authority: &Owner,
     table: &str,
     id: &str,
     changes: Value,
@@ -253,7 +253,7 @@ async fn corrupted_barriers(fixture: &Fixture) {
     assert_eq!(host.holds.acquired.get(), 0);
 }
 
-async fn substitute_link(host: &Host, authority: &Assignment, spec: &JobSpec, original: Value) {
+async fn substitute_link(host: &Host, authority: &Owner, spec: &JobSpec, original: Value) {
     let other = ordinary(&spec.app_id);
     host.queue.submit(&other).await.unwrap();
     let commands = host.database.collection("management").unwrap();
@@ -299,12 +299,12 @@ async fn settlement_authority(fixture: &Fixture) {
     let refused = host
         .queue
         .settle_authorized(
-            &(&authority).into(),
+            &authority.worker_id,
             &settlement,
             |_| {
                 checks.set(checks.get() + 1);
                 ready(if checks.get() == 1 {
-                    Ok(authority.clone())
+                    Ok(authority.worker_id.clone())
                 } else {
                     Err(Error::Denied)
                 })
@@ -321,7 +321,7 @@ async fn settlement_authority(fixture: &Fixture) {
 
 async fn replay_authority(
     host: &Host,
-    authority: &Assignment,
+    authority: &Owner,
     settlement: &JournalSettlement,
     receipt: &zeroship_core::workflow_jobs::SettlementReceipt,
 ) {
@@ -330,7 +330,7 @@ async fn replay_authority(
     assert_eq!(
         host.queue
             .settle_authorized(
-                &authority.into(),
+                &authority.worker_id,
                 settlement,
                 |_| ready(Err(Error::Denied)),
                 |_| {
@@ -364,9 +364,9 @@ async fn replay_authority(
     assert_eq!(
         host.queue
             .settle_authorized(
-                &authority.into(),
+                &authority.worker_id,
                 settlement,
-                |_| ready(Ok(authority.clone())),
+                |_| ready(Ok(authority.worker_id.clone())),
                 |_| {
                     replay_checks.set(replay_checks.get() + 1);
                     ready(Ok(authority.worker_id.clone()))

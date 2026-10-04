@@ -191,9 +191,9 @@ impl TaskExecution for V8Execution {
         // Freeze app effects before any host upload can yield. The task lease
         // remains active while staging; app code has finished its frontier.
         self.stop().await;
-        // Shutdown holds the frontier that app code already produced. Only a
-        // revoked authority withdraws the right to hand it to the runner.
-        self.budget.check_authority()?;
+        // Shutdown holds the frontier that app code already produced, and expiry
+        // does not withdraw the right to hand it to the runner: the journal fences
+        // the settlement against the task lease.
         let (transport, limits) = &self.output;
         let (_, assignment) = &self.loader;
         let prepared = PreparedExecution::from_runtime_json(assignment, &json, *limits)?;
@@ -212,17 +212,13 @@ impl TaskExecution for V8Execution {
                 // The referenced bytes have landed. The frontier is complete,
                 // and expiry no longer justifies throwing it away.
                 Ok((execution, owed)) => {
-                    self.budget.check_authority()?;
                     // Held rather than returned, because `TaskExecution::wait`
                     // answers with the frontier alone: what the settlement owes
                     // is not part of the frontier and must not travel inside it.
                     *self.owed.borrow_mut() = owed;
                     return Ok(execution);
                 }
-                Err(error) => {
-                    self.budget.check_authority()?;
-                    return Err(error);
-                }
+                Err(error) => return Err(error),
             }
         }
     }

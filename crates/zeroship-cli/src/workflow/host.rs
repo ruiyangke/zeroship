@@ -19,7 +19,7 @@ use futures::{
     FutureExt,
 };
 use std::{
-    cell::{Cell, RefCell},
+    cell::Cell,
     collections::HashMap,
     rc::Rc,
     sync::{
@@ -29,7 +29,7 @@ use std::{
     time::Duration,
 };
 use zeroship_bundle::LoadedWorker;
-use zeroship_core::{app_id::AppId, workflow_coordination::AssignedScope, workflow_jobs::JobSpec};
+use zeroship_core::{app_id::AppId, workflow_jobs::JobSpec};
 use zeroship_runtime::{NativePlugin, RuntimeLimits};
 use zeroship_workflow::{
     deployment_holds::AssignedHolds,
@@ -43,8 +43,9 @@ use zeroship_workflow::{
     WorkflowServiceError,
 };
 use zeroship_workflow_runner::{
-    consumer::{ConsumerBindings, ConsumerScope, JobConsumer},
+    consumer::JobConsumer,
     delivery::JobTransport,
+    prepared::{CreatorFactory, CreatorRuntime, PreparedApps, PreparedOptions},
     ObjectStepOutputs, PayloadObjects, TaskExecutor, WorkerBinding,
 };
 use zeroship_workflow_v8::{AppRuntimeLoader, V8TaskExecutor};
@@ -102,8 +103,8 @@ pub struct Settings {
     pub limits: RuntimeLimits,
 }
 
-/// A host whose placement, deployment selection and recovery responsibility
-/// are established, ready to run its loops.
+/// A host whose deployment selection and recovery responsibility are
+/// established, ready to run its loops.
 pub struct Opened<T: JobTransport<Journal = AppWorkflows>> {
     pub api: AppWorkflows,
     pub backend: AppBackend,
@@ -118,20 +119,48 @@ pub struct Host<T: JobTransport<Journal = AppWorkflows>> {
     api: AppWorkflows,
     manager: ManagerClient,
     thread: ManagerThread,
-    consumer: JobConsumer<T>,
-    executor: Rc<dyn TaskExecutor>,
+    consumer: JobConsumer<T, LocalCreator>,
     objects: PayloadObjects,
     ingress: Rc<LocalIngress>,
-    placement: RefCell<Placement>,
+    app: AppId,
     sweeps: LocalSweeps,
     bounds: SweepBounds,
     wake: flume::Receiver<()>,
-    renew_every: Duration,
+    report_every: Duration,
 }
 
-struct Placement {
-    scope: AssignedScope,
-    binding: ConsumerScope<AppWorkflows>,
+#[derive(Clone)]
+struct LocalCreator {
+    app: AppId,
+    journal: AppWorkflows,
+    executor: Rc<dyn TaskExecutor>,
+}
+
+impl std::fmt::Debug for LocalCreator {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("LocalCreator").finish_non_exhaustive()
+    }
+}
+
+impl CreatorFactory for LocalCreator {
+    type Journal = AppWorkflows;
+
+    fn open<'a>(
+        &'a self,
+        app: &'a AppId,
+    ) -> LocalBoxFuture<'a, Result<CreatorRuntime<Self::Journal>, WorkflowServiceError>> {
+        async move {
+            if app != &self.app {
+                return Err(WorkflowServiceError::PermissionDenied);
+            }
+            Ok(CreatorRuntime {
+                app: self.journal.clone(),
+                executor: self.executor.clone(),
+                residency: Rc::new(()),
+            })
+        }
+        .boxed_local()
+    }
 }
 
 /// What one turn of the maintenance lane runs under.
@@ -177,14 +206,17 @@ pub async fn open<C: Composition>(
     } = settings;
     let store = storage.open().await?;
     schema::initialize_local(&store).await?;
+    let host_policy = AppPolicy::default();
+    let max_delivery_attempts = host_policy.max_delivery_attempts;
     let (manager, thread) = manager::spawn(
         deployment.platform().to_path_buf(),
+        app.clone(),
+        host_policy.clone(),
         config.manager_options(),
     )
     .await?;
     let policies = Arc::new(HostPolicies::default());
     let policy = policies.bind(app.clone())?;
-    let host_policy = AppPolicy::default();
     policy
         .begin_refresh()?
         .install(PolicySnapshot::configuration(
@@ -198,7 +230,6 @@ pub async fn open<C: Composition>(
             Rc::new(AssignedHolds::new(Rc::new(manager.journal_holds(&app)))),
         )?);
     let api = service.register_app(&policy).await?;
-    let scope = manager.place(&app).await?;
     let installed = deployment
         .load(&app, config.max_archive_bytes, config.max_source_bytes)
         .await?;
@@ -211,7 +242,6 @@ pub async fn open<C: Composition>(
     } else {
         manager.selected(&app).await?
     };
-    let delivery_ceiling = host_policy.max_delivery_attempts;
     let ingress = Rc::new(LocalIngress {
         manager: manager.clone(),
         app: app.clone(),
@@ -272,17 +302,27 @@ pub async fn open<C: Composition>(
         error_backoff: consumer_options.error_backoff,
     };
     let consumer = JobConsumer::new(
-        Rc::new(composition.transport(manager.transport(delivery_ceiling))),
+        Rc::new(composition.transport(manager.transport(api.clone()))),
         manager.worker().clone(),
+        Rc::new(PreparedApps::new(
+            LocalCreator {
+                app: app.clone(),
+                journal: api.clone(),
+                executor: executor.clone(),
+            },
+            // The local host serves its one configured app and nothing else, so
+            // that is the whole of its feed.
+            Rc::new({
+                let app = app.clone();
+                move |candidate: &AppId| candidate == &app
+            }),
+            PreparedOptions {
+                capacity: 1,
+                operation_timeout: consumer_options.delivery.operation_timeout,
+            },
+        )?),
         consumer_options,
     )?;
-    let binding = ConsumerScope::new(
-        api.clone(),
-        api.binding().clone(),
-        scope.clone(),
-        executor.clone(),
-    )?;
-    consumer.bindings().replace(vec![binding.clone()])?;
     // A previous process may have committed intents it never published.
     let _ = wake_sender.try_send(());
     Ok(Opened {
@@ -291,18 +331,17 @@ pub async fn open<C: Composition>(
         executable: installed.map(|installed| installed.executable.into_executable()),
         activation: activation.map(|activation| activation.job),
         host: Host {
-            sweeps: manager.sweeps(app, delivery_ceiling),
+            sweeps: manager.sweeps(app.clone(), max_delivery_attempts),
             api,
             manager,
             thread,
             consumer,
-            executor,
             objects,
             ingress,
-            placement: RefCell::new(Placement { scope, binding }),
+            app,
             bounds,
             wake,
-            renew_every: config.renew_interval(),
+            report_every: Duration::from_millis(config.manager.driver_interval_ms),
         },
     })
 }
@@ -312,8 +351,8 @@ const POLICY_REVISION: i64 = 1;
 
 /// Establishes the app's ingress epoch through the local manager. The host is
 /// its app's platform authority, so its configured policy decides admission
-/// where a remote worker would present a policy lease, and the epoch is
-/// installed into that same configured snapshot.
+/// where the workflow service observes Control's, and the epoch is installed
+/// into that same configured snapshot.
 pub struct LocalIngress {
     manager: ManagerClient,
     app: AppId,
@@ -417,7 +456,7 @@ pub async fn applied(
 }
 
 impl<T: JobTransport<Journal = AppWorkflows>> Host<T> {
-    /// Consume delivered jobs, renew placement and publish committed intents
+    /// Consume delivered jobs, report ingress and publish committed intents
     /// until `stop`. Returns after execution joins and the manager stops.
     pub async fn run_until(self, stop: impl std::future::Future<Output = ()>) {
         let Self {
@@ -425,70 +464,36 @@ impl<T: JobTransport<Journal = AppWorkflows>> Host<T> {
             manager,
             thread,
             mut consumer,
-            executor,
             objects,
             ingress,
-            placement,
+            app,
             sweeps,
             bounds,
             wake,
-            renew_every,
+            report_every,
         } = self;
         let stop = stop.boxed_local().shared();
-        let bindings = consumer.bindings();
         futures::join!(
             consumer.run_until(stop.clone()),
-            place(
-                &manager,
-                &api,
-                &executor,
-                &ingress,
-                &bindings,
-                &placement,
-                renew_every,
-                stop.clone()
-            ),
-            publish(&api, &manager, &placement, &wake, stop.clone()),
+            report_ingress(&ingress, report_every, stop.clone()),
+            publish(&api, &manager, &app, &wake, stop.clone()),
             sweep(
                 &api,
                 &manager,
                 &sweeps,
                 &objects,
-                &placement,
+                &app,
                 bounds,
                 stop.clone()
             ),
         );
-        // Executions have joined; nothing new may be placed on this process.
-        match compio::time::timeout(renew_every, manager.drain()).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                tracing::warn!(
-                    code = error.code(),
-                    "workflow worker could not report draining"
-                );
-            }
-            Err(_) => tracing::warn!("workflow worker draining report timed out"),
-        }
         // The manager finishes in-flight operations and its current pass.
         drop(thread);
     }
 }
 
-/// Keep this worker registered and the app placed on it, and report ingress
-/// activity with each renewal. A refused placement is replaced by the next
-/// revision; retired consumer bindings are rebuilt.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the loop owns placement, activity reporting and consumer bindings together"
-)]
-async fn place(
-    manager: &ManagerClient,
-    api: &AppWorkflows,
-    executor: &Rc<dyn TaskExecutor>,
+async fn report_ingress(
     ingress: &LocalIngress,
-    bindings: &ConsumerBindings<AppWorkflows>,
-    placement: &RefCell<Placement>,
     every: Duration,
     stop: Stop<'_>,
 ) {
@@ -502,54 +507,6 @@ async fn place(
         if stopped(stop.clone(), ingress.report()).await.is_none() {
             return;
         }
-        let (scope, retired) = {
-            let current = placement.borrow();
-            (current.scope.clone(), current.binding.is_retired())
-        };
-        let next = match stopped(stop.clone(), manager.renew(&scope)).await {
-            None => return,
-            Some(Ok(())) if !retired => continue,
-            Some(Ok(())) => scope,
-            Some(Err(
-                WorkflowServiceError::PermissionDenied | WorkflowServiceError::Conflict(_),
-            )) => match stopped(stop.clone(), manager.replace(&scope)).await {
-                None => return,
-                Some(Ok(next)) => next,
-                Some(Err(error)) => {
-                    tracing::warn!(code = error.code(), "workflow placement not replaced");
-                    continue;
-                }
-            },
-            Some(Err(error)) => {
-                tracing::warn!(code = error.code(), "workflow placement not renewed");
-                continue;
-            }
-        };
-        let installed =
-            ConsumerScope::new(
-                api.clone(),
-                api.binding().clone(),
-                next.clone(),
-                executor.clone(),
-            )
-            .and_then(|binding| {
-                bindings.replace(vec![binding.clone()])?;
-                Ok(binding)
-            });
-        match installed {
-            Ok(binding) => {
-                *placement.borrow_mut() = Placement {
-                    scope: next,
-                    binding,
-                };
-            }
-            Err(error) => {
-                tracing::warn!(
-                    code = error.code(),
-                    "workflow consumer binding not replaced"
-                );
-            }
-        }
     }
 }
 
@@ -558,13 +515,13 @@ async fn place(
 async fn publish(
     api: &AppWorkflows,
     manager: &ManagerClient,
-    placement: &RefCell<Placement>,
+    app: &AppId,
     wake: &flume::Receiver<()>,
     stop: Stop<'_>,
 ) {
     while stopped(stop.clone(), wake.recv_async()).await == Some(Ok(())) {
         while wake.try_recv().is_ok() {}
-        let publisher = manager.publisher(placement.borrow().scope.clone());
+        let publisher = manager.publisher(app);
         match stopped(stop.clone(), api.publish_pending_jobs(&publisher)).await {
             None => return,
             Some(Ok(())) => {}
@@ -580,7 +537,7 @@ async fn publish(
 
 /// Claim, run and settle this host's journal maintenance rows until `stop`.
 ///
-/// The consumer beside this loop claims as `Claimant::Placed`, which admits only
+/// The consumer beside this loop claims as `Claimant::Worker`, which admits only
 /// the operation that executes creator code, so every sweep the journal needs
 /// arrives here instead. This is the local host's counterpart of the workflow
 /// service's maintenance driver: the same authority, the same dispatch, and the
@@ -594,14 +551,14 @@ async fn sweep(
     manager: &ManagerClient,
     sweeps: &LocalSweeps,
     objects: &PayloadObjects,
-    placement: &RefCell<Placement>,
+    app: &AppId,
     bounds: SweepBounds,
     stop: Stop<'_>,
 ) {
     loop {
         let delay = match stopped(
             stop.clone(),
-            swept(api, manager, sweeps, objects, placement, bounds),
+            swept(api, manager, sweeps, objects, app, bounds),
         )
         .await
         {
@@ -630,16 +587,13 @@ async fn swept(
     manager: &ManagerClient,
     sweeps: &LocalSweeps,
     objects: &PayloadObjects,
-    placement: &RefCell<Placement>,
+    app: &AppId,
     bounds: SweepBounds,
 ) -> Result<bool, WorkflowServiceError> {
     let Some(grant) = bounded(bounds.operation_timeout, sweeps.claim()).await? else {
         return Ok(false);
     };
-    // The publication seam the reconciliation sweep needs. It is the host's own
-    // placement publisher, because the intents that sweep republishes are the
-    // creator intents this process publishes from the same outbox.
-    let publisher = manager.publisher(placement.borrow().scope.clone());
+    let publisher = manager.publisher(app);
     let receipt = match bounded(
         bounds.execution_timeout,
         api.maintenance_job(&grant, &publisher, objects, objects, bounds.maintenance),

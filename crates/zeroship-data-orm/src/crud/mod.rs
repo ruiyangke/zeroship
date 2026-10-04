@@ -1276,6 +1276,69 @@ pub async fn run_upsert(
     }
 }
 
+/// Insert a document, ignoring an existing row at the conflict target.
+///
+/// The statement is `INSERT ... ON CONFLICT (target) DO NOTHING`, so two
+/// concurrent inserts of the same identity both succeed and the winner's row is
+/// left untouched. The caller reads the row back to learn which it got.
+pub async fn run_insert_on_conflict(
+    binding: DbBinding,
+    coll: String,
+    route: crate::tx_route::TxRoute,
+    doc: Value,
+    conflict_fields: Value,
+    actor_id: Option<String>,
+) -> Result<read_pipeline::ApplyResult, DbError> {
+    let schema = crate::descriptor::collection_schema(&binding, &coll)?;
+    route
+        .sql_registration()
+        .check(&upsert::requirements(&schema, false))
+        .map_err(mapping::QueryError::from)?;
+    let mut doc = doc;
+    write_pipeline::apply(
+        route.backend().key_store(),
+        &route,
+        &binding,
+        &coll,
+        &mut doc,
+        write_pipeline::ApplyMode::Insert {
+            actor_id: actor_id.as_deref(),
+        },
+    )
+    .await?;
+    let assignments = AssignmentPlan::from_schema(&schema).write_assignments(
+        &schema,
+        actor_id.as_deref(),
+        false,
+        false,
+    );
+    let bq = upsert::Builder::new(
+        binding.schema(),
+        &coll,
+        &schema,
+        &assignments,
+        route.sql_registration(),
+    )
+    .build_do_nothing(doc, &conflict_fields)
+    .map_err(DbError::from)?;
+    let rows = exec_mutation_with_emit(
+        bq,
+        &route,
+        &coll,
+        zeroship_data_orm::cdc::ChangeOp::Insert,
+        &binding,
+    )
+    .await?;
+    read_pipeline::apply(
+        &route,
+        &binding,
+        &coll,
+        rows,
+        read_pipeline::ApplyOptions::default(),
+    )
+    .await
+}
+
 // ---------------------------------------------------------------------------
 // search - vector entry point
 // ---------------------------------------------------------------------------

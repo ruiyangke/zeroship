@@ -19,6 +19,7 @@
 //! spent.
 
 use super::publication::{Manager, Publisher};
+use super::queue_owner::{Owner, QueueCalls};
 use crate::service::{
     delivery::{DeliveredTask, JobAcceptance},
     AppWorkflows, TaskAssignment, WorkerIdentity,
@@ -26,30 +27,22 @@ use crate::service::{
 use crate::WorkflowServiceError;
 use zeroship_core::{
     app_id::AppId,
-    workflow_coordination::{Assignment, WorkerId},
     workflow_jobs::JobSpec,
 };
 use zeroship_workflow_manager::DeliveryGrant;
 
-/// One worker holding a placement on this app, claiming through its manager.
+/// One worker acting on this app, claiming through its manager.
 pub(in crate::service) struct Worker {
     manager: Manager,
-    owner: Assignment,
+    owner: Owner,
 }
 
 impl Worker {
-    /// Register a worker against `app` with a placement that outlasts a case.
+    /// A fresh worker acting on `app` through its own manager queue.
     pub(in crate::service) async fn new(app: &AppId) -> Self {
         Self {
             manager: Manager::new(app).await,
-            owner: Assignment {
-                app_id: app.clone(),
-                worker_id: WorkerId::mint(),
-                revision: 1.try_into().unwrap(),
-                expires_at: (chrono::Utc::now().timestamp_millis() + 120_000)
-                    .try_into()
-                    .unwrap(),
-            },
+            owner: Owner::new(app),
         }
     }
 
@@ -76,7 +69,7 @@ impl Worker {
             .claim(&self.owner)
             .await
             .unwrap()
-            .expect("a published or redelivered job is claimable by this placement");
+            .expect("a published or redelivered job is claimable by this worker");
         let task = match scope.accept_job(&grant).await.unwrap() {
             JobAcceptance::Execute(task) => *task,
             other => panic!("expected execution, got {other:?}"),

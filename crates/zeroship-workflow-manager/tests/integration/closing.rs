@@ -12,21 +12,17 @@ use std::{
     cell::RefCell,
     collections::BTreeSet,
     future::Future,
-    num::NonZeroU32,
     pin::Pin,
     rc::Rc,
-    time::{Duration, Instant},
+    time::Duration,
 };
-use crate::support::{Backend, Fixture};
+use crate::support::{Backend, Fixture, Owner, QueueCalls};
 use zeroship_core::{
     app_id::AppId,
-    workflow_coordination::{
-        AssignedScope, RegisterWorker, Revision, RunId, WorkerId, WorkerState,
-    },
+    workflow_coordination::{Revision, RunId, WorkerId},
     workflow_jobs::{
         BroadcastId, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
     },
-    workflow_policy::{AppPolicy, EstablishIngress, PolicyLeaseRequest},
     workflow_schedules::DisableSchedules,
 };
 use zeroship_data_orm::{
@@ -34,14 +30,12 @@ use zeroship_data_orm::{
     value, Value,
 };
 use zeroship_workflow_manager::{
-    coordinator::{self, Coordinator, Placed},
     driver,
     lifecycle::AppLifecycle,
     maintenance::MaintenanceAuthority,
-    policy::{PolicyObservation, PolicySource},
     recovery::{self, Closing, DutyKind, Recovery, Responsibility, ScopeState},
     scheduling::{self, Scheduler},
-    DeliveryGrant, Error, Queue,
+    Claimant, DeliveryGrant, Error, Queue,
 };
 
 macro_rules! case {
@@ -88,7 +82,6 @@ case!(
     driver_lane
 );
 
-const KEY: &str = "verified-enrolled-key";
 const HOUR: Duration = Duration::from_secs(3600);
 const TICK: Duration = Duration::from_millis(1);
 
@@ -113,34 +106,16 @@ const fn options(
     }
 }
 
-#[derive(Debug)]
-struct Source(PolicyObservation);
-
-impl PolicySource for Source {
-    fn observe<'a>(
-        &'a self,
-        _: &'a AppId,
-    ) -> Pin<Box<dyn Future<Output = Result<PolicyObservation, Error>> + 'a>> {
-        Box::pin(ready(Ok(self.0.clone())))
-    }
-
-    fn revalidate(&self, observation: &PolicyObservation) -> Result<Instant, Error> {
-        Ok(observation.expires_at())
-    }
-}
-
 struct Host {
     queue: Queue,
-    coordinator: Coordinator,
     app: AppId,
     worker: WorkerId,
-    scope: AssignedScope,
     /// The lane of the process that owns this queue. A Close is a sweep, so it
-    /// is delivered to the lane and never to the placed worker.
+    /// is delivered to the lane and never to the pulling worker.
     lane: MaintenanceAuthority,
 }
 
-/// An activated scope at ingress epoch one, placed on one ready worker.
+/// An activated scope at ingress epoch one, with one enrolled worker.
 async fn host(fixture: &Fixture) -> Host {
     let queue = Queue::connect(
         fixture.binding(),
@@ -150,35 +125,16 @@ async fn host(fixture: &Fixture) -> Host {
     )
     .await
     .unwrap();
-    let coordinator = support::coordinator(&queue, coordinator::Options::default());
     let app = AppId::mint();
     let worker = WorkerId::mint();
-    coordinator
-        .register(
-            &worker,
-            &RegisterWorker {
-                capacity: NonZeroU32::new(4).unwrap(),
-                state: WorkerState::Ready,
-            },
-        )
-        .await
-        .unwrap();
-    let Placed::Assigned(assignment) = coordinator.place(&app).await.unwrap() else {
-        panic!("the app has one eligible worker");
-    };
     let host = Host {
         lane: MaintenanceAuthority::new(app.clone(), WorkerId::mint()),
         queue,
-        coordinator,
         app,
         worker,
-        scope: AssignedScope {
-            app_id: assignment.app_id,
-            assignment_revision: assignment.revision,
-        },
     };
     host.recovery(options(HOUR, HOUR, HOUR, HOUR))
-        .ensure(&host.app, &DeploymentId::mint(), revision(1))
+        .ensure(&host.app, &zeroship_core::ZoneId::default_zone(), &DeploymentId::mint(), revision(1))
         .await
         .unwrap();
     host
@@ -198,18 +154,25 @@ impl Host {
     }
 
     async fn claim(&self) -> Option<DeliveryGrant> {
-        self.coordinator
-            .claim_job(&self.worker, &self.scope, Ok(support::delivery_ceiling()), || ready(Ok(self.worker.clone())))
+        let worker = self.worker.clone();
+        self.queue
+            .claim_authorized(
+                &self.app,
+                &self.worker,
+                Claimant::Worker,
+                Ok(support::delivery_ceiling()),
+                |_| ready(Ok(worker.clone())),
+            )
             .await
             .unwrap()
     }
 
     async fn settle(&self, grant: &DeliveryGrant, outcome: JobOutcome) {
-        self.coordinator
-            .settle_job(
-                &self.worker,
+        let owner = Owner::new(self.app.clone(), self.worker.clone());
+        self.queue
+            .settle(
+                &owner,
                 &support::settlement_from(grant.delivery().clone(), outcome),
-                || ready(Ok(self.worker.clone())),
             )
             .await
             .unwrap();
@@ -238,29 +201,25 @@ impl Host {
         self.queue.submit(job).await
     }
 
-    async fn lease(&self, establish: Option<EstablishIngress>) -> Result<Option<Revision>, Error> {
-        let source = Source(
-            PolicyObservation::new(
-                self.app.clone(),
-                revision(1),
-                AppPolicy::default(),
-                zeroship_core::ZoneId::default_zone(),
-                false,
-                Instant::now() + HOUR,
-            )
-            .unwrap(),
-        );
-        let request = PolicyLeaseRequest {
-            scope: self.scope.clone(),
-            establish,
-            ingress_used: false,
-        };
-        self.coordinator
-            .policy_lease(&self.worker, KEY, &request, &source, || {
-                ready(Ok(self.worker.clone()))
-            })
-            .await
-            .map(|grant| grant.ingress_epoch())
+    /// Establish the scope through its responsibility, the service's own door.
+    /// `None` observes the current epoch; `Some(after)` requests an
+    /// establishment above `after`, and `Some(None)` establishes from scratch.
+    async fn lease(&self, establish: Option<Option<i64>>) -> Result<Option<Revision>, Error> {
+        let recovery = self.recovery(options(HOUR, HOUR, HOUR, HOUR));
+        match establish {
+            Some(after) => {
+                let after = after.and_then(|after| (after > 0).then(|| revision(after)));
+                recovery.establish(&self.app, after, true).await.map(Some)
+            }
+            None => match recovery.responsibility(&self.app).await? {
+                Some(state)
+                    if matches!(state.state, ScopeState::Open | ScopeState::Closing) =>
+                {
+                    Ok(Some(state.ingress_epoch))
+                }
+                _ => Ok(None),
+            },
+        }
     }
 }
 
@@ -276,7 +235,7 @@ fn fanout(app: &AppId, available_at: i64) -> JobSpec {
     }
 }
 
-/// Creator work, which a placed worker is the only claimant of.
+/// Creator work, which a worker of the app's zone is the only claimant of.
 fn advance(app: &AppId, available_at: i64) -> JobSpec {
     JobSpec {
         id: JobId::mint(),
@@ -414,6 +373,7 @@ async fn archived(fixture: &Fixture) {
         .unwrap()
         .disable(&DisableSchedules {
             app_id: host.app.clone(),
+                execution_zone_id: zeroship_core::ZoneId::default_zone(),
             revision: revision(2),
         })
         .await
@@ -451,9 +411,7 @@ async fn pacing(fixture: &Fixture) {
 
     // Establishment reopens at the next epoch and clears the pacing.
     assert_eq!(
-        host.lease(Some(EstablishIngress {
-            after: Some(revision(1))
-        }))
+        host.lease(Some(Some(1)))
         .await,
         Ok(Some(revision(2)))
     );
@@ -522,16 +480,50 @@ async fn deferred(fixture: &Fixture) {
     assert_eq!(host.state().await.state, ScopeState::Retired);
 }
 
-/// Abandonment deletes the duties and cancels an attempt. Nothing reopens an
-/// abandoned scope: not establishment, activation, a worker publication or an
-/// intent-producing claim, and its cancelled Close settles without effect.
+/// Abandonment deletes the duties, cancels an attempt and settles the deleted
+/// app's unsettled creator work `Rejected`, leased or not, while maintenance
+/// kinds stay unsettled for their lane. Nothing reopens an abandoned scope: not
+/// establishment, activation or a worker publication, and its cancelled Close
+/// settles without effect.
 async fn abandonment(fixture: &Fixture) {
     let host = host(fixture).await;
     let recovery = host.recovery(options(TICK, HOUR, HOUR, HOUR));
+    let held = advance(&host.app, 0);
+    host.publish(&held).await.unwrap();
     let timer = advance(&host.app, 0);
     host.publish(&timer).await.unwrap();
+    let sweep = fanout(&host.app, FUTURE);
+    host.publish(&sweep).await.unwrap();
     let close = recovery.begin_close(&host.app).await.unwrap().unwrap();
+    let leased = host.claim().await.expect("a closing scope still delivers its creator work");
+    assert_eq!(leased.delivery().job, held);
     assert!(recovery.abandon(&host.app).await.unwrap());
+    let rejected = serde_json::to_string(&JobOutcome::Rejected {}).unwrap();
+    for job in [&held, &timer] {
+        let row = rows(fixture, "jobs", value!({"id":job.id.as_str()})).await;
+        assert_eq!(
+            (row[0]["state"].clone(), row[0]["outcome"].clone()),
+            (value!("settled"), value!(rejected.clone())),
+            "a deleted app's creator work never delivers, so abandonment settles it"
+        );
+    }
+    let row = rows(fixture, "jobs", value!({"id":sweep.id.as_str()})).await;
+    assert_eq!(
+        row[0]["state"],
+        value!("ready"),
+        "a maintenance kind stays with its lane"
+    );
+    let owner = Owner::new(host.app.clone(), host.worker.clone());
+    assert_eq!(
+        host.queue
+            .settle(
+                &owner,
+                &support::settlement_from(leased.delivery().clone(), JobOutcome::Completed {}),
+            )
+            .await,
+        Err(Error::Conflict),
+        "the holder of a settled row cannot settle it again with its own outcome"
+    );
     assert!(
         !recovery.abandon(&host.app).await.unwrap(),
         "abandonment is idempotent"
@@ -543,15 +535,13 @@ async fn abandonment(fixture: &Fixture) {
     assert_eq!(duties(fixture, &host.app).await, 0);
 
     assert_eq!(
-        host.lease(Some(EstablishIngress { after: None })).await,
+        host.lease(Some(None)).await,
         Err(Error::Denied)
     );
     // Abandonment answers before the epoch bound is judged, so a host naming an
     // epoch above the last one is refused rather than told to retry lower.
     assert_eq!(
-        host.lease(Some(EstablishIngress {
-            after: Some(revision(2))
-        }))
+        host.lease(Some(Some(2)))
         .await,
         Err(Error::Denied)
     );
@@ -562,15 +552,16 @@ async fn abandonment(fixture: &Fixture) {
     );
     assert_eq!(
         recovery
-            .ensure(&host.app, &DeploymentId::mint(), revision(2))
+            .ensure(&host.app, &zeroship_core::ZoneId::default_zone(), &DeploymentId::mint(), revision(2))
             .await,
         Err(Error::Denied)
     );
     host.publish(&fanout(&host.app, FUTURE)).await.unwrap();
     recovery.note_ingress(&host.app).await.unwrap();
-    let grant = host.claim().await.unwrap();
-    assert_eq!(grant.delivery().job, timer);
-    host.settle(&grant, JobOutcome::Completed {}).await;
+    assert!(
+        host.claim().await.is_none(),
+        "abandonment left no creator work to claim"
+    );
     host.settle_close(&close, true).await;
     assert_eq!(host.state().await, abandoned);
     assert_eq!(duties(fixture, &host.app).await, 0);

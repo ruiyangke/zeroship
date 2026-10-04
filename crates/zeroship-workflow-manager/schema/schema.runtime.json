@@ -1,169 +1,6 @@
 {
   "version": 2,
   "collections": {
-    "assignments": {
-      "fields": {
-        "id": {
-          "type": "string",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "id"
-          },
-          "primaryKey": true
-        },
-        "app_id": {
-          "type": "string",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "app_id"
-          }
-        },
-        "worker_id": {
-          "type": "string",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "worker_id"
-          }
-        },
-        "revision": {
-          "type": "bigInt",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "revision"
-          }
-        },
-        "expires_at": {
-          "type": "bigInt",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "expires_at"
-          }
-        },
-        "released": {
-          "type": "boolean",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "released"
-          }
-        },
-        "refused": {
-          "type": "boolean",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "refused"
-          }
-        }
-      },
-      "options": {
-        "softDelete": false,
-        "versioning": false,
-        "strictness": "strict"
-      },
-      "indexes": [
-        {
-          "name": "assignments_scope_key",
-          "fields": [
-            "app_id",
-            "worker_id"
-          ],
-          "unique": true
-        },
-        {
-          "name": "assignments_worker_idx",
-          "fields": [
-            "worker_id",
-            "app_id"
-          ]
-        },
-        {
-          "name": "assignments_expiry_idx",
-          "fields": [
-            "expires_at",
-            "app_id"
-          ]
-        }
-      ]
-    },
-    "capacity_demands": {
-      "fields": {
-        "id": {
-          "type": "string",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "id"
-          },
-          "primaryKey": true
-        },
-        "execution_zone_id": {
-          "type": "string",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "execution_zone_id"
-          }
-        },
-        "recorded_at": {
-          "type": "bigInt",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "recorded_at"
-          }
-        }
-      },
-      "options": {
-        "softDelete": false,
-        "versioning": false,
-        "strictness": "strict"
-      },
-      "indexes": [
-        {
-          "name": "capacity_demands_zone_idx",
-          "fields": [
-            "execution_zone_id",
-            "id"
-          ]
-        }
-      ]
-    },
     "capacity_targets": {
       "fields": {
         "id": {
@@ -224,14 +61,62 @@
             "valueColumn": "refusal"
           }
         },
-        "observed": {
+        "backlog_depth": {
+          "type": "bigInt",
+          "required": true,
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "backlog_depth"
+          }
+        },
+        "oldest_available_at": {
           "type": "bigInt",
           "readable": true,
           "filterable": true,
           "sortable": true,
           "projectable": true,
           "storage": {
-            "valueColumn": "observed"
+            "valueColumn": "oldest_available_at"
+          }
+        },
+        "exhausted_jobs": {
+          "type": "bigInt",
+          "required": true,
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "exhausted_jobs"
+          }
+        },
+        "backed_off_jobs": {
+          "type": "bigInt",
+          "required": true,
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "backed_off_jobs"
+          }
+        },
+        "withheld_jobs": {
+          "type": "bigInt",
+          "required": true,
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "withheld_jobs"
           }
         },
         "attempt": {
@@ -616,16 +501,6 @@
             "valueColumn": "worker_id"
           }
         },
-        "assignment_revision": {
-          "type": "bigInt",
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "assignment_revision"
-          }
-        },
         "lease_deadline": {
           "type": "bigInt",
           "readable": true,
@@ -634,6 +509,38 @@
           "projectable": true,
           "storage": {
             "valueColumn": "lease_deadline"
+          }
+        },
+        "leased_at": {
+          "type": "bigInt",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "leased_at"
+          }
+        },
+        "deferred_until": {
+          "type": "bigInt",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deferred_until"
+          }
+        },
+        "deferrals": {
+          "type": "bigInt",
+          "required": true,
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deferrals"
           }
         },
         "outcome": {
@@ -985,123 +892,6 @@
         }
       ]
     },
-    "placement_receipts": {
-      "fields": {
-        "id": {
-          "type": "string",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "id"
-          },
-          "primaryKey": true
-        },
-        "app_id": {
-          "type": "string",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "app_id"
-          }
-        },
-        "request_id": {
-          "type": "string",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "request_id"
-          }
-        },
-        "operation": {
-          "type": "string",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "operation"
-          }
-        },
-        "worker_id": {
-          "type": "string",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "worker_id"
-          }
-        },
-        "expected_revision": {
-          "type": "bigInt",
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "expected_revision"
-          }
-        },
-        "reason": {
-          "type": "string",
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "reason"
-          }
-        },
-        "result_revision": {
-          "type": "bigInt",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "result_revision"
-          }
-        },
-        "result_expires_at": {
-          "type": "bigInt",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "result_expires_at"
-          }
-        }
-      },
-      "options": {
-        "softDelete": false,
-        "versioning": false,
-        "strictness": "strict"
-      },
-      "indexes": [
-        {
-          "name": "placement_receipts_scope_key",
-          "fields": [
-            "app_id",
-            "request_id"
-          ],
-          "unique": true
-        }
-      ]
-    },
     "queue_scopes": {
       "fields": {
         "id": {
@@ -1115,6 +905,17 @@
             "valueColumn": "id"
           },
           "primaryKey": true
+        },
+        "execution_zone_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "execution_zone_id"
+          }
         },
         "lock_version": {
           "type": "bigInt",
@@ -1146,7 +947,15 @@
         "versioning": false,
         "strictness": "strict"
       },
-      "indexes": []
+      "indexes": [
+        {
+          "name": "queue_scopes_zone_idx",
+          "fields": [
+            "execution_zone_id",
+            "id"
+          ]
+        }
+      ]
     },
     "recovery_duties": {
       "fields": {
@@ -1932,96 +1741,6 @@
         "strictness": "strict"
       },
       "indexes": []
-    },
-    "workers": {
-      "fields": {
-        "id": {
-          "type": "string",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "id"
-          },
-          "primaryKey": true
-        },
-        "capacity": {
-          "type": "bigInt",
-          "required": true,
-          "default": 1,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "capacity"
-          }
-        },
-        "state": {
-          "type": "string",
-          "required": true,
-          "default": "ready",
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "state"
-          }
-        },
-        "expires_at": {
-          "type": "bigInt",
-          "required": true,
-          "default": 0,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "expires_at"
-          }
-        },
-        "lock_version": {
-          "type": "bigInt",
-          "required": true,
-          "default": 0,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "lock_version"
-          }
-        },
-        "execution_zone_id": {
-          "type": "string",
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "execution_zone_id"
-          }
-        }
-      },
-      "options": {
-        "softDelete": false,
-        "versioning": false,
-        "strictness": "strict"
-      },
-      "indexes": [
-        {
-          "name": "workers_zone_idx",
-          "fields": [
-            "execution_zone_id",
-            "state",
-            "expires_at",
-            "id"
-          ]
-        }
-      ]
     }
   }
 }

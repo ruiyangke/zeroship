@@ -47,7 +47,16 @@ impl<'a> Builder<'a> {
         conflict: &Value,
         expected_id: Option<Value>,
     ) -> Result<CompiledQuery, QueryError> {
-        let statement = resolve(self, document, conflict, expected_id)?;
+        let statement = resolve(self, document, conflict, expected_id, false)?;
+        self.registration.compile(statement).map_err(Into::into)
+    }
+
+    pub(crate) fn build_do_nothing(
+        &self,
+        document: Value,
+        conflict: &Value,
+    ) -> Result<CompiledQuery, QueryError> {
+        let statement = resolve(self, document, conflict, None, true)?;
         self.registration.compile(statement).map_err(Into::into)
     }
 }
@@ -78,6 +87,7 @@ fn resolve(
     document: Value,
     conflict: &Value,
     expected_id: Option<Value>,
+    do_nothing: bool,
 ) -> Result<Statement, QueryError> {
     let Builder {
         namespace,
@@ -122,7 +132,8 @@ fn resolve(
             .get(&name)
             .ok_or_else(|| invalid("input column is not declared by the descriptor"))?;
         let column = table.column(&input.column)?;
-        if !input.insert_only
+        if !do_nothing
+            && !input.insert_only
             && !targets.contains(input.column.as_str())
             && !assigned.contains(input.column.as_str())
         {
@@ -136,27 +147,29 @@ fn resolve(
             value: expression(input.storage, value, registration)?,
         });
     }
-    for assignment in &assignments.columns {
-        let column = table.column(&assignment.column)?;
-        let value = match &assignment.value {
-            AssignedValue::CurrentTimestamp => Expression::CurrentTimestamp,
-            AssignedValue::Increment(step) => Expression::Increment {
+    if !do_nothing {
+        for assignment in &assignments.columns {
+            let column = table.column(&assignment.column)?;
+            let value = match &assignment.value {
+                AssignedValue::CurrentTimestamp => Expression::CurrentTimestamp,
+                AssignedValue::Increment(step) => Expression::Increment {
+                    column: column.clone(),
+                    step: *step,
+                },
+                AssignedValue::Bound(value) => {
+                    expression(column.storage(), value.clone(), registration)?
+                }
+            };
+            update.push(Assignment { column, value });
+        }
+        // Preserve returning rows and trigger behavior when no input field changes.
+        if update.is_empty() {
+            let column = conflict.first().expect("validated conflict target").clone();
+            update.push(Assignment {
                 column: column.clone(),
-                step: *step,
-            },
-            AssignedValue::Bound(value) => {
-                expression(column.storage(), value.clone(), registration)?
-            }
-        };
-        update.push(Assignment { column, value });
-    }
-    // Preserve returning rows and trigger behavior when no input field changes.
-    if update.is_empty() {
-        let column = conflict.first().expect("validated conflict target").clone();
-        update.push(Assignment {
-            column: column.clone(),
-            value: Expression::Incoming(column),
-        });
+                value: Expression::Incoming(column),
+            });
+        }
     }
     let condition = expected_id
         .map(|value| {
@@ -178,6 +191,7 @@ fn resolve(
         condition,
         returning,
         insert_generated_identity,
+        do_nothing,
     })?))
 }
 

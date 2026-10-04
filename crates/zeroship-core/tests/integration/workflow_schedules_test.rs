@@ -5,6 +5,7 @@ use zeroship_core::{
     app_id::AppId,
     workflow_coordination::RunId,
     workflow_jobs::{DeploymentId, JobId},
+    zone_id::ZoneId,
     workflow_schedules::{
         ActivateSchedules, RegisterSchedules, ScheduleCatchUp, ScheduleDescriptor, ScheduleId,
         ScheduleOverlap, ScheduleTiming,
@@ -77,6 +78,7 @@ fn descriptors() -> Vec<(ScheduleDescriptor, Value)> {
 fn registration(schedules: Vec<ScheduleDescriptor>) -> RegisterSchedules {
     RegisterSchedules {
         app_id: AppId::mint(),
+        execution_zone_id: ZoneId::default_zone(),
         deployment_id: DeploymentId::mint(),
         schedules,
     }
@@ -99,18 +101,21 @@ fn schedule_registration_and_activation_preserve_explicit_metadata_identity() {
     assert_eq!(
         round_trip(&request),
         json!({
-            "appId":request.app_id,"deploymentId":request.deployment_id,
+            "appId":request.app_id,"executionZoneId":request.execution_zone_id,
+            "deploymentId":request.deployment_id,
             "schedules":expected,
         })
     );
     let activation = ActivateSchedules {
         app_id: request.app_id.clone(),
+        execution_zone_id: request.execution_zone_id.clone(),
         deployment_id: request.deployment_id.clone(),
         revision: 7.try_into().unwrap(),
     };
     assert_eq!(
         round_trip(&activation),
-        json!({"appId":request.app_id,"deploymentId":request.deployment_id,"revision":7})
+        json!({"appId":request.app_id,"executionZoneId":request.execution_zone_id,
+            "deploymentId":request.deployment_id,"revision":7})
     );
     round_trip(&RegisterSchedules {
         schedules: Vec::new(),
@@ -180,6 +185,7 @@ fn scheduling_messages_reject_customer_data_at_every_nested_boundary() {
     }
     let activation = ActivateSchedules {
         app_id: AppId::mint(),
+        execution_zone_id: ZoneId::default_zone(),
         deployment_id: DeploymentId::mint(),
         revision: 1.try_into().unwrap(),
     };
@@ -201,7 +207,7 @@ fn scheduling_messages_reject_customer_data_at_every_nested_boundary() {
 #[test]
 fn scheduling_envelopes_require_native_identities_and_activation_revisions() {
     let wire = round_trip(&registration(Vec::new()));
-    for field in ["appId", "deploymentId", "schedules"] {
+    for field in ["appId", "executionZoneId", "deploymentId", "schedules"] {
         let mut missing = wire.clone();
         missing.as_object_mut().unwrap().remove(field);
         refuses::<RegisterSchedules>(missing);
@@ -231,11 +237,12 @@ fn scheduling_envelopes_require_native_identities_and_activation_revisions() {
     }
     let activation = ActivateSchedules {
         app_id: AppId::mint(),
+        execution_zone_id: ZoneId::default_zone(),
         deployment_id: DeploymentId::mint(),
         revision: 1.try_into().unwrap(),
     };
     let wire = round_trip(&activation);
-    for field in ["appId", "deploymentId", "revision"] {
+    for field in ["appId", "executionZoneId", "deploymentId", "revision"] {
         let mut missing = wire.clone();
         missing.as_object_mut().unwrap().remove(field);
         refuses::<ActivateSchedules>(missing);

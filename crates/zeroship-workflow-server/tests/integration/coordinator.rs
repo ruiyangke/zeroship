@@ -6,9 +6,9 @@
 use compio_postgres::{Client, NoTls};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    num::{NonZeroU32, NonZeroUsize},
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     rc::Rc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use zeroship_core::{
     app_id::AppId,
@@ -16,32 +16,35 @@ use zeroship_core::{
     typed_id,
     workflow_coordination::*,
     workflow_jobs::{
-        JobOperation, JobOutcome, JobReceipt, JournalSettlement, ManagementCommand,
+        ClaimJobs, Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobReceipt, JobSpec,
+        JournalSettlement, ManagementCommand,
     },
     workflow_policy::AppPolicy,
+    ZoneId,
 };
 use zeroship_workflow::WorkflowServiceError;
 use zeroship_workflow_manager::{
     app_facts::{AppFactsFuture, AppFactsSource},
-    coordinator::Placed,
+    coordinator::{Admission, ZoneClaim},
     maintenance::MaintenanceAuthority,
     policy::control::PolicyObservations,
     recovery::Options as RecoveryOptions,
-    Error,
+    DeliveryGrant, Error,
 };
 use zeroship_workflow_server::{
-    coordinator::{connect_eligibility, Coordinator, Error as HostError, Options, SCHEMA_SQL},
+    coordinator::{Coordinator, Error as HostError, Options, SCHEMA_SQL},
     runs::RunService,
     server::connect_policies,
 };
 
 type StoredIds = BTreeMap<(String, String, String), String>;
 
-use crate::support::{holds, platform, zone};
+use crate::support::{holds, platform, policies::GrantedPolicies};
 
 struct Fixture {
     platform: platform::Platform,
     admin: Client,
+    admin_url: String,
     runtime_url: String,
 }
 impl Fixture {
@@ -50,7 +53,9 @@ impl Fixture {
         let admin = connect(platform.admin_url.as_str()).await;
         // The clone carries the migrated platform schema. This fixture's
         // subject is the coordinator's own generated schema, so it replaces
-        // those schemas before installing it.
+        // those schemas before installing it. The manager's deployment catalog
+        // lives in `zeroship`, and nothing the coordinator reads does, so the
+        // schema exists and the coordinator holds no grant on it.
         admin
             .batch_execute(
                 "DROP SCHEMA IF EXISTS workflow_manager CASCADE;
@@ -58,7 +63,6 @@ impl Fixture {
              DROP SCHEMA IF EXISTS customer CASCADE;
              CREATE SCHEMA workflow_manager;
              CREATE SCHEMA zeroship;
-             CREATE TABLE zeroship.apps(id text PRIMARY KEY,execution_zone_id text,deleted_at timestamptz);
              CREATE SCHEMA customer;
              CREATE TABLE customer.__zeroship_workflow_history(id text PRIMARY KEY,secret text);
              REVOKE ALL ON SCHEMA customer FROM PUBLIC;",
@@ -84,9 +88,11 @@ impl Fixture {
             .unwrap();
         grant_runtime(&admin, "coordinator_test").await;
         let runtime_url = platform.role_url("coordinator_test").to_string();
+        let admin_url = platform.admin_url.to_string();
         Self {
             platform,
             admin,
+            admin_url,
             runtime_url,
         }
     }
@@ -113,21 +119,18 @@ impl Fixture {
         self.options(Options::default()).await
     }
     async fn connect_as(&self, url: &str, options: Options) -> Coordinator {
-        Coordinator::connect(url, options, holds::client(), zone::trusted())
+        Coordinator::connect(url, options, holds::client())
             .await
             .unwrap()
     }
     async fn options(&self, options: Options) -> Coordinator {
-        Coordinator::connect(&self.runtime_url, options, holds::client(), zone::trusted())
+        Coordinator::connect(&self.runtime_url, options, holds::client())
             .await
             .unwrap()
     }
     async fn stored_ids(&self) -> StoredIds {
         let rows = self.admin.query(
-            "SELECT 'workers' AS kind,id AS scope,'' AS subject,id FROM workflow_manager.workers
-             UNION ALL SELECT 'queue_scopes',id,'',id FROM workflow_manager.queue_scopes
-             UNION ALL SELECT 'assignments',app_id,worker_id,id FROM workflow_manager.assignments
-             UNION ALL SELECT 'placement_receipts',app_id,request_id,id FROM workflow_manager.placement_receipts
+            "SELECT 'queue_scopes' AS kind,id AS scope,'' AS subject,id FROM workflow_manager.queue_scopes
              UNION ALL SELECT 'management',app_id,request_id,id FROM workflow_manager.management
              UNION ALL SELECT 'management_scopes',app_id,run_id,id FROM workflow_manager.management_scopes",
             &[],
@@ -141,9 +144,7 @@ impl Fixture {
             let subject: String = row.get("subject");
             let id: String = row.get("id");
             match kind.as_str() {
-                "workers" | "queue_scopes" => assert_eq!(id, scope),
-                "assignments" => assert!(typed_id::parse_with_prefix(&id, "wca").is_ok()),
-                "placement_receipts" => assert!(typed_id::parse_with_prefix(&id, "wcp").is_ok()),
+                "queue_scopes" => assert_eq!(id, scope),
                 "management" => assert!(typed_id::parse_with_prefix(&id, "wjb").is_ok()),
                 "management_scopes" => assert!(typed_id::parse_with_prefix(&id, "wmo").is_ok()),
                 _ => panic!("unexpected metadata table"),
@@ -159,17 +160,15 @@ impl Fixture {
 async fn grant_runtime(admin: &Client, role: &str) {
     admin
         .batch_execute(&format!(
-            "GRANT USAGE ON SCHEMA workflow_manager,zeroship TO \"{role}\";
-             GRANT SELECT(id,execution_zone_id,deleted_at) ON zeroship.apps TO \"{role}\";
+            "GRANT USAGE ON SCHEMA workflow_manager TO \"{role}\";
              GRANT SELECT ON workflow_manager.schema_version TO \"{role}\";
-             GRANT SELECT,INSERT,UPDATE,DELETE ON workflow_manager.workers,
-               workflow_manager.queue_scopes,workflow_manager.deployment_holds,workflow_manager.assignments,
-               workflow_manager.placement_receipts,workflow_manager.management,workflow_manager.management_scopes,workflow_manager.jobs,
+             GRANT SELECT,INSERT,UPDATE,DELETE ON
+               workflow_manager.queue_scopes,workflow_manager.deployment_holds,
+               workflow_manager.management,workflow_manager.management_scopes,workflow_manager.jobs,
                workflow_manager.schedule_deployments,workflow_manager.schedule_activations,
                workflow_manager.schedule_disables,workflow_manager.schedule_scopes,
                workflow_manager.schedules,workflow_manager.schedule_occurrences,
                workflow_manager.recovery_scopes,workflow_manager.recovery_duties,
-               workflow_manager.capacity_demands,
                workflow_manager.capacity_targets TO \"{role}\";"
         ))
         .await
@@ -193,43 +192,6 @@ async fn connect(url: &str) -> Client {
     .detach();
     client
 }
-async fn register_worker(service: &Coordinator, capacity: u32) -> WorkerId {
-    let worker = WorkerId::mint();
-    service
-        .manager
-        .register(
-            &worker,
-            &RegisterWorker {
-                capacity: NonZeroU32::new(capacity).unwrap(),
-                state: WorkerState::Ready,
-            },
-        )
-        .await
-        .unwrap();
-    worker
-}
-/// The manager selects an eligible worker for the app.
-async fn place(service: &Coordinator, app: &AppId) -> Assignment {
-    match service.manager.place(app).await.unwrap() {
-        Placed::Assigned(assignment) => assignment,
-        other => panic!("expected a placement: {other:?}"),
-    }
-}
-
-fn assigned(assignment: &Assignment) -> AssignedScope {
-    AssignedScope {
-        app_id: assignment.app_id.clone(),
-        assignment_revision: assignment.revision,
-    }
-}
-fn release(assignment: &Assignment, reason: ReleaseReason) -> ReleaseScope {
-    ReleaseScope {
-        request_id: RequestId::mint(),
-        app_id: assignment.app_id.clone(),
-        assignment_revision: assignment.revision,
-        reason,
-    }
-}
 fn command(app: &AppId) -> ManageRun {
     ManageRun {
         request_id: RequestId::mint(),
@@ -241,219 +203,135 @@ fn command(app: &AppId) -> ManageRun {
     }
 }
 
-/// Two replicas placing the same app converge on one placement, a second
-/// visit reports it owned, and a full instance admits nothing more. Giving the
-/// placement up advances its revision and retires the old authority.
-#[compio::test]
-async fn replicas_fence_placement_retries_and_capacity() {
-    let fixture = Fixture::new().await;
-    let a = fixture.service().await;
-    let b = fixture.service().await;
-    let worker = register_worker(&a, 1).await;
-    let app = AppId::mint();
-    let (first, second) = futures::join!(a.manager.place(&app), b.manager.place(&app));
-    let assignment = match (first.unwrap(), second.unwrap()) {
-        (Placed::Assigned(assignment), Placed::Owned)
-        | (Placed::Owned, Placed::Assigned(assignment)) => assignment,
-        results => panic!("racing visits must converge on one placement: {results:?}"),
+/// Register `app`'s queue scope in `zone` and submit one advance job for it,
+/// the way the service's own publication submits committed intent.
+async fn submitted(service: &Coordinator, app: &AppId, zone: &ZoneId) -> JobSpec {
+    let queue = service.manager.queue();
+    queue.register_scope(app, zone).await.unwrap();
+    let job = JobSpec {
+        id: JobId::mint(),
+        app_id: app.clone(),
+        operation: JobOperation::Advance {
+            deployment_id: DeploymentId::mint(),
+            run_id: RunId::mint(),
+            generation: 0,
+            revision: 1.try_into().unwrap(),
+        },
+        available_at: 1.try_into().unwrap(),
     };
-    let initial_ids = fixture.stored_ids().await;
-    b.manager
-        .register(
-            &worker,
-            &RegisterWorker {
-                capacity: NonZeroU32::new(1).unwrap(),
-                state: WorkerState::Ready,
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(fixture.stored_ids().await, initial_ids);
-    assert_eq!(b.manager.place(&app).await.unwrap(), Placed::Owned);
-    // The instance's one slot is taken, so another app finds no capacity.
-    assert!(matches!(
-        b.manager.place(&AppId::mint()).await.unwrap(),
-        Placed::Unplaced(_)
-    ));
-    b.manager
-        .release(&worker, &release(&assignment, ReleaseReason::Relinquished))
-        .await
-        .unwrap();
-    let replacement = place(&b, &app).await;
-    assert!(replacement.revision > assignment.revision);
-    assert_ids_retained(&initial_ids, &fixture.stored_ids().await);
-    // The placement was re-admitted, so the row is live at a HIGHER revision:
-    // this instance is still the placed one and its revision moved, which is the
-    // retryable case. The release-without-replacement case above stays `Denied`,
-    // because there the grant is gone rather than superseded.
-    assert_eq!(
-        a.manager.renew(&worker, &assigned(&assignment)).await,
-        Err(Error::Conflict)
-    );
-    assert_eq!(
-        a.manager.assignments(&worker, None).await.unwrap(),
-        vec![replacement]
-    );
-
-    let spare = register_worker(&a, 1).await;
-    let (left, right) = (AppId::mint(), AppId::mint());
-    let (left, right) = futures::join!(a.manager.place(&left), b.manager.place(&right));
-    assert!(matches!(
-        (&left, &right),
-        (Ok(Placed::Assigned(_)), Ok(Placed::Unplaced(_)))
-            | (Ok(Placed::Unplaced(_)), Ok(Placed::Assigned(_)))
-    ));
-    assert_eq!(a.manager.assignments(&spare, None).await.unwrap().len(), 1);
+    assert_eq!(queue.submit(&job).await.unwrap(), job);
+    job
 }
-#[compio::test]
-async fn release_needs_neither_a_wake_hint_nor_a_responsible_peer() {
-    let fixture = Fixture::new().await;
-    let a = fixture.service().await;
-    let b = fixture.service().await;
-    register_worker(&a, 1).await;
-    register_worker(&a, 1).await;
-    let (app, other) = (AppId::mint(), AppId::mint());
-    // One slot per worker, so the two apps land on different instances.
-    let first = place(&a, &app).await;
-    let second = place(&b, &other).await;
-    let (w1, w2) = (first.worker_id.clone(), second.worker_id.clone());
-    assert_ne!(w1, w2);
-    // A worker holding no placement of the app releases nothing.
-    let stranger = register_worker(&a, 2).await;
-    assert_eq!(
-        a.manager
-            .release(&stranger, &release(&first, ReleaseReason::Relinquished))
-            .await,
-        Err(Error::Denied)
-    );
-    let r1 = release(&first, ReleaseReason::Relinquished);
-    let r2 = release(&second, ReleaseReason::Relinquished);
-    // Every owner may release at once: recovery responsibility stays with the
-    // manager, so no responsible peer has to remain.
-    let (released1, released2) =
-        futures::join!(a.manager.release(&w1, &r1), b.manager.release(&w2, &r2));
-    assert_eq!((released1, released2), (Ok(()), Ok(())));
-    let released_ids = fixture.stored_ids().await;
-    assert_eq!(b.manager.release(&w1, &r1).await, Ok(()));
-    assert_eq!(fixture.stored_ids().await, released_ids);
-    assert_eq!(
-        b.manager
-            .release(
-                &w1,
-                &ReleaseScope {
-                    reason: ReleaseReason::Refused,
-                    ..r1.clone()
-                }
-            )
-            .await,
-        Err(Error::Conflict)
-    );
-    assert_eq!(
-        a.manager.renew(&w1, &assigned(&first)).await,
-        Err(Error::Denied)
-    );
-    let replacement = place(&a, &app).await;
-    assert!(replacement.revision > first.revision);
-    assert_ids_retained(&released_ids, &fixture.stored_ids().await);
-    assert_eq!(
-        b.manager
-            .assignments(&replacement.worker_id, None)
-            .await
+
+/// One zone claim for one job, by an enrolled `worker` the authorization
+/// callback keeps confirming.
+async fn claim(
+    service: &Coordinator,
+    worker: &WorkerId,
+    zone: &ZoneId,
+    policies: &GrantedPolicies,
+) -> Vec<DeliveryGrant> {
+    let request = ClaimJobs {
+        max: NonZeroU32::MIN,
+        wait_ms: NonZeroU64::new(5_000).unwrap(),
+        after: None,
+        exclude: Vec::new(),
+    };
+    let claim = ZoneClaim {
+        worker,
+        zone,
+        request: &request,
+        deadline: service
+            .manager
+            .claim_deadline(Instant::now(), &request)
             .unwrap(),
-        vec![replacement.clone()]
-    );
-    // A refused release tombstones the pair for this instance's life, so the
-    // next selection never offers that instance the app again.
-    let refused = replacement.worker_id.clone();
-    a.manager
-        .release(&refused, &release(&replacement, ReleaseReason::Refused))
-        .await
-        .unwrap();
-    let next = place(&a, &app).await;
-    assert_ne!(next.worker_id, refused);
-
-    // An instance that holds no placement of an app cannot claim its work,
-    // however live its own registration is.
-    let foreign = place(&a, &AppId::mint()).await;
-    let outsider = register_worker(&a, 1).await;
-    assert_eq!(
-        a.manager
-            .claim_job(&outsider, &assigned(&foreign), Ok(AppPolicy::default().max_delivery_attempts), || async {
-                Ok(outsider.clone())
-            })
-            .await
-            .unwrap_err(),
-        Error::Denied
-    );
-}
-
-/// An expired placement leaves its app unowned, so the manager places it
-/// again under a higher revision while the stale authority stays refused.
-#[compio::test]
-async fn expired_placements_leave_the_app_unowned_and_replaceable() {
-    let fixture = Fixture::new().await;
-    let service = fixture.service().await;
-    let worker = register_worker(&service, 1).await;
-    let app = AppId::mint();
-    let assignment = place(&service, &app).await;
-    assert!(service.manager.owned(&app).await.unwrap());
-    fixture
-        .admin
-        .execute(
-            "UPDATE workflow_manager.assignments SET expires_at=0 WHERE app_id=$1",
-            &[&app.as_str()],
-        )
-        .await
-        .unwrap();
-    assert!(!service.manager.owned(&app).await.unwrap());
+    };
     service
         .manager
-        .register(
-            &worker,
-            &RegisterWorker {
-                capacity: NonZeroU32::new(1).unwrap(),
-                state: WorkerState::Ready,
-            },
+        .claim_in_zone(
+            &claim,
+            policies,
+            || async { Ok(worker.clone()) },
+            |_| async { Admission::Deliver(()) },
         )
         .await
-        .unwrap();
-    assert_eq!(
-        service.manager.renew(&worker, &assigned(&assignment)).await,
-        Err(Error::Denied)
+        .unwrap()
+        .0
+        .grants
+        .into_iter()
+        .map(|(grant, ())| grant)
+        .collect()
+}
+
+async fn heartbeat(
+    service: &Coordinator,
+    worker: &WorkerId,
+    delivery: &Delivery,
+) -> Result<DeliveryGrant, Error> {
+    service
+        .manager
+        .heartbeat_job(worker, delivery, || async { Ok(worker.clone()) })
+        .await
+}
+
+/// Two replicas over one queue hand one job to exactly one of two workers
+/// claiming at once, and the claim leaves the scope's stored identity where it
+/// was. The holder's lease then answers to either replica, and to no other
+/// worker.
+#[compio::test]
+async fn replicas_deliver_a_job_once_and_keep_its_scope_identity() {
+    let fixture = Fixture::new().await;
+    let a = fixture.service().await;
+    let b = fixture.service().await;
+    let zone = ZoneId::mint();
+    let app = AppId::mint();
+    let policies = GrantedPolicies::default();
+    policies.grant(&app, &zone, AppPolicy::default());
+    let job = submitted(&a, &app, &zone).await;
+    let initial_ids = fixture.stored_ids().await;
+    let (first, second) = (WorkerId::mint(), WorkerId::mint());
+    let (left, right) = futures::join!(
+        claim(&a, &first, &zone, &policies),
+        claim(&b, &second, &zone, &policies)
     );
-    assert!(service
-        .manager
-        .assignments(&worker, None)
-        .await
-        .unwrap()
-        .is_empty());
-    let replacement = place(&service, &app).await;
-    assert!(replacement.revision > assignment.revision);
-    assert!(service.manager.owned(&app).await.unwrap());
-    // An expired registration is neither a candidate nor an owner.
-    fixture
-        .admin
-        .execute(
-            "UPDATE workflow_manager.workers SET expires_at=0 WHERE id=$1",
-            &[&worker.as_str()],
+    let mut granted = left.into_iter().chain(right).collect::<Vec<_>>();
+    assert_eq!(granted.len(), 1, "racing claims must deliver the job once");
+    let delivery = granted.pop().unwrap().delivery().clone();
+    assert_eq!(delivery.job, job);
+    assert_eq!(delivery.attempt.get(), 1);
+    assert_ids_retained(&initial_ids, &fixture.stored_ids().await);
+    let (holder, other) = if delivery.worker_id == first {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    for replica in [&a, &b] {
+        assert!(
+            claim(replica, &other, &zone, &policies).await.is_empty(),
+            "a leased job is offered to nobody else"
+        );
+        let renewed = heartbeat(replica, &holder, &delivery).await.unwrap();
+        assert_eq!(renewed.delivery().attempt, delivery.attempt);
+    }
+    assert!(heartbeat(&a, &other, &delivery).await.is_err());
+    assert_eq!(
+        heartbeat(
+            &b,
+            &other,
+            &Delivery {
+                worker_id: other.clone(),
+                ..delivery.clone()
+            }
         )
         .await
-        .unwrap();
-    assert!(service
-        .manager
-        .ready_workers(None)
-        .await
-        .unwrap()
-        .is_empty());
-    assert!(!service.manager.owned(&app).await.unwrap());
-    assert!(matches!(
-        service.manager.place(&app).await.unwrap(),
-        Placed::Unplaced(_)
-    ));
+        .unwrap_err(),
+        Error::Conflict,
+        "a delivery naming a worker the queue never handed it to is stale"
+    );
 }
 
 #[compio::test]
-async fn management_is_durable_bounded_typed_and_assignment_scoped() {
+async fn management_is_durable_bounded_typed_and_held_by_the_lane() {
     let fixture = Fixture::new().await;
     let options = Options {
         batch_limit: 1,
@@ -463,7 +341,9 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
     let a = fixture.options(options).await;
     let b = fixture.options(options).await;
     let actor = service_issuer(CONTROL_SERVICE_NAME).unwrap();
+    let zone = ZoneId::mint();
     let app = AppId::mint();
+    a.manager.queue().register_scope(&app, &zone).await.unwrap();
     let one = command(&app);
     assert_eq!(
         a.manager
@@ -478,9 +358,6 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
     let receipt = left.unwrap();
     assert_eq!(receipt, right.unwrap());
     let initial_ids = fixture.stored_ids().await;
-    // Enqueued management is a maintenance row, which the lane claims without a
-    // placement, so accepting it leaves the app with no owner.
-    assert!(!a.manager.owned(&app).await.unwrap());
     let mut changed = one.clone();
     changed.run_id = RunId::mint();
     assert_eq!(
@@ -503,26 +380,17 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
         a.manager.manage(&actor, &command(&app)).await,
         Err(Error::Capacity)
     );
-    let worker = register_worker(&a, 1).await;
-    let assignment = place(&a, &app).await;
-    assert_eq!(assignment.worker_id, worker);
-    let scope = assigned(&assignment);
-    // A lifecycle command is a maintenance row. `claim_job` claims as
-    // `Claimant::Placed`, which admits the creator operation alone, so the placed
-    // worker is offered nothing here and the row belongs to the authority the
-    // owning process asserts. The refusal is the control for the claim below: one
-    // variable differs, and it is the claimant.
-    assert!(b
-        .manager
-        .claim_job(&worker, &scope, Ok(AppPolicy::default().max_delivery_attempts), || async { Ok(worker.clone()) })
-        .await
-        .unwrap()
-        .is_none());
-    // The authority carries this app's own placed identity rather than a fresh
-    // one, because `Queue::settle` authorizes on `settlement.delivery.worker_id`
-    // and the settlements below are made under `worker`. Its asserted revision is
-    // `ASSERTED`, which is the revision this first placement holds, so the
-    // placement read behind `settle_job` resolves the authority this lease names.
+    // A lifecycle command is a maintenance row. A zone claim claims as
+    // `Claimant::Worker`, which admits the creator operation alone, so a worker
+    // of the app's own zone is offered nothing here and the row belongs to the
+    // authority the owning process asserts. The refusal is the control for the
+    // lane's claim below: one variable differs, and it is the claimant.
+    let worker = WorkerId::mint();
+    let policies = GrantedPolicies::default();
+    policies.grant(&app, &zone, AppPolicy::default());
+    assert!(claim(&b, &worker, &zone, &policies).await.is_empty());
+    // The lane carries the worker's identity here so the settlement below is
+    // made by the holder the lease names.
     let lane = MaintenanceAuthority::new(app.clone(), worker.clone());
     let grant = lane
         .claim(
@@ -533,7 +401,6 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
         .unwrap()
         .unwrap();
     assert_eq!(grant.delivery().worker_id, worker);
-    assert_eq!(grant.delivery().assignment_revision, assignment.revision);
     assert_eq!(
         grant.delivery().job.operation,
         JobOperation::Management {
@@ -628,28 +495,20 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
             .await,
         Err(Error::Denied)
     );
-    a.manager
-        .release(&worker, &release(&assignment, ReleaseReason::Relinquished))
-        .await
-        .unwrap();
-    let renewed = place(&a, &app).await;
-    assert_ne!(
-        renewed.revision, assignment.revision,
-        "a re-placement must supersede the revision the settlement above names"
-    );
-    // Exact committed settlement remains readable after placement replacement.
+    drop(a);
+    drop(b);
+    let reopened = fixture.options(options).await;
+    // The exact committed settlement stays readable over a reopened queue.
     assert_eq!(
-        b.manager
+        reopened
+            .manager
             .settle_job(&worker, &settlement, || async { Ok(worker.clone()) })
             .await
             .unwrap(),
         receipt
     );
-    drop(a);
-    drop(b);
-    let reopened = fixture.options(options).await;
-    // The same authority over a reopened queue. It is asserted rather than read,
-    // so the replaced placement above neither grants nor withdraws it.
+    // The same authority over the reopened queue. It is asserted rather than
+    // read, so nothing about the earlier processes grants or withdraws it.
     let grant = lane
         .claim(
             reopened.manager.queue(),
@@ -689,14 +548,25 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
     );
 }
 
+/// A heartbeat waiting on the app lock is bounded by the transaction budget,
+/// the session it timed out on is reusable, and a lease that lapsed while the
+/// heartbeat waited is refused after the wait rather than extended.
 #[compio::test]
 async fn lock_waits_cannot_extend_authority_and_timeout_sessions_are_reusable() {
     let mut fixture = Fixture::new().await;
     let normal = fixture.service().await;
-    let worker = register_worker(&normal, 1).await;
+    let zone = ZoneId::mint();
     let app = AppId::mint();
-    let assignment = place(&normal, &app).await;
-    assert_eq!(assignment.worker_id, worker);
+    let policies = GrantedPolicies::default();
+    policies.grant(&app, &zone, AppPolicy::default());
+    submitted(&normal, &app, &zone).await;
+    let worker = WorkerId::mint();
+    let delivery = claim(&normal, &worker, &zone, &policies)
+        .await
+        .pop()
+        .expect("the zone's worker claims the job")
+        .delivery()
+        .clone();
     let options = Options {
         connections: 1,
         command_timeout: Duration::from_millis(80),
@@ -711,27 +581,25 @@ async fn lock_waits_cannot_extend_authority_and_timeout_sessions_are_reusable() 
     .await
     .unwrap();
     assert_eq!(
-        bounded.manager.renew(&worker, &assigned(&assignment)).await,
-        Err(Error::Timeout)
+        heartbeat(&bounded, &worker, &delivery).await.unwrap_err(),
+        Error::Timeout
     );
     lock.rollback().await.unwrap();
     // The pool session survives the cancelled command: `verify` runs several
     // queries on the same one-connection pool that just timed out.
     bounded.verify().await.unwrap();
-    // The assignment the wait contended for is live, read through a
-    // coordinator whose budget is not the 80ms that produced the timeout, so
-    // the outcome does not turn on a second query fitting that budget.
-    normal
-        .manager
-        .renew(&worker, &assigned(&assignment))
+    // The delivery the wait contended for is live, read through a coordinator
+    // whose budget is not the 80ms that produced the timeout, so the outcome
+    // does not turn on a second query fitting that budget.
+    heartbeat(&normal, &worker, &delivery).await.unwrap();
+
+    let blocker_pid: i32 = fixture
+        .admin
+        .query_one("SELECT pg_backend_pid()", &[])
         .await
-        .unwrap();
-
-    fixture.admin.execute(
-        "UPDATE workflow_manager.assignments SET expires_at=floor(extract(epoch FROM clock_timestamp())*1000)::bigint+200 WHERE app_id=$1",
-        &[&app.as_str()],
-    ).await.unwrap();
-
+        .unwrap()
+        .get(0);
+    let expirer = connect(&fixture.admin_url).await;
     let lock = fixture.admin.transaction().await.unwrap();
     lock.query(
         "SELECT id FROM workflow_manager.queue_scopes WHERE id=$1 FOR UPDATE",
@@ -739,12 +607,42 @@ async fn lock_waits_cannot_extend_authority_and_timeout_sessions_are_reusable() 
     )
     .await
     .unwrap();
-    let request = assigned(&assignment);
-    let (attempt, ()) = futures::join!(normal.manager.renew(&worker, &request), async {
-        compio::time::sleep(Duration::from_millis(300)).await;
+    let lapse = async {
+        compio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = expirer
+                    .query_one(
+                        "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
+                         WHERE usename='coordinator_test' AND $1=ANY(pg_blocking_pids(pid)))",
+                        &[&blocker_pid],
+                    )
+                    .await
+                    .unwrap()
+                    .get(0);
+                if waiting {
+                    break;
+                }
+                compio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the heartbeat must reach the held app lock");
+        // The lease lapses while the heartbeat waits. The job row is not under
+        // the lock, so this lands before the heartbeat reads it.
+        assert_eq!(
+            expirer
+                .execute(
+                    "UPDATE workflow_manager.jobs SET lease_deadline=0 WHERE app_id=$1 AND id=$2",
+                    &[&app.as_str(), &delivery.job.id.as_str()],
+                )
+                .await
+                .unwrap(),
+            1
+        );
         lock.commit().await.unwrap();
-    });
-    assert_eq!(attempt, Err(Error::Denied));
+    };
+    let (attempt, ()) = futures::join!(heartbeat(&normal, &worker, &delivery), lapse);
+    assert_eq!(attempt.unwrap_err(), Error::Conflict);
 }
 
 #[compio::test]
@@ -848,7 +746,7 @@ async fn metadata_schema_has_no_customer_authority_and_ids_are_bytewise() {
          JOIN pg_class target ON target.oid=constraint_row.confrelid \
          JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace \
          WHERE namespace.nspname='workflow_manager' \
-           AND constraint_row.conname IN ('assignment_scope','assignment_worker','receipt_scope','management_job','management_order','management_order_app','jobs_app_id_fkey') \
+           AND constraint_row.conname IN ('management_job','management_order','management_order_app','jobs_app_id_fkey') \
          ORDER BY relation.relname,target.relname", &[],
     ).await.unwrap();
     assert_eq!(
@@ -861,13 +759,10 @@ async fn metadata_schema_has_no_customer_authority_and_ids_are_bytewise() {
             ))
             .collect::<Vec<_>>(),
         [
-            ("assignments", "queue_scopes", vec!["id"]),
-            ("assignments", "workers", vec!["id"]),
             ("jobs", "queue_scopes", vec!["id"]),
             ("management", "jobs", vec!["app_id", "id"]),
             ("management", "management_scopes", vec!["app_id", "run_id"]),
             ("management_scopes", "queue_scopes", vec!["id"]),
-            ("placement_receipts", "queue_scopes", vec!["id"]),
         ]
         .map(|(table, target, columns)| (
             table.to_owned(),
@@ -882,13 +777,7 @@ async fn metadata_schema_has_no_customer_authority_and_ids_are_bytewise() {
         .unwrap();
     assert_eq!(service.verify().await, Err(HostError::Unavailable));
     assert!(matches!(
-        Coordinator::connect(
-            &fixture.runtime_url,
-            Options::default(),
-            holds::client(),
-            zone::trusted()
-        )
-        .await,
+        Coordinator::connect(&fixture.runtime_url, Options::default(), holds::client()).await,
         Err(HostError::Unavailable)
     ));
     // Retire the login this case minted; it owns nothing outside this clone.
@@ -899,212 +788,6 @@ async fn metadata_schema_has_no_customer_authority_and_ids_are_bytewise() {
         ))
         .await
         .unwrap();
-}
-
-#[compio::test]
-async fn assignment_verification_preserves_leases_and_fences_app_authority() {
-    let fixture = Fixture::new().await;
-    let service = fixture.service().await;
-    let worker = register_worker(&service, 2).await;
-    let app = AppId::mint();
-    let assignment = place(&service, &app).await;
-    assert_eq!(assignment.worker_id, worker);
-    let request = VerifyAssignment {
-        app_id: app.clone(),
-        worker_id: worker.clone(),
-        assignment_revision: assignment.revision,
-    };
-    for worker_is_shorter in [false, true] {
-        let (assignment_ttl, worker_ttl) = if worker_is_shorter {
-            (60_000_i64, 30_000_i64)
-        } else {
-            (30_000, 60_000)
-        };
-        fixture.admin.execute(
-            "UPDATE workflow_manager.assignments SET expires_at=floor(extract(epoch FROM clock_timestamp())*1000)::bigint+$2 WHERE app_id=$1",
-            &[&app.as_str(), &assignment_ttl],
-        ).await.unwrap();
-        fixture.admin.execute(
-            "UPDATE workflow_manager.workers SET state='draining',expires_at=floor(extract(epoch FROM clock_timestamp())*1000)::bigint+$2 WHERE id=$1",
-            &[&worker.as_str(), &worker_ttl],
-        ).await.unwrap();
-        let snapshot = || async {
-            fixture.admin.query_one(
-                "SELECT to_jsonb(a)::text AS assignment,to_jsonb(w)::text AS worker,
-                 LEAST(a.expires_at,w.expires_at) AS deadline
-                 FROM workflow_manager.assignments a JOIN workflow_manager.workers w ON w.id=a.worker_id
-                 WHERE a.app_id=$1 AND a.worker_id=$2", &[&app.as_str(), &worker.as_str()],
-            ).await.unwrap()
-        };
-        let before = snapshot().await;
-        let result = service.manager.verify_assignment(&request).await.unwrap();
-        assert_eq!(result.app_id, app);
-        assert_eq!(result.worker_id, worker);
-        assert_eq!(result.revision, assignment.revision);
-        assert_eq!(result.expires_at.get(), before.get::<_, i64>("deadline"));
-        assert_eq!(
-            service.manager.verify_assignment(&request).await.unwrap(),
-            result
-        );
-        let after = snapshot().await;
-        for column in ["assignment", "worker"] {
-            assert_eq!(
-                before.get::<_, String>(column),
-                after.get::<_, String>(column)
-            );
-        }
-    }
-    // An app or an instance with no placement of its own is not the placed
-    // one, and no retry changes that.
-    for foreign in [
-        VerifyAssignment {
-            app_id: AppId::mint(),
-            ..request.clone()
-        },
-        VerifyAssignment {
-            worker_id: WorkerId::mint(),
-            ..request.clone()
-        },
-    ] {
-        assert_eq!(
-            service.manager.verify_assignment(&foreign).await,
-            Err(Error::Denied)
-        );
-    }
-    fixture
-        .admin
-        .execute(
-            "UPDATE workflow_manager.assignments SET released=true WHERE app_id=$1",
-            &[&app.as_str()],
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        service.manager.verify_assignment(&request).await,
-        Err(Error::Denied)
-    );
-    fixture
-        .admin
-        .execute(
-            "UPDATE workflow_manager.assignments SET released=false,expires_at=0 WHERE app_id=$1",
-            &[&app.as_str()],
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        service.manager.verify_assignment(&request).await,
-        Err(Error::Denied)
-    );
-    fixture
-        .admin
-        .execute(
-            "UPDATE workflow_manager.assignments SET expires_at=$2 WHERE app_id=$1",
-            &[&app.as_str(), &i64::MAX],
-        )
-        .await
-        .unwrap();
-    fixture
-        .admin
-        .execute(
-            "UPDATE workflow_manager.workers SET expires_at=0 WHERE id=$1",
-            &[&worker.as_str()],
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        service.manager.verify_assignment(&request).await,
-        Err(Error::Denied)
-    );
-}
-
-/// A revision that moved is not a refusal.
-///
-/// `refresh_entry` in `zeroship-workflow-runner` releases a placement as REFUSED
-/// on `PermissionDenied`, and the manager then stops offering that pair to that
-/// instance. A placement whose revision advanced under a caller that WAS
-/// legitimately placed is the opposite case: the next scan installs the revision
-/// that now holds, so it must not arrive as the permanent one. It reaches
-/// creator code through `api/runs.rs` too, where the same distinction decides
-/// whether a caller retries.
-#[compio::test]
-async fn a_moved_assignment_revision_conflicts_rather_than_denying() {
-    let fixture = Fixture::new().await;
-    let service = fixture.service().await;
-    let worker = register_worker(&service, 2).await;
-    let app = AppId::mint();
-    let first = place(&service, &app).await;
-    assert_eq!(first.worker_id, worker);
-    let granted = VerifyAssignment {
-        app_id: app.clone(),
-        worker_id: worker.clone(),
-        assignment_revision: first.revision,
-    };
-    // The control. Without it the refusal below would also pass over a fixture
-    // that never placed anything.
-    assert_eq!(
-        service
-            .manager
-            .verify_assignment(&granted)
-            .await
-            .map(|verified| verified.revision),
-        Ok(first.revision)
-    );
-    service
-        .manager
-        .release(&worker, &release(&first, ReleaseReason::Relinquished))
-        .await
-        .unwrap();
-    let moved = place(&service, &app).await;
-    assert!(moved.revision > first.revision);
-    assert_eq!(
-        service.manager.verify_assignment(&granted).await,
-        Err(Error::Conflict)
-    );
-    // The revision that now holds verifies, so the refusal above is about the
-    // revision rather than about the pair.
-    assert_eq!(
-        service
-            .manager
-            .verify_assignment(&VerifyAssignment {
-                assignment_revision: moved.revision,
-                ..granted.clone()
-            })
-            .await
-            .map(|verified| verified.revision),
-        Ok(moved.revision)
-    );
-}
-
-#[compio::test]
-async fn assignment_verification_checks_expiry_after_waiting_for_scope_lock() {
-    let mut fixture = Fixture::new().await;
-    let service = fixture.service().await;
-    let worker = register_worker(&service, 1).await;
-    let app = AppId::mint();
-    let assignment = place(&service, &app).await;
-    assert_eq!(assignment.worker_id, worker);
-    let request = VerifyAssignment {
-        app_id: app.clone(),
-        worker_id: worker.clone(),
-        assignment_revision: assignment.revision,
-    };
-    fixture.admin.execute(
-        "UPDATE workflow_manager.assignments SET expires_at=floor(extract(epoch FROM clock_timestamp())*1000)::bigint+200 WHERE app_id=$1",
-        &[&app.as_str()],
-    ).await.unwrap();
-    let lock = fixture.admin.transaction().await.unwrap();
-    lock.query(
-        "SELECT id FROM workflow_manager.queue_scopes WHERE id=$1 FOR UPDATE",
-        &[&app.as_str()],
-    )
-    .await
-    .unwrap();
-    let (result, ()) = futures::join!(service.manager.verify_assignment(&request), async {
-        compio::time::sleep(Duration::from_millis(300)).await;
-        lock.commit().await.unwrap();
-    });
-    assert_eq!(result, Err(Error::Denied));
-    service.verify().await.unwrap();
 }
 
 /// The startup budget these tests give the coordinator. The pool's own default
@@ -1231,9 +914,8 @@ async fn fails_within_budget<T, E>(
 }
 
 /// A database that accepts connections and never answers fails coordinator
-/// startup within the one startup budget: constructing the pool, and binding
-/// placement eligibility, each stop at `Options::startup_timeout` rather than
-/// at a default of the pool's.
+/// startup within the one startup budget: constructing the pool stops at
+/// `Options::startup_timeout` rather than at a default of the pool's.
 #[compio::test]
 async fn a_silent_database_fails_startup_within_the_startup_budget() {
     assert!(
@@ -1250,7 +932,6 @@ async fn a_silent_database_fails_startup_within_the_startup_budget() {
             &database.url,
             budgeted(),
             holds::client(),
-            zone::trusted(),
         )),
     )
     .await;
@@ -1265,26 +946,11 @@ async fn a_silent_database_fails_startup_within_the_startup_budget() {
          other than the budget stopped it"
     );
 
-    let (elapsed, error) = fails_within_budget(
-        "binding placement eligibility",
-        connect_eligibility(&database.url, budgeted()),
-    )
-    .await;
-    assert_eq!(
-        error,
-        HostError::Unavailable,
-        "binding placement eligibility did not report the database unavailable"
-    );
-    assert!(
-        elapsed >= STARTUP_BUDGET,
-        "binding placement eligibility failed after {elapsed:?}, before its budget"
-    );
-
     let accepted = database.stop();
     assert_eq!(accepted.answered, 0);
     assert!(
-        accepted.silent >= 2,
-        "the stand-in accepted fewer connections than the steps that ran: {accepted:?}"
+        accepted.silent >= 1,
+        "the stand-in accepted no connection, so the step that ran never reached it: {accepted:?}"
     );
 }
 
@@ -1301,7 +967,6 @@ async fn a_database_that_stalls_after_the_pool_fails_startup_within_the_startup_
             &database.url,
             budgeted(),
             holds::client(),
-            zone::trusted(),
         )),
     )
     .await;

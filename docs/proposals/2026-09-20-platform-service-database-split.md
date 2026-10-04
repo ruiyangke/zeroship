@@ -128,15 +128,15 @@ Ownership is not recorded anywhere in the tree today.
 
 ### `workflow` - durable execution
 
-    workflow_manager.*          all eighteen: workers, queue_scopes,
-                                deployment_holds, jobs, assignments,
-                                placement_receipts, management,
+    workflow_manager.*          every table declared by
+                                crates/zeroship-workflow-manager/schema/schema.ts:
+                                schema_version, queue_scopes,
+                                deployment_holds, jobs, management,
                                 management_scopes, schedule_deployments,
                                 schedule_activations, schedule_disables,
                                 schedule_scopes, schedules,
                                 schedule_occurrences, recovery_scopes,
-                                recovery_duties, capacity_demands,
-                                capacity_targets
+                                recovery_duties, capacity_targets
     workflow_manager.workflow_policy_ledger
     workflow_manager.workflow_rollout_config
     app_deploys                 CONTESTED - workflow's DDL, control writes

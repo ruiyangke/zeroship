@@ -219,7 +219,7 @@ mod tests {
             serde_json::from_value::<DeployRegistrationRequest>(encoded.clone()).unwrap(),
             request
         );
-        for field in ["holderId", "generation", "hash", "workflows", "assignmentRevision"] {
+        for field in ["holderId", "generation", "hash", "workflows"] {
             let mut invalid = encoded.clone();
             invalid[field] = serde_json::json!("x");
             assert!(

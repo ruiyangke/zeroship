@@ -1,32 +1,38 @@
 use super::{authorization, read_json, respond, LocatePayload};
 use crate::{auth::VerifiedWorker, coordinator::Error, SharedState};
 use ntex::web::{self, types::State};
-use std::time::{Duration, Instant};
+use std::{
+    cell::Cell,
+    time::{Duration, Instant},
+};
 use zeroship_core::{
     app_id::AppId,
     service_identity::{endpoints, ServiceEndpoint},
     workflow_coordination::{
-        AssignedScope, PayloadLocation, PayloadReservation, PinnedDeployment, ReadTaskPayload,
-        ReservePayload, ResolveTaskExecutable, VerifyAssignment, WorkerId,
+        PayloadLocation, PayloadReservation, PinnedDeployment, ReadTaskPayload, ReservePayload,
+        ResolveTaskExecutable, WorkerId,
     },
-    workflow_jobs::{Delivery, JobSpec, JournalSettlement},
+    workflow_jobs::{ClaimJobs, ClaimedJobs, Delivery, JobSpec, JournalSettlement},
     workflow_policy::MAX_JOURNAL_BYTES_CEILING,
 };
 use zeroship_workflow::{
     service::{
         delivery::{
-            AcceptedJob, ClaimedTask, JobReceipt, RenewedTask, ReportedExecution, ReportedGrant,
-            TaskClaim,
+            AcceptedJob, ClaimedTask, DeferredReason, DeliveredTask, JobAcceptance, JobReceipt,
+            RenewedTask, ReportedExecution, ReportedGrant, TaskClaim,
         },
         AppWorkflows, TaskToken, WorkerIdentity,
     },
     WorkflowServiceError,
 };
 use zeroship_workflow_client::{
-    ClaimedDelivery, JobReceiptQuery, ReleaseDelivery, RenewDelivery, RenewedDelivery,
-    SettleDelivery,
+    ClaimedDelivery, GiveBackReason, JobReceiptQuery, ReleaseDelivery, RenewDelivery,
+    RenewedDelivery, SettleDelivery,
 };
-use zeroship_workflow_manager::Error as NativeError;
+use zeroship_workflow_manager::{
+    coordinator::{Admission, ClaimSkipReason, ZoneClaim},
+    DeliveryGrant, Error as NativeError, GiveBack,
+};
 
 /// JSON extractor budget for a settlement that carries an outcome batch.
 ///
@@ -83,9 +89,11 @@ pub fn configure(config: &mut web::ServiceConfig) {
 /// OBSERVING THE APP IS POLICY I/O, SO THIS IS FENCED OFF THE BODY ALONE. Binding
 /// upserts the app's policy ledger row and asks Control for its facts, whose
 /// refusals differ by whether the app exists -- an oracle if any caller could
-/// name any app. Every route therefore proves the caller holds the delivery (or,
-/// for the task routes that carry no delivery, a queue row) for the app against
-/// the queue under the credential that verified the request BEFORE reaching here.
+/// name any app. Every route therefore proves against the queue, under the
+/// credential that verified the request, that the caller holds the delivery it
+/// names (or, for the task routes that carry no delivery, a live delivery of
+/// the app) BEFORE reaching here; the claim reaches it only for a grant it just
+/// committed in the caller's own zone.
 /// The app selects which journal to ask; it is never itself the authorization.
 async fn journal(state: &SharedState, app: &AppId) -> Result<AppWorkflows, Error> {
     let source = state.policy_source.as_ref().ok_or(Error::Unavailable)?;
@@ -137,6 +145,29 @@ fn journal_error(error: WorkflowServiceError) -> Error {
         | WorkflowServiceError::InvalidResponse(_)
         | WorkflowServiceError::Internal(_) => Error::Unavailable,
     }
+}
+
+/// Bind the journal a task call names, for a caller holding a live delivery of
+/// that app.
+///
+/// A task call names an app and a task credential and no delivery, so the fence
+/// before the journal is the queue's record that the caller holds a live lease
+/// on some job of that app: every task credential is issued under one, and the
+/// journal task's deadline never outlives the lease it was issued under. A body
+/// naming any other app is refused `Denied` before the policy source is asked
+/// to observe it.
+async fn task_journal(
+    state: &SharedState,
+    actor: &VerifiedWorker,
+    app: &AppId,
+) -> Result<AppWorkflows, Error> {
+    state
+        .service
+        .manager
+        .queue()
+        .require_live_holder(actor.id(), app)
+        .await?;
+    journal(state, app).await
 }
 
 async fn authenticate(
@@ -201,21 +232,13 @@ async fn revalidate(state: &SharedState, actor: &VerifiedWorker) -> Result<Worke
     })
 }
 
-/// The delivery ceiling is operator policy, so it is read from the authoritative
-/// source rather than accepted from the worker. The result is handed to the
-/// manager unresolved: a source that cannot answer for an app must not preempt
-/// that app's placement refusal, which would tell the worker to retry a scope it
-/// can never hold.
-async fn ceiling(state: &SharedState, app: &AppId) -> Result<i64, NativeError> {
-    let source = state
-        .policy_source
-        .as_ref()
-        .ok_or(NativeError::Unavailable)?;
-    Ok(source.observe(app).await?.policy().max_delivery_attempts)
-}
-
-/// Claim a delivery and, for the one operation that hands out a task, accept it
-/// into this service's journal under the grant just committed.
+/// Claim a batch of deliveries across the caller's zone and, for the one
+/// operation that hands out a task, accept each into this service's journal
+/// under the grant just committed.
+///
+/// THE ZONE COMES FROM THE CREDENTIAL. The verified instance row names the zone
+/// the claim pages, so a body cannot widen it, and an app of another zone is
+/// never visited, observed or named to Control.
 ///
 /// THE QUEUE COMMITS FIRST. The claim transaction numbers the attempt and opens
 /// the recovery responsibility an intent-producing job needs, so a journal that
@@ -224,62 +247,294 @@ async fn ceiling(state: &SharedState, app: &AppId) -> Result<i64, NativeError> {
 /// work, so the authority the caller receives is what is actually left rather
 /// than what was left before this service did its own I/O.
 ///
-/// TWO STORES, NO SHARED TRANSACTION. A failure between the halves leaves the
-/// queue holding a leased row whose journal accepted nothing; that row's lease
-/// expires and the job is redelivered, which is the same recovery an unreachable
-/// worker gets.
+/// A GRANT THE CALLER CANNOT USE IS GIVEN BACK IN THE SAME REQUEST. A journal
+/// deferral, a journal that could not be reached for that app, and a grant the
+/// journal work exhausted each return the row rather than reaching the caller,
+/// and none of them fails the batch: they are per-app outcomes, and an error
+/// reply would strand every delivery this request already committed. A row the
+/// give-back cannot return - its lease already lapsed, its app is busy, or the
+/// claim's give-back deadline passed - is redelivered by that lapse, which is
+/// the recovery an unreachable worker gets.
+///
+/// THE BUDGET STARTS AT ARRIVAL and every step is inside it. The deadlines are
+/// taken once, from the instant this request arrived, so authentication and
+/// the body read are spent from them. Each grant's journal acceptance runs
+/// inside the claim, before the next app is tried, and every give-back, here
+/// and in the claim, ends by the claim's give-back deadline without waiting
+/// for an app's lock, so no reply leaves after the caller has stopped waiting
+/// for it.
 async fn claim(
     request: web::HttpRequest,
     state: State<SharedState>,
     body: web::types::Payload,
 ) -> web::HttpResponse {
+    let arrival = Instant::now();
     respond(
         async {
             let actor = authenticate(&request, &state, endpoints::WORKFLOW_JOB_CLAIM).await?;
-            let command: AssignedScope = read_json(&request, body).await?;
-            // AUTHORIZE BEFORE ANY POLICY I/O. The delivery ceiling below is
-            // read from the policy source, which observes the app, so placement
-            // is proved here first: a worker the app has not placed is refused
-            // without the app being named to the policy source at all.
-            state
-                .service
-                .manager
-                .verify_assignment(&VerifyAssignment {
-                    app_id: command.app_id.clone(),
-                    worker_id: actor.id().clone(),
-                    assignment_revision: command.assignment_revision,
-                })
-                .await?;
-            let granted = state
-                .service
-                .manager
-                .claim_job(actor.id(), &command, ceiling(&state, &command.app_id).await, || {
-                    revalidate(&state, &actor)
-                })
-                .await?;
-            let Some(grant) = granted else {
-                return Ok(None);
+            let command: ClaimJobs = read_json(&request, body).await?;
+            let policies = state.policy_source.as_ref().ok_or(Error::Unavailable)?;
+            let manager = &state.service.manager;
+            let deadline = manager.claim_deadline(arrival, &command)?;
+            let claim = ZoneClaim {
+                worker: actor.id(),
+                zone: actor.zone(),
+                request: &command,
+                deadline,
             };
-            let accepted: Option<AcceptedJob> =
-                if grant.delivery().job.operation.accepts_execution() {
-                    let journal = journal(&state, &command.app_id).await?;
-                    Some(
-                        journal
-                            .accept_job(&grant)
-                            .await
-                            .and_then(zeroship_workflow::service::delivery::JobAcceptance::reported)
-                            .map_err(journal_error)?,
-                    )
-                } else {
-                    None
-                };
-            Ok(Some(ClaimedDelivery {
-                lease: grant.lease()?,
-                accepted,
-            }))
+            let room = ReplyRoom::new(ClaimJobs::MAX_REPLY_BYTES);
+            let (batch, report) = manager
+                .claim_in_zone(
+                    &claim,
+                    policies.as_ref(),
+                    || revalidate(&state, &actor),
+                    |grant| admit(&state, &actor, &room, grant),
+                )
+                .await?;
+            for skipped in report.skipped {
+                tracing::debug!(
+                    app_id = %skipped.app_id.as_str(),
+                    reason = ?skipped.reason,
+                    "workflow claim skipped app"
+                );
+            }
+            for (app, error) in report.lapsing {
+                tracing::debug!(
+                    app_id = %app.as_str(),
+                    ?error,
+                    "workflow claim left an unusable delivery to lapse"
+                );
+            }
+            let mut deliveries = Vec::with_capacity(batch.grants.len());
+            for (grant, accepted) in batch.grants {
+                match grant.lease() {
+                    Ok(lease) => deliveries.push(ClaimedDelivery { lease, accepted }),
+                    Err(_) => give_back(&state, &actor, &claim, &grant).await,
+                }
+            }
+            Ok(ClaimedJobs {
+                deliveries,
+                after: batch.after,
+                lap_complete: batch.lap_complete,
+            })
         }
         .await,
     )
+}
+
+/// The service's half of one grant its claim committed: the zone check again,
+/// the journal's acceptance, and room in the reply.
+///
+/// THE ZONE IS CHECKED HERE AS WELL AS IN THE CLAIM. The claim passes a deleted
+/// app or one of another zone before locking it, but the journal is what would
+/// execute the job, so it accepts nothing until the verified worker's zone is
+/// admitted for that app by an observation this service took itself. A refusal
+/// gives the row back rather than failing the batch.
+///
+/// A TASK THE CALLER WILL NOT RECEIVE IS RELEASED WITH ITS ROW, while the grant
+/// it was accepted under is still live: a task left to lapse on its own
+/// deadline would hold one of the app's running units until then and count
+/// against its run as a dispatch that stalled. That covers a reply with no room
+/// left. A grant the reply finds exhausted is past that point - its task's
+/// deadline was bounded by the same lease - so both halves are redelivered by
+/// the lapse.
+async fn admit(
+    state: &SharedState,
+    actor: &VerifiedWorker,
+    room: &ReplyRoom,
+    grant: DeliveryGrant,
+) -> Admission<Option<AcceptedJob>> {
+    let app = &grant.delivery().job.app_id;
+    let admitted = match state.policy_source.as_ref() {
+        Some(source) => source
+            .observe(app)
+            .await
+            .and_then(|observation| observation.admits_zone(actor.zone())),
+        None => Err(NativeError::Unavailable),
+    };
+    if let Err(error) = admitted {
+        return Admission::GiveBack {
+            reason: if error == NativeError::Denied {
+                ClaimSkipReason::Denied
+            } else {
+                ClaimSkipReason::Unavailable
+            },
+            defer: GiveBack::Backoff,
+        };
+    }
+    if !grant.delivery().job.operation.accepts_execution() {
+        return room.fit(&grant, None);
+    }
+    let journal = match journal(state, app).await {
+        Ok(journal) => journal,
+        Err(error) => return refused(app, error),
+    };
+    let acceptance = match journal.accept_job(&grant).await {
+        Ok(acceptance) => acceptance,
+        Err(error) => return refused(app, journal_error(error)),
+    };
+    let task = match &acceptance {
+        JobAcceptance::Execute(task) => Some(DeliveredTask::clone(task)),
+        JobAcceptance::Settled(_) | JobAcceptance::Deferred { .. } => None,
+    };
+    let admitted = match acceptance {
+        JobAcceptance::Deferred { reason } => {
+            return Admission::GiveBack {
+                reason: ClaimSkipReason::Deferred,
+                defer: deferral(state, &grant, &reason).await,
+            }
+        }
+        accepted => match accepted.reported() {
+            Ok(accepted) => room.fit(&grant, Some(accepted)),
+            Err(error) => refused(app, journal_error(error)),
+        },
+    };
+    if let (Admission::Full | Admission::GiveBack { .. }, Some(task)) = (&admitted, &task) {
+        if let Err(error) = journal.release_job(task, &grant).await {
+            tracing::debug!(
+                app_id = %app.as_str(),
+                code = error.code(),
+                "workflow claim left an unsent task to lapse"
+            );
+        }
+    }
+    admitted
+}
+
+/// A grant the journal could not take: back with a growing pause.
+fn refused(app: &AppId, error: Error) -> Admission<Option<AcceptedJob>> {
+    tracing::warn!(
+        app_id = %app.as_str(),
+        %error,
+        "workflow claim could not accept a delivery into the journal"
+    );
+    Admission::GiveBack {
+        reason: ClaimSkipReason::Refused,
+        defer: GiveBack::Backoff,
+    }
+}
+
+/// What one claim reply still has room for under [`ClaimJobs::MAX_REPLY_BYTES`].
+///
+/// Each delivery is measured as it would be encoded, with its lease measured
+/// when it is admitted. The reply measures every lease again, later, and a
+/// later measure carries no more digits, so the sum is an upper bound on what
+/// the reply holds. The first delivery always fits: a reply that could carry
+/// none would leave an app with a large journal unclaimable.
+struct ReplyRoom {
+    left: Cell<usize>,
+    empty: Cell<bool>,
+}
+
+impl ReplyRoom {
+    /// Room under `limit`, less the reply's envelope at its widest: a cursor
+    /// naming an app and the longer spelling of `lapComplete`.
+    fn new(limit: usize) -> Self {
+        let envelope = serde_json::to_vec(&ClaimedJobs::<AcceptedJob> {
+            deliveries: Vec::new(),
+            after: Some(AppId::mint()),
+            lap_complete: false,
+        })
+        .map_or(limit, |encoded| encoded.len());
+        Self {
+            left: Cell::new(limit.saturating_sub(envelope)),
+            empty: Cell::new(true),
+        }
+    }
+
+    /// Take room for `delivery` and its separator, or report that none is left.
+    fn take(&self, delivery: &ClaimedDelivery<AcceptedJob>) -> bool {
+        let Ok(encoded) = serde_json::to_vec(delivery) else {
+            return false;
+        };
+        let size = encoded.len().saturating_add(1);
+        if self.empty.replace(false) {
+            self.left.set(self.left.get().saturating_sub(size));
+            return true;
+        }
+        if size > self.left.get() {
+            return false;
+        }
+        self.left.set(self.left.get() - size);
+        true
+    }
+
+    /// Admit `grant` with its journal half if the reply has room for it.
+    fn fit(
+        &self,
+        grant: &DeliveryGrant,
+        accepted: Option<AcceptedJob>,
+    ) -> Admission<Option<AcceptedJob>> {
+        let Ok(lease) = grant.lease() else {
+            return Admission::GiveBack {
+                reason: ClaimSkipReason::Unavailable,
+                defer: GiveBack::Backoff,
+            };
+        };
+        let delivery = ClaimedDelivery { lease, accepted };
+        if self.take(&delivery) {
+            Admission::Deliver(delivery.accepted)
+        } else {
+            Admission::Full
+        }
+    }
+}
+
+/// The pause a short-lived refusal earns: the app is at its concurrency cap,
+/// which the next settlement of one of its runs lifts.
+const AT_CAP_BACKOFF: Duration = Duration::from_millis(100);
+
+/// How long a deferred row stays unclaimable, by why the journal deferred it.
+///
+/// A run that is not due waits exactly until it is. Policy that refuses
+/// dispatch is not looked at again before the observation it came from lapses,
+/// so the row waits for that observation's validity. A missing deployment is
+/// the one condition nothing here can predict the end of, so its pause grows
+/// with every consecutive back-off.
+async fn deferral(state: &SharedState, grant: &DeliveryGrant, reason: &DeferredReason) -> GiveBack {
+    match reason {
+        DeferredReason::NotDue { until } => GiveBack::Exact(until.get()),
+        DeferredReason::AtCap => GiveBack::After(AT_CAP_BACKOFF),
+        DeferredReason::PolicyOff => {
+            let observed = match state.policy_source.as_ref() {
+                Some(source) => source.observe(&grant.delivery().job.app_id).await.ok(),
+                None => None,
+            };
+            observed
+                .map(|observation| {
+                    observation
+                        .expires_at()
+                        .saturating_duration_since(Instant::now())
+                })
+                .filter(|remaining| !remaining.is_zero())
+                .map_or(GiveBack::Backoff, GiveBack::After)
+        }
+        DeferredReason::DeploymentUnavailable => GiveBack::Backoff,
+    }
+}
+
+/// Return a grant the reply found exhausted, never failing the batch it came
+/// from, within the time the claim keeps for its give-backs.
+async fn give_back(
+    state: &SharedState,
+    actor: &VerifiedWorker,
+    claim: &ZoneClaim<'_>,
+    grant: &DeliveryGrant,
+) {
+    if let Err(error) = state
+        .service
+        .manager
+        .give_back_claimed(claim, grant.delivery(), GiveBack::Backoff, || {
+            revalidate(state, actor)
+        })
+        .await
+    {
+        tracing::debug!(
+            app_id = %grant.delivery().job.app_id.as_str(),
+            ?error,
+            "workflow claim left an unusable delivery to lapse"
+        );
+    }
 }
 
 /// Renew a delivery's queue lease and, when the caller names one, the journal
@@ -412,10 +667,11 @@ async fn settle(
 /// task and token finds no row at all. The same substitution is what the run
 /// routes make, for the same reason.
 ///
-/// The APP in the body selects which journal to ask and grants nothing. Unlike a
-/// placement, it is not a claim this service has to verify: the task credential
-/// is the authority, the journal holds only its hash, and a body naming another
-/// app reaches a journal where this caller's task does not exist.
+/// The APP in the body selects which journal to ask and grants nothing by
+/// itself. It must be an app the caller holds a live delivery of
+/// ([`task_journal`]), and within it the task credential is the authority: the
+/// journal holds only its hash, so a caller naming a task it was not handed
+/// finds no row.
 ///
 /// What crosses back is a key and a descriptor. The lock this takes is released
 /// before the caller opens the object, which is the point of splitting it -- in
@@ -433,13 +689,7 @@ async fn task_payload(
             let token = TaskToken::try_from(command.token).map_err(|_| Error::Unauthenticated)?;
             let worker = WorkerIdentity::new(actor.id().as_str().to_owned())
                 .map_err(|_| Error::Unauthenticated)?;
-            state
-                .service
-                .manager
-                .queue()
-                .require_placement(actor.id(), &command.app_id)
-                .await?;
-            let journal = journal(&state, &command.app_id).await?;
+            let journal = task_journal(&state, &actor, &command.app_id).await?;
             let located: PayloadLocation = journal
                 .service()
                 .read_task_payload(
@@ -483,13 +733,7 @@ async fn task_executable(
             let token = TaskToken::try_from(command.token).map_err(|_| Error::Unauthenticated)?;
             let worker = WorkerIdentity::new(actor.id().as_str().to_owned())
                 .map_err(|_| Error::Unauthenticated)?;
-            state
-                .service
-                .manager
-                .queue()
-                .require_placement(actor.id(), &command.app_id)
-                .await?;
-            let journal = journal(&state, &command.app_id).await?;
+            let journal = task_journal(&state, &actor, &command.app_id).await?;
             let pinned: PinnedDeployment = journal
                 .service()
                 .resolve_task_executable(&worker, &command.task_id, &token)
@@ -501,12 +745,24 @@ async fn task_executable(
     )
 }
 
-/// Hand a claimed journal task back without settling its delivery.
+/// Give a delivery back without settling it, with the journal task held under
+/// it when the caller names one.
 ///
-/// THE DELIVERY STAYS UNSETTLED, deliberately. A release gives up creator work
-/// the holder cannot finish; the journal marks the task released and makes the
-/// run due, `reclaim` expires that row on the next pass, and the queue
-/// redelivers. Settling here would report an outcome no execution produced.
+/// THE DELIVERY STAYS UNSETTLED, deliberately. A release gives up work the
+/// holder cannot do - creator work it cannot finish, or an app it could not
+/// prepare; the journal marks the task released and makes the run due, and the
+/// queue row returns to `ready` in the same request rather than staying leased
+/// until its lease lapses. Settling here would report an outcome no execution
+/// produced.
+///
+/// THE REASON DECIDES WHAT THE ROW OWES. An app the holder could not prepare ran
+/// nothing, so its row counts no attempt and stays unclaimable for a pause that
+/// grows with every consecutive back-off, and an app no worker can prepare does
+/// not cycle through the zone at claim speed. An attempt that began and was
+/// interrupted - it failed, was told to stop, or its host drained - did run, so
+/// its row is claimable at once and the attempt counts toward the delivery
+/// budget, once: an execution that fails before its first renewal would
+/// otherwise be redelivered without end.
 ///
 /// NOT FENCED ON DEPLOYMENT ADMISSIBILITY, unlike a completion, and that is a
 /// property rather than an omission. A release commits no execution, so there is
@@ -539,20 +795,34 @@ async fn release(
                 .queue()
                 .require_latest_delivery(&command.delivery)
                 .await?;
-            let journal = journal(&state, &command.delivery.job.app_id).await?;
-            let grant =
-                ReportedGrant::resume(
+            if let Some(task) = command.task {
+                let journal = journal(&state, &command.delivery.job.app_id).await?;
+                let grant = ReportedGrant::resume(
                     command.delivery.clone(),
-                    Some(command.task.remaining_ms),
+                    Some(task.remaining_ms),
                     started,
                 )
                 .map_err(journal_error)?;
-            let claim = TaskClaim::resume(command.task, command.delivery, started)
-                .map_err(journal_error)?;
-            journal
-                .release_job(&claim, &grant)
+                let claim = TaskClaim::resume(task, command.delivery.clone(), started)
+                    .map_err(journal_error)?;
+                journal
+                    .release_job(&claim, &grant)
+                    .await
+                    .map_err(journal_error)?;
+            }
+            let defer = match command.reason {
+                GiveBackReason::PreparationFailed => GiveBack::Backoff,
+                GiveBackReason::Interrupted => GiveBack::Interrupted,
+                GiveBackReason::Unsent => GiveBack::Unsent,
+            };
+            state
+                .service
+                .manager
+                .give_back_job(actor.id(), &command.delivery, defer, || {
+                    revalidate(&state, &actor)
+                })
                 .await
-                .map_err(journal_error)
+                .map_err(Error::from)
         }
         .await,
     )
@@ -618,13 +888,7 @@ async fn task_payload_reserve(
             let token = TaskToken::try_from(command.token).map_err(|_| Error::Unauthenticated)?;
             let worker = WorkerIdentity::new(actor.id().as_str().to_owned())
                 .map_err(|_| Error::Unauthenticated)?;
-            state
-                .service
-                .manager
-                .queue()
-                .require_placement(actor.id(), &command.app_id)
-                .await?;
-            let journal = journal(&state, &command.app_id).await?;
+            let journal = task_journal(&state, &actor, &command.app_id).await?;
             let reserved: PayloadReservation = journal
                 .service()
                 .reserve_task_payload(
@@ -641,3 +905,6 @@ async fn task_payload_reserve(
         .await,
     )
 }
+
+#[cfg(test)]
+mod tests;

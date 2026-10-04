@@ -12,7 +12,7 @@ use zeroship_workflow::{
             AppJournal, DeliveredTask, JobAcceptance, JobReceipt, PayloadConfirmation,
             ReportedExecution, TaskRenewal,
         },
-        AppWorkflows, ControlIntent, PolicyAuthority, PolicyBinding,
+        AppWorkflows, ControlIntent,
     },
     WorkflowExecution, WorkflowServiceError,
 };
@@ -24,8 +24,8 @@ use std::{
     time::{Duration, Instant},
 };
 use zeroship_core::{
-    workflow_coordination::{AssignedScope, FailureCode},
-    workflow_jobs::{Delivery, JobLease, JobSpec, JournalSettlement, SettlementReceipt},
+    workflow_coordination::FailureCode,
+    workflow_jobs::{ClaimJobs, Delivery, JobLease, JobSpec, JournalSettlement, SettlementReceipt},
 };
 use zeroship_workflow_client::{LeasedJob, WorkerCoordinator};
 
@@ -55,25 +55,16 @@ pub trait JobTransport {
     /// DECLARED RATHER THAN RETURNED, which is what makes it safe. A transport that
     /// declares `()` and then needs a journal does not misbehave quietly; it fails
     /// to compile, because there is no value of that type to use.
-    type Journal;
-    /// Bind one attempt's policy authority to this transport's journal.
+    type Journal: Clone;
+    /// Claim a batch for `request`.
     ///
-    /// ONE SITE PER SHAPE, deliberately. The retained authority is not decoration:
-    /// `CapturedLease::capture` reads it to choose the policy snapshot whose
-    /// `lease_ms` bounds the attempt, so an unscoped journal yields a DIFFERENT
-    /// lease budget rather than an error. An in-process transport therefore
-    /// delegates to `scope_journal`, and the crossed one has nothing to scope.
-    fn scope(
-        &self,
-        journal: &Self::Journal,
-        authority: &PolicyAuthority,
-    ) -> Result<Self::Journal, WorkflowServiceError>;
-
+    /// The exchange lasts at most `request.wait_ms`: the service works
+    /// for it to a deadline inside that wait, and the caller waits exactly
+    /// that long for the reply, so the two ends agree from the one value.
     fn claim(
         &self,
-        journal: &Self::Journal,
-        scope: &AssignedScope,
-    ) -> impl Future<Output = Result<Option<Claimed<Self::Lease>>, WorkflowServiceError>>;
+        request: &ClaimJobs,
+    ) -> impl Future<Output = Result<ClaimedBatch<Self::Lease>, WorkflowServiceError>>;
     fn heartbeat(
         &self,
         journal: &Self::Journal,
@@ -121,6 +112,21 @@ pub trait JobTransport {
         lease: &Self::Lease,
         task: &DeliveredTask,
     ) -> impl Future<Output = Result<(), WorkflowServiceError>>;
+    /// Give back a claim this host began nothing of, for `why`.
+    ///
+    /// THE WHOLE CLAIM, because both halves go back. The queue row returns and
+    /// counts no attempt - after a back-off when the app could not be
+    /// prepared, at once when the host stopped before starting it - and when
+    /// the journal accepted execution, its task is released in the same
+    /// exchange, so the redelivery is not deferred behind a task this host
+    /// never ran. No journal handle is an argument: neither case prepared one,
+    /// so a transport releases the journal half through the journal it reaches
+    /// itself.
+    fn give_back(
+        &self,
+        claimed: &Claimed<Self::Lease>,
+        why: Unstarted,
+    ) -> impl Future<Output = Result<(), WorkflowServiceError>>;
     /// Read what an attempt of this logical job already committed, if any.
     ///
     /// The recovery read for an uncertain settlement, for the same reason: the
@@ -133,15 +139,47 @@ pub trait JobTransport {
     ) -> impl Future<Output = Result<Option<JobReceipt>, WorkflowServiceError>>;
 }
 
+/// Why a host gives back a claim it began nothing of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unstarted {
+    /// The host could not prepare the delivery's app. The row waits out a
+    /// back-off that grows while the app keeps failing.
+    Unprepared,
+    /// The host stopped before starting the delivery. Nothing was wrong with
+    /// the job, so the row is claimable at once.
+    Stopped,
+}
+
 /// A claimed delivery and the journal acceptance that rode with it.
 #[derive(Debug)]
 pub struct Claimed<L> {
     pub lease: L,
-    /// Present for the one operation this port delivers. A claimant holding a
-    /// placement is admitted to creator work alone, so a reply carrying none is
-    /// a transport that dropped half of its own answer rather than a kind this
-    /// slot settles without an executor.
+    /// Present for the one operation this port delivers. A worker's claim is
+    /// admitted to creator work alone, so a reply carrying none is a transport
+    /// that dropped half of its own answer rather than a kind this slot settles
+    /// without an executor.
     pub accepted: Option<JobAcceptance>,
+}
+
+impl<L> Claimed<L> {
+    /// The journal task this claim's acceptance leased, if it accepted execution.
+    #[must_use]
+    pub fn task(&self) -> Option<&DeliveredTask> {
+        match &self.accepted {
+            Some(JobAcceptance::Execute(task)) => Some(task),
+            _ => None,
+        }
+    }
+}
+
+/// One batch claim's deliveries and where the next claim continues.
+#[derive(Debug)]
+pub struct ClaimedBatch<L> {
+    pub deliveries: Vec<Claimed<L>>,
+    /// The last app this claim visited; the next claim sends it back.
+    pub after: Option<zeroship_core::app_id::AppId>,
+    /// This claim reached the end of the zone's candidate apps.
+    pub lap_complete: bool,
 }
 
 /// A renewed delivery and the journal renewal that rode with it.
@@ -165,39 +203,66 @@ impl JobTransport for WorkerCoordinator {
     /// itself and establishes authority from the credential that signed the
     /// request, so there is nothing for this side to scope.
     type Journal = ();
-    fn scope(
-        &self,
-        _journal: &Self::Journal,
-        _authority: &PolicyAuthority,
-    ) -> Result<Self::Journal, WorkflowServiceError> {
-        Ok(())
-    }
-
+    /// A delivery that cannot be taken is refused alone, and the rest of the
+    /// batch runs: a refusal of the whole reply would strand every lease the
+    /// service committed in it.
+    ///
+    /// A lease spent in transit can be neither renewed nor given back and
+    /// lapses. A journal task that arrived with no time left could not begin,
+    /// through no fault of the job, so its delivery is given back claimable at
+    /// once while its lease is still live.
     async fn claim(
         &self,
-        // The journal these deliveries are accepted into is the coordinator's,
-        // at the far end of this call. A host that reaches the manager over HTTP
-        // holds no credential to it, which is what merging the halves is for.
-        _journal: &Self::Journal,
-        scope: &AssignedScope,
-    ) -> Result<Option<Claimed<Self::Lease>>, WorkflowServiceError> {
+        request: &ClaimJobs,
+    ) -> Result<ClaimedBatch<Self::Lease>, WorkflowServiceError> {
         let claimed = self
-            .claim_job::<AppJournal>(scope)
+            .claim_jobs::<AppJournal>(request)
             .await
             .map_err(metadata_error)?;
-        claimed
-            .map(|claimed| {
-                Ok(Claimed {
-                    accepted: claimed
-                        .accepted
-                        .map(|accepted| {
-                            accepted.received(claimed.lease.delivery(), claimed.started)
-                        })
-                        .transpose()?,
+        for lapsed in &claimed.lapsed {
+            tracing::debug!(
+                job_id = %lapsed.job.id.as_str(),
+                "workflow claim left a delivery spent in transit to lapse"
+            );
+        }
+        let mut deliveries = Vec::with_capacity(claimed.deliveries.len());
+        for claimed in claimed.deliveries {
+            let accepted = claimed
+                .accepted
+                .map(|accepted| accepted.received(claimed.lease.delivery(), claimed.started))
+                .transpose();
+            match accepted {
+                Ok(accepted) => deliveries.push(Claimed {
+                    accepted,
                     lease: claimed.lease,
-                })
-            })
-            .transpose()
+                }),
+                Err(refused) => {
+                    tracing::debug!(
+                        job_id = %claimed.lease.delivery().job.id.as_str(),
+                        code = refused.code(),
+                        "workflow claim gave back a delivery whose task arrived spent"
+                    );
+                    if let Err(error) = self
+                        .give_back_job::<AppJournal>(
+                            &claimed.lease,
+                            zeroship_workflow_client::GiveBackReason::Unsent,
+                        )
+                        .await
+                    {
+                        tracing::debug!(
+                            job_id = %claimed.lease.delivery().job.id.as_str(),
+                            ?error,
+                            "workflow claim left a spent delivery to lapse"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(ClaimedBatch {
+            deliveries,
+            after: claimed.after,
+            lap_complete: claimed.lap_complete,
+        })
     }
 
     async fn heartbeat(
@@ -233,15 +298,48 @@ impl JobTransport for WorkerCoordinator {
     }
 
     /// The journal half of a release crosses with the delivery it gives back.
+    ///
+    /// Every release on this path follows a delivery the journal accepted for
+    /// execution and this slot then stopped without a receipt, whether its
+    /// executor failed to start, failed, was told to stop or was drained. It is
+    /// reported as interrupted, so the service counts the attempt and an
+    /// execution that keeps failing before its first renewal exhausts its
+    /// delivery budget instead of cycling. An app that could not be prepared
+    /// never reaches a slot; it goes back through [`JobTransport::give_back`].
     async fn release(
         &self,
         _journal: &Self::Journal,
         lease: &Self::Lease,
         task: &DeliveredTask,
     ) -> Result<(), WorkflowServiceError> {
-        self.release_job::<AppJournal>(lease, &task.reported()?)
-            .await
-            .map_err(metadata_error)
+        self.release_job::<AppJournal>(
+            lease,
+            &task.reported()?,
+            zeroship_workflow_client::GiveBackReason::Interrupted,
+        )
+        .await
+        .map_err(metadata_error)
+    }
+
+    /// One release request carries both halves: the task, when the journal
+    /// accepted execution, and the delivery the service returns to the queue.
+    async fn give_back(
+        &self,
+        claimed: &Claimed<Self::Lease>,
+        why: Unstarted,
+    ) -> Result<(), WorkflowServiceError> {
+        let reason = match why {
+            Unstarted::Unprepared => zeroship_workflow_client::GiveBackReason::PreparationFailed,
+            Unstarted::Stopped => zeroship_workflow_client::GiveBackReason::Unsent,
+        };
+        match claimed.task() {
+            Some(task) => {
+                self.release_job::<AppJournal>(&claimed.lease, &task.reported()?, reason)
+                    .await
+            }
+            None => self.give_back_job::<AppJournal>(&claimed.lease, reason).await,
+        }
+        .map_err(metadata_error)
     }
 
     /// Answered from the journal's own service, so a holder that holds none can
@@ -340,8 +438,9 @@ struct Active<L, J> {
     app: J,
     claims: RefCell<Claims<L>>,
     execution: Box<dyn TaskExecution>,
-    authority: PolicyAuthority,
     guard: ExecutionGuard,
+    /// The attempt's hard bound, the one the guard was built with.
+    bound: Duration,
     phase: Phase,
 }
 
@@ -424,62 +523,54 @@ impl<T: JobTransport> DeliverySlot<T> {
     pub async fn run(
         &mut self,
         app: &T::Journal,
-        policy: &PolicyBinding,
         claimed: Claimed<T::Lease>,
     ) -> Result<DeliveryOutcome, WorkflowServiceError> {
         let Claimed { lease, accepted } = claimed;
         self.drain_interrupted().await;
-        // THE CAPTURE SITE, and the only one. `PolicyBinding::authority` captures a
-        // FRESH authority; `AppWorkflows::captured_authority` answers with the
-        // RETAINED one once `with_authority` has installed it. Same type, different
-        // provenance, so they are interchangeable HERE and nowhere after: this runs
-        // before anything is scoped, so there is nothing retained to answer with.
-        // The scope call below CONSUMES this value rather than capturing again, so a
-        // second capture placed after it would be visibly a second capture -- and
-        // would take a fresh authority where the retained one decides the attempt's
-        // lease budget.
-        let authority = policy.authority();
-        // The acceptance rode in with the claim. A claimant holding a placement
-        // is admitted to creator work alone -- `Claimant::admits` in
-        // `zeroship-workflow-manager` pairs each work class with exactly one
-        // claimant -- so the journal accepts execution for every operation this
-        // slot can be handed, and a claim that reaches here carrying none is a
-        // transport that dropped half of its own reply.
+        // The acceptance rode in with the claim. A worker's claim is admitted to
+        // creator work alone -- `Claimant::admits` in `zeroship-workflow-manager`
+        // pairs each work class with exactly one claimant -- so the journal
+        // accepts execution for every operation this slot can be handed, and a
+        // claim that reaches here carrying none is a transport that dropped half
+        // of its own reply.
         let accepted = accepted.ok_or_else(|| lossy("journal acceptance"))?;
         let task = match accepted {
-            JobAcceptance::Deferred => return Ok(DeliveryOutcome::Deferred),
+            JobAcceptance::Deferred { .. } => return Ok(DeliveryOutcome::Deferred),
             JobAcceptance::Settled(receipt) => return self.acknowledge(app, *receipt, &lease).await,
             JobAcceptance::Execute(task) => *task,
         };
-        let authority = match authority.and_then(|authority| {
-            authority.check()?;
-            Ok(authority)
-        }) {
-            Ok(authority) => authority,
-            Err(error) => {
-                release(self.transport.as_ref(), app, &task, &lease, self.options.operation_timeout).await;
-                return Err(error);
-            }
-        };
-        let timeout = authority
-            .deadline()
-            .map_or(self.options.execution_timeout, |deadline| {
-                self.options
-                    .execution_timeout
-                    .min(deadline.saturating_duration_since(Instant::now()))
-            });
-        let guard = match ExecutionGuard::new(timeout) {
-            Ok(guard) => guard,
-            Err(error) => {
-                release(self.transport.as_ref(), app, &task, &lease, self.options.operation_timeout).await;
-                return Err(error);
-            }
-        };
-        let claims = Claims { lease, task };
-        if let Err(error) = guard
-            .cancel_on(authority.cancelled())
-            .and_then(|()| constrain(&guard, &claims))
+        // THE HARD BOUND IS THE LOCAL CEILING AND THE ATTEMPT, NOT THE LEASE. The
+        // manager refuses to extend a lease past the attempt it delivered, so the
+        // attempt's remainder is the one bound renewal can never move. The lease
+        // is renewable: `constrain` below holds the guard to it and every renewal
+        // moves it, so folding the lease this attempt STARTED under into the hard
+        // bound would end a renewed execution at its first lease.
+        //
+        // THE SETTLEMENT IS RESERVED INSIDE THE ATTEMPT. What follows the
+        // execution - committing and settling it, or releasing it - takes up to
+        // one operation bound and needs a live lease, and no lease outlives the
+        // attempt. So the execution ends that bound before the attempt does; an
+        // execution allowed to run to the attempt's end would leave nothing to
+        // settle or release with, and its committed work would wait for the
+        // lease to lapse.
+        let bound = match lease
+            .attempt_remaining()
+            .filter(|_| lease.remaining().is_some())
+            .and_then(|attempt| attempt.checked_sub(self.options.operation_timeout))
+            .filter(|execution| !execution.is_zero())
+            .map(|execution| self.options.execution_timeout.min(execution))
+            .ok_or(WorkflowServiceError::Timeout)
+            .and_then(|bound| ExecutionGuard::new(bound).map(|guard| (bound, guard)))
         {
+            Ok(bound) => bound,
+            Err(error) => {
+                release(self.transport.as_ref(), app, &task, &lease, self.options.operation_timeout).await;
+                return Err(error);
+            }
+        };
+        let (timeout, guard) = bound;
+        let claims = Claims { lease, task };
+        if let Err(error) = constrain(&guard, &claims) {
             release(
                 self.transport.as_ref(),
                 app,
@@ -490,8 +581,7 @@ impl<T: JobTransport> DeliverySlot<T> {
             .await;
             return Err(error);
         }
-        // The scope site: one call, consuming the authority captured above.
-        let scoped = self.transport.scope(app, &authority)?;
+        let scoped = app.clone();
         let execution = match self
             .executor
             .start(claims.task.assignment(), guard.budget())
@@ -513,16 +603,16 @@ impl<T: JobTransport> DeliverySlot<T> {
             app: scoped,
             claims: RefCell::new(claims),
             execution,
-            authority,
             guard,
+            bound: timeout,
             // The SAME bound the guard holds, so the renewal delay computed
             // from this phase cannot fall past the end of the attempt. The
             // delay is a fraction of the smallest bound that can end an
-            // attempt, and captured host authority is one of them: the
+            // attempt, and the delivered attempt bound is one of them: the
             // manager counts an attempt into its delivery ceiling only on
-            // that attempt's first renewal, so an attempt the authority
-            // window cuts short before any renewal leaves the ceiling where
-            // it was while redelivery continues.
+            // that attempt's first renewal, so an attempt cut short before
+            // any renewal leaves the ceiling where it was while redelivery
+            // continues.
             phase: Phase::new(timeout),
         });
         let result = Box::pin(run_active(self.transport.as_ref(), active, self.options)).await;
@@ -539,8 +629,6 @@ impl<T: JobTransport> DeliverySlot<T> {
     }
 
     /// Stop and join a cancelled invocation before releasing its creator claim.
-    /// A missing manager job-release endpoint is intentional: abandoned delivery
-    /// authority expires and the logical job remains available for redelivery.
     pub async fn drain_interrupted(&mut self) {
         if let Some(active) = &mut self.active {
             let execution = CancelOnDrop(active.execution.as_mut());
@@ -609,21 +697,23 @@ async fn run_active<T: JobTransport>(
             &active.claims,
             execution.0,
             &active.guard,
+            active.bound,
             &active.phase,
             options,
         )
         .boxed_local();
-        let ownership = active.authority.run(renew(
+        let renewal = renew(
             transport,
             &active.app,
             &active.claims,
             &active.guard,
             &active.phase,
             options,
-        ));
-        match futures::future::select(work, ownership).await {
-            Either::Left((result, ownership)) => {
-                drop(ownership);
+        )
+        .boxed_local();
+        match futures::future::select(work, renewal).await {
+            Either::Left((result, renewal)) => {
+                drop(renewal);
                 Ok(result)
             }
             Either::Right((control, work)) => {
@@ -692,6 +782,12 @@ fn constrain<L: JobLease>(
 
 /// Extend both leases until the run's control intent says to stop.
 ///
+/// A RENEWAL THAT EXTENDS NOTHING ENDS THE ATTEMPT. The journal extends nothing
+/// when the service's policy has admission or dispatch off, and it answers with
+/// a control intent instead -- the run's own, or a pause -- so the attempt is
+/// interrupted at that renewal, within one renewal delay of the policy change,
+/// rather than running on to an expiry the host would otherwise wait out.
+///
 /// ONE EXCHANGE CARRIES BOTH LEASES, SO THIS SIDE READS ITS AUTHORITY BEFORE
 /// ASKING AND NOT BETWEEN THE HALVES. `available` is the read: it takes the
 /// smaller of the grant's remaining authority and the task's, and refuses to ask
@@ -742,22 +838,26 @@ async fn renew<T: JobTransport>(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one attempt's borrowed halves, each owned by the slot's active state"
+)]
 async fn execute<T: JobTransport>(
     transport: &T,
     app: &T::Journal,
     claims: &RefCell<Claims<T::Lease>>,
     execution: &mut dyn TaskExecution,
     guard: &ExecutionGuard,
+    bound: Duration,
     phase: &Phase,
     options: DeliveryOptions,
 ) -> Result<Completed, WorkflowServiceError> {
     // A resolved frontier describes effects that already reached the world, so
     // local expiry does not withdraw the right to publish it; the completion
-    // loop below stays bounded by the phase deadline and the creator lease.
-    // Revoked delivery authority does withdraw it, and publishes nothing.
-    let result = bounded(options.execution_timeout, execution.wait())
-        .await
-        .and_then(|outcome| guard.budget().check_authority().map(|()| outcome));
+    // loop below stays bounded by the phase deadline and the creator lease. A
+    // renewal that ends the attempt drops this future instead, so nothing it
+    // resolves afterwards is published.
+    let result = bounded(bound, execution.wait()).await;
     // Joining remains mandatory after this deadline, but it must not keep
     // renewing manager or creator authority while native shutdown is stuck.
     phase.finalize(options.operation_timeout, result.as_ref().err());
@@ -797,7 +897,7 @@ async fn execute<T: JobTransport>(
                         receipt.settlement(&lease)?;
                         let settlement = transport.settle(app, &lease).await?;
                         agrees(&receipt, &settlement)?;
-                        return Ok(Completed { settlement, receipt });
+                        return Ok(Completed { receipt, settlement });
                     }
                     compio::time::sleep(options.retry_delay).await;
                 }
@@ -849,7 +949,6 @@ fn agrees(receipt: &JobReceipt, manager: &SettlementReceipt) -> Result<(), Workf
 fn same_delivery(left: &Delivery, right: &Delivery) -> bool {
     left.job == right.job
         && left.worker_id == right.worker_id
-        && left.assignment_revision == right.assignment_revision
         && left.attempt == right.attempt
 }
 
@@ -890,20 +989,6 @@ fn metadata_error(error: zeroship_workflow_client::Error) -> WorkflowServiceErro
 
 #[cfg(test)]
 mod tests;
-
-/// Bind an attempt's authority to an in-process journal.
-///
-/// The one implementation of the scoping every in-process transport needs, so a
-/// transport delegates rather than restating it. Handing back an unscoped journal
-/// would take a different policy snapshot's `lease_ms` for the attempt, which is
-/// a behaviour change rather than a failure -- so the omission has to be a visible
-/// act, and delegating here is what makes it one.
-pub fn scope_journal(
-    journal: &AppWorkflows,
-    authority: &PolicyAuthority,
-) -> Result<AppWorkflows, WorkflowServiceError> {
-    journal.clone().with_authority(authority.clone())
-}
 
 /// The settlement an in-process journal holds for a committed delivery: the
 /// outcome of the job's receipt, read now, and no successors.

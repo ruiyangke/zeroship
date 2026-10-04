@@ -4,13 +4,14 @@
 )]
 
 use crate::support;
+use crate::support::QueueCalls;
 
 use zeroship_workflow_manager::schema::{jobs, queue_scopes};
 use std::cell::Cell;
-use crate::support::{Backend, Fixture};
+use crate::support::{Backend, Fixture, Owner};
 use zeroship_core::{
     app_id::AppId,
-    workflow_coordination::{Assignment, RunId, VerifyAssignment, WorkerId},
+    workflow_coordination::{RunId, WorkerId},
     workflow_jobs::{
         BroadcastId, Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
     },
@@ -76,7 +77,6 @@ struct StoredJob {
     state: String,
     attempt: i64,
     worker_id: Option<String>,
-    assignment_revision: Option<i64>,
     lease_deadline: Option<i64>,
 }
 
@@ -144,13 +144,8 @@ async fn host(fixture: &Fixture) -> Queue {
     .unwrap()
 }
 
-fn assignment(app: &AppId) -> Assignment {
-    Assignment {
-        app_id: app.clone(),
-        worker_id: WorkerId::mint(),
-        revision: 1.try_into().unwrap(),
-        expires_at: i64::MAX.try_into().unwrap(),
-    }
+fn assignment(app: &AppId) -> Owner {
+    Owner::new(app.clone(), WorkerId::mint())
 }
 
 fn job(app: &AppId, available_at: i64) -> JobSpec {
@@ -167,7 +162,7 @@ fn job(app: &AppId, available_at: i64) -> JobSpec {
     }
 }
 
-async fn claim(queue: &Queue, authority: &Assignment) -> Delivery {
+async fn claim(queue: &Queue, authority: &Owner) -> Delivery {
     queue
         .claim(authority)
         .await
@@ -180,13 +175,14 @@ async fn claim(queue: &Queue, authority: &Assignment) -> Delivery {
 /// Claim as the lane in the process that owns the journal. The dispatch order is
 /// one order over the whole queue, but each claimant sees only the kinds it may
 /// take, and a broadcast page is one of the lane's.
-async fn claim_sweep(queue: &Queue, authority: &Assignment) -> Delivery {
+async fn claim_sweep(queue: &Queue, authority: &Owner) -> Delivery {
     queue
         .claim_authorized(
-            &authority.into(),
+            &authority.app_id,
+            &authority.worker_id,
             Claimant::Maintenance,
             Ok(support::delivery_ceiling()),
-            |_| std::future::ready(Ok(authority.clone())),
+            |_| std::future::ready(Ok(authority.worker_id.clone())),
         )
         .await
         .unwrap()
@@ -218,7 +214,7 @@ async fn expire(database: &Database, delivery: &Delivery) {
 async fn expired_delivery_rotates(fixture: &Fixture) {
     let queue = host(fixture).await;
     let app = AppId::mint();
-    queue.register_scope(&app).await.unwrap();
+    queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     let authority = assignment(&app);
     let oldest = job(&app, 0);
     let sibling = job(&app, 1);
@@ -244,7 +240,7 @@ async fn expired_delivery_rotates(fixture: &Fixture) {
 async fn lost_claim(fixture: &Fixture) {
     let queue = host(fixture).await;
     let app = AppId::mint();
-    queue.register_scope(&app).await.unwrap();
+    queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     let authority = assignment(&app);
     let oldest = job(&app, 2);
     let sibling = job(&app, 3);
@@ -274,8 +270,8 @@ async fn eligibility(fixture: &Fixture) {
     let queue = host(fixture).await;
     let app = AppId::mint();
     let foreign = AppId::mint();
-    queue.register_scope(&app).await.unwrap();
-    queue.register_scope(&foreign).await.unwrap();
+    queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
+    queue.register_scope(&foreign, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     let authority = assignment(&app);
     let foreign_job = job(&foreign, 0);
     queue.submit(&foreign_job).await.unwrap();
@@ -303,7 +299,7 @@ async fn concurrent_claims(fixture: &Fixture) {
     let left = host(fixture).await;
     let right = host(fixture).await;
     let app = AppId::mint();
-    left.register_scope(&app).await.unwrap();
+    left.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     let authority = assignment(&app);
     let oldest = job(&app, 0);
     let second = job(&app, 1);
@@ -315,9 +311,22 @@ async fn concurrent_claims(fixture: &Fixture) {
     let first = claim(&left, &authority).await;
     assert_eq!(first.job, oldest);
     expire(&database, &first).await;
+    // The app's lock admits one claim at a time and each waits for it, so
+    // the two take turns: neither is refused, and each takes its own row.
     let (a, b) = futures::join!(left.claim(&authority), right.claim(&authority));
-    let a = a.unwrap().unwrap().delivery().clone();
-    let b = b.unwrap().unwrap().delivery().clone();
+    let claimed: Vec<_> = [a, b]
+        .into_iter()
+        .map(|result| {
+            result
+                .expect("a claim waits for the app's lock")
+                .expect("each claim takes a row")
+                .delivery()
+                .clone()
+        })
+        .collect();
+    assert_eq!(claimed.len(), 2);
+    let a = claimed[0].clone();
+    let b = claimed[1].clone();
     assert_ne!(a.job.id, b.job.id);
     assert!(a.job == second || a.job == third);
     assert!(b.job == second || b.job == third);
@@ -341,7 +350,7 @@ async fn concurrent_claims(fixture: &Fixture) {
 async fn claim_rollback(fixture: &Fixture) {
     let queue = host(fixture).await;
     let app = AppId::mint();
-    queue.register_scope(&app).await.unwrap();
+    queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     let authority = assignment(&app);
     let first = job(&app, 0);
     queue.submit(&first).await.unwrap();
@@ -349,20 +358,16 @@ async fn claim_rollback(fixture: &Fixture) {
     let database = fixture.database().await;
     let before = snapshot(&database, &app).await;
     let calls = Cell::new(0);
-    let identity = VerifyAssignment {
-        app_id: app.clone(),
-        worker_id: authority.worker_id.clone(),
-        assignment_revision: authority.revision,
-    };
     let result = queue
         .claim_authorized(
-            &identity,
-            Claimant::Placed,
+            &app,
+            &authority.worker_id,
+            Claimant::Worker,
             Ok(support::delivery_ceiling()),
             |tx| {
                 calls.set(calls.get() + 1);
                 let check = calls.get();
-                let observed = authority.clone();
+                let observed = authority.worker_id.clone();
                 let id = first.id.clone();
                 async move {
                     if check == 2 {
@@ -391,7 +396,7 @@ async fn claim_rollback(fixture: &Fixture) {
 async fn stable_rotation(fixture: &Fixture) {
     let queue = host(fixture).await;
     let app = AppId::mint();
-    queue.register_scope(&app).await.unwrap();
+    queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     let authority = assignment(&app);
     let first = job(&app, 0);
     let second = job(&app, 1);
@@ -399,7 +404,7 @@ async fn stable_rotation(fixture: &Fixture) {
     queue.submit(&second).await.unwrap();
     let database = fixture.database().await;
     let submitted = rotation(&database, &app).await;
-    queue.register_scope(&app).await.unwrap();
+    queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     assert_eq!(rotation(&database, &app).await, submitted);
     assert_eq!(queue.submit(&first).await.unwrap(), first);
     assert_eq!(rotation(&database, &app).await, submitted);
@@ -408,7 +413,7 @@ async fn stable_rotation(fixture: &Fixture) {
     assert_eq!(delivery.job, first);
     let claimed = rotation(&database, &app).await;
     assert_ne!(claimed, submitted);
-    queue.register_scope(&app).await.unwrap();
+    queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     assert_eq!(rotation(&database, &app).await, claimed);
     let renewed = queue
         .heartbeat(&authority, &delivery)
@@ -459,7 +464,7 @@ async fn replace_rotation(database: &Database, spec: &JobSpec, cursor: i64, orde
 async fn invalid_state(fixture: &Fixture) {
     let queue = host(fixture).await;
     let app = AppId::mint();
-    queue.register_scope(&app).await.unwrap();
+    queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     let authority = assignment(&app);
     let spec = job(&app, 0);
     queue.submit(&spec).await.unwrap();
@@ -500,7 +505,7 @@ case!(
 async fn fanout_reorders(fixture: &Fixture) {
     let queue = host(fixture).await;
     let app = AppId::mint();
-    queue.register_scope(&app).await.unwrap();
+    queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     let authority = assignment(&app);
     let mut broadcasts = [BroadcastId::mint(), BroadcastId::mint()];
     broadcasts.sort_by(|a, b| a.as_str().cmp(b.as_str()));

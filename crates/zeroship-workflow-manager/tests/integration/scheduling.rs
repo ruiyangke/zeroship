@@ -4,12 +4,13 @@
 )]
 
 use crate::support;
+use crate::support::QueueCalls;
 
 use std::future::ready;
-use crate::support::{Admin, Backend, Fixture};
+use crate::support::{Admin, Backend, Fixture, Owner};
 use zeroship_core::{
     app_id::AppId,
-    workflow_coordination::{Assignment, WorkerId},
+    workflow_coordination::{WorkerId},
     workflow_jobs::{Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec},
     workflow_schedules::{ActivateSchedules, RegisterSchedules, ScheduleDescriptor, ScheduleId},
 };
@@ -165,6 +166,7 @@ fn descriptor(name: &str, catch_up: ScheduleCatchUp) -> ScheduleDescriptor {
 fn registration(app: &AppId, schedules: Vec<ScheduleDescriptor>) -> RegisterSchedules {
     RegisterSchedules {
         app_id: app.clone(),
+                execution_zone_id: zeroship_core::ZoneId::default_zone(),
         deployment_id: DeploymentId::mint(),
         schedules,
     }
@@ -173,18 +175,14 @@ fn registration(app: &AppId, schedules: Vec<ScheduleDescriptor>) -> RegisterSche
 fn activation(registration: &RegisterSchedules, revision: i64) -> ActivateSchedules {
     ActivateSchedules {
         app_id: registration.app_id.clone(),
+                execution_zone_id: zeroship_core::ZoneId::default_zone(),
         deployment_id: registration.deployment_id.clone(),
         revision: revision.try_into().unwrap(),
     }
 }
 
-fn assignment(app: &AppId) -> Assignment {
-    Assignment {
-        app_id: app.clone(),
-        worker_id: WorkerId::mint(),
-        revision: 1.try_into().unwrap(),
-        expires_at: i64::MAX.try_into().unwrap(),
-    }
+fn assignment(app: &AppId) -> Owner {
+    Owner::new(app.clone(), WorkerId::mint())
 }
 
 async fn rows(fixture: &Fixture, table: &str, filter: Value) -> Vec<Value> {
@@ -259,23 +257,24 @@ fn instants(jobs: &[JobSpec]) -> Vec<i64> {
 }
 
 /// Ask as the lane in the process that owns the journal. Activation and calendar
-/// jobs are sweeps, so the lane is the only host they are delivered to; a placed
-/// worker takes creator work alone, and this suite enqueues none.
+/// jobs are sweeps, so the lane is the only host they are delivered to; a worker
+/// takes creator work alone, and this suite enqueues none.
 async fn try_claim_sweep(
     queue: &Queue,
-    owner: &Assignment,
+    owner: &Owner,
 ) -> Result<Option<DeliveryGrant>, Error> {
     queue
         .claim_authorized(
-            &owner.into(),
+            &owner.app_id,
+            &owner.worker_id,
             Claimant::Maintenance,
             Ok(support::delivery_ceiling()),
-            |_| ready(Ok(owner.clone())),
+            |_| ready(Ok(owner.worker_id.clone())),
         )
         .await
 }
 
-async fn claim_sweep(queue: &Queue, owner: &Assignment) -> Delivery {
+async fn claim_sweep(queue: &Queue, owner: &Owner) -> Delivery {
     try_claim_sweep(queue, owner)
         .await
         .unwrap()
@@ -285,11 +284,11 @@ async fn claim_sweep(queue: &Queue, owner: &Assignment) -> Delivery {
 }
 
 /// The lane has nothing left to take.
-async fn no_sweep(queue: &Queue, owner: &Assignment) {
+async fn no_sweep(queue: &Queue, owner: &Owner) {
     assert!(try_claim_sweep(queue, owner).await.unwrap().is_none());
 }
 
-async fn settle(queue: &Queue, owner: &Assignment, delivery: &Delivery, outcome: JobOutcome) {
+async fn settle(queue: &Queue, owner: &Owner, delivery: &Delivery, outcome: JobOutcome) {
     queue
         .settle(
             owner,
@@ -340,7 +339,7 @@ async fn preparation(fixture: &Fixture) {
         prepared
     );
     let foreign = AppId::mint();
-    queue.register_scope(&foreign).await.unwrap();
+    queue.register_scope(&foreign, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     let mut wrong_scope = activation(&metadata, 1);
     wrong_scope.app_id = foreign.clone();
     assert_eq!(scheduler.activate(&wrong_scope).await, Err(Error::Denied));
@@ -1047,7 +1046,7 @@ async fn selection(fixture: &Fixture) {
     let (scheduler, queue) = host(fixture).await;
     let app = AppId::mint();
     assert_eq!(scheduler.selection(&app).await, Ok(None));
-    queue.register_scope(&app).await.unwrap();
+    queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     assert_eq!(scheduler.selection(&app).await, Ok(None));
 
     let first = registration(&app, vec![descriptor("first", ScheduleCatchUp::Skip)]);
@@ -1091,6 +1090,7 @@ async fn selection(fixture: &Fixture) {
     scheduler
         .disable(&zeroship_core::workflow_schedules::DisableSchedules {
             app_id: app.clone(),
+                execution_zone_id: zeroship_core::ZoneId::default_zone(),
             revision: 5.try_into().unwrap(),
         })
         .await
@@ -1111,7 +1111,7 @@ async fn selection(fixture: &Fixture) {
     assert_eq!(scheduler.selection(&app).await, Err(Error::Storage));
 }
 
-/// A placed host leaves a due cron row for the lane that owns the journal.
+/// A worker leaves a due cron row for the lane that owns the journal.
 ///
 /// `cron_job` stages the schedule's inline input, so a cron row is one of the
 /// two sweeps that write payload objects; the other is collection, and its arm
@@ -1122,7 +1122,7 @@ async fn selection(fixture: &Fixture) {
 /// The row here is a dispatched one rather than a hand-written spec, because a
 /// cron row is deliverable only through its own lifecycle: an occurrence bound
 /// to an activation that has settled completed. That is what makes the control
-/// mean something - the lane takes this row, so the placed claimant's empty
+/// mean something - the lane takes this row, so the worker's empty
 /// answer is about the kind and not about a prerequisite nothing satisfied.
 async fn cron_left_to_the_journal_lane(fixture: &Fixture) {
     let (scheduler, queue) = host(fixture).await;
@@ -1141,7 +1141,7 @@ async fn cron_left_to_the_journal_lane(fixture: &Fixture) {
 
     assert!(
         queue.claim(&owner).await.unwrap().is_none(),
-        "the cron row is all that is left to claim, and a placed host answers \
+        "the cron row is all that is left to claim, and a worker answers \
          nothing rather than it"
     );
     assert_eq!(

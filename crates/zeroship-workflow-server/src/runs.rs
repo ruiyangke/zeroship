@@ -231,12 +231,12 @@ impl RunService {
         // often they established.
         //
         // ABSENCE OF INFORMATION IS NOT INFORMATION ABOUT ABSENCE, and the
-        // distinction is why this belongs here and not inside `install`.
-        // `AssignedPolicies` installs a manager lease, where a `None` epoch is
-        // the manager AUTHORITATIVELY saying no responsibility is open;
-        // preserving a stale epoch there would defeat the fence outright. Two
-        // install paths that look alike must not be unified: one is silent
-        // about the epoch, the other is decisive about it.
+        // distinction is why this belongs here and not inside `install`. An
+        // installer holding the manager's own answer - the local host's
+        // `LocalIngress` installs the epoch its manager established - is
+        // decisive about the epoch, and preserving a stale one there would
+        // defeat the fence outright. This observation is silent about it. Two
+        // install paths that look alike must not be unified.
         //
         // What licenses carrying it forward at all is that the epoch is a claim
         // rechecked at use time, never a cached grant. `require_open_epoch`
@@ -475,7 +475,7 @@ fn establishment_error(error: ManagerError) -> WorkflowServiceError {
         ManagerError::Capacity => WorkflowServiceError::ResourceExhausted(
             "workflow ingress establishment was refused for capacity".into(),
         ),
-        ManagerError::Timeout => WorkflowServiceError::Timeout,
+        ManagerError::Timeout | ManagerError::Contended => WorkflowServiceError::Timeout,
         ManagerError::Unavailable => WorkflowServiceError::Unavailable(
             "workflow ingress establishment is unavailable".into(),
         ),

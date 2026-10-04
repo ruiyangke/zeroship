@@ -4,14 +4,14 @@ use std::fmt::Debug;
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{
-        AssignedScope, ConflictPolicy, CreatorStartOptions, InvalidRestart, InvalidStart,
+        ConflictPolicy, CreatorStartOptions, InvalidRestart, InvalidStart,
         ManagementOutcome, ManagementReceipt, PayloadLocation, RequestId, RestartDeploy,
-        RestartOptions, RestartTarget, RunId, RunOperation, RunState, ScopePage, StartOptions,
+        RestartOptions, RestartTarget, RunId, RunOperation, RunState, StartOptions,
         StartRun, StepOutputLocation, WorkerId,
     },
     workflow_jobs::{
-        BroadcastId, Delivery, DeliveryLease, DeploymentId, JobId, JobOperation, JobOutcome,
-        JobReceipt, JobSpec, ManagementCommand, PropagationId, SettlementReceipt,
+        BroadcastId, ClaimJobs, Delivery, DeliveryLease, DeploymentId, JobId, JobOperation,
+        JobOutcome, JobReceipt, JobSpec, ManagementCommand, PropagationId, SettlementReceipt,
     },
     workflow_schedules::ScheduleId,
 };
@@ -197,7 +197,6 @@ fn delivery(operation: JobOperation) -> Delivery {
             available_at: 0.try_into().unwrap(),
         },
         worker_id: WorkerId::mint(),
-        assignment_revision: 2.try_into().unwrap(),
         attempt: 3.try_into().unwrap(),
         deadline: 456.try_into().unwrap(),
     }
@@ -720,8 +719,7 @@ fn delivery_and_receipt_preserve_logical_and_attempt_identities() {
     });
     assert_eq!(round_trip(job), expected_job);
     let expected_delivery = json!({
-        "job":expected_job,"workerId":delivery.worker_id,
-        "assignmentRevision":2,"attempt":3,"deadline":456,
+        "job":expected_job,"workerId":delivery.worker_id,"attempt":3,"deadline":456,
     });
     assert_eq!(round_trip(&delivery), expected_delivery);
     // The queue receipt names the logical job and the attempt the queue counted,
@@ -744,9 +742,10 @@ fn lease_replies_are_closed_and_carry_no_caller_expiry() {
     let lease = DeliveryLease {
         delivery: value,
         remaining_ms: std::num::NonZeroU64::new(789).unwrap(),
+        attempt_remaining_ms: std::num::NonZeroU64::new(456).unwrap(),
     };
     let wire = round_trip(&lease);
-    assert_eq!(wire, json!({"delivery":lease.delivery,"remainingMs":789}));
+    assert_eq!(wire, json!({"delivery":lease.delivery,"remainingMs":789,"attemptRemainingMs":456}));
     for bad in [json!(0), json!(-1), json!(0.5), json!("1"), Value::Null] {
         let mut invalid = wire.clone();
         invalid["remainingMs"] = bad;
@@ -762,7 +761,7 @@ fn lease_replies_are_closed_and_carry_no_caller_expiry() {
             .insert("input".into(), json!({"secret":true}));
         refuses::<DeliveryLease>(invalid);
     }
-    for field in ["delivery", "remainingMs"] {
+    for field in ["delivery", "remainingMs", "attemptRemainingMs"] {
         let mut missing = wire.clone();
         missing.as_object_mut().unwrap().remove(field);
         refuses::<DeliveryLease>(missing);
@@ -887,7 +886,6 @@ fn counters_and_deadlines_enforce_native_ranges_on_the_wire() {
     };
     let wire = round_trip(&delivery(operation));
     for path in [
-        "/assignmentRevision",
         "/attempt",
         "/job/operation/revision",
     ] {
@@ -1033,12 +1031,20 @@ fn missing_fields_and_unknown_operations_or_outcomes_are_rejected() {
     }
     let app = AppId::mint();
     let request = RequestId::mint();
-    let page = ScopePage { after: None };
+    let page = ClaimJobs {
+        max: 1.try_into().unwrap(),
+        wait_ms: 1.try_into().unwrap(),
+        after: None,
+        exclude: Vec::new(),
+    };
     spells_its_null(&page, "/after");
     requires_every_key(&page, &[""]);
     requires_every_key(
-        &ScopePage {
+        &ClaimJobs {
+            max: 1.try_into().unwrap(),
+            wait_ms: 1.try_into().unwrap(),
             after: Some(app.clone()),
+            exclude: Vec::new(),
         },
         &[""],
     );
@@ -1386,10 +1392,7 @@ fn a_continued_run_is_terminal_and_names_itself_distinctly() {
 fn a_creator_start_cannot_name_a_payload_descriptor() {
     let start = StartRun {
         request_id: RequestId::mint(),
-        scope: AssignedScope {
-            app_id: AppId::mint(),
-            assignment_revision: 3.try_into().unwrap(),
-        },
+        app_id: AppId::mint(),
         workflow_name: "orders".to_owned(),
         input: json!({"order": 7}),
         options: CreatorStartOptions {

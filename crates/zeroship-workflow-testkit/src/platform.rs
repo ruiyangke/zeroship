@@ -94,7 +94,7 @@ impl Platform {
 }
 impl Platform {
     /// A live Control app in the deployment's seeded zone, created the way
-    /// Control creates one, so placement can read its zone and deletion.
+    /// Control creates one, so the service can read its zone and deletion.
     /// Seeding an app that exists changes nothing.
     pub async fn seed_app(&self, app: &zeroship_core::AppId) -> String {
         self.seed_app_in(app, None).await
@@ -127,7 +127,7 @@ impl Platform {
         self.admin
             .execute(
                 "INSERT INTO zeroship.organizations(id,slug,name,billing_email) \
-                 VALUES($1,$2,'Placement Test','placement@zeroship.test')",
+                 VALUES($1,$2,'Workflow Test','workflow@zeroship.test')",
                 &[&organization.as_str(), &name],
             )
             .await
@@ -142,7 +142,7 @@ impl Platform {
         self.admin
             .execute(
                 "INSERT INTO zeroship.projects(id,organization_id,slug,name,execution_zone_id) \
-                 VALUES($1,$2,'default','Placement Test',$3)",
+                 VALUES($1,$2,'default','Workflow Test',$3)",
                 &[&project.as_str(), &organization.as_str(), &zone],
             )
             .await

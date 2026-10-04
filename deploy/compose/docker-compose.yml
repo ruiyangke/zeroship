@@ -617,9 +617,9 @@ services:
       migrate:
         condition: service_completed_successfully
 
-  # The workflow metadata coordinator: worker registry, placement, the manager
-  # driver's scheduling/recovery/retention/closing lanes, and the creator-facing
-  # run and schedule calls served over its own journal.
+  # The workflow service: the zone queues workers pull jobs from, the manager
+  # driver's scheduling/recovery/retention/closing/capacity lanes, and the
+  # creator-facing run and schedule calls served over its own journal.
   workflow:
     build:
       context: ../..
@@ -632,7 +632,7 @@ services:
       zeroship-workflow-server
         --listen 0.0.0.0:9093
     # /readyz opens the coordination metadata pool, so unhealthy here means
-    # placement and management calls would fail, not merely that the port is
+    # claims and management calls would fail, not merely that the port is
     # closed. Startup itself verifies more than the probe does: the process
     # refuses to bind at all unless `workflow_manager` carries the fingerprint
     # this build expects and the login holds exactly the manager grants.
@@ -934,12 +934,16 @@ services:
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}/service-peers.json:/etc/zeroship/secrets/service-peers.json:ro
     deploy:
       replicas: 3
-    # A stopped worker drains for up to `worker.shutdown_timeout` (its default:
-    # the command above does not set it) and then retires its own instance at
-    # control. Docker's own stop timeout is shorter than that default, and a
-    # worker killed mid-drain leaves its row `active`, so the grace period
-    # covers the drain and the retirement call.
-    stop_grace_period: 45s
+    # A stopped worker drains its HTTP requests and its running workflow
+    # executions side by side for up to `worker.shutdown_timeout` (its default:
+    # the command above does not set it), then retires its own instance at
+    # control within that call's own bound. A worker killed mid-drain leaves its
+    # row `active` and its executions to redeliver, so the grace covers both.
+    # The worker states the grace it needs as `termination_grace_secs` in its
+    # `--check-config` report, and
+    # `the_compose_stop_grace_covers_the_worker_drain_and_its_retirement` in
+    # crates/zeroship-worker/tests/e2e/check_config.rs holds this value to it.
+    stop_grace_period: 65s
     security_opt:
       - seccomp:unconfined
     depends_on:

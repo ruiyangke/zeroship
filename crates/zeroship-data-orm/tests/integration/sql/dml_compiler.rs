@@ -1093,6 +1093,7 @@ fn generated_increment_only_accepts_integer_storage() {
             condition: None,
             returning: Vec::new(),
             insert_generated_identity: false,
+            do_nothing: false,
         })
     };
 
@@ -1336,6 +1337,7 @@ fn parts(table: &Table) -> UpsertParts {
             alias: None,
         }],
         insert_generated_identity: false,
+        do_nothing: false,
     }
 }
 
@@ -1392,6 +1394,43 @@ fn source_membership_cannot_be_forged_with_the_same_table_name() {
         );
     }
     assert!(Upsert::new(parts(&own)).is_ok());
+}
+
+#[test]
+fn upsert_do_nothing_renders_without_an_update_on_both_dialects() {
+    let table = table();
+    for registration in [SqlRegistration::postgres(), SqlRegistration::sqlite()] {
+        let mut input = parts(&table);
+        input.update.clear();
+        input.condition = None;
+        input.do_nothing = true;
+        let query = registration
+            .compile(Statement::Upsert(Upsert::new(input).unwrap()))
+            .unwrap();
+        assert!(
+            query.sql().contains(" ON CONFLICT (\"id\") DO NOTHING"),
+            "{}",
+            query.sql()
+        );
+        assert!(!query.sql().contains("DO UPDATE"), "{}", query.sql());
+    }
+}
+
+#[test]
+fn upsert_do_nothing_refuses_update_assignments_or_a_condition() {
+    let table = table();
+    let mut with_update = parts(&table);
+    with_update.do_nothing = true;
+    assert!(Upsert::new(with_update).is_err());
+    let mut with_condition = parts(&table);
+    with_condition.do_nothing = true;
+    with_condition.update.clear();
+    assert!(Upsert::new(with_condition).is_err());
+    let mut bare = parts(&table);
+    bare.do_nothing = true;
+    bare.update.clear();
+    bare.condition = None;
+    assert!(Upsert::new(bare).is_ok());
 }
 
 #[test]

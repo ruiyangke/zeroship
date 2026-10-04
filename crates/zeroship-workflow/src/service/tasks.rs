@@ -188,8 +188,8 @@ impl WorkflowService {
                         tx.commit().await?;
                         return Ok(Some(*task));
                     }
-                    ReadyClaim::Unavailable => advanced = true,
-                    ReadyClaim::Busy => {}
+                    ReadyClaim::DeploymentUnavailable => advanced = true,
+                    ReadyClaim::PolicyOff | ReadyClaim::AtCap => {}
                 }
                 tx.commit().await?;
             }
@@ -515,8 +515,9 @@ pub(super) async fn inspect_task(
 /// Shared exact-run executor admission; the caller owns the app/run locks.
 pub(super) enum ReadyClaim {
     Task(Box<TaskAssignment>),
-    Unavailable,
-    Busy,
+    DeploymentUnavailable,
+    PolicyOff,
+    AtCap,
 }
 
 pub(super) async fn assign(
@@ -550,10 +551,10 @@ pub(super) async fn assign(
         )
         .await?;
     if available.is_empty() {
-        return Ok(ReadyClaim::Unavailable);
+        return Ok(ReadyClaim::DeploymentUnavailable);
     }
     if !policy.admission || !policy.dispatch || policy.max_running == 0 {
-        return Ok(ReadyClaim::Busy);
+        return Ok(ReadyClaim::PolicyOff);
     }
     let Output::Count(running) = task_rows
         .count(
@@ -567,7 +568,7 @@ pub(super) async fn assign(
         ));
     };
     if running >= policy.max_running {
-        return Ok(ReadyClaim::Busy);
+        return Ok(ReadyClaim::AtCap);
     }
     let run = lock_run(tx, app, &id).await?;
     let invocation = frontier::invocation(tx, app, &run).await?;

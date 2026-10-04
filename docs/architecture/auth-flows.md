@@ -693,14 +693,14 @@ The rows, by principal:
 - `svc/workflow` reaches both of Control's deployment-hold pairs, Control's app-facts read and
   Control's deploy registration. A journal hold is decided and recorded where the journal is while
   Control is where it takes effect on the deploy catalog, so the service that holds the journal is
-  the one Control admits; Control reads no placement from the body, because the service has none and
-  the request carries no authority field. The app-facts read is how the workflow manager gets the
-  policy inputs and the deletion marker, which is why it holds no grant on `zeroship.apps` policy
-  columns or on `zeroship.plans`.
+  the one Control admits; the request names no worker and carries no authority field. The app-facts
+  read is how the workflow manager gets the policy inputs, each app's frozen execution zone and the
+  deletion marker, which is why it holds no grant on `zeroship.apps` or on `zeroship.plans`.
 - `svc/gateway` reaches Control's route feed and the worker's dispatch endpoint.
 - `svc/worker` reaches Control's version, app, environment, data-key and binding reads, its own
-  retire and renew, the workflow register, assignment, renew, release, job, run and task endpoints,
-  the policy lease, and CDC subscribe.
+  retire and renew, the workflow job, run and task endpoints, and CDC subscribe. Which apps a worker
+  may claim jobs for and make run calls for is decided by the execution zone frozen on its instance
+  row, never by a body.
 
 The route declaration and the authorization are one statement on both ends: `configure` in
 `crates/zeroship-worker/src/handler.rs` registers the dispatch route from the endpoint's own path
@@ -712,11 +712,12 @@ cannot drift into two copies.
 `WorkflowAuth` distinguishes a **role** assertion, verified against the process-wide peer
 bundle, from an
 **instance** assertion, where the issuer must carry the `svc/worker` principal, its instance segment
-parses as a worker id, the public key comes from the active-worker registry, and a single-key trust
-bundle is built for that exact issuer before verification runs. The two are never fallbacks for each
-other. The schedule endpoints add a further explicit check that the issuer is Control's, and the job
-endpoints revalidate the worker mid-operation rather than trusting the entry check for the whole
-call.
+parses as a worker id, the public key and the instance's frozen execution zone come from one
+live-instance read (`WorkerRegistry::active_instance`), and a single-key trust bundle is built for
+that exact issuer before verification runs. The two are never fallbacks for each other. The schedule
+endpoints add a further explicit check that the issuer is Control's, the claim and run endpoints
+admit only apps of the verified zone, and the job endpoints revalidate the worker mid-operation rather
+than trusting the entry check for the whole call.
 
 ### 3.4 Worker join
 

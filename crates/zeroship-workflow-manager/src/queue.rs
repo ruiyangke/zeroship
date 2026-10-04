@@ -6,14 +6,14 @@
 use crate::{
     clock::{Clock, Sample, RESOLUTION_MILLIS},
     error::Error,
-    models::{self, assignments, jobs, queue_scopes, Claimant, Job, Placement, Scope},
+    models::{self, jobs, queue_scopes, Claimant, Job, Scope},
     retention::{self, Retention},
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
     cell::Cell,
-    future::{poll_fn, ready, Future},
+    future::{poll_fn, Future},
     io::Write,
     num::{NonZeroU64, NonZeroUsize},
     rc::Rc,
@@ -22,12 +22,12 @@ use std::{
 };
 use zeroship_core::{
     app_id::AppId,
-    workflow_coordination::{Assignment, VerifyAssignment, WorkerId},
+    workflow_coordination::WorkerId,
     workflow_jobs::{
         valid_outcome, Delivery, DeliveryLease, DeploymentId, JobLease, JobSpec,
         JournalSettlement, SettlementReceipt,
     },
-    workflow_policy::AppPolicy,
+    zone_id::ZoneId,
 };
 use zeroship_data_orm::{
     binding::DbBinding,
@@ -42,8 +42,11 @@ use zeroship_data_orm::{
 pub struct Options {
     pub max_connections: NonZeroUsize,
     pub lease: Duration,
+    pub max_attempt: Duration,
     pub transaction_timeout: Duration,
     pub max_metadata_bytes: usize,
+    pub defer_backoff: Duration,
+    pub defer_backoff_max: Duration,
 }
 
 impl Default for Options {
@@ -51,17 +54,51 @@ impl Default for Options {
         Self {
             max_connections: NonZeroUsize::new(8).unwrap(),
             lease: Duration::from_secs(30),
+            max_attempt: Duration::from_secs(300),
             transaction_timeout: Duration::from_secs(5),
             max_metadata_bytes: 256 * 1024,
+            defer_backoff: Duration::from_millis(100),
+            defer_backoff_max: Duration::from_secs(60),
         }
+    }
+}
+
+impl Options {
+    /// The bounds [`Queue::connect`] refuses, checked without opening anything,
+    /// so a host's configuration check refuses what its startup would.
+    ///
+    /// One attempt spans at least one lease: `max_attempt` caps how far
+    /// heartbeats may extend a delivery, so a cap shorter than the lease would
+    /// cut every attempt before its first renewal was due.
+    ///
+    /// # Errors
+    /// Refuses empty or unrepresentable durations, an attempt cap shorter than
+    /// the lease and a back-off ceiling below its base.
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.transaction_timeout.is_zero()
+            || Instant::now()
+                .checked_add(self.transaction_timeout)
+                .is_none()
+            || self.max_metadata_bytes == 0
+            || self.lease.as_millis() == 0
+            || self.max_attempt < self.lease
+            || self.max_attempt.as_millis() == 0
+            || self.defer_backoff.is_zero()
+            || self.defer_backoff_max < self.defer_backoff
+            || i64::try_from(self.lease.as_millis()).is_err()
+            || i64::try_from(self.max_attempt.as_millis()).is_err()
+            || i64::try_from(self.defer_backoff_max.as_millis()).is_err()
+        {
+            return Err(Error::Invalid);
+        }
+        Ok(())
     }
 }
 
 /// Durable platform metadata with app-scoped delivery fences.
 ///
-/// Hosts authenticate workers and obtain their current coordinator assignment
-/// before calling delivery operations. The authorized variants recheck placement
-/// after locks and before commit. Journal authority belongs to the service.
+/// Hosts authenticate workers before calling delivery operations. The
+/// authorized variants recheck enrollment after locks and before commit.
 /// A timeout does not retract a dispatched commit; retry the same settlement to
 /// recover its durable receipt.
 #[derive(Clone, Debug)]
@@ -70,6 +107,61 @@ pub struct Queue {
     pub(crate) clock: Clock,
     pub(crate) options: Options,
     pub(crate) holds: Rc<dyn crate::retention::HoldClient>,
+}
+
+/// How a delivery returns to the ready queue without settling.
+///
+/// Every variant clears the holder and returns the row to `ready`. The deferral
+/// variants keep it unclaimable for a while and count no attempt: nothing
+/// executed, so a job that is deferred or unpreparable forever never exhausts its
+/// delivery budget. An interrupted attempt is the opposite case, claimable at
+/// once and counted; an unsent delivery is claimable at once and counts nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GiveBack {
+    /// Unclaimable until exactly this instant on the queue's database clock.
+    Exact(i64),
+    /// Unclaimable for this long from the give-back.
+    After(Duration),
+    /// Unclaimable for a pause that doubles with each consecutive back-off,
+    /// from [`Options::defer_backoff`] up to [`Options::defer_backoff_max`].
+    /// The only give-back that lengthens the next one.
+    Backoff,
+    /// An attempt that began executing and stopped without a receipt. The row
+    /// is claimable at once and the attempt counts toward the delivery budget,
+    /// exactly once: an attempt its first renewal already counted is not
+    /// counted again. Counting it is what stops an execution that fails before
+    /// its first renewal from being redelivered without end.
+    Interrupted,
+    /// A delivery that reached no execution through no fault of the job: the
+    /// reply it would have joined was full, its task reached the holder with
+    /// no time left, or its holder stopped before starting it. The row is
+    /// claimable at once, counts no attempt and leaves its back-off as it was.
+    Unsent,
+}
+
+/// How an operation takes an app's queue lock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScopeLock {
+    /// Wait for it, within the operation's budget.
+    Wait,
+    /// Refuse at once as [`Error::Contended`] when another transaction holds
+    /// it, on PostgreSQL. SQLite has no row locks, so there this waits like
+    /// [`Self::Wait`] and ends as `Unavailable` or `Timeout`.
+    Skip,
+}
+
+/// What a claim transaction found under the app's lock.
+#[derive(Debug)]
+pub(crate) enum Claimed {
+    /// A delivery committed for the caller. Boxed: a grant is several times
+    /// the size of the other answers, which carry nothing.
+    Granted(Box<DeliveryGrant>),
+    /// No row the caller may take.
+    Empty,
+    /// As many live deliveries as the caller's concurrency cap allows,
+    /// counted under the lock: another claim leased the last slot after this
+    /// caller's lock-free count.
+    AtCap,
 }
 
 struct PreparedSettlement {
@@ -82,6 +174,7 @@ struct PreparedSettlement {
 pub struct DeliveryGrant {
     delivery: Delivery,
     expires_at: Instant,
+    attempt_expires_at: Instant,
 }
 
 impl JobLease for DeliveryGrant {
@@ -94,6 +187,12 @@ impl JobLease for DeliveryGrant {
             .checked_duration_since(Instant::now())
             .filter(|remaining| !remaining.is_zero())
     }
+
+    fn attempt_remaining(&self) -> Option<Duration> {
+        self.attempt_expires_at
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+    }
 }
 
 impl DeliveryGrant {
@@ -103,21 +202,24 @@ impl DeliveryGrant {
         &self.delivery
     }
 
-    fn new(delivery: Delivery, sample: Sample, assignment_expires: Instant) -> Result<Self, Error> {
-        let expires_at = local_deadline(sample, delivery.deadline.get())?.min(assignment_expires);
+    fn new(delivery: Delivery, sample: Sample, attempt_deadline: i64) -> Result<Self, Error> {
+        let expires_at = local_deadline(sample, delivery.deadline.get())?;
+        let attempt_expires_at = local_deadline(sample, attempt_deadline)?;
         if expires_at <= Instant::now() {
             return Err(Error::Timeout);
         }
         Ok(Self {
             delivery,
             expires_at,
+            attempt_expires_at,
         })
     }
 
     fn cap(&mut self, sample: Sample) -> Result<(), Error> {
         self.expires_at = self
             .expires_at
-            .min(local_deadline(sample, self.delivery.deadline.get())?);
+            .min(local_deadline(sample, self.delivery.deadline.get())?)
+            .min(self.attempt_expires_at);
         if self.expires_at <= Instant::now() {
             return Err(Error::Timeout);
         }
@@ -134,9 +236,17 @@ impl DeliveryGrant {
             .ok()
             .and_then(NonZeroU64::new)
             .ok_or(Error::Timeout)?;
+        let attempt_remaining = self
+            .attempt_expires_at
+            .saturating_duration_since(Instant::now());
+        let attempt_remaining_ms = u64::try_from(attempt_remaining.as_millis())
+            .ok()
+            .and_then(NonZeroU64::new)
+            .ok_or(Error::Timeout)?;
         Ok(DeliveryLease {
             delivery: self.delivery.clone(),
             remaining_ms,
+            attempt_remaining_ms,
         })
     }
 }
@@ -152,16 +262,7 @@ impl Queue {
         options: Options,
         holds: Rc<dyn crate::retention::HoldClient>,
     ) -> Result<Self, Error> {
-        if options.transaction_timeout.is_zero()
-            || Instant::now()
-                .checked_add(options.transaction_timeout)
-                .is_none()
-            || options.max_metadata_bytes == 0
-            || options.lease.as_millis() == 0
-            || i64::try_from(options.lease.as_millis()).is_err()
-        {
-            return Err(Error::Invalid);
-        }
+        options.validate()?;
         let database = Database::connect(
             binding.clone(),
             ConnectOptions::new(url, ProjectKeySource::unavailable())
@@ -253,8 +354,8 @@ impl Queue {
     ///
     /// # Errors
     /// Refuses failed transactions; repeated registration preserves queue state.
-    pub async fn register_scope(&self, app: &AppId) -> Result<(), Error> {
-        self.transact(|tx| async move { register_scope_in(&tx, app).await })
+    pub async fn register_scope(&self, app: &AppId, zone: &ZoneId) -> Result<(), Error> {
+        self.transact(|tx| async move { register_scope_in(&tx, app, zone).await })
             .await
     }
 
@@ -299,26 +400,7 @@ impl Queue {
         }
     }
 
-    /// Claim under a current assignment authenticated by the native host, on the
-    /// default app policy's delivery budget. This form substitutes defaults the
-    /// authorized form demands: a host that observes its app's policy, or
-    /// revalidates placement inside the transaction, calls `claim_authorized`.
-    ///
-    /// It claims as [`Claimant::Placed`], because an assignment is a placement.
-    ///
-    /// # Errors
-    /// Refuses expired authority and failed transactions.
-    pub async fn claim(&self, assignment: &Assignment) -> Result<Option<DeliveryGrant>, Error> {
-        self.claim_authorized(
-            &assignment.into(),
-            Claimant::Placed,
-            Ok(AppPolicy::default().max_delivery_attempts),
-            |_| ready(Ok(assignment.clone())),
-        )
-        .await
-    }
-
-    /// Revalidate placement after acquiring the app lock and before commit.
+    /// Revalidate enrollment after acquiring the app lock and before commit.
     /// Each authorization callback receives the active transaction for scoped reads.
     ///
     /// A job whose counted executions have reached `max_delivery_attempts` is no
@@ -327,176 +409,200 @@ impl Queue {
     /// no executor produced an outcome for it.
     ///
     /// The ceiling arrives as its caller's already-settled result, and is read
-    /// only once placement holds. A policy authority that cannot answer for an
-    /// app therefore never preempts that app's placement refusal, and a caller
-    /// denied the scope is told so rather than told to retry.
+    /// only once the app's lock and the caller's enrollment hold. A policy
+    /// authority that cannot answer for an app therefore never preempts a
+    /// refusal of the caller itself, and a caller that is refused is told so
+    /// rather than told to retry.
     ///
     /// `claimant` names the host asking, and the kinds it refuses are excluded
     /// from candidate selection rather than from the claimed row, so a refused
     /// row at the front of the dispatch order does not hide the rows behind it.
     ///
+    /// The app's lock is WAITED FOR, within the transaction timeout: the
+    /// maintenance lane and management commands claim one app at a time, and
+    /// one that found the app busy would only have to ask again. The worker's
+    /// zone claim is the one caller that passes a busy app instead.
+    ///
     /// # Errors
-    /// Refuses revoked assignments, unreadable or invalid ceilings, exhausted
+    /// Refuses revoked enrollment, unreadable or invalid ceilings, exhausted
     /// attempt numbering and failed transactions.
     pub async fn claim_authorized<F, Fut>(
         &self,
-        assignment: &VerifyAssignment,
+        app: &AppId,
+        worker: &WorkerId,
         claimant: Claimant,
         max_delivery_attempts: Result<i64, Error>,
-        mut authorize: F,
+        authorize: F,
     ) -> Result<Option<DeliveryGrant>, Error>
     where
         F: FnMut(Database) -> Fut,
-        Fut: Future<Output = Result<Assignment, Error>>,
+        Fut: Future<Output = Result<WorkerId, Error>>,
     {
-        let budget = Budget::new(self.options.transaction_timeout);
+        let claimed = self
+            .claim_within(
+                Budget::new(self.options.transaction_timeout),
+                ScopeLock::Wait,
+                app,
+                worker,
+                claimant,
+                max_delivery_attempts,
+                None,
+                authorize,
+            )
+            .await?;
+        Ok(match claimed {
+            Claimed::Granted(grant) => Some(*grant),
+            Claimed::Empty | Claimed::AtCap => None,
+        })
+    }
+
+    /// [`Self::claim_authorized`] under a caller's budget and lock, which a
+    /// zone claim caps at its batch deadline and takes without waiting.
+    ///
+    /// `max_running`, when given, is counted again under the lock against the
+    /// app's live creator deliveries: a lock-free count that admitted the app
+    /// can be overtaken by another claim that leased its last slot meanwhile.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one claim's budget, lock, caller, ceilings and enrollment check"
+    )]
+    pub(crate) async fn claim_within<F, Fut>(
+        &self,
+        budget: Budget,
+        lock: ScopeLock,
+        app: &AppId,
+        worker: &WorkerId,
+        claimant: Claimant,
+        max_delivery_attempts: Result<i64, Error>,
+        max_running: Option<i64>,
+        mut authorize: F,
+    ) -> Result<Claimed, Error>
+    where
+        F: FnMut(Database) -> Fut,
+        Fut: Future<Output = Result<WorkerId, Error>>,
+    {
         self.transact_for(budget.clone(), |tx| async move {
-            lock_scope(&tx, &assignment.app_id).await?;
-            let observed = authorize(tx.clone()).await?;
+            lock_scope_as(&tx, app, lock).await?;
+            require_worker(worker, authorize(tx.clone()).await?)?;
             let sample = self.clock.sample().await?;
-            let authority = current(assignment, observed, sample.millis)?;
-            budget.cap(sample, authority.expires_at.get())?;
             let max_delivery_attempts = max_delivery_attempts?;
             if max_delivery_attempts <= 0 {
                 return Err(Error::Invalid);
             }
             let now = sample.millis;
-            let assignment_expires = local_deadline(sample, authority.expires_at.get())?;
-            crate::management::validate_pending(&tx, &assignment.app_id).await?;
+            crate::management::validate_pending(&tx, app).await?;
+            if let Some(cap) = max_running {
+                if crate::scheduling::live_advance_count(&tx, app, now).await? >= cap {
+                    require_worker(worker, authorize(tx.clone()).await?)?;
+                    return Ok(Claimed::AtCap);
+                }
+            }
             let Some(id) = Box::pin(crate::scheduling::candidate(
                 &tx,
-                &assignment.app_id,
+                app,
                 now,
                 claimant,
                 Some(max_delivery_attempts),
             ))
             .await?
             else {
-                let observed = authorize(tx.clone()).await?;
-                let sample = self.clock.sample().await?;
-                let authority = current(assignment, observed, sample.millis)?;
-                budget.cap(sample, authority.expires_at.get())?;
-                return Ok(None);
+                require_worker(worker, authorize(tx.clone()).await?)?;
+                return Ok(Claimed::Empty);
             };
-            let job = load(&tx, &assignment.app_id, &id).await?.ok_or(Error::Storage)?;
+            let job = load(&tx, app, &id).await?.ok_or(Error::Storage)?;
             if let Some(deployment) = job.spec()?.deployment_id() {
-                retention::require_held(&tx, &assignment.app_id, deployment).await?;
+                retention::require_held(&tx, app, deployment).await?;
             }
             crate::scheduling::validate_delivery(&tx, &job).await?;
             crate::management::validate_job(&tx, &job.spec()?, true).await?;
             let attempt = job.attempt.checked_add(1).filter(|value| *value > 0)
                 .ok_or(Error::Capacity)?;
             let sample = self.clock.sample().await?;
-            let deadline = self.deadline(&authority, sample.millis)?;
+            let leased_at = sample.millis;
+            let attempt_deadline = self.attempt_deadline(leased_at)?;
+            let deadline = self.deadline(leased_at, attempt_deadline)?;
             budget.cap(sample, deadline)?;
             let delivery = Delivery {
-                job: job.spec()?, worker_id: assignment.worker_id.clone(),
-                assignment_revision: assignment.assignment_revision,
+                job: job.spec()?, worker_id: worker.clone(),
                 attempt: attempt.try_into().map_err(|_| Error::Storage)?,
                 deadline: deadline.try_into().map_err(|_| Error::Storage)?,
             };
-            let mut grant = DeliveryGrant::new(delivery, sample, assignment_expires)?;
-            let dispatch_order = next_dispatch_order(&tx, &assignment.app_id, Some(job.dispatch_order)).await?;
+            let mut grant = DeliveryGrant::new(delivery, sample, attempt_deadline)?;
+            let dispatch_order = next_dispatch_order(&tx, app, Some(job.dispatch_order)).await?;
             update(&tx,
-                value!({"id":id,"app_id":assignment.app_id.as_str(),"state":job.state,"attempt":job.attempt}),
-                value!({"state":"leased","attempt":attempt,"worker_id":assignment.worker_id.as_str(),
-                    "assignment_revision":assignment.assignment_revision.get(),"lease_deadline":deadline,
+                value!({"id":id,"app_id":app.as_str(),"state":job.state,"attempt":job.attempt}),
+                value!({"state":"leased","attempt":attempt,"worker_id":worker.as_str(),
+                    "lease_deadline":deadline,"leased_at":leased_at,"deferred_until":null,
                     "dispatch_order":dispatch_order})
             ).await?;
             // Responsibility must exist before an intent-producing job executes.
             // The reopen shares this claim's app lock and rolls back with it.
             Box::pin(crate::recovery::claimed_in(&tx, &grant.delivery().job, now)).await?;
-            let observed = authorize(tx.clone()).await?;
+            require_worker(worker, authorize(tx.clone()).await?)?;
             let sample = self.clock.sample().await?;
-            let authority = current(assignment, observed, sample.millis)?;
-            if deadline > authority.expires_at.get() || sample.millis >= deadline {
+            if sample.millis >= deadline {
                 return Err(Error::Denied);
             }
-            budget.cap(sample, deadline.min(authority.expires_at.get()))?;
+            budget.cap(sample, deadline)?;
             grant.cap(sample)?;
-            Ok(Some(grant))
+            Ok(Claimed::Granted(Box::new(grant)))
         }).await
     }
 
-    /// Extend the current delivery under host-authenticated placement.
-    ///
-    /// # Errors
-    /// Refuses expired deliveries and any changed worker, app, revision or attempt.
-    pub async fn heartbeat(
-        &self,
-        assignment: &Assignment,
-        delivery: &Delivery,
-    ) -> Result<DeliveryGrant, Error> {
-        self.heartbeat_authorized(&assignment.into(), delivery, |_| {
-            ready(Ok(assignment.clone()))
-        })
-        .await
-    }
-
-    /// Revalidate placement while extending the stored delivery lease.
+    /// Revalidate enrollment while extending the stored delivery lease.
     /// Each authorization callback receives the active transaction for scoped reads.
     ///
     /// # Errors
-    /// Refuses stale delivery identity, revoked placement and failed transactions.
+    /// Refuses stale delivery identity, revoked enrollment and failed transactions.
     pub async fn heartbeat_authorized<F, Fut>(
         &self,
-        assignment: &VerifyAssignment,
+        worker: &WorkerId,
         delivery: &Delivery,
         mut authorize: F,
     ) -> Result<DeliveryGrant, Error>
     where
         F: FnMut(Database) -> Fut,
-        Fut: Future<Output = Result<Assignment, Error>>,
+        Fut: Future<Output = Result<WorkerId, Error>>,
     {
-        bound(assignment, delivery)?;
+        bound(worker, delivery)?;
         let budget = Budget::new(self.options.transaction_timeout);
         self.transact_for(budget.clone(), |tx| async move {
-            lock_scope(&tx, &assignment.app_id).await?;
-            let observed = authorize(tx.clone()).await?;
-            let sample = self.clock.sample().await?;
-            let authority = current(assignment, observed, sample.millis)?;
-            budget.cap(sample, authority.expires_at.get())?;
-            let assignment_expires = local_deadline(sample, authority.expires_at.get())?;
-            let job = load(&tx, &assignment.app_id, delivery.job.id.as_str())
+            lock_scope(&tx, &delivery.job.app_id).await?;
+            require_worker(worker, authorize(tx.clone()).await?)?;
+            let job = load(&tx, &delivery.job.app_id, delivery.job.id.as_str())
                 .await?
                 .ok_or(Error::Conflict)?;
             matches_delivery(&job, delivery)?;
             crate::management::validate_job(&tx, &delivery.job, true).await?;
             if let Some(deployment) = delivery.job.deployment_id() {
-                retention::require_held(&tx, &assignment.app_id, deployment).await?;
+                retention::require_held(&tx, &delivery.job.app_id, deployment).await?;
             }
             let sample = self.clock.sample().await?;
             live(&job, sample.millis)?;
             budget.cap(
                 sample,
-                authority
-                    .expires_at
-                    .get()
-                    .min(job.lease_deadline.ok_or(Error::Storage)?),
+                job.lease_deadline.ok_or(Error::Storage)?,
             )?;
-            let deadline = self.deadline(&authority, sample.millis)?;
+            let attempt_deadline = attempt_deadline(&job, self.options.max_attempt)?;
+            let deadline = self.deadline(sample.millis, attempt_deadline)?;
             let mut grant = DeliveryGrant::new(
                 Delivery {
                     deadline: deadline.try_into().map_err(|_| Error::Storage)?,
                     ..delivery.clone()
                 },
                 sample,
-                assignment_expires,
+                attempt_deadline,
             )?;
             update(&tx, fence(delivery), renewal(&job, delivery, deadline)?).await?;
-            let observed = authorize(tx.clone()).await?;
+            require_worker(worker, authorize(tx.clone()).await?)?;
             let sample = self.clock.sample().await?;
-            let authority = current(assignment, observed, sample.millis)?;
-            if deadline > authority.expires_at.get() || sample.millis >= deadline {
+            if sample.millis >= deadline {
                 return Err(Error::Denied);
             }
             live(&job, sample.millis)?;
             budget.cap(
                 sample,
-                authority
-                    .expires_at
-                    .get()
-                    .min(job.lease_deadline.ok_or(Error::Storage)?),
+                job.lease_deadline.ok_or(Error::Storage)?,
             )?;
             grant.cap(sample)?;
             Ok(grant)
@@ -513,42 +619,28 @@ impl Queue {
     ///
     /// # Errors
     /// Refuses changed settlements, stale delivery fences and failed transactions.
-    pub async fn settle(
-        &self,
-        assignment: &Assignment,
-        settlement: &JournalSettlement,
-    ) -> Result<SettlementReceipt, Error> {
-        self.settle_authorized(
-            &assignment.into(),
-            settlement,
-            |_| ready(Ok(assignment.clone())),
-            |_| ready(Ok(settlement.delivery().worker_id.clone())),
-        )
-        .await
-    }
-
-    /// Revalidate active placement around an atomic settlement. Receipt replay
+    /// Revalidate active enrollment around an atomic settlement. Receipt replay
     /// checks current enrollment of the original worker through `authorize_replay`;
-    /// expired or replaced placement does not erase its immutable receipt.
-    /// Replay neither renews placement nor writes anything the caller supplies.
+    /// an expired lease does not erase its immutable receipt.
+    /// Replay neither renews the lease nor writes anything the caller supplies.
     /// Both callbacks receive the active transaction for scoped metadata reads.
     ///
     /// # Errors
     /// Refuses revoked active delivery, conflicting settlements and failed transactions.
     pub async fn settle_authorized<F, Fut, R, Replay>(
         &self,
-        assignment: &VerifyAssignment,
+        worker: &WorkerId,
         settlement: &JournalSettlement,
         mut authorize: F,
         mut authorize_replay: R,
     ) -> Result<SettlementReceipt, Error>
     where
         F: FnMut(Database) -> Fut,
-        Fut: Future<Output = Result<Assignment, Error>>,
+        Fut: Future<Output = Result<WorkerId, Error>>,
         R: FnMut(Database) -> Replay,
         Replay: Future<Output = Result<WorkerId, Error>>,
     {
-        let prepared = self.prepare_settlement(assignment, settlement)?;
+        let prepared = self.prepare_settlement(worker, settlement)?;
         let delivery = settlement.delivery();
         let outcome = settlement.outcome();
         let budget = Budget::new(self.options.transaction_timeout);
@@ -560,8 +652,8 @@ impl Queue {
                     let digest = &prepared.digest;
                     let budget = &budget;
                     async move {
-                        lock_scope(&tx, &assignment.app_id).await?;
-                        let job = load(&tx, &assignment.app_id, delivery.job.id.as_str())
+                        lock_scope(&tx, &delivery.job.app_id).await?;
+                        let job = load(&tx, &delivery.job.app_id, delivery.job.id.as_str())
                             .await?
                             .ok_or(Error::Conflict)?;
                         matches_delivery(&job, delivery)?;
@@ -569,7 +661,7 @@ impl Queue {
                             serde_json::to_string(outcome).map_err(|_| Error::Invalid)?;
                         let receipt = SettlementReceipt {
                             job_id: delivery.job.id.clone(),
-                            app_id: assignment.app_id.clone(),
+                            app_id: delivery.job.app_id.clone(),
                             attempt: delivery.attempt,
                             outcome: outcome.clone(),
                         };
@@ -585,12 +677,12 @@ impl Queue {
                             }
                             return Ok(Retention::Ready(receipt));
                         }
-                        let observed = authorize(tx.clone()).await?;
+                        require_worker(worker, authorize(tx.clone()).await?)?;
                         let sample = self.clock.sample().await?;
-                        cap_live_delivery(budget, assignment, observed, &job, sample)?;
+                        cap_live_delivery(budget, &job, sample)?;
                         crate::management::validate_job(&tx, &delivery.job, true).await?;
                         if let Some(deployment) = delivery.job.deployment_id() {
-                            retention::require_held(&tx, &assignment.app_id, deployment).await?;
+                            retention::require_held(&tx, &delivery.job.app_id, deployment).await?;
                         }
                         crate::management::settle(&tx, &delivery.job, outcome, false).await?;
                         update(
@@ -610,9 +702,9 @@ impl Queue {
                             sample.millis,
                         ))
                         .await?;
-                        let observed = authorize(tx.clone()).await?;
+                        require_worker(worker, authorize(tx.clone()).await?)?;
                         let sample = self.clock.sample().await?;
-                        cap_live_delivery(budget, assignment, observed, &job, sample)?;
+                        cap_live_delivery(budget, &job, sample)?;
                         Ok(Retention::Ready(receipt))
                     }
                 })
@@ -620,7 +712,7 @@ impl Queue {
             match result {
                 Retention::Ready(receipt) => return Ok(receipt),
                 Retention::Acquire(deployment) => {
-                    self.ensure_deployment_for(&assignment.app_id, &deployment, budget.clone())
+                    self.ensure_deployment_for(&delivery.job.app_id, &deployment, budget.clone())
                         .await?;
                 }
             }
@@ -628,7 +720,7 @@ impl Queue {
     }
 
     /// Refuse a delivery that is not the one this queue last handed out for its
-    /// job: the job, worker, assignment revision and attempt the latest claim
+    /// job: the job, worker and attempt the latest claim
     /// wrote.
     ///
     /// A FENCE WITHOUT A LIVENESS CHECK, because the caller has not decided yet
@@ -651,38 +743,36 @@ impl Queue {
         .await
     }
 
-    /// Refuse a task call for an app this worker has no live placement on.
+    /// Refuse a task call for an app in which this worker holds no live
+    /// delivery.
     ///
     /// A task read or reservation names an app and a task credential, never a
     /// delivery, so the queue cannot compare the exact attempt the way
-    /// [`Self::require_latest_delivery`] does. What it proves instead is that the
-    /// worker is admitted to the app at all, which is what must be true before
-    /// the policy source is asked to observe it. The journal then authorizes the
-    /// task itself. Without this fence, naming another tenant's app would make
-    /// the policy source observe it and answer differently by whether that app
-    /// exists.
+    /// [`Self::require_latest_delivery`] does. What it proves instead is that
+    /// the worker holds a live lease on some job of the app, which is what every
+    /// task credential is issued under, and which must be true before the
+    /// policy source is asked to observe the app. The journal then authorizes
+    /// the task itself. Without this fence, naming another tenant's app would
+    /// make the policy source observe it and answer differently by whether that
+    /// app exists.
     ///
     /// # Errors
-    /// Refuses with `Denied` a released or lapsed placement on the app, and
+    /// Refuses with `Denied` an app in which the worker holds no live lease, and
     /// reports failed transactions.
-    pub async fn require_placement(&self, worker: &WorkerId, app: &AppId) -> Result<(), Error> {
+    pub async fn require_live_holder(&self, worker: &WorkerId, app: &AppId) -> Result<(), Error> {
         self.transact(|tx| async move {
-            let placement = tx
-                .entity::<assignments::Entity>()?
-                .find::<Placement>(
-                    assignments::app_id
+            let now = self.clock.now().await?;
+            let held = tx
+                .entity::<jobs::Entity>()?
+                .count(
+                    jobs::app_id
                         .eq(app.as_str())?
-                        .and(assignments::worker_id.eq(worker.as_str())?),
-                    FindOptions {
-                        limit: Some(1),
-                        ..Default::default()
-                    },
+                        .and(jobs::worker_id.eq(Some(worker.as_str()))?)
+                        .and(jobs::state.eq("leased")?)
+                        .and(jobs::lease_deadline.gt(Some(now))?),
                 )
-                .await?
-                .into_iter()
-                .next()
-                .ok_or(Error::Denied)?;
-            if placement.released || placement.expires_at <= self.clock.now().await? {
+                .await?;
+            if held <= 0 {
                 return Err(Error::Denied);
             }
             Ok(())
@@ -690,28 +780,166 @@ impl Queue {
         .await
     }
 
+    /// Refuse a run call for an app that holds no queue scope in `zone`.
+    ///
+    /// A run call names an app and nothing else, and binding it observes the
+    /// app's policy: a Control read and a ledger write whose answers differ by
+    /// whether the app exists. The scope's frozen zone is this queue's own
+    /// copy of the app's, written when Control's lifecycle publication first
+    /// reached it, so this read is what admits the observation at all. An app
+    /// this queue has never seen and an app of another zone are refused alike,
+    /// with nothing observed and nothing written.
+    ///
+    /// # Errors
+    /// Refuses with `Denied` an app with no scope in `zone`, and reports failed
+    /// transactions.
+    pub async fn require_scope_in_zone(&self, app: &AppId, zone: &ZoneId) -> Result<(), Error> {
+        self.transact(|tx| async move {
+            let held = tx
+                .entity::<queue_scopes::Entity>()?
+                .count(
+                    queue_scopes::id
+                        .eq(app.as_str())?
+                        .and(queue_scopes::execution_zone_id.eq(zone.as_str())?),
+                )
+                .await?;
+            if held <= 0 {
+                return Err(Error::Denied);
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// Return a live delivery to the ready queue without settling it, as
+    /// `defer` says: until a deferral ends, or at once for an interrupted
+    /// attempt.
+    ///
+    /// # Errors
+    /// Refuses a stale or live-worker-mismatched delivery and invalid deadlines.
+    pub async fn give_back<F, Fut>(
+        &self,
+        worker: &WorkerId,
+        delivery: &Delivery,
+        defer: GiveBack,
+        authorize: F,
+    ) -> Result<(), Error>
+    where
+        F: FnMut(Database) -> Fut,
+        Fut: Future<Output = Result<WorkerId, Error>>,
+    {
+        self.give_back_within(
+            Budget::new(self.options.transaction_timeout),
+            ScopeLock::Wait,
+            worker,
+            delivery,
+            defer,
+            authorize,
+        )
+        .await
+    }
+
+    /// [`Self::give_back`] under a caller's budget and lock, which a zone
+    /// claim bounds by the time its reply has left and takes without waiting.
+    pub(crate) async fn give_back_within<F, Fut>(
+        &self,
+        budget: Budget,
+        lock: ScopeLock,
+        worker: &WorkerId,
+        delivery: &Delivery,
+        defer: GiveBack,
+        mut authorize: F,
+    ) -> Result<(), Error>
+    where
+        F: FnMut(Database) -> Fut,
+        Fut: Future<Output = Result<WorkerId, Error>>,
+    {
+        bound(worker, delivery)?;
+        self.transact_for(budget, |tx| async move {
+            lock_scope_as(&tx, &delivery.job.app_id, lock).await?;
+            require_worker(worker, authorize(tx.clone()).await?)?;
+            let now = self.clock.now().await?;
+            let job = load(&tx, &delivery.job.app_id, delivery.job.id.as_str())
+                .await?
+                .ok_or(Error::Conflict)?;
+            matches_delivery(&job, delivery)?;
+            live(&job, now)?;
+            let patch = match defer {
+                GiveBack::Interrupted => interrupted(&job, delivery)?,
+                GiveBack::Unsent => value!({"state":"ready","worker_id":null,
+                    "lease_deadline":null,"leased_at":null,"deferred_until":null}),
+                GiveBack::Exact(_) | GiveBack::After(_) | GiveBack::Backoff => {
+                    self.deferral(&job, defer, now)?
+                }
+            };
+            update(&tx, fence(delivery), patch).await
+        })
+        .await
+    }
+
+    /// The row a deferral give-back leaves: ready, held by nobody, unclaimable
+    /// until `deferred_until`, and no attempt counted.
+    ///
+    /// ONLY THE BACK-OFF COUNTS ITSELF. `deferrals` is what the back-off
+    /// doubles by, so it moves for the give-backs that wait out a back-off and
+    /// for no other: a pause whose length is already known - an occurrence not
+    /// yet due, a policy observation not yet lapsed, a concurrency cap - says
+    /// nothing about whether the app can be prepared or its deployment
+    /// reached, and counting it would lengthen the next back-off for a fault
+    /// that never happened.
+    ///
+    /// A DEFERRAL THAT HAS ALREADY ENDED LEAVES THE ROW CLAIMABLE NOW. The
+    /// instant a host defers to can pass between its decision and this
+    /// give-back - an occurrence that fell due meanwhile - and refusing that
+    /// give-back would leave the row leased until its lease lapsed.
+    fn deferral(&self, job: &Job, defer: GiveBack, now: i64) -> Result<Value, Error> {
+        let (deferred_until, deferrals) = match defer {
+            GiveBack::Exact(until) => (until, job.deferrals),
+            GiveBack::After(delay) => (
+                now.checked_add(i64::try_from(delay.as_millis()).map_err(|_| Error::Invalid)?)
+                    .ok_or(Error::Capacity)?,
+                job.deferrals,
+            ),
+            GiveBack::Backoff => {
+                let shift = u32::try_from(job.deferrals).unwrap_or(u32::MAX).min(62);
+                let multiplier = 1_u128.checked_shl(shift).unwrap_or(u128::MAX);
+                let delay = self
+                    .options
+                    .defer_backoff
+                    .as_millis()
+                    .saturating_mul(multiplier)
+                    .min(self.options.defer_backoff_max.as_millis());
+                (
+                    now.checked_add(i64::try_from(delay).map_err(|_| Error::Capacity)?)
+                        .ok_or(Error::Capacity)?,
+                    job.deferrals.checked_add(1).ok_or(Error::Capacity)?,
+                )
+            }
+            GiveBack::Interrupted | GiveBack::Unsent => return Err(Error::Invalid),
+        };
+        let deferred_until = (deferred_until > now).then_some(deferred_until);
+        Ok(value!({"state":"ready","worker_id":null,"lease_deadline":null,
+            "leased_at":null,"deferred_until":deferred_until,"deferrals":deferrals}))
+    }
+
     /// Refuse a receipt read for anyone but the worker this queue last delivered
-    /// `job` to, or for a worker whose placement on the app is gone.
+    /// `job` to.
     ///
-    /// THE LATEST HOLDER, NOT A LIVE ONE. A claim writes `worker_id` and nothing
-    /// clears it, so a settled job still names the worker that settled it --
-    /// the holder a lost settlement reply leaves needing the job's receipt --
-    /// and the claim that superseded an earlier holder is what refuses that
-    /// holder here.
+    /// THE LATEST HOLDER, NOT A LIVE ONE. A claim writes `worker_id` and a
+    /// settlement leaves it, so a settled job still names the worker that
+    /// settled it -- the holder a lost settlement reply leaves needing the job's
+    /// receipt -- and the claim that superseded an earlier holder is what
+    /// refuses that holder here. A give-back clears it: the row is nobody's
+    /// until it is claimed again.
     ///
-    /// PLACEMENT IS RECHECKED BECAUSE A HOLD OUTLIVES IT. A settled row keeps
-    /// naming its worker after the app's placement was released, so the queue
-    /// row alone would let a worker that lost the app keep reading its outcomes.
-    /// The read takes the app lock and requires the worker's stored placement to
-    /// be live, which is the same authority a claim reads.
-    ///
-    /// The job is compared whole, not by id, so a holder is answered about the
-    /// job it was delivered and not about another operation under the same id.
+    /// The worker's live enrollment is the caller's check, made against the
+    /// credential that verified the request. The job is compared whole, not by
+    /// id, so a holder is answered about the job it was delivered and not about
+    /// another operation under the same id.
     ///
     /// # Errors
     /// Refuses with `Conflict` a job this worker does not hold, including one
-    /// the queue has never seen; refuses with `Denied` a released or lapsed
-    /// placement; and reports failed transactions.
+    /// the queue has never seen, and reports failed transactions.
     pub async fn require_latest_holder(
         &self,
         worker: &WorkerId,
@@ -724,24 +952,6 @@ impl Queue {
             if stored.spec()? != *job || stored.worker_id.as_deref() != Some(worker.as_str()) {
                 return Err(Error::Conflict);
             }
-            let placement = tx
-                .entity::<assignments::Entity>()?
-                .find::<Placement>(
-                    assignments::app_id
-                        .eq(job.app_id.as_str())?
-                        .and(assignments::worker_id.eq(worker.as_str())?),
-                    FindOptions {
-                        limit: Some(1),
-                        ..Default::default()
-                    },
-                )
-                .await?
-                .into_iter()
-                .next()
-                .ok_or(Error::Denied)?;
-            if placement.released || placement.expires_at <= self.clock.now().await? {
-                return Err(Error::Denied);
-            }
             Ok(())
         })
         .await
@@ -749,11 +959,11 @@ impl Queue {
 
     fn prepare_settlement(
         &self,
-        assignment: &VerifyAssignment,
+        worker: &WorkerId,
         settlement: &JournalSettlement,
     ) -> Result<PreparedSettlement, Error> {
         let delivery = settlement.delivery();
-        bound(assignment, delivery)?;
+        bound(worker, delivery)?;
         if !valid_outcome(&delivery.job.operation, settlement.outcome()) {
             return Err(Error::Invalid);
         }
@@ -761,23 +971,28 @@ impl Queue {
         let digest = digest(&self.encode(&(
             &delivery.job,
             &delivery.worker_id,
-            delivery.assignment_revision,
             delivery.attempt,
             settlement.outcome(),
         ))?);
         Ok(PreparedSettlement { digest })
     }
 
-    fn deadline(&self, assignment: &Assignment, now: i64) -> Result<i64, Error> {
+    fn deadline(&self, now: i64, attempt_deadline: i64) -> Result<i64, Error> {
         let lease = i64::try_from(self.options.lease.as_millis()).map_err(|_| Error::Invalid)?;
         let deadline = now
             .checked_add(lease)
             .ok_or(Error::Capacity)?
-            .min(assignment.expires_at.get());
+            .min(attempt_deadline);
         if deadline <= now {
             return Err(Error::Denied);
         }
         Ok(deadline)
+    }
+
+    fn attempt_deadline(&self, leased_at: i64) -> Result<i64, Error> {
+        let max_attempt =
+            i64::try_from(self.options.max_attempt.as_millis()).map_err(|_| Error::Invalid)?;
+        leased_at.checked_add(max_attempt).ok_or(Error::Capacity)
     }
 
     pub(crate) fn encode(&self, value: &impl Serialize) -> Result<Vec<u8>, Error> {
@@ -879,10 +1094,40 @@ impl Queue {
     }
 }
 
-pub async fn register_scope_in(tx: &Database, app: &AppId) -> Result<(), Error> {
+pub async fn register_scope_in(
+    tx: &Database,
+    app: &AppId,
+    zone: &ZoneId,
+) -> Result<(), Error> {
+    // Two concurrent registrations of one app cannot both establish a row: the
+    // insert leaves an existing row untouched, and the read below decides from
+    // whichever row won. A conflict on the identity alone, with a stored zone
+    // that differs, is the one refusal.
     tx.collection(queue_scopes::Entity::COLLECTION)?
+        .execute(Operation::InsertOnConflict {
+            document: value!({"id":app.as_str(),"execution_zone_id":zone.as_str()}),
+            conflict_fields: value!(["id"]),
+        })
+        .await?;
+    let scopes = tx.entity::<queue_scopes::Entity>()?;
+    let scope = scopes
+        .find::<Scope>(
+            queue_scopes::id.eq(app.as_str())?,
+            FindOptions {
+                limit: Some(1),
+                ..Default::default()
+            },
+        )
+        .await?
+        .into_iter()
+        .next()
+        .ok_or(Error::Storage)?;
+    if scope.execution_zone_id != zone.as_str() {
+        return Err(Error::Conflict);
+    }
+    tx.collection(models::capacity_targets::Entity::COLLECTION)?
         .execute(Operation::Upsert {
-            document: value!({"id":app.as_str()}),
+            document: value!({"id":zone.as_str()}),
             conflict_fields: value!(["id"]),
         })
         .await?;
@@ -902,6 +1147,44 @@ pub async fn lock_scope(tx: &Database, app: &AppId) -> Result<(), Error> {
         Output::Count(1) => Ok(()),
         Output::Count(0) => Err(Error::Denied),
         _ => Err(Error::Storage),
+    }
+}
+
+/// Take the app's queue lock as `lock` says.
+async fn lock_scope_as(tx: &Database, app: &AppId, lock: ScopeLock) -> Result<(), Error> {
+    match lock {
+        ScopeLock::Wait => lock_scope(tx, app).await,
+        ScopeLock::Skip => lock_scope_without_waiting(tx, app).await,
+    }
+}
+
+/// Take the app's queue lock without waiting for it.
+///
+/// On PostgreSQL the scope row is locked `FOR UPDATE NOWAIT`, and a row another
+/// transaction holds is refused at once as [`Error::Contended`], so a zone claim
+/// passes that app instead of spending its batch behind the holder. SQLite has
+/// no row locks and one database-wide write lock, so it keeps the waiting
+/// update-as-lock of [`lock_scope`], and a wait there ends as `Unavailable` or
+/// `Timeout`, never `Contended`.
+async fn lock_scope_without_waiting(tx: &Database, app: &AppId) -> Result<(), Error> {
+    if tx.postgres().is_err() {
+        return lock_scope(tx, app).await;
+    }
+    let locked = tx
+        .entity::<queue_scopes::Entity>()?
+        .query()
+        .filter(queue_scopes::id.eq(app.as_str())?)
+        .for_update_nowait()?
+        .first::<Scope>()
+        .await
+        .map_err(|error| match error {
+            DbError::LockContention { .. } => Error::Contended,
+            other => Error::from(other),
+        })?;
+    if locked.is_some() {
+        Ok(())
+    } else {
+        Err(Error::Denied)
     }
 }
 
@@ -982,22 +1265,15 @@ async fn update(tx: &Database, filter: Value, patch: Value) -> Result<(), Error>
     }
 }
 
-fn current(
-    original: &VerifyAssignment,
-    observed: Assignment,
-    now: i64,
-) -> Result<Assignment, Error> {
-    if original != &VerifyAssignment::from(&observed) || observed.expires_at.get() <= now {
+fn require_worker(expected: &WorkerId, observed: WorkerId) -> Result<(), Error> {
+    if expected != &observed {
         return Err(Error::Denied);
     }
-    Ok(observed)
+    Ok(())
 }
 
-fn bound(assignment: &VerifyAssignment, delivery: &Delivery) -> Result<(), Error> {
-    if assignment.app_id != delivery.job.app_id
-        || assignment.worker_id != delivery.worker_id
-        || assignment.assignment_revision != delivery.assignment_revision
-    {
+fn bound(worker: &WorkerId, delivery: &Delivery) -> Result<(), Error> {
+    if worker != &delivery.worker_id {
         return Err(Error::Denied);
     }
     Ok(())
@@ -1006,7 +1282,6 @@ fn bound(assignment: &VerifyAssignment, delivery: &Delivery) -> Result<(), Error
 fn matches_delivery(job: &Job, delivery: &Delivery) -> Result<(), Error> {
     if job.spec()? != delivery.job
         || job.worker_id.as_deref() != Some(delivery.worker_id.as_str())
-        || job.assignment_revision != Some(delivery.assignment_revision.get())
         || job.attempt != delivery.attempt.get()
     {
         return Err(Error::Conflict);
@@ -1016,20 +1291,17 @@ fn matches_delivery(job: &Job, delivery: &Delivery) -> Result<(), Error> {
 
 fn cap_live_delivery(
     budget: &Budget,
-    expected: &VerifyAssignment,
-    observed: Assignment,
     job: &Job,
     sample: Sample,
 ) -> Result<(), Error> {
-    let authority = current(expected, observed, sample.millis)?;
     live(job, sample.millis)?;
-    budget.cap(
-        sample,
-        authority
-            .expires_at
-            .get()
-            .min(job.lease_deadline.ok_or(Error::Storage)?),
-    )
+    budget.cap(sample, job.lease_deadline.ok_or(Error::Storage)?)
+}
+
+fn attempt_deadline(job: &Job, max_attempt: Duration) -> Result<i64, Error> {
+    let leased_at = job.leased_at.ok_or(Error::Storage)?;
+    let duration = i64::try_from(max_attempt.as_millis()).map_err(|_| Error::Invalid)?;
+    leased_at.checked_add(duration).ok_or(Error::Capacity)
 }
 
 fn live(job: &Job, now: i64) -> Result<(), Error> {
@@ -1039,27 +1311,54 @@ fn live(job: &Job, now: i64) -> Result<(), Error> {
     Ok(())
 }
 
-/// Renewal is the manager's only evidence that a delivery began executing: a
-/// claim the journal defers never reaches this path, so its attempt
-/// stays uncounted and capacity pressure cannot exhaust a job's budget. The
-/// first renewal of an attempt counts it; later renewals of the same attempt
-/// extend only the lease.
+/// Renewal is the manager's evidence that a delivery began executing: a claim
+/// the journal defers never reaches this path, so its attempt stays uncounted
+/// and capacity pressure cannot exhaust a job's budget. The first renewal of an
+/// attempt counts it; later renewals of the same attempt extend only the lease.
 fn renewal(job: &Job, delivery: &Delivery, deadline: i64) -> Result<Value, Error> {
+    let mut patch = counted(job, delivery)?;
+    patch["lease_deadline"] = value!(deadline);
+    Ok(patch)
+}
+
+/// The row an interrupted attempt leaves: ready at once, held by nobody, and
+/// the attempt counted by the same rule its renewal follows.
+///
+/// The holder's own report is the other evidence that an attempt executed: it
+/// began, and stopped without a receipt. An attempt that fails before its
+/// first renewal is counted here or nowhere, and an uncounted failure would be
+/// redelivered without end.
+fn interrupted(job: &Job, delivery: &Delivery) -> Result<Value, Error> {
+    let mut patch = counted(job, delivery)?;
+    for (field, cleared) in [
+        ("state", value!("ready")),
+        ("worker_id", Value::Null),
+        ("lease_deadline", Value::Null),
+        ("leased_at", Value::Null),
+        ("deferred_until", Value::Null),
+    ] {
+        patch[field] = cleared;
+    }
+    Ok(patch)
+}
+
+/// Count `delivery`'s attempt toward the delivery budget once, and end the run
+/// of consecutive back-offs: an attempt already counted is not counted again.
+fn counted(job: &Job, delivery: &Delivery) -> Result<Value, Error> {
     if job.executed_attempt == Some(delivery.attempt.get()) {
-        return Ok(value!({ "lease_deadline": deadline }));
+        return Ok(value!({ "deferrals": 0 }));
     }
     let counted = job
         .execution_attempts
         .checked_add(1)
         .ok_or(Error::Capacity)?;
-    Ok(value!({"lease_deadline":deadline,"execution_attempts":counted,
+    Ok(value!({"execution_attempts":counted,"deferrals":0,
         "executed_attempt":delivery.attempt.get()}))
 }
 
 fn fence(delivery: &Delivery) -> Value {
     value!({"id":delivery.job.id.as_str(),"app_id":delivery.job.app_id.as_str(),"state":"leased",
-        "worker_id":delivery.worker_id.as_str(),"assignment_revision":delivery.assignment_revision.get(),
-        "attempt":delivery.attempt.get()})
+        "worker_id":delivery.worker_id.as_str(),"attempt":delivery.attempt.get()})
 }
 
 pub fn digest(bytes: &[u8]) -> String {
@@ -1074,6 +1373,17 @@ pub struct Budget(Rc<Cell<Instant>>);
 impl Budget {
     pub(crate) fn new(timeout: Duration) -> Self {
         Self(Rc::new(Cell::new(Instant::now() + timeout)))
+    }
+
+    /// A budget that ends at `deadline` exactly.
+    pub(crate) fn at(deadline: Instant) -> Self {
+        Self(Rc::new(Cell::new(deadline)))
+    }
+
+    /// `timeout` from now, never past `deadline`: one transaction's share of a
+    /// caller's larger budget.
+    pub(crate) fn within(timeout: Duration, deadline: Instant) -> Self {
+        Self::at((Instant::now() + timeout).min(deadline))
     }
 
     pub(crate) fn cap(&self, sample: Sample, deadline: i64) -> Result<(), Error> {
@@ -1175,7 +1485,6 @@ mod tests {
                 available_at: 0.try_into().unwrap(),
             },
             worker_id: WorkerId::mint(),
-            assignment_revision: 1.try_into().unwrap(),
             attempt: 1.try_into().unwrap(),
             deadline: deadline.try_into().unwrap(),
         }
@@ -1190,7 +1499,7 @@ mod tests {
                 millis: 60_000,
                 started,
             },
-            started + Duration::from_secs(60),
+            120_000,
         )
         .unwrap();
         let original = grant.expires_at;
@@ -1225,27 +1534,23 @@ mod tests {
     }
 
     #[test]
-    fn original_assignment_sample_caps_a_grant_created_after_clock_regression() {
+    fn original_attempt_sample_caps_a_grant_created_after_clock_regression() {
         let started = Instant::now();
-        let assignment_expires = local_deadline(
-            Sample {
-                millis: 100_000,
-                started,
-            },
-            120_000,
-        )
-        .unwrap();
         let grant = DeliveryGrant::new(
             delivery(120_000),
             Sample {
                 millis: 0,
                 started: started + Duration::from_secs(1),
             },
-            assignment_expires,
+            100_000,
         )
         .unwrap();
-        assert_eq!(grant.expires_at, assignment_expires);
-        assert!(grant.expires_at < started + Duration::from_secs(120));
+        assert_eq!(
+            grant.attempt_expires_at,
+            started + Duration::from_secs(1) + Duration::from_millis(99_999)
+        );
+        assert!(grant.expires_at < started + Duration::from_secs(121));
+        assert!(grant.attempt_expires_at < grant.expires_at);
     }
 
     #[test]
@@ -1253,6 +1558,9 @@ mod tests {
         let grant = DeliveryGrant {
             delivery: delivery(i64::MAX),
             expires_at: Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
+            attempt_expires_at: Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .unwrap(),
         };
         let cloned = grant.clone();
         assert_eq!(grant.lease(), Err(Error::Timeout));

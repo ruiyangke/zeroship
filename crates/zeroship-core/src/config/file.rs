@@ -298,8 +298,8 @@ pub struct WorkerSection {
     pub max_step_blob_bytes: Option<u64>,
     /// Workflow manager origin; absent runs no workflow host.
     pub workflow_manager_url: Option<String>,
-    /// App placements advertised to the workflow manager.
-    pub workflow_capacity: Option<usize>,
+    /// Claimed apps whose prepared creator resources the workflow host keeps.
+    pub workflow_prepared_apps: Option<usize>,
     /// Delivered workflow jobs executing at once.
     pub workflow_slots: Option<usize>,
 }
@@ -380,10 +380,12 @@ pub struct WorkflowSection {
     pub database_acquire_timeout_ms: Option<u64>,
     /// Deadline for a complete metadata transaction.
     pub database_command_timeout_ms: Option<u64>,
-    /// Worker registration lifetime between heartbeats.
-    pub worker_ttl_ms: Option<u64>,
-    /// Placement lifetime between authorized renewals.
-    pub assignment_ttl_ms: Option<u64>,
+    /// How long a claimed delivery stays leased without a heartbeat.
+    pub delivery_lease_ms: Option<u64>,
+    /// Maximum wall-clock span of one delivery attempt across heartbeats.
+    pub max_attempt_ms: Option<u64>,
+    /// Server work budget inside a batch claim.
+    pub claim_budget_ms: Option<u64>,
     /// Maximum records in a metadata response page.
     pub batch_limit: Option<usize>,
     /// Maximum pending lifecycle commands per app.
@@ -404,10 +406,12 @@ pub struct WorkflowSection {
     pub closing_backoff_ms: Option<u64>,
     /// Ceiling of the doubling closing backoff.
     pub closing_backoff_max_ms: Option<u64>,
-    /// Fewest placement slots an execution zone's capacity target may name.
+    /// Fewest execution slots a zone's capacity target may name.
     pub capacity_min_slots: Option<i64>,
-    /// Most placement slots an execution zone's capacity target may name.
+    /// Most execution slots a zone's capacity target may name.
     pub capacity_max_slots: Option<i64>,
+    /// Execution slots already provisioned by the static deployment.
+    pub static_pool_slots: Option<u64>,
     /// Idleness a zone's demand must stay below its target before it shrinks.
     pub capacity_hold_down_ms: Option<u64>,
     /// Deadline for one claimed capacity request before it is recorded unavailable.
@@ -1300,14 +1304,14 @@ relay_smtp_tls = "starttls"
         let file = TempFile::write(
             "worker-workflow-host.toml",
             "[worker]\nworkflow_manager_url = \"https://workflow.example\"\n\
-             workflow_capacity = 8\nworkflow_slots = 2\n",
+             workflow_prepared_apps = 8\nworkflow_slots = 2\n",
         );
         let config = FileConfig::load(Some(&file.path)).expect("the workflow settings parse");
         assert_eq!(
             config.worker.workflow_manager_url.as_deref(),
             Some("https://workflow.example")
         );
-        assert_eq!(config.worker.workflow_capacity, Some(8));
+        assert_eq!(config.worker.workflow_prepared_apps, Some(8));
         assert_eq!(config.worker.workflow_slots, Some(2));
 
         // The control: a misspelled leaf is still refused.

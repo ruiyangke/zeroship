@@ -310,25 +310,25 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | `worker.max_isolates` | operational | `ZEROSHIP_WORKER_MAX_ISOLATES` | `worker.max_isolates` | zeroship-worker `--max-isolates` | `200` |
 | `worker.port` | operational | `ZEROSHIP_WORKER_PORT` | `worker.port` | zeroship-worker `--port` | `8080` |
 | `worker.service_peers_file` | operational | `ZEROSHIP_WORKER_SERVICE_PEERS_FILE` | `worker.service_peers_file` | zeroship-worker `--service-peers-file` | empty |
-| `worker.shutdown_timeout` | operational | `ZEROSHIP_WORKER_SHUTDOWN_TIMEOUT` | `worker.shutdown_timeout` | zeroship-worker `--shutdown-timeout` | `30` |
+| `worker.shutdown_timeout` | operational | `ZEROSHIP_WORKER_SHUTDOWN_TIMEOUT` | `worker.shutdown_timeout` | zeroship-worker `--shutdown-timeout` | `60` |
 | `worker.socket` | operational | `ZEROSHIP_WORKER_SOCKET` | `worker.socket` | zeroship-worker `--socket` | empty |
 | `worker.storage_url` | operational | `ZEROSHIP_WORKER_STORAGE_URL` | `worker.storage_url` | zeroship-worker `--storage-url` | empty |
 | `worker.threads` | operational | `ZEROSHIP_WORKER_THREADS` | `worker.threads` | zeroship-worker `--threads` | `default_http_threads()` |
-| `worker.workflow_capacity` | operational | `ZEROSHIP_WORKER_WORKFLOW_CAPACITY` | `worker.workflow_capacity` | zeroship-worker `--workflow-capacity` | `64` |
 | `worker.workflow_manager_url` | operational | `ZEROSHIP_WORKER_WORKFLOW_MANAGER_URL` | `worker.workflow_manager_url` | zeroship-worker `--workflow-manager-url` | empty |
+| `worker.workflow_prepared_apps` | operational | `ZEROSHIP_WORKER_WORKFLOW_PREPARED_APPS` | `worker.workflow_prepared_apps` | zeroship-worker `--workflow-prepared-apps` | `64` |
 | `worker.workflow_slots` | operational | `ZEROSHIP_WORKER_WORKFLOW_SLOTS` | `worker.workflow_slots` | zeroship-worker `--workflow-slots` | `4` |
 
 ### workflow
 
 | Canonical | Class | Environment | Overlay path | Flag by binary | Default |
 | --- | --- | --- | --- | --- | --- |
-| `workflow.assignment_ttl_ms` | operational | `ZEROSHIP_WORKFLOW_ASSIGNMENT_TTL_MS` | `workflow.assignment_ttl_ms` | zeroship-workflow-server `--assignment-ttl-ms` | `30000` |
 | `workflow.batch_limit` | operational | `ZEROSHIP_WORKFLOW_BATCH_LIMIT` | `workflow.batch_limit` | zeroship-workflow-server `--batch-limit` | `128` |
 | `workflow.capacity_hold_down_ms` | operational | `ZEROSHIP_WORKFLOW_CAPACITY_HOLD_DOWN_MS` | `workflow.capacity_hold_down_ms` | zeroship-workflow-server `--capacity-hold-down-ms` | `300_000` |
 | `workflow.capacity_max_slots` | operational | `ZEROSHIP_WORKFLOW_CAPACITY_MAX_SLOTS` | `workflow.capacity_max_slots` | zeroship-workflow-server `--capacity-max-slots` | `1024` |
 | `workflow.capacity_min_slots` | operational | `ZEROSHIP_WORKFLOW_CAPACITY_MIN_SLOTS` | `workflow.capacity_min_slots` | zeroship-workflow-server `--capacity-min-slots` | `0` |
 | `workflow.capacity_request_timeout_ms` | operational | `ZEROSHIP_WORKFLOW_CAPACITY_REQUEST_TIMEOUT_MS` | `workflow.capacity_request_timeout_ms` | zeroship-workflow-server `--capacity-request-timeout-ms` | `10000` |
 | `workflow.capacity_retry_interval_ms` | operational | `ZEROSHIP_WORKFLOW_CAPACITY_RETRY_INTERVAL_MS` | `workflow.capacity_retry_interval_ms` | zeroship-workflow-server `--capacity-retry-interval-ms` | `30000` |
+| `workflow.claim_budget_ms` | operational | `ZEROSHIP_WORKFLOW_CLAIM_BUDGET_MS` | `workflow.claim_budget_ms` | zeroship-workflow-server `--claim-budget-ms` | `5000` |
 | `workflow.closing_backoff_max_ms` | operational | `ZEROSHIP_WORKFLOW_CLOSING_BACKOFF_MAX_MS` | `workflow.closing_backoff_max_ms` | zeroship-workflow-server `--closing-backoff-max-ms` | `3_600_000` |
 | `workflow.closing_backoff_ms` | operational | `ZEROSHIP_WORKFLOW_CLOSING_BACKOFF_MS` | `workflow.closing_backoff_ms` | zeroship-workflow-server `--closing-backoff-ms` | `60000` |
 | `workflow.closing_idle_ms` | operational | `ZEROSHIP_WORKFLOW_CLOSING_IDLE_MS` | `workflow.closing_idle_ms` | zeroship-workflow-server `--closing-idle-ms` | `900_000` |
@@ -338,11 +338,13 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | `workflow.database_command_timeout_ms` | operational | `ZEROSHIP_WORKFLOW_DATABASE_COMMAND_TIMEOUT_MS` | `workflow.database_command_timeout_ms` | zeroship-workflow-server `--database-command-timeout-ms` | `10000` |
 | `workflow.database_connections` | operational | `ZEROSHIP_WORKFLOW_DATABASE_CONNECTIONS` | `workflow.database_connections` | zeroship-workflow-server `--database-connections` | `8` |
 | `workflow.database_url` | secret | `ZEROSHIP_WORKFLOW_DATABASE_URL` | `workflow.database_url` | zeroship-workflow-server `--database-url-file` | - |
+| `workflow.delivery_lease_ms` | operational | `ZEROSHIP_WORKFLOW_DELIVERY_LEASE_MS` | `workflow.delivery_lease_ms` | zeroship-workflow-server `--delivery-lease-ms` | `30000` |
 | `workflow.driver_interval_ms` | operational | `ZEROSHIP_WORKFLOW_DRIVER_INTERVAL_MS` | `workflow.driver_interval_ms` | zeroship-workflow-server `--driver-interval-ms` | `1000` |
 | `workflow.driver_lane_timeout_ms` | operational | `ZEROSHIP_WORKFLOW_DRIVER_LANE_TIMEOUT_MS` | `workflow.driver_lane_timeout_ms` | zeroship-workflow-server `--driver-lane-timeout-ms` | `10000` |
 | `workflow.http_threads` | operational | `ZEROSHIP_WORKFLOW_HTTP_THREADS` | `workflow.http_threads` | zeroship-workflow-server `--http-threads` | `2` |
 | `workflow.listen` | operational | `ZEROSHIP_WORKFLOW_LISTEN` | `workflow.listen` | zeroship-workflow-server `--listen` | `127.0.0.1:9093` |
 | `workflow.maintenance_sweeps` | operational | `ZEROSHIP_WORKFLOW_MAINTENANCE_SWEEPS` | `workflow.maintenance_sweeps` | zeroship-workflow-server `--maintenance-sweeps` | `true` |
+| `workflow.max_attempt_ms` | operational | `ZEROSHIP_WORKFLOW_MAX_ATTEMPT_MS` | `workflow.max_attempt_ms` | zeroship-workflow-server `--max-attempt-ms` | `300_000` |
 | `workflow.max_connections` | operational | `ZEROSHIP_WORKFLOW_MAX_CONNECTIONS` | `workflow.max_connections` | zeroship-workflow-server `--max-connections` | `1024` |
 | `workflow.max_pending_management` | operational | `ZEROSHIP_WORKFLOW_MAX_PENDING_MANAGEMENT` | `workflow.max_pending_management` | zeroship-workflow-server `--max-pending-management` | `1024` |
 | `workflow.max_request_bytes` | operational | `ZEROSHIP_WORKFLOW_MAX_REQUEST_BYTES` | `workflow.max_request_bytes` | zeroship-workflow-server `--max-request-bytes` | `crate::api::DEFAULT_MAX_REQUEST_BYTES` |
@@ -350,8 +352,8 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | `workflow.replay_sweep_ms` | operational | `ZEROSHIP_WORKFLOW_REPLAY_SWEEP_MS` | `workflow.replay_sweep_ms` | zeroship-workflow-server `--replay-sweep-ms` | `30000` |
 | `workflow.service_key_file` | operational | `ZEROSHIP_WORKFLOW_SERVICE_KEY_FILE` | `workflow.service_key_file` | zeroship-workflow-server `--service-key-file` | empty |
 | `workflow.service_peers_file` | operational | `ZEROSHIP_WORKFLOW_SERVICE_PEERS_FILE` | `workflow.service_peers_file` | zeroship-workflow-server `--service-peers-file` | empty |
+| `workflow.static_pool_slots` | operational | `ZEROSHIP_WORKFLOW_STATIC_POOL_SLOTS` | `workflow.static_pool_slots` | zeroship-workflow-server `--static-pool-slots` | `1024` |
 | `workflow.storage_url` | operational | `ZEROSHIP_WORKFLOW_STORAGE_URL` | `workflow.storage_url` | zeroship-workflow-server `--storage-url` | empty |
-| `workflow.worker_ttl_ms` | operational | `ZEROSHIP_WORKFLOW_WORKER_TTL_MS` | `workflow.worker_ttl_ms` | zeroship-workflow-server `--worker-ttl-ms` | `30000` |
 
 <!-- END GENERATED CONFIGURATION CONTRACT -->
 
@@ -376,8 +378,7 @@ them:
 database budget. It bounds each checkout from the coordinator's pool, which its
 name says, and each step of opening the database at startup, which it does not:
 the authentication connection, the coordinator's pool warm-up, its queue binding,
-placement eligibility, the journal open and the policy-ledger open, one step at a
-time. There is no separate startup setting, so a database that accepts
+the journal open and the policy-ledger open, one step at a time. There is no separate startup setting, so a database that accepts
 connections and never answers fails startup within this value.
 `Options::startup_timeout` in
 `crates/zeroship-workflow-server/src/coordinator.rs` is where the service reads

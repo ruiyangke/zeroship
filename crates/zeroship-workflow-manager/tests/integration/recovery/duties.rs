@@ -93,7 +93,7 @@ async fn damaged_pair(fixture: &Fixture, kind: DutyKind) {
     let app = AppId::mint();
     let deployment = DeploymentId::mint();
     recovery
-        .ensure(&app, &deployment, 1.try_into().unwrap())
+        .ensure(&app, &zeroship_core::ZoneId::default_zone(), &deployment, 1.try_into().unwrap())
         .await
         .unwrap();
     let original = snapshot(fixture, &app, kind).await;
@@ -104,7 +104,7 @@ async fn damaged_pair(fixture: &Fixture, kind: DutyKind) {
         assert_eq!(recovery.dispatch(&app, kind).await, Err(Error::Storage));
         assert_eq!(
             recovery
-                .ensure(&app, &deployment, 2.try_into().unwrap())
+                .ensure(&app, &zeroship_core::ZoneId::default_zone(), &deployment, 2.try_into().unwrap())
                 .await,
             Err(Error::Storage)
         );
@@ -115,7 +115,7 @@ async fn damaged_pair(fixture: &Fixture, kind: DutyKind) {
     assert_eq!(recovery.dispatch(&app, kind).await, Err(Error::Storage));
     assert_eq!(
         recovery
-            .ensure(&app, &deployment, 2.try_into().unwrap())
+            .ensure(&app, &zeroship_core::ZoneId::default_zone(), &deployment, 2.try_into().unwrap())
             .await,
         Err(Error::Storage)
     );
@@ -131,7 +131,7 @@ async fn damaged_pair(fixture: &Fixture, kind: DutyKind) {
         .unwrap();
     assert_eq!(
         recovery
-            .ensure(&app, &deployment, 2.try_into().unwrap())
+            .ensure(&app, &zeroship_core::ZoneId::default_zone(), &deployment, 2.try_into().unwrap())
             .await,
         Err(Error::Storage)
     );
@@ -144,7 +144,7 @@ async fn damaged_pair(fixture: &Fixture, kind: DutyKind) {
         .await
         .unwrap();
     recovery
-        .ensure(&app, &deployment, 2.try_into().unwrap())
+        .ensure(&app, &zeroship_core::ZoneId::default_zone(), &deployment, 2.try_into().unwrap())
         .await
         .unwrap();
     assert_eq!(snapshot(fixture, &app, kind).await, original);
@@ -155,7 +155,7 @@ async fn independent_receipts(fixture: &Fixture, kind: DutyKind) {
     let (recovery, queue) = host(fixture).await;
     let app = AppId::mint();
     recovery
-        .ensure(&app, &DeploymentId::mint(), 1.try_into().unwrap())
+        .ensure(&app, &zeroship_core::ZoneId::default_zone(), &DeploymentId::mint(), 1.try_into().unwrap())
         .await
         .unwrap();
     let first = recovery.dispatch(&app, kind).await.unwrap().unwrap();
@@ -192,7 +192,7 @@ async fn pending_kind(fixture: &Fixture, kind: DutyKind) {
     let app = AppId::mint();
     let deployment = DeploymentId::mint();
     recovery
-        .ensure(&app, &deployment, 1.try_into().unwrap())
+        .ensure(&app, &zeroship_core::ZoneId::default_zone(), &deployment, 1.try_into().unwrap())
         .await
         .unwrap();
     let expected = recovery.dispatch(&app, kind).await.unwrap().unwrap();
@@ -208,7 +208,7 @@ async fn pending_kind(fixture: &Fixture, kind: DutyKind) {
     assert_eq!(recovery.dispatch(&app, kind).await, Err(Error::Storage));
     assert_eq!(
         recovery
-            .ensure(&app, &deployment, 2.try_into().unwrap())
+            .ensure(&app, &zeroship_core::ZoneId::default_zone(), &deployment, 2.try_into().unwrap())
             .await,
         Err(Error::Storage)
     );
@@ -227,7 +227,7 @@ async fn pending_kind(fixture: &Fixture, kind: DutyKind) {
     assert_eq!(recovery.dispatch(&app, kind).await.unwrap(), Some(expected));
     let foreign = AppId::mint();
     recovery
-        .ensure(&foreign, &deployment, 1.try_into().unwrap())
+        .ensure(&foreign, &zeroship_core::ZoneId::default_zone(), &deployment, 1.try_into().unwrap())
         .await
         .unwrap();
     let foreign_job = recovery.dispatch(&foreign, kind).await.unwrap().unwrap();
@@ -252,7 +252,7 @@ async fn registration_rollback(fixture: &Fixture, _kind: DutyKind) {
     let deployment = DeploymentId::mint();
     registration_fault(fixture, true).await;
     assert!(recovery
-        .ensure(&app, &deployment, 1.try_into().unwrap())
+        .ensure(&app, &zeroship_core::ZoneId::default_zone(), &deployment, 1.try_into().unwrap())
         .await
         .is_err());
     assert!(provenance(fixture, &app).await.is_empty());
@@ -262,7 +262,7 @@ async fn registration_rollback(fixture: &Fixture, _kind: DutyKind) {
     assert_eq!(job_count(fixture, &app).await, 0);
     registration_fault(fixture, false).await;
     recovery
-        .ensure(&app, &deployment, 1.try_into().unwrap())
+        .ensure(&app, &zeroship_core::ZoneId::default_zone(), &deployment, 1.try_into().unwrap())
         .await
         .unwrap();
     for kind in [DutyKind::Reconcile, DutyKind::Collect] {
@@ -309,7 +309,7 @@ async fn settled_pending(fixture: &Fixture, kind: DutyKind) {
     let app = AppId::mint();
     let deployment = DeploymentId::mint();
     recovery
-        .ensure(&app, &deployment, 1.try_into().unwrap())
+        .ensure(&app, &zeroship_core::ZoneId::default_zone(), &deployment, 1.try_into().unwrap())
         .await
         .unwrap();
     let pending = recovery.dispatch(&app, kind).await.unwrap().unwrap();
@@ -345,7 +345,7 @@ async fn settled_pending(fixture: &Fixture, kind: DutyKind) {
         assert_eq!(recovery.dispatch(&app, kind).await, Err(Error::Storage));
         assert_eq!(
             recovery
-                .ensure(&app, &deployment, 2.try_into().unwrap())
+                .ensure(&app, &zeroship_core::ZoneId::default_zone(), &deployment, 2.try_into().unwrap())
                 .await,
             Err(Error::Storage)
         );
@@ -369,7 +369,7 @@ async fn concurrent_kinds(fixture: &Fixture, kind: DutyKind) {
     let (second, _) = host(fixture).await;
     let app = AppId::mint();
     first
-        .ensure(&app, &DeploymentId::mint(), 1.try_into().unwrap())
+        .ensure(&app, &zeroship_core::ZoneId::default_zone(), &DeploymentId::mint(), 1.try_into().unwrap())
         .await
         .unwrap();
     let (a, b) = futures::join!(
@@ -386,7 +386,7 @@ async fn concurrent_kinds(fixture: &Fixture, kind: DutyKind) {
     let following = snapshot(fixture, &app, other(kind)).await;
     let (reopened, _) = host(fixture).await;
     reopened
-        .ensure(&app, &DeploymentId::mint(), 2.try_into().unwrap())
+        .ensure(&app, &zeroship_core::ZoneId::default_zone(), &DeploymentId::mint(), 2.try_into().unwrap())
         .await
         .unwrap();
     assert_eq!(snapshot(fixture, &app, kind).await, selected);
@@ -413,7 +413,7 @@ async fn page_receipts(fixture: &Fixture, kind: DutyKind) {
     let (recovery, queue) = host(fixture).await;
     let app = AppId::mint();
     recovery
-        .ensure(&app, &DeploymentId::mint(), 1.try_into().unwrap())
+        .ensure(&app, &zeroship_core::ZoneId::default_zone(), &DeploymentId::mint(), 1.try_into().unwrap())
         .await
         .unwrap();
     let owner = lane(&app);

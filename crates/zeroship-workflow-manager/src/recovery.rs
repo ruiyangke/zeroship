@@ -28,7 +28,7 @@ use zeroship_core::{
     app_id::AppId,
     workflow_coordination::Revision,
     workflow_jobs::{DeploymentId, JobId, JobOperation, JobOutcome, JobSpec},
-    workflow_policy::EstablishIngress,
+    zone_id::ZoneId,
 };
 use zeroship_data_orm::orm::{Database, FindOptions, FromRow, Insertable, Patch};
 
@@ -212,12 +212,12 @@ impl Millis {
     }
 }
 
-/// The trusted platform host registers responsibility before enabling ingress.
+/// The trusted platform host records responsibility before enabling ingress.
 ///
-/// Worker registration, placement and heartbeat operations cannot postpone it.
-/// Registration expiry, release, empty polling and heartbeats never retire it;
-/// only a settled Close with drained evidence below its watermark does, and
-/// only Control's terminal deletion abandons it.
+/// Claims, heartbeats and releases cannot postpone it. A lapsed lease, a
+/// release, an empty claim and a heartbeat never retire it; only a settled
+/// Close with drained evidence below its watermark does, and only Control's
+/// terminal deletion abandons it.
 #[derive(Debug, Clone)]
 pub struct Recovery {
     queue: Queue,
@@ -327,12 +327,13 @@ impl Recovery {
     pub async fn ensure(
         &self,
         app: &AppId,
+        zone: &ZoneId,
         deployment: &DeploymentId,
         activation_revision: Revision,
     ) -> Result<(), Error> {
         self.queue
             .transact(|tx| async move {
-                queue::register_scope_in(&tx, app).await?;
+                queue::register_scope_in(&tx, app, zone).await?;
                 queue::lock_scope(&tx, app).await?;
                 let now = self.queue.clock.now().await?;
                 Box::pin(ensure_in(&tx, app, deployment, activation_revision, now)).await
@@ -457,10 +458,7 @@ impl Recovery {
             .await
     }
 
-    /// Establish an open ingress epoch above `after` for a trusted host that
-    /// holds no policy lease, such as the local development host, which is its
-    /// app's platform authority. The epoch commits before it is returned, under
-    /// the same rules as a leased establishment.
+    /// Establish an open ingress epoch above `after` for a trusted host.
     ///
     /// # Errors
     /// Refuses an unactivated scope, an epoch the manager never issued,
@@ -476,21 +474,27 @@ impl Recovery {
             .transact(|tx| async move {
                 queue::lock_scope(&tx, app).await?;
                 let now = self.queue.clock.now().await?;
-                Box::pin(lease_epoch_in(
-                    &tx,
-                    app,
-                    Some(EstablishIngress { after }),
-                    false,
-                    admission,
-                    now,
-                ))
-                .await?
-                .ok_or(Error::Storage)
+                let stored = load(&tx, app).await?.ok_or(Error::Conflict)?;
+                let current = stored.responsibility()?;
+                if current.state == ScopeState::Abandoned {
+                    return Err(Error::Denied);
+                }
+                let after = after.map_or(0, Revision::get);
+                if after > current.ingress_epoch.get() {
+                    return Err(Error::Conflict);
+                }
+                if current.state == ScopeState::Open && current.ingress_epoch.get() > after {
+                    return Ok(current.ingress_epoch);
+                }
+                if !admission {
+                    return Err(Error::Denied);
+                }
+                Box::pin(reopen(&tx, app, &current, now)).await
             })
             .await
     }
 
-    /// Record ingress a trusted host accepted outside a policy lease.
+    /// Record ingress a trusted host accepted for the app.
     /// Retired and abandoned scopes are unchanged; ingress cannot reopen them.
     ///
     /// # Errors
@@ -610,9 +614,18 @@ impl Recovery {
     /// recorded. The duties are deleted, a closing attempt is cancelled and
     /// the scope row stays as the epoch's tombstone. Nothing reopens it.
     ///
+    /// The app's unsettled creator work is settled `Rejected` in the same
+    /// transaction: no worker may run a deleted app (the zone rule refuses it),
+    /// so those rows would otherwise stay unsettled and be passed on every claim
+    /// lap and every capacity visit for as long as the queue exists. A holder of
+    /// a live lease on one finds it settled at its next heartbeat or settle.
+    /// Maintenance kinds stay with the lane that owns them.
+    ///
     /// # Errors
     /// Reports malformed responsibility and unavailable storage.
     pub async fn abandon(&self, app: &AppId) -> Result<bool, Error> {
+        let rejected =
+            serde_json::to_string(&JobOutcome::Rejected {}).map_err(|_| Error::Storage)?;
         self.queue
             .transact(|tx| async move {
                 queue::lock_scope(&tx, app).await?;
@@ -625,6 +638,17 @@ impl Recovery {
                 }
                 tx.entity::<recovery_duties::Entity>()?
                     .delete_many(recovery_duties::app_id.eq(app.as_str())?)
+                    .await?;
+                tx.entity::<jobs::Entity>()?
+                    .update_many(
+                        jobs::app_id
+                            .eq(app.as_str())?
+                            .and(jobs::operation_kind.eq("advance")?)
+                            .and(jobs::state.ne("settled")?),
+                        jobs::state
+                            .set("settled")?
+                            .and(jobs::outcome.set(Some(rejected.clone()))?)?,
+                    )
                     .await?;
                 transition(&tx, app, &current, settled(ScopeState::Abandoned)?).await?;
                 Ok(true)
@@ -827,64 +851,6 @@ pub(crate) async fn ensure_in(
         duties::create_pair(tx, app, now).await?;
     }
     Ok(())
-}
-
-/// Policy issuance calls this under the app lock, after the placement and
-/// enrollment re-checks and before commit, so responsibility is durable before
-/// the lease reaches the worker.
-///
-/// A plain refresh never reopens responsibility: it reports the current epoch
-/// while the scope is open or closing and none otherwise. Establishment
-/// guarantees an open epoch above the named one, or any open epoch when it
-/// names none. It reopens a retired scope, cancels a closing one, or advances
-/// an open epoch the creator already fenced, and only while the observed
-/// policy admits work. Retries after a lost reply find the epoch already above
-/// the named one and return it unchanged. An abandoned scope never reopens.
-pub(crate) async fn lease_epoch_in(
-    tx: &Database,
-    app: &AppId,
-    establish: Option<EstablishIngress>,
-    ingress_used: bool,
-    admission: bool,
-    now: i64,
-) -> Result<Option<Revision>, Error> {
-    let Some(stored) = load(tx, app).await? else {
-        // Nothing to establish before activation creates the scope.
-        return if establish.is_some() {
-            Err(Error::Conflict)
-        } else {
-            Ok(None)
-        };
-    };
-    let current = stored.responsibility()?;
-    if current.state == ScopeState::Abandoned {
-        return if establish.is_some() {
-            Err(Error::Denied)
-        } else {
-            Ok(None)
-        };
-    }
-    if ingress_used {
-        touch(tx, app, &current, now).await?;
-    }
-    let Some(EstablishIngress { after }) = establish else {
-        return Ok(
-            matches!(current.state, ScopeState::Open | ScopeState::Closing)
-                .then_some(current.ingress_epoch),
-        );
-    };
-    let after = after.map_or(0, Revision::get);
-    // The manager never issued a later epoch; refuse rather than inflate it.
-    if after > current.ingress_epoch.get() {
-        return Err(Error::Conflict);
-    }
-    if current.state == ScopeState::Open && current.ingress_epoch.get() > after {
-        return Ok(Some(current.ingress_epoch));
-    }
-    if !admission {
-        return Err(Error::Denied);
-    }
-    Box::pin(reopen(tx, app, &current, now)).await.map(Some)
 }
 
 /// Claim-time re-arm, under the claim transaction's app lock. A claimed

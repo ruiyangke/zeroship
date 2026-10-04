@@ -8,7 +8,7 @@ use std::cell::Cell;
 use zeroship_core::workflow_jobs::BroadcastId;
 
 fn released(delivery: &Delivery, task: &ClaimedTask) -> Value {
-    json!({"delivery": delivery, "task": task})
+    json!({"delivery": delivery, "task": task, "reason": "preparation_failed"})
 }
 
 /// What a worker that wants to decide its own job sends: an outcome, a successor,
@@ -158,9 +158,10 @@ async fn a_committed_execution_is_settled_with_the_journal_outcome() {
         (StatusCode::OK, body)
     );
 }
-
 /// A release gives back the task of the worker whose credential signed it, and
-/// no other worker's, even one presenting that task's own valid token.
+/// no other worker's, even one presenting that task's own valid token. The
+/// released row returns to `ready` in the same request, holding nobody and
+/// unclaimable until its back-off ends.
 #[ntex::test]
 async fn a_release_answers_to_the_worker_that_signed_it() {
     let fixture = Fixture::new().await;
@@ -168,6 +169,7 @@ async fn a_release_answers_to_the_worker_that_signed_it() {
     let (delivery, task) = fixture.held(&job).await;
     let other = fixture.other_worker().await;
     let body = released(&delivery, &task);
+    let before = fixture.job_snapshot(&job).await;
     assert_eq!(
         fixture
             .post_as(&other, endpoints::WORKFLOW_JOB_RELEASE, &body)
@@ -178,13 +180,19 @@ async fn a_release_answers_to_the_worker_that_signed_it() {
         fixture.task_state(&task.id).await,
         vec!["leased".to_owned()]
     );
+    assert_eq!(fixture.job_snapshot(&job).await, before);
     let (status, reply) = fixture.post(endpoints::WORKFLOW_JOB_RELEASE, &body).await;
     assert_eq!(status, StatusCode::OK, "{reply}");
     assert_eq!(
         fixture.task_state(&task.id).await,
         vec!["released".to_owned()]
     );
+    assert_eq!(fixture.job_column(&job, "state").await.as_deref(), Some("ready"));
+    assert_eq!(fixture.job_column(&job, "worker_id").await, None);
+    assert_eq!(fixture.job_column(&job, "deferrals").await.as_deref(), Some("1"));
+    assert!(fixture.job_column(&job, "deferred_until").await.is_some());
 }
+
 
 /// The execution half of a settlement commits for the worker whose credential
 /// signed it, and no other worker's, even one presenting the task's own token.
@@ -267,65 +275,41 @@ async fn a_receipt_is_read_by_the_job_holder_alone() {
     );
 }
 
-/// An unplaced worker's claim for an app it holds no placement on performs no
-/// policy I/O: Control is never asked about the app, so the refusal cannot say
-/// whether that app exists.
+/// A claim from an instance of another zone never visits this zone's apps: it is
+/// offered nothing, the job stays `ready`, and Control is never asked about the
+/// app, so the reply cannot say whether that app exists. The same claim from an
+/// instance of the app's own zone is the control, and it is served.
 #[ntex::test]
-async fn an_unplaced_claim_never_asks_control_about_the_app() {
+async fn a_claim_from_another_zone_never_reaches_this_zones_apps() {
     let fixture = Fixture::new().await;
-    let foreign = AppId::mint();
-    let other = fixture.other_worker().await;
-    let scope = AssignedScope {
-        app_id: foreign,
-        assignment_revision: 1.try_into().unwrap(),
-    };
-    let before = fixture.server.control_facts_requests();
-    assert_eq!(
-        fixture
-            .post_as(&other, endpoints::WORKFLOW_JOB_CLAIM, &scope)
-            .await
-            .0,
-        StatusCode::FORBIDDEN,
-        "placement is refused before the app's delivery ceiling is read"
-    );
+    let (zone, signer) = crate::support::zone::declare_zone(&fixture.platform).await;
+    let elsewhere =
+        crate::support::zone::Enrolled::join(&fixture.platform, &signer, zone.as_str()).await;
+    let job = fixture.job();
+    fixture.submit(&job).await;
+    let before = fixture.job_snapshot(&job).await;
+    let asked = fixture.server.control_facts_requests();
+    let (status, body) = post(
+        &fixture.http,
+        &fixture.server.url,
+        endpoints::WORKFLOW_JOB_CLAIM,
+        &elsewhere.authorization(),
+        &claim_one(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(delivered(&body).is_empty(), "another zone's claim was served: {body}");
+    assert_eq!(fixture.job_snapshot(&job).await, before);
     assert_eq!(
         fixture.server.control_facts_requests(),
-        before,
-        "the claim observed a foreign app"
+        asked,
+        "a claim from another zone observed this zone's app"
     );
-}
-
-/// A worker whose placement on the app was released cannot keep reading the
-/// job's receipt, even though the queue still names it as the last holder.
-#[ntex::test]
-async fn a_released_placement_cannot_read_a_receipt() {
-    let fixture = Fixture::new().await;
-    let job = fixture.fresh_executable().await;
-    let _ = fixture.held(&job).await;
-    let query = json!({"job": job});
-    assert_eq!(
-        fixture
-            .post(endpoints::WORKFLOW_JOB_RECEIPT, &query)
-            .await,
-        (StatusCode::OK, Value::Null),
-        "the live holder is answered that nothing has committed"
-    );
-    fixture
-        .platform
-        .admin
-        .execute(
-            "UPDATE workflow_manager.assignments SET released=true WHERE app_id=$1 AND worker_id=$2",
-            &[&job.app_id.as_str(), &fixture.worker.id.as_str()],
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        fixture
-            .post(endpoints::WORKFLOW_JOB_RECEIPT, &query)
-            .await
-            .0,
-        StatusCode::FORBIDDEN,
-        "a released placement must not keep reading outcomes"
+    let delivery = fixture.claim(&job).await;
+    assert_eq!(delivery.worker_id, fixture.worker.id);
+    assert!(
+        fixture.server.control_facts_requests() > asked,
+        "the served claim observed the app, so the count above reads real requests"
     );
 }
 
@@ -337,10 +321,8 @@ async fn a_lease_handover_refuses_the_earlier_holder() {
     let job = fixture.fresh_executable().await;
     let (delivery, task) = fixture.held(&job).await;
     let replacement = fixture.other_worker().await;
-    let reassignment = fixture
-        .platform
-        .seed_placement(&job.app_id, &replacement.id, Duration::from_secs(30))
-        .await;
+    // Both leases lapse, as they do when a holder stops renewing: the queue's,
+    // and the journal task's, which never outlives the grant it was issued under.
     fixture
         .platform
         .admin
@@ -350,17 +332,23 @@ async fn a_lease_handover_refuses_the_earlier_holder() {
         )
         .await
         .unwrap();
-    let (status, body) = fixture
-        .post_as(
-            &replacement,
-            endpoints::WORKFLOW_JOB_CLAIM,
-            &AssignedScope {
-                app_id: job.app_id.clone(),
-                assignment_revision: reassignment.revision,
-            },
+    fixture
+        .platform
+        .admin
+        .execute(
+            "UPDATE workflow_manager.__zeroship_workflow_tasks SET deadline=0 WHERE id=$1",
+            &[&task.id],
         )
+        .await
+        .unwrap();
+    let (status, body) = fixture
+        .post_as(&replacement, endpoints::WORKFLOW_JOB_CLAIM, &claim_one())
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    let handed = delivered(&body);
+    assert_eq!(handed.len(), 1, "the lapsed job is redelivered: {body}");
+    assert_eq!(handed[0]["lease"]["delivery"]["workerId"], json!(replacement.id));
+    assert_eq!(handed[0]["lease"]["delivery"]["attempt"], json!(2));
     // The earlier holder holds neither the latest delivery nor its task.
     let refused = (StatusCode::CONFLICT, json!({"code":"conflict"}));
     assert_eq!(
@@ -511,10 +499,10 @@ async fn a_caller_without_the_latest_delivery_never_reaches_the_journal() {
         ),
     ];
     assert!(!probes.is_empty());
-    // The task routes carry no delivery; they are fenced on the worker's live
-    // placement, so a foreign app is refused `Denied` before the policy source
-    // is asked to observe it.
-    let placement_probes = [
+    // The task routes carry no delivery; they are fenced on the worker holding a
+    // live delivery of the app they name, so an app it holds none of is refused
+    // `Denied` before the policy source is asked to observe it.
+    let task_probes = [
         (
             &fixture.worker,
             endpoints::WORKFLOW_TASK_PAYLOAD,
@@ -531,7 +519,7 @@ async fn a_caller_without_the_latest_delivery_never_reaches_the_journal() {
             payload_reserve,
         ),
     ];
-    assert!(!placement_probes.is_empty());
+    assert!(!task_probes.is_empty());
 
     let admin_url = fixture.platform.admin_url.to_string();
     let mut blocker = platform::connect(&admin_url).await;
@@ -593,7 +581,7 @@ async fn a_caller_without_the_latest_delivery_never_reaches_the_journal() {
             assert_eq!(answer, refused, "{} {body}", endpoint.path_template());
         }
         let denied = (StatusCode::FORBIDDEN, json!({"code":"denied"}));
-        for (worker, endpoint, body) in &placement_probes {
+        for (worker, endpoint, body) in &task_probes {
             let answer = compio::time::timeout(
                 Duration::from_secs(3),
                 fixture.post_as(worker, *endpoint, body),
@@ -601,7 +589,7 @@ async fn a_caller_without_the_latest_delivery_never_reaches_the_journal() {
             .await
             .unwrap_or_else(|_| {
                 panic!(
-                    "a task call with no placement waited on the journal: {} {body}",
+                    "a task call for an app it holds no delivery of waited on the journal: {} {body}",
                     endpoint.path_template()
                 )
             });

@@ -914,10 +914,10 @@ async fn insert_run(
     }
     match source {
         Some(source) => {
-            super::continuations::advance(tx, app, source, id, 0).await?;
+            Box::pin(super::continuations::advance(tx, app, source, id, 0)).await?;
         }
         None => {
-            super::continuations::create(tx, app, id, 0).await?;
+            Box::pin(super::continuations::create(tx, app, id, 0)).await?;
         }
     }
     super::publication::record(tx, app, id, now).await?;

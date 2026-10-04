@@ -2,18 +2,18 @@
 
 use super::{
     publication::{Manager, Publisher},
+    queue_owner::{Owner, QueueCalls},
     *,
 };
 use crate::service::{
     delivery::{
-        attempt_budget, creator_deadline, CapturedLease, DeliveredTask, JobAcceptance,
+        attempt_budget, creator_deadline, CapturedLease, DeliveredTask, DeferredReason, JobAcceptance,
         ATTEMPT_IO_CEILING,
     },
     AppWorkflows, StepOutput, WorkerIdentity,
 };
 use std::time::{Duration, Instant};
 use zeroship_core::{
-    workflow_coordination::{Assignment, WorkerId},
     workflow_jobs::{Delivery, JobLease, JobOperation, JobOutcome, JobSpec},
 };
 use zeroship_workflow_manager::Options;
@@ -29,7 +29,7 @@ async fn postgres_delivery_receipt_failure_rolls_back_checkpoint() {
         .await
         .unwrap();
     let manager = Manager::new(&app).await;
-    let owner = assignment(&app);
+    let owner = Owner::new(&app);
     let job = publish(&scope, &manager).await;
     let grant = manager.queue.claim(&owner).await.unwrap().unwrap();
     let claimed = task(scope.accept_job(&grant).await.unwrap());
@@ -103,6 +103,11 @@ case!(
     postgres_delivery_creator_policy_bounds_execution,
     policy_bounds
 );
+case!(
+    sqlite_delivery_revoked_dispatch_stops_renewal_mid_execution,
+    postgres_delivery_revoked_dispatch_stops_renewal_mid_execution,
+    revoked_dispatch
+);
 
 case!(
     sqlite_delivery_caps_a_task_at_its_authority_window,
@@ -120,6 +125,12 @@ case!(
     sqlite_delivery_rejects_competing_frontiers,
     postgres_delivery_rejects_competing_frontiers,
     competing
+);
+
+case!(
+    sqlite_delivery_settles_a_run_no_clock_will_wake_and_defers_one_not_yet_due,
+    postgres_delivery_settles_a_run_no_clock_will_wake_and_defers_one_not_yet_due,
+    not_due
 );
 
 case!(
@@ -163,7 +174,7 @@ async fn stalling(store: Rc<OrmStore>) {
         )
         .unwrap();
     let manager = Manager::new(&app).await;
-    let owner = assignment(&app);
+    let owner = Owner::new(&app);
     let job = publish(&scope, &manager).await;
     let deployment = job
         .deployment_id()
@@ -253,7 +264,7 @@ async fn progress_clears_strikes(store: Rc<OrmStore>) {
         )
         .unwrap();
     let manager = Manager::new(&app).await;
-    let owner = assignment(&app);
+    let owner = Owner::new(&app);
     publish(&scope, &manager).await;
     let mut grant = manager.queue.claim(&owner).await.unwrap().unwrap();
     let mut claimed = task(scope.accept_job(&grant).await.unwrap());
@@ -346,7 +357,7 @@ async fn abandoning(store: Rc<OrmStore>) {
         )
         .unwrap();
     let manager = Manager::new(&app).await;
-    let owner = assignment(&app);
+    let owner = Owner::new(&app);
     let job = publish(&scope, &manager).await;
     let deployment = job
         .deployment_id()
@@ -464,7 +475,7 @@ async fn rollback_progress_clears_strikes(store: Rc<OrmStore>) {
         )
         .unwrap();
     let manager = Manager::new(&app).await;
-    let owner = assignment(&app);
+    let owner = Owner::new(&app);
     publish(&scope, &manager).await;
     let mut grant = manager.queue.claim(&owner).await.unwrap().unwrap();
     let mut claimed = task(scope.accept_job(&grant).await.unwrap());
@@ -551,7 +562,7 @@ async fn competing(store: Rc<OrmStore>) {
         .await
         .unwrap();
     let manager = Manager::new(&app).await;
-    let owner = assignment(&app);
+    let owner = Owner::new(&app);
     let job = publish(&scope, &manager).await;
     let grant = manager.queue.claim(&owner).await.unwrap().unwrap();
     let claimed = task(scope.accept_job(&grant).await.unwrap());
@@ -564,7 +575,9 @@ async fn competing(store: Rc<OrmStore>) {
     assert_eq!(duplicate.delivery().job, competing);
     assert!(matches!(
         scope.accept_job(&duplicate).await.unwrap(),
-        JobAcceptance::Deferred
+        JobAcceptance::Deferred {
+            reason: DeferredReason::AtCap
+        }
     ));
     scope
         .complete_job(
@@ -605,7 +618,7 @@ async fn lock_waits(store: Rc<OrmStore>) {
         .await
         .unwrap();
     let manager = Manager::new(&app).await;
-    let owner = assignment(&app);
+    let owner = Owner::new(&app);
     publish(&scope, &manager).await;
     let grant = manager.queue.claim(&owner).await.unwrap().unwrap();
 
@@ -729,7 +742,7 @@ async fn io_ceiling(store: Rc<OrmStore>) {
         .await
         .unwrap();
     let manager = Manager::new(&app).await;
-    let owner = assignment(&app);
+    let owner = Owner::new(&app);
     publish(&scope, &manager).await;
     let grant = manager.queue.claim(&owner).await.unwrap().unwrap();
     assert!(
@@ -756,17 +769,6 @@ async fn io_ceiling(store: Rc<OrmStore>) {
         !bounded.is_zero(),
         "the control spent its whole authority before it was measured, so it bounded nothing"
     );
-}
-
-fn assignment(app: &AppId) -> Assignment {
-    Assignment {
-        app_id: app.clone(),
-        worker_id: WorkerId::mint(),
-        revision: 1.try_into().unwrap(),
-        expires_at: (chrono::Utc::now().timestamp_millis() + 120_000)
-            .try_into()
-            .unwrap(),
-    }
 }
 
 async fn publish(scope: &AppWorkflows, manager: &Manager) -> JobSpec {
@@ -807,6 +809,9 @@ impl JobLease for ProbeLease {
     fn delivery(&self) -> &Delivery {
         &self.delivery
     }
+    fn attempt_remaining(&self) -> Option<Duration> {
+        self.remaining()
+    }
     fn remaining(&self) -> Option<Duration> {
         self.expires
             .checked_duration_since(Instant::now())
@@ -832,7 +837,7 @@ async fn receipts(store: Rc<OrmStore>) {
         .await
         .unwrap();
     let manager = Manager::new(&app).await;
-    let owner = assignment(&app);
+    let owner = Owner::new(&app);
     let job = publish(&scope, &manager).await;
     let grant = manager.queue.claim(&owner).await.unwrap().unwrap();
     assert!(matches!(
@@ -843,7 +848,9 @@ async fn receipts(store: Rc<OrmStore>) {
     assert_eq!(claimed.assignment().invocation.run_id, run.id);
     assert!(matches!(
         scope.accept_job(&grant).await.unwrap(),
-        JobAcceptance::Deferred
+        JobAcceptance::Deferred {
+            reason: DeferredReason::AtCap
+        }
     ));
     let mut changed = ProbeLease::copy(&grant);
     changed.delivery.job.available_at = (job.available_at.get() + 1).try_into().unwrap();
@@ -975,7 +982,7 @@ async fn attempts(store: Rc<OrmStore>) {
         .await
         .unwrap();
     let manager = Manager::new(&app).await;
-    let owner = assignment(&app);
+    let owner = Owner::new(&app);
     publish(&scope, &manager).await;
     let grant = manager.queue.claim(&owner).await.unwrap().unwrap();
     let claimed = task(scope.accept_job(&grant).await.unwrap());
@@ -1070,7 +1077,7 @@ async fn checkpoint(store: Rc<OrmStore>) {
         .await
         .unwrap();
     let manager = Manager::new(&app).await;
-    let owner = assignment(&app);
+    let owner = Owner::new(&app);
     let original = publish(&scope, &manager).await;
     let grant = manager.queue.claim(&owner).await.unwrap().unwrap();
     let claimed = task(scope.accept_job(&grant).await.unwrap());
@@ -1155,7 +1162,7 @@ async fn accept_within(service: &WorkflowService, app: &AppId, window: Duration)
         },
     )
     .await;
-    let owner = assignment(app);
+    let owner = Owner::new(app);
     publish(&scope, &manager).await;
     let grant = manager.queue.claim(&owner).await.unwrap().unwrap();
     service.fixture_install(app, windowed(window)).unwrap();
@@ -1236,6 +1243,55 @@ async fn authority_caps_creator_deadline(store: Rc<OrmStore>) {
     tx.commit().await.unwrap();
 }
 
+/// Dispatch disabled while a task executes stops its renewal: the next
+/// heartbeat extends nothing and asks the holder to pause, which is what
+/// interrupts the execution within one heartbeat phase. The heartbeat before
+/// the revocation is the control, extended under the same delivery.
+async fn revoked_dispatch(store: Rc<OrmStore>) {
+    let (service, app, _, _deployments) = registered_service(store).await;
+    let scope = service.fixture_app(app.clone());
+    scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let manager = Manager::new(&app).await;
+    let owner = Owner::new(&app);
+    publish(&scope, &manager).await;
+    let grant = manager.queue.claim(&owner).await.unwrap().unwrap();
+    let claimed = task(scope.accept_job(&grant).await.unwrap());
+    let renewed = manager
+        .queue
+        .heartbeat(&owner, grant.delivery())
+        .await
+        .unwrap();
+    let renewal = scope.heartbeat_job(&claimed, &renewed).await.unwrap();
+    assert!(
+        renewal.reported().unwrap().extended.is_some(),
+        "the control: a live task under open dispatch is extended"
+    );
+    assert_eq!(renewal.control(), crate::service::ControlIntent::None);
+
+    service
+        .policies
+        .fixture_install(
+            &app,
+            leased_policy(
+                2,
+                AppPolicy {
+                    dispatch: false,
+                    ..Default::default()
+                },
+            ),
+        )
+        .unwrap();
+    let revoked = scope.heartbeat_job(&claimed, &renewed).await.unwrap();
+    assert!(
+        revoked.reported().unwrap().extended.is_none(),
+        "a heartbeat after dispatch was disabled extended the task"
+    );
+    assert_eq!(revoked.control(), crate::service::ControlIntent::Pause);
+}
+
 async fn policy_bounds(store: Rc<OrmStore>) {
     let (service, app, _, _deployments) = registered_service(store).await;
     let scope = service.fixture_app(app.clone());
@@ -1244,7 +1300,7 @@ async fn policy_bounds(store: Rc<OrmStore>) {
         .await
         .unwrap();
     let manager = Manager::new(&app).await;
-    let owner = assignment(&app);
+    let owner = Owner::new(&app);
     publish(&scope, &manager).await;
     let grant = manager.queue.claim(&owner).await.unwrap().unwrap();
     service
@@ -1262,13 +1318,28 @@ async fn policy_bounds(store: Rc<OrmStore>) {
         .unwrap();
     assert!(matches!(
         scope.accept_job(&grant).await.unwrap(),
-        JobAcceptance::Deferred
+        JobAcceptance::Deferred {
+            reason: DeferredReason::PolicyOff
+        }
     ));
     assert!(scope
         .job_receipt(&grant.delivery().job)
         .await
         .unwrap()
         .is_none());
+    // THE POLICY'S LEASE IS THE BOUND UNDER TEST, and every step below that
+    // must succeed - the acceptance, the renewal and the fresh acceptance -
+    // commits journal I/O inside it: the journal captures the delivery under the
+    // policy's lease and refuses a commit that outlives it. Each of those steps
+    // already runs under the attempt's I/O ceiling, so a lease no shorter than
+    // that ceiling is one no step that met its own I/O bound can miss. The
+    // manager's grant outlasts it, so the policy is what bounds the task.
+    let policy_lease = crate::service::delivery::ATTEMPT_IO_CEILING;
+    let lease_ms = i64::try_from(policy_lease.as_millis()).unwrap();
+    assert!(
+        grant.remaining().unwrap() > policy_lease * 2,
+        "the premise: the grant is not what bounds the task"
+    );
     service
         .policies
         .fixture_install(
@@ -1276,7 +1347,7 @@ async fn policy_bounds(store: Rc<OrmStore>) {
             leased_policy(
                 3,
                 AppPolicy {
-                    lease_ms: 700,
+                    lease_ms,
                     ..Default::default()
                 },
             ),
@@ -1284,7 +1355,7 @@ async fn policy_bounds(store: Rc<OrmStore>) {
         .unwrap();
     let claimed = task(scope.accept_job(&grant).await.unwrap());
     assert!(claimed.remaining().unwrap() < grant.remaining().unwrap());
-    assert!(claimed.assignment().lease_ms <= 700);
+    assert!(claimed.assignment().lease_ms <= lease_ms);
     let renewed_grant = manager
         .queue
         .heartbeat(&owner, grant.delivery())
@@ -1366,7 +1437,7 @@ async fn heartbeat_release_no_hint(store: Rc<OrmStore>) {
         .await
         .unwrap();
     let manager = Manager::new(&app).await;
-    let owner = assignment(&app);
+    let owner = Owner::new(&app);
     publish(&scope, &manager).await;
     let grant = manager.queue.claim(&owner).await.unwrap().unwrap();
     let mut claimed = task(scope.accept_job(&grant).await.unwrap());
@@ -1432,7 +1503,7 @@ const RENEWAL_GAP: Duration = Duration::from_millis(5);
 async fn renew(
     scope: &AppWorkflows,
     manager: &Manager,
-    owner: &Assignment,
+    owner: &Owner,
     task: &mut DeliveredTask,
     delivery: &Delivery,
 ) -> i64 {
@@ -1479,7 +1550,7 @@ async fn renewal_seam(store: Rc<OrmStore>) {
         .await
         .unwrap();
     let manager = Manager::new(&app).await;
-    let owner = assignment(&app);
+    let owner = Owner::new(&app);
     let job = publish(&scope, &manager).await;
 
     let grant = manager.queue.claim(&owner).await.unwrap().unwrap();
@@ -1592,7 +1663,7 @@ async fn outcome_identity(store: Rc<OrmStore>) {
         .await
         .unwrap();
     let manager = Manager::new(&app).await;
-    let owner = assignment(&app);
+    let owner = Owner::new(&app);
     publish(&scope, &manager).await;
     let grant = manager.queue.claim(&owner).await.unwrap().unwrap();
     let claimed = task(scope.accept_job(&grant).await.unwrap());
@@ -1739,7 +1810,7 @@ async fn reported_executions(store: Rc<OrmStore>) {
         )
         .unwrap();
     let manager = Manager::new(&app).await;
-    let owner = assignment(&app);
+    let owner = Owner::new(&app);
     publish(&scope, &manager).await;
 
     let mut grant = manager.queue.claim(&owner).await.unwrap().unwrap();
@@ -1800,4 +1871,82 @@ async fn reported_executions(store: Rc<OrmStore>) {
         .settle(&owner, &receipt.settlement(&grant).unwrap())
         .await
         .unwrap();
+}
+
+/// An advance delivered at its own frontier to a run that no clock will wake -
+/// a paused run, which holds no wake time - settles `Waiting` rather than being
+/// deferred. A deferral needs the instant it ends, and this one has none:
+/// whatever ends the wait publishes the run's next advance at a new revision,
+/// as the resume here does, and that advance is accepted for execution. The
+/// control is a run whose wake time is still ahead, which is deferred to
+/// exactly that instant.
+///
+/// The pause is written onto the run without moving its frontier, the state a
+/// delivery meets when it arrives at a frontier whose run stopped being due
+/// after the advance was published.
+async fn not_due(store: Rc<OrmStore>) {
+    let (service, app, _, _deployments) = registered_service(store).await;
+    let scope = service.fixture_app(app.clone());
+    let manager = Manager::new(&app).await;
+    let owner = Owner::new(&app);
+
+    let paused = scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    publish(&scope, &manager).await;
+    let tx = service.begin().await.unwrap();
+    journal_update(
+        &tx,
+        "runs",
+        json!({"id":paused.id}),
+        json!({"due_at":null,"state":"paused","control":"pause"}),
+    )
+    .await;
+    tx.commit().await.unwrap();
+    let grant = manager.queue.claim(&owner).await.unwrap().unwrap();
+    let JobAcceptance::Settled(receipt) = scope.accept_job(&grant).await.unwrap() else {
+        panic!("a run no clock will wake is settled, not deferred")
+    };
+    assert_eq!(receipt.outcome, JobOutcome::Waiting {});
+    assert!(scope.pending_jobs(None, 10).await.unwrap().is_empty());
+    manager
+        .queue
+        .settle(&owner, &receipt.settlement(&grant).unwrap())
+        .await
+        .unwrap();
+    scope
+        .transition(&RequestId::mint(), &paused.id, crate::operations::RunOperation::Resume)
+        .await
+        .unwrap();
+    let resumed = publish(&scope, &manager).await;
+    let grant = manager.queue.claim(&owner).await.unwrap().unwrap();
+    assert_eq!(grant.delivery().job, resumed);
+    let resumed_task = task(scope.accept_job(&grant).await.unwrap());
+    scope.release_job(&resumed_task, &grant).await.unwrap();
+
+    let waking = scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let job = scope
+        .pending_jobs(None, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|job| matches!(&job.operation, JobOperation::Advance { run_id, .. } if run_id.as_str() == waking.id))
+        .expect("the second run's advance");
+    let wake = chrono::Utc::now().timestamp_millis() + 3_600_000;
+    let tx = service.begin().await.unwrap();
+    journal_update(&tx, "runs", json!({"id":waking.id}), json!({"due_at":wake})).await;
+    tx.commit().await.unwrap();
+    let mut lease = ProbeLease::copy(&grant);
+    lease.delivery.job = job;
+    let JobAcceptance::Deferred {
+        reason: DeferredReason::NotDue { until },
+    } = scope.accept_job(&lease).await.unwrap()
+    else {
+        panic!("a run whose wake time is ahead is deferred to it")
+    };
+    assert_eq!(until.get(), wake);
 }

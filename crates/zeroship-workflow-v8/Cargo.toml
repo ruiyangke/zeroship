@@ -37,6 +37,8 @@ sha2 = { workspace = true }
 zeroship-id = { workspace = true }
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
+# Drives a consumer beside the stand-in for the workflow service.
+futures = { workspace = true }
 
 [lints]
 workspace = true

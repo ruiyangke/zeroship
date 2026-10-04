@@ -100,7 +100,7 @@ impl DeployedApp {
         case.set_environment(1, "var-old", "sec-old");
         let env = get_env(&case.worker.envs, &case.worker.app_id).unwrap();
         cache::load_app(
-            case.worker.app_id.clone(),
+            cache::hold(&case.worker.app_id),
             cache::test_modules(source),
             case.version.runtime.clone(),
             case.version.net_policy.clone(),

@@ -69,7 +69,11 @@ app scope without holding a creator transaction across manager I/O. The entire
 returned specification must match before confirmation; retries preserve job
 identities, and pending intents retain deployment dependencies independently of
 run history. Release checks validate every pending app specification before
-trusting its deployment projection. `AssignedPublisher` uses the authenticated worker client.
+trusting its deployment projection. The workflow service, which holds the journal
+and the queue, is the only publisher: its maintenance lane publishes through
+`LanePublisher` and each app's publication wake drains intents after a commit
+(`crates/zeroship-workflow-server/src/sweeps.rs` and `src/publication.rs`).
+Workers publish nothing.
 `service::delivery` accepts an advance job for its exact app, deployment, run,
 generation and frontier. Native manager grants and authenticated client leases
 implement the trusted Rust `JobLease` contract. The returned `DeliveredTask`
@@ -97,13 +101,16 @@ Overlap skips retain a rejected receipt; capacity and unavailable prerequisites
 remain retryable. Historical activations keep their original input even after
 replacement or schedule removal. Receipt replay requires the exact occurrence
 linkage and performs no artifact I/O.
-`runner::delivery::DeliverySlot` routes activation, cron, management,
-reconciliation, collection, fanout and propagation jobs to bounded journal operations and advance jobs to the existing executor and
-payload pipeline. Its host supplies `JobTransport`;
-the authenticated worker client implements that metadata interface. The slot
-renews manager and creator authority together, retains interrupted execution
-until native shutdown joins, and retries exact settlement after a committed
-creator result. This slot performs no journal discovery or calendar evaluation.
+`AppWorkflows::maintenance_job` (`service::maintenance`) routes activation, cron,
+management, reconciliation, collection, fanout, propagation, hold release and
+closure jobs to bounded journal operations; the workflow service's maintenance
+lane claims those kinds. `runner::delivery::DeliverySlot` runs a claimed advance
+job, the one kind a worker claims, through the executor and payload pipeline. Its
+host supplies `JobTransport`; the authenticated worker client implements that
+metadata interface. The slot renews manager and creator authority together,
+retains interrupted execution until native shutdown joins, and retries exact
+settlement after a committed creator result. This slot performs no journal
+discovery or calendar evaluation.
 `AppWorkflows::fanout_job` expands a delivered topic page inside one creator
 transaction. Topic acceptance and completion sequences keep later broadcasts
 pending until their predecessor finishes. The page's original subscription
@@ -128,46 +135,42 @@ cascade obligation fences its source generation's cascading children:
 preparation, completion and renewal treat them as cancelled, so they cannot
 continue as new, and restarting one is a durable conflict until the obligation
 finishes.
-`runner::consumer::JobConsumer` claims manager jobs through that transport and
-shares bounded execution capacity across trusted `ConsumerScope` bindings. Each
-binding pairs an app handle with its own executor and creator storage. The host
-replaces the authorized snapshot through `ConsumerBindings`; unchanged binding
-clones preserve active work, while replacement or removal cancels the previous
-binding. A cancelled execution retains its slot until shutdown joins. Selection
-rotates between eligible apps and bounds claim I/O, idle polling and error retries.
-The consumer performs no calendar evaluation, journal discovery or independent
-maintenance. Native tests connect it to the ORM coordinator and queue using a
-separate manager database, including a lost settlement acknowledgement.
-`runner::assignments::AssignmentBindings` connects authenticated manager placement
-to those bindings. It reads through an empty assignment page before changing the
-snapshot, preserves unchanged policy generations, and retires removals before
-opening replacement creator resources. `CreatorFactory` resolves resources from
-trusted host configuration and must return the exact supplied policy binding.
-Renewal, policy refresh and preparation progress independently across apps under
-operation bounds and original policy deadlines. Closing the reconciler revokes
-local authority synchronously; the host separately joins consumer execution.
+`runner::consumer::JobConsumer` pulls claimable jobs from the worker's
+execution zone through that transport. One claimer asks for exactly its free
+execution slots in one batch, continuing from the cursor the previous reply
+returned, and claims again at once until a reply reaches the end of the zone
+without filling them; then it waits the idle interval, or less when a slot
+frees. Each slot prepares the delivery's app through
+`runner::prepared::PreparedApps`, a bounded cache of app journal, executor and
+residency keyed by app: a miss runs under the delivery's remaining lease,
+eviction takes only idle entries, and an app the host's version feed stops
+listing leaves the cache on the next claim cycle while any execution holding it
+keeps it resident. A failed preparation gives the claim back, journal task
+included, and withholds the app from this worker's claims until a local
+expiry that doubles per consecutive failure up to a ceiling. An execution is
+bounded by the smaller of the local ceiling and the delivered attempt; a
+renewal that extends nothing interrupts it. A cancelled execution retains its
+slot, and the app it holds, until shutdown joins. The consumer performs no
+calendar evaluation, journal discovery or independent maintenance. Native tests
+connect it to the ORM coordinator and queue using a separate manager database,
+including a lost settlement acknowledgement.
 `runner::host::WorkerHost` owns the runtime-local lifecycle for a fixed enrolled
-signer. It registers before scanning, then drives registration, assignment scans,
-policy renewal and consumption independently. App-placement capacity follows the
-assignment bound; execution slots are a separate local limit. Transient manager
-outages retry without extending authority. Identity refusal or shutdown cancels
-pending refreshes, revokes local bindings and announces terminal draining while
-joining execution. Cancellation also retires the host; explicit `drain` joins
-retained slots, and the same host cannot become ready again. The host does not
-release assignments or discharge manager recovery responsibility.
-Production enrollment, trusted creator resource providers, remaining delivered
-operation handlers and production worker composition remain required before
-replacing the production runner. The local CLI host already runs the consumer.
+signer: it composes the claimer, its slots and the prepared-app cache, refuses a
+cache smaller than its slots, and runs once. Shutdown stops claiming and joins
+execution; explicit `drain` joins retained slots. The local CLI host runs the
+same consumer for its one configured app.
 `zeroship-worker::workflow_creator::WorkflowCreatorFactory` assembles payload
 storage, retained app artifacts, a `RemoteBackend` and the V8 executor from an
 injected `WorkflowResourceProvider`. It holds no journal: its `Journal` type is
 `()`, and every journal fact crosses to the workflow service. The task payload
-handle and V8 backend derive from the same assigned app. Runtime metadata can
+handle and V8 backend derive from the same claimed app. Runtime metadata can
 refresh env, limits, network rules and ordinary native peers, but the loader
 retains the original workflow backend.
 The provider must resolve independently authorized deployment-host resources;
-manager placement IDs and revisions only select those resources and their
-retention client. Production resource provisioning and installation remain open.
+the claimed app's id only selects them, and Control answers the worker's app
+reads only for apps in the worker's own execution zone. Each prepared app holds
+an `AppResidency` guard, so its key, bindings and environment stay supplied
+while it or any execution from it holds the app, and only that long.
 `service::reconciliation` persists a selected publication or deployment-hold page
 and its progress in the journal's job receipt. It reserves each item before I/O,
 so retries reach later items even when an earlier request stalls. Confirmation
@@ -258,25 +261,19 @@ policy capture through renewal and finalization; invalidation interrupts its
 watchdog and the runner joins native work before reusing capacity. Payload reads
 retain that capture through the returned body.
 
-For an assigned remote host, `AssignedPolicies` binds a fixed worker client and
-assignment to a new policy generation:
-
-```rust,ignore
-let remote = AssignedPolicies::new(&policies, worker_client, assignment)?;
-remote.refresh().await?;
-let app = service.register_app(remote.binding()).await?;
-```
-
-Keep this handle for the unchanged association. Constructing a replacement
-retires old handles, while cloning preserves their generation. Each refresh
-reserves its ticket before HTTP and installs the validated client's original
-monotonic deadline. Delayed replies cannot replace newer refreshes or a new
-binding. Failed exchanges leave previous authority bounded by its existing
-deadline. The raw policy is shared through `zeroship_core::workflow_policy`;
-source revision and lease duration remain independent. The authoritative Control
-source and ordinary production assignment/refresh loop still require integration.
-Deploy selection also comes from the trusted host, through `activate_deploy`,
-without querying platform tables.
+The workflow service is the host that binds policy in production, and it does so
+on every call that reaches the journal: `RunService::app`
+(`crates/zeroship-workflow-server/src/runs.rs`) observes the app's policy from
+the trusted platform source, installs it as a lease snapshot whose deadline is
+the observation's own validity, and carries the binding's ingress epoch forward
+across that reinstall. An unchanged revision with an unmoved deadline is inert,
+so a reinstall does not disturb operations already in flight. Workers hold no
+policy binding and receive no policy: the service applies it to each claim,
+renewal and settlement, and a renewal under policy with admission or dispatch off
+extends nothing. The raw policy is shared through `zeroship_core::workflow_policy`;
+source revision and lease duration remain independent. Deploy selection also
+comes from the trusted host, through `activate_deploy`, without querying
+platform tables.
 
 Ordinary start, signal, broadcast, lifecycle, signal-token and signal-ingress
 operations capture the host policy revision and deadline before journal I/O.

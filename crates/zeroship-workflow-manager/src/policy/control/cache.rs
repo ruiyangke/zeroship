@@ -45,6 +45,16 @@ pub(super) struct Cache {
 struct Entry {
     identity: Arc<()>,
     observation: Option<PolicyObservation>,
+    /// When the current observation is read again although it is still valid:
+    /// halfway through its validity. A grant is capped at the expiry of the
+    /// observation it is issued from, so an observation served until its last
+    /// moment would issue grants with almost nothing left; reading it again
+    /// ahead of expiry keeps every grant at least half a window long while the
+    /// source answers.
+    refresh_at: Instant,
+    /// A read ahead of expiry is in flight. Every other caller keeps the
+    /// current observation meanwhile, and keeps it if that read fails.
+    refreshing: bool,
     used_at: Instant,
     /// Callers that arrived while this app's refresh was in flight, to be
     /// answered from its result. Empty unless a refresh is pending.
@@ -54,6 +64,10 @@ struct Entry {
 pub(super) enum Reservation<'a> {
     Cached(PolicyObservation),
     Refresh(Ticket<'a>),
+    /// The current observation is past the point it is read again. This
+    /// caller reads the source; if that read fails, the current observation,
+    /// still valid, answers it.
+    Ahead(Ticket<'a>, PolicyObservation),
     /// A refresh for this app is already in flight; wait for its observation
     /// rather than refuse a request that the next observation will answer.
     Wait(oneshot::Receiver<Result<PolicyObservation, Error>>),
@@ -87,8 +101,23 @@ impl Cache {
                 Some(observation) if observation.expires_at() > now => {
                     entry.used_at = now;
                     let observation = observation.clone();
+                    if now < entry.refresh_at || entry.refreshing {
+                        drop(entries);
+                        return Ok(Reservation::Cached(observation));
+                    }
+                    let identity = Arc::new(());
+                    entry.identity = identity.clone();
+                    entry.refreshing = true;
                     drop(entries);
-                    return Ok(Reservation::Cached(observation));
+                    return Ok(Reservation::Ahead(
+                        Ticket {
+                            cache: self,
+                            app: app.clone(),
+                            identity,
+                            pending: true,
+                        },
+                        observation,
+                    ));
                 }
                 None => {
                     let (waiter, waiting) = oneshot::channel();
@@ -112,6 +141,8 @@ impl Cache {
             Entry {
                 identity: identity.clone(),
                 observation: None,
+                refresh_at: now,
+                refreshing: false,
                 used_at: now,
                 waiters: Vec::new(),
             },
@@ -129,19 +160,6 @@ impl Cache {
         if let Ok(mut entries) = self.entries.lock() {
             entries.remove(app);
         }
-    }
-
-    pub(super) fn revalidate(&self, observation: &PolicyObservation) -> Result<Instant, Error> {
-        let entries = self.entries()?;
-        let expires_at = entries
-            .get(observation.app_id())
-            .and_then(|entry| entry.observation.as_ref())
-            .filter(|current| current.same_observation(observation))
-            .map(PolicyObservation::expires_at)
-            .filter(|expires_at| *expires_at > Instant::now())
-            .ok_or(Error::Unavailable)?;
-        drop(entries);
-        Ok(expires_at)
     }
 }
 
@@ -163,6 +181,9 @@ impl Ticket<'_> {
             .get_mut(&self.app)
             .filter(|entry| Arc::ptr_eq(&entry.identity, &self.identity))
             .ok_or(Error::Unavailable)?;
+        let now = Instant::now();
+        entry.refresh_at = now + observation.expires_at().saturating_duration_since(now) / 2;
+        entry.refreshing = false;
         entry.observation = Some(observation.clone());
         let waiters = std::mem::take(&mut entry.waiters);
         drop(entries);
@@ -181,6 +202,19 @@ impl Drop for Ticket<'_> {
                 return;
             };
             let waiters = match entries.get_mut(&self.app) {
+                // A read ahead of expiry that did not complete leaves the
+                // current observation serving until it expires; the next
+                // caller past its refresh point reads again.
+                Some(entry)
+                    if Arc::ptr_eq(&entry.identity, &self.identity)
+                        && entry
+                            .observation
+                            .as_ref()
+                            .is_some_and(|current| current.expires_at() > Instant::now()) =>
+                {
+                    entry.refreshing = false;
+                    Vec::new()
+                }
                 Some(entry) if Arc::ptr_eq(&entry.identity, &self.identity) => {
                     let waiters = std::mem::take(&mut entry.waiters);
                     entries.remove(&self.app);

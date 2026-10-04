@@ -19,7 +19,8 @@ async fn long_stream_accrues_egress_before_close() {
     let _kernel = Kernel::install(10, empty_kernel(meter.clone()));
     let app_id = AppId::mint();
     let (writer, reader) = stream_buffer_with_cap(16 * 1024 * 1024);
-    let mut body = stream_response(200, &[], reader, app_id.clone()).take_body();
+    let mut body =
+        stream_response(200, &[], reader, app_id.clone(), crate::cache::hold(&app_id)).take_body();
 
     let big = vec![b'x'; (STREAM_FLUSH_BYTES + 4096) as usize];
     assert!(matches!(writer.push(big.clone()), StreamPushResult::Ok));
@@ -56,7 +57,8 @@ async fn streaming_counts_request_exactly_once() {
     let app_id = AppId::mint();
     record_stream_unary(&app_id, 123, 456, std::time::Instant::now());
     let (writer, reader) = stream_buffer_with_cap(16 * 1024 * 1024);
-    let mut body = stream_response(200, &[], reader, app_id.clone()).take_body();
+    let mut body =
+        stream_response(200, &[], reader, app_id.clone(), crate::cache::hold(&app_id)).take_body();
 
     let mut total_bytes = 0;
     for _ in 0..2 {
@@ -77,4 +79,50 @@ async fn streaming_counts_request_exactly_once() {
         Some(total_bytes)
     );
     assert!(usage_value(&events, &app_id, "stream_wall_us").is_some());
+}
+
+/// A streamed body holds its app exactly until the stream ends.
+///
+/// The dispatch returns as soon as the response head is built, but the code
+/// producing the body keeps running and may read the app's encrypted data, so
+/// the app's credentials must outlive the dispatch by exactly the stream.
+#[compio::test]
+async fn a_streamed_body_holds_its_app_until_the_stream_ends() {
+    let envs = crate::sync::SharedEnvs::default();
+    let registry = crate::residency::AppResidency::new(None, None, envs.clone());
+    let mut kernel = empty_kernel(Arc::new(zeroship_metering::Meter::new()));
+    kernel.residency = Some(registry.clone());
+    let _kernel = Kernel::install(10, kernel);
+    let app_id = AppId::mint();
+    let hold = crate::cache::hold(&app_id);
+    crate::sync::put_env_from_json(
+        &envs,
+        app_id.clone(),
+        r#"{"vars":{},"secrets":{},"expose":[]}"#,
+        1,
+    )
+    .expect("the environment parses");
+
+    let (writer, reader) = stream_buffer_with_cap(16 * 1024 * 1024);
+    let mut body = stream_response(200, &[], reader, app_id.clone(), hold).take_body();
+    assert_eq!(registry.holders(&app_id), 1, "the open stream holds the app");
+    let chunk = vec![b's'; 1024];
+    assert!(matches!(writer.push(chunk.clone()), StreamPushResult::Ok));
+    assert_eq!(next_chunk(&mut body).await.unwrap().as_ref(), chunk);
+    assert_eq!(registry.holders(&app_id), 1, "and still holds it mid-stream");
+    assert!(crate::sync::get_env(&envs, &app_id).is_some());
+
+    writer.close();
+    assert!(next_chunk(&mut body).await.is_none(), "drain completes");
+    compio::time::timeout(Duration::from_secs(5), async {
+        while registry.holders(&app_id) != 0 {
+            compio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the finished stream releases its hold");
+    assert!(
+        crate::sync::get_env(&envs, &app_id).is_none(),
+        "with the stream gone nothing holds the app"
+    );
 }

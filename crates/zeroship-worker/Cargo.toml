@@ -52,6 +52,9 @@ tracing = { workspace = true }
 zeroship-workflow-manager = { workspace = true }
 # The workflow-typed fixture adapters over the plain workflow testkit.
 zeroship-workflow-fixtures = { workspace = true }
+# The drain contract's held execution implements the runner's task execution
+# trait, which is declared through `async_trait`.
+async-trait = { workspace = true }
 # Parse generated configuration and compose private migration host settings.
 toml = { workspace = true }
 # Rust fixtures own PostgreSQL, Redis and temporary storage.
@@ -63,6 +66,8 @@ testcontainers = { workspace = true }
 # JWKS-shaped peer documents.
 ed25519-dalek = { workspace = true }
 base64 = { workspace = true }
+# The termination-grace contract reads the compose file the deployment ships.
+serde_yaml = "0.9"
 
 [[test]]
 name = "main"

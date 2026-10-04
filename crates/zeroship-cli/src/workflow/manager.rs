@@ -1,8 +1,7 @@
 //! The native workflow manager of the local host, on its own thread.
 //!
 //! The CLI acts as the trusted platform host for its one app: it records the
-//! normal deployment, registers this process as a worker, places the app on
-//! it and publishes deployment schedules. Delivery uses the same queue grants,
+//! normal deployment and publishes deployment schedules. Delivery uses the same queue grants,
 //! fences and receipts as production; only enrollment and network transport
 //! are omitted. The manager thread owns the platform metadata file and runs
 //! no app code, just as production keeps the manager out of the creator zone.
@@ -18,15 +17,13 @@ use futures::{
     future::{FutureExt, LocalBoxFuture, Shared},
     StreamExt,
 };
-use std::{
-    future::ready, num::NonZeroU32, path::PathBuf, rc::Rc, thread::JoinHandle, time::Duration,
-};
+use std::{future::ready, path::PathBuf, rc::Rc, thread::JoinHandle, time::Duration};
 use zeroship_core::{
     app_id::AppId,
-    workflow_coordination::{AssignedScope, RegisterWorker, Revision, WorkerId, WorkerState},
+    workflow_coordination::{Revision, WorkerId},
     workflow_deployments::{HoldGeneration, HoldReceipt, HoldScope, HoldState},
     workflow_jobs::{
-        Delivery, DeploymentId, JobSpec, JournalSettlement, SettlementReceipt,
+        ClaimJobs, Delivery, DeploymentId, JobSpec, JournalSettlement, SettlementReceipt,
     },
     workflow_schedules::{ActivateSchedules, RegisterSchedules, ScheduleDescriptor},
     zone_id::ZoneId,
@@ -37,16 +34,15 @@ use zeroship_workflow::{
     WorkflowExecution, WorkflowServiceError,
 };
 use zeroship_workflow_runner::delivery::{
-    committed_settlement, Claimed, Completed, JobTransport, Renewed,
+    committed_settlement, Claimed, ClaimedBatch, Completed, JobTransport, Renewed, Unstarted,
 };
 use zeroship_workflow_manager::{
     capacity::LocalCapacity,
-    coordinator::{Coordinator, Options as CoordinatorOptions, Placed},
+    coordinator::{Admission, Coordinator, Options as CoordinatorOptions, ZoneClaim},
     deployments,
     driver::{Driver, Options as DriverOptions},
-    eligibility::SoleWorker,
     lifecycle::Undeletable,
-    local::LocalPlatform,
+    local::{ConfiguredPolicies, LocalPlatform},
     maintenance::MaintenanceAuthority,
     recovery::{Options as RecoveryOptions, Recovery},
     scheduling::{Options as SchedulingOptions, Scheduler, SelectedActivation},
@@ -55,11 +51,12 @@ use zeroship_workflow_manager::{
 
 const MAX_QUEUED_REQUESTS: usize = 64;
 
-/// Local placement and maintenance bounds for the native manager.
+/// Local claim and maintenance bounds for the native manager.
 #[derive(Debug, Clone, Copy)]
 pub struct ManagerOptions {
     pub lease: Duration,
-    pub placement_ttl: Duration,
+    pub max_attempt: Duration,
+    pub claim_budget: Duration,
     pub recovery_interval: Duration,
     pub hold_grace: Duration,
     pub lane_timeout: Duration,
@@ -106,6 +103,8 @@ impl Drop for ManagerThread {
 /// Refuses incompatible metadata, invalid bounds and unavailable storage.
 pub async fn spawn(
     platform: PathBuf,
+    app: AppId,
+    policy: zeroship_core::workflow_policy::AppPolicy,
     options: ManagerOptions,
 ) -> Result<(ManagerClient, ManagerThread), WorkflowServiceError> {
     let (requests, receiver) = flume::bounded::<Request>(MAX_QUEUED_REQUESTS);
@@ -119,7 +118,7 @@ pub async fn spawn(
                 return;
             };
             runtime.block_on(async move {
-                let manager = match LocalManager::open(&platform, options).await {
+                let manager = match LocalManager::open(&platform, app, policy, options).await {
                     Ok(manager) => Rc::new(manager),
                     Err(error) => {
                         let _ = started.send(Err(error));
@@ -186,6 +185,7 @@ struct LocalManager {
     coordinator: Coordinator,
     scheduler: Scheduler,
     recovery: Recovery,
+    policies: ConfiguredPolicies,
     worker: WorkerId,
     options: ManagerOptions,
 }
@@ -193,31 +193,25 @@ struct LocalManager {
 impl LocalManager {
     async fn open(
         path: &std::path::Path,
+        app: AppId,
+        policy: zeroship_core::workflow_policy::AppPolicy,
         options: ManagerOptions,
     ) -> Result<Self, WorkflowServiceError> {
         let platform = LocalPlatform::open(path).await.map_err(catalog_error)?;
         let queue = platform
-            .queue(QueueOptions {
-                lease: options.lease,
-                ..QueueOptions::default()
-            })
+            .queue(queue_options(options))
             .await
             .map_err(manager_error)?;
-        // The trusted in-process worker shares the host's single zone and
-        // performs no enrollment, so the local catalog needs no Control rows.
-        // It is also the only live worker: a registration left ready by a
-        // process that died is a predecessor, not capacity this host has.
         let worker = WorkerId::mint();
         let coordinator = Coordinator::new(
             queue.clone(),
             CoordinatorOptions {
-                worker_ttl: options.placement_ttl,
-                assignment_ttl: options.placement_ttl,
+                claim_budget: options.claim_budget,
                 ..CoordinatorOptions::default()
             },
-            Rc::new(SoleWorker::new(ZoneId::default_zone(), worker.clone())),
         )
         .map_err(manager_error)?;
+        let policies = ConfiguredPolicies::new(app, policy).map_err(manager_error)?;
         let scheduler =
             Scheduler::new(queue.clone(), SchedulingOptions::default()).map_err(manager_error)?;
         let recovery = Recovery::new(queue, recovery_options(options)).map_err(manager_error)?;
@@ -226,6 +220,7 @@ impl LocalManager {
             coordinator,
             scheduler,
             recovery,
+            policies,
             worker,
             options,
         })
@@ -244,57 +239,10 @@ impl LocalManager {
                 ..DriverOptions::default()
             },
             Rc::new(Undeletable),
+            Rc::new(self.policies.clone()),
             Rc::new(LocalCapacity),
         )
         .map_err(manager_error)
-    }
-
-    async fn register(&self, state: WorkerState) -> Result<(), WorkflowServiceError> {
-        self.coordinator
-            .register(
-                &self.worker,
-                &RegisterWorker {
-                    capacity: NonZeroU32::MIN,
-                    state,
-                },
-            )
-            .await
-            .map(|_| ())
-            .map_err(manager_error)
-    }
-
-    /// Register this worker as ready and let the manager place the app on it.
-    /// Selection can choose no other worker, because the only other
-    /// registration a local catalog can hold is a dead predecessor's and that
-    /// is not eligible; an app this process already owns keeps its placement
-    /// rather than being given a second revision.
-    async fn place_app(&self, app: &AppId) -> Result<AssignedScope, WorkflowServiceError> {
-        self.register(WorkerState::Ready).await?;
-        let assignment = match self.coordinator.place(app).await.map_err(manager_error)? {
-            Placed::Assigned(assignment) => assignment,
-            Placed::Owned => self
-                .coordinator
-                .assignments(&self.worker, None)
-                .await
-                .map_err(manager_error)?
-                .into_iter()
-                .find(|assignment| assignment.app_id == *app)
-                .ok_or_else(|| manager_error(Error::Denied))?,
-            Placed::Unplaced(_) | Placed::Ineligible => return Err(manager_error(Error::Denied)),
-        };
-        Ok(AssignedScope {
-            app_id: assignment.app_id,
-            assignment_revision: assignment.revision,
-        })
-    }
-
-    async fn renew(&self, scope: &AssignedScope) -> Result<(), WorkflowServiceError> {
-        self.register(WorkerState::Ready).await?;
-        self.coordinator
-            .renew(&self.worker, scope)
-            .await
-            .map(|_| ())
-            .map_err(manager_error)
     }
 
     async fn publish(
@@ -306,6 +254,7 @@ impl LocalManager {
         self.scheduler
             .prepare(&RegisterSchedules {
                 app_id: app.clone(),
+                execution_zone_id: ZoneId::default_zone(),
                 deployment_id: deployment.clone(),
                 schedules,
             })
@@ -335,6 +284,7 @@ impl LocalManager {
             .scheduler
             .activate(&ActivateSchedules {
                 app_id: app.clone(),
+                execution_zone_id: ZoneId::default_zone(),
                 deployment_id: deployment.clone(),
                 revision,
             })
@@ -350,7 +300,7 @@ impl LocalManager {
 
     /// Publish a creator intent through the same trusted queue submission the
     /// workflow service uses. The local host is its app's platform authority,
-    /// so nothing rechecks placement here; the publisher asserts the app.
+    /// so nothing rechecks the app's zone here; the publisher asserts the app.
     ///
     /// # Errors
     /// Refuses reused identities with different content and unavailable storage.
@@ -366,12 +316,23 @@ impl LocalManager {
     /// queue.
     ///
     /// The identity is this process's own worker id rather than a second minted
-    /// one: the local host is both the placed worker and the service that owns
-    /// the journal, so one process leaves one identity on every row it leases.
+    /// one: the local host is both the worker that claims its app's jobs and
+    /// the service that owns the journal, so one process leaves one identity on
+    /// every row it leases.
     /// The two lanes stay apart by the kinds their claimants admit, not by whose
     /// name is on the row.
     fn maintenance(&self, app: &AppId) -> MaintenanceAuthority {
         MaintenanceAuthority::new(app.clone(), self.worker.clone())
+    }
+}
+
+/// The bounds of the queue the local manager opens.
+#[must_use]
+pub fn queue_options(options: ManagerOptions) -> QueueOptions {
+    QueueOptions {
+        lease: options.lease,
+        max_attempt: options.max_attempt,
+        ..QueueOptions::default()
     }
 }
 
@@ -410,55 +371,6 @@ impl ManagerClient {
             .await
             .map_err(|_| unavailable())?;
         receive.await.map_err(|_| unavailable())?
-    }
-
-    /// Register this worker as ready and place the app on it. Local
-    /// eligibility is exactly the configured app.
-    ///
-    /// # Errors
-    /// Refuses unavailable storage and conflicting placement records.
-    pub async fn place(&self, app: &AppId) -> Result<AssignedScope, WorkflowServiceError> {
-        let app = app.clone();
-        self.call(move |manager| async move { manager.place_app(&app).await }.boxed_local())
-            .await
-    }
-
-    /// Extend registration and the current placement. A missing, replaced or
-    /// expired placement is refused; the caller must place the app again.
-    ///
-    /// # Errors
-    /// Reports refused placement authority and unavailable storage.
-    pub async fn renew(&self, scope: &AssignedScope) -> Result<(), WorkflowServiceError> {
-        let scope = scope.clone();
-        self.call(move |manager| async move { manager.renew(&scope).await }.boxed_local())
-            .await
-    }
-
-    /// Replace an expired or refused placement with the next revision.
-    ///
-    /// # Errors
-    /// Refuses conflicting placement records and unavailable storage.
-    pub async fn replace(
-        &self,
-        previous: &AssignedScope,
-    ) -> Result<AssignedScope, WorkflowServiceError> {
-        let previous = previous.clone();
-        self.call(move |manager| {
-            async move { manager.place_app(&previous.app_id).await }.boxed_local()
-        })
-        .await
-    }
-
-    /// Report terminal draining so nothing new is placed on this process.
-    /// Durable work and recovery responsibility remain.
-    ///
-    /// # Errors
-    /// Reports unavailable storage.
-    pub async fn drain(&self) -> Result<(), WorkflowServiceError> {
-        self.call(|manager| {
-            async move { manager.register(WorkerState::Draining).await }.boxed_local()
-        })
-        .await
     }
 
     /// Record an ingested normal deployment in the platform catalog.
@@ -551,7 +463,7 @@ impl ManagerClient {
             async move {
                 manager
                     .recovery
-                    .ensure(&app, &deployment, revision)
+                    .ensure(&app, &ZoneId::default_zone(), &deployment, revision)
                     .await
                     .map_err(manager_error)
             }
@@ -641,10 +553,10 @@ impl ManagerClient {
     /// host's publication through the journal handle's own publication hint,
     /// not through this transport.
     #[must_use]
-    pub fn transport(&self, max_delivery_attempts: i64) -> LocalTransport {
+    pub fn transport(&self, journal: AppWorkflows) -> LocalTransport {
         LocalTransport {
             client: self.clone(),
-            max_delivery_attempts,
+            journal,
         }
     }
 
@@ -659,12 +571,12 @@ impl ManagerClient {
         }
     }
 
-    /// Submission of committed creator intents under one placement revision.
+    /// Submission of committed creator intents for the configured app.
     #[must_use]
-    pub const fn publisher(&self, scope: AssignedScope) -> LocalPublisher<'_> {
+    pub const fn publisher<'a>(&'a self, app: &'a AppId) -> LocalPublisher<'a> {
         LocalPublisher {
             client: self,
-            scope,
+            app,
         }
     }
 
@@ -680,7 +592,7 @@ impl ManagerClient {
 
 /// The queue half of the local host's journal maintenance lane.
 ///
-/// `Claimant::Placed` admits only `advance`, so the consumer's transport below
+/// `Claimant::Worker` admits only `advance`, so the consumer's transport below
 /// never sees a sweep. This process holds the journal those sweeps maintain and
 /// the payload store behind it, so it asserts maintenance authority over its own
 /// queue exactly as the workflow service's lane does.
@@ -744,13 +656,11 @@ impl LocalSweeps {
     }
 }
 
-/// Native coordinator delivery for the trusted local worker. Grants are the
-/// queue's own monotonic leases; placement is rechecked inside each queue
-/// transaction exactly as for an authenticated remote worker.
+/// Native coordinator delivery for the trusted local worker.
 #[derive(Debug)]
 pub struct LocalTransport {
     client: ManagerClient,
-    max_delivery_attempts: i64,
+    journal: AppWorkflows,
 }
 
 impl JobTransport for LocalTransport {
@@ -758,49 +668,90 @@ impl JobTransport for LocalTransport {
     /// This host holds the journal, so an attempt is scoped here rather than
     /// server-side.
     type Journal = AppWorkflows;
-    fn scope(
-        &self,
-        journal: &Self::Journal,
-        authority: &zeroship_workflow::service::PolicyAuthority,
-    ) -> Result<Self::Journal, WorkflowServiceError> {
-        zeroship_workflow_runner::delivery::scope_journal(journal, authority)
-    }
-
-    /// Both halves run here, in this process, against the journal handed in.
-    /// The manager commits first and the journal second, which is the order a
-    /// served claim keeps too: the queue must have counted the delivery before
-    /// anything accepts work under it.
     async fn claim(
         &self,
-        journal: &AppWorkflows,
-        scope: &AssignedScope,
-    ) -> Result<Option<Claimed<DeliveryGrant>>, WorkflowServiceError> {
-        let scope = scope.clone();
-        let ceiling = self.max_delivery_attempts;
-        let granted = self
+        request: &ClaimJobs,
+    ) -> Result<ClaimedBatch<DeliveryGrant>, WorkflowServiceError> {
+        let request = request.clone();
+        let arrival = std::time::Instant::now();
+        let batch = self
             .client
             .call(move |manager| {
                 async move {
+                    let claim = ZoneClaim {
+                        worker: &manager.worker,
+                        zone: &ZoneId::default_zone(),
+                        request: &request,
+                        deadline: manager
+                            .coordinator
+                            .claim_deadline(arrival, &request)
+                            .map_err(manager_error)?,
+                    };
+                    // The journal is this host's own and lives on the caller's
+                    // thread, so each grant is admitted as it stands and
+                    // accepted below.
                     manager
                         .coordinator
-                        .claim_job(&manager.worker, &scope, Ok(ceiling), || {
-                            ready(Ok(manager.worker.clone()))
-                        })
+                        .claim_in_zone(
+                            &claim,
+                            &manager.policies,
+                            || ready(Ok(manager.worker.clone())),
+                            |_| ready(Admission::Deliver(())),
+                        )
                         .await
+                        .map(|(batch, _)| batch)
                         .map_err(manager_error)
                 }
                 .boxed_local()
             })
             .await?;
-        let Some(lease) = granted else {
-            return Ok(None);
-        };
-        let accepted = if lease.delivery().job.operation.accepts_execution() {
-            Some(journal.accept_job(&lease).await?)
-        } else {
-            None
-        };
-        Ok(Some(Claimed { lease, accepted }))
+        let mut deliveries = Vec::with_capacity(batch.grants.len());
+        for (lease, ()) in batch.grants {
+            let accepted = if lease.delivery().job.operation.accepts_execution() {
+                Some(self.journal.accept_job(&lease).await?)
+            } else {
+                None
+            };
+            if let Some(zeroship_workflow::service::delivery::JobAcceptance::Deferred {
+                reason,
+            }) = &accepted
+            {
+                let defer = match reason {
+                    zeroship_workflow::service::delivery::DeferredReason::NotDue { until } => {
+                        zeroship_workflow_manager::GiveBack::Exact(until.get())
+                    }
+                    zeroship_workflow::service::delivery::DeferredReason::PolicyOff
+                    | zeroship_workflow::service::delivery::DeferredReason::AtCap => {
+                        zeroship_workflow_manager::GiveBack::After(Duration::from_millis(100))
+                    }
+                    zeroship_workflow::service::delivery::DeferredReason::DeploymentUnavailable => {
+                        zeroship_workflow_manager::GiveBack::Backoff
+                    }
+                };
+                let delivery = lease.delivery().clone();
+                self.client
+                    .call(move |manager| {
+                        async move {
+                            manager
+                                .coordinator
+                                .give_back_job(&manager.worker, &delivery, defer, || {
+                                    ready(Ok(manager.worker.clone()))
+                                })
+                                .await
+                                .map_err(manager_error)
+                        }
+                        .boxed_local()
+                    })
+                    .await?;
+                continue;
+            }
+            deliveries.push(Claimed { lease, accepted });
+        }
+        Ok(ClaimedBatch {
+            deliveries,
+            after: batch.after,
+            lap_complete: batch.lap_complete,
+        })
     }
 
     async fn heartbeat(
@@ -841,14 +792,36 @@ impl JobTransport for LocalTransport {
             .await
     }
 
-    /// Both halves are this process's own journal, asked directly.
+    /// An attempt began and stopped without a receipt. The journal half is this
+    /// process's own journal, released first; the queue half returns the row
+    /// as interrupted, ready at once and counted toward the delivery budget, as
+    /// the service does for a worker's release.
     async fn release(
         &self,
         journal: &AppWorkflows,
         lease: &DeliveryGrant,
         task: &DeliveredTask,
     ) -> Result<(), WorkflowServiceError> {
-        journal.release_job(task, lease).await
+        journal.release_job(task, lease).await?;
+        self.return_row(lease, zeroship_workflow_manager::GiveBack::Interrupted)
+            .await
+    }
+
+    /// The journal half is this process's own journal, released first, so the
+    /// redelivery the queue half allows is not deferred behind the task.
+    async fn give_back(
+        &self,
+        claimed: &Claimed<DeliveryGrant>,
+        why: Unstarted,
+    ) -> Result<(), WorkflowServiceError> {
+        if let Some(task) = claimed.task() {
+            self.journal.release_job(task, &claimed.lease).await?;
+        }
+        let defer = match why {
+            Unstarted::Unprepared => zeroship_workflow_manager::GiveBack::Backoff,
+            Unstarted::Stopped => zeroship_workflow_manager::GiveBack::Unsent,
+        };
+        self.return_row(&claimed.lease, defer).await
     }
 
     async fn receipt(
@@ -884,6 +857,32 @@ impl JobTransport for LocalTransport {
 }
 
 impl LocalTransport {
+    /// Return `lease`'s row to this host's queue as `defer` says.
+    async fn return_row(
+        &self,
+        lease: &DeliveryGrant,
+        defer: zeroship_workflow_manager::GiveBack,
+    ) -> Result<(), WorkflowServiceError> {
+        let delivery = lease.delivery().clone();
+        self.client
+            .call(move |manager| {
+                async move {
+                    manager
+                        .coordinator
+                        .give_back_job(
+                            &manager.worker,
+                            &delivery,
+                            defer,
+                            || ready(Ok(manager.worker.clone())),
+                        )
+                        .await
+                        .map_err(manager_error)
+                }
+                .boxed_local()
+            })
+            .await
+    }
+
     /// The queue half every settlement on this host ends in. The successor
     /// intents a completion committed are woken by the journal handle's own
     /// hint, so this reports only what the manager recorded.
@@ -908,16 +907,16 @@ impl LocalTransport {
     }
 }
 
-/// Publishes creator intents under one placement revision.
+/// Publishes the one app's creator intents through the local manager.
 #[derive(Debug)]
 pub struct LocalPublisher<'a> {
     client: &'a ManagerClient,
-    scope: AssignedScope,
+    app: &'a AppId,
 }
 
 impl JobPublisher for LocalPublisher<'_> {
     fn app_id(&self) -> &AppId {
-        &self.scope.app_id
+        self.app
     }
 
     async fn submit(&self, job: &JobSpec) -> Result<JobSpec, WorkflowServiceError> {
@@ -977,7 +976,7 @@ pub fn manager_error(error: Error) -> WorkflowServiceError {
             WorkflowServiceError::ResourceExhausted("workflow manager capacity exhausted".into())
         }
         Error::Timeout => WorkflowServiceError::Timeout,
-        Error::Unavailable => {
+        Error::Unavailable | Error::Contended => {
             WorkflowServiceError::Unavailable("workflow manager storage is unavailable".into())
         }
         Error::Storage => {

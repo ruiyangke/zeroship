@@ -47,7 +47,7 @@ async fn in_flight_dispatch_pins_its_isolate_against_eviction() {
         .expect("dispatch takes an isolate lease");
 
         let error = crate::cache::load_app(
-            AppId::mint(),
+            crate::cache::hold(&AppId::mint()),
             crate::cache::test_modules(
                 br#"export default { fetch() { return new Response("b"); } }"#,
             ),

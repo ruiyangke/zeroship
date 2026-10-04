@@ -4,12 +4,13 @@
 )]
 
 use crate::support;
+use crate::support::QueueCalls;
 
 use std::time::Duration;
-use crate::support::{Admin, Backend, Fixture};
+use crate::support::{Admin, Backend, Fixture, Owner};
 use zeroship_core::{
     app_id::AppId,
-    workflow_coordination::{Assignment, WorkerId},
+    workflow_coordination::WorkerId,
     workflow_jobs::{DeploymentId, JobId, JobOperation, JobOutcome, JobSpec},
 };
 use zeroship_data_orm::{
@@ -185,7 +186,7 @@ async fn job_count(fixture: &Fixture, app: &AppId) -> i64 {
 }
 
 /// The lane of the process that owns this queue. A recovery duty's job is a
-/// sweep, so no placement exists to deliver it: the lane asserts its own
+/// sweep, so no worker is delivered it: the lane asserts its own
 /// authority instead.
 fn lane(app: &AppId) -> MaintenanceAuthority {
     MaintenanceAuthority::new(app.clone(), WorkerId::mint())
@@ -193,13 +194,8 @@ fn lane(app: &AppId) -> MaintenanceAuthority {
 
 /// The authority `lane` asserts, for the queue operations [`MaintenanceAuthority`]
 /// does not wrap.
-fn asserted(lane: &MaintenanceAuthority) -> Assignment {
-    Assignment {
-        app_id: lane.app().clone(),
-        worker_id: lane.identity().clone(),
-        revision: 1.try_into().unwrap(),
-        expires_at: i64::MAX.try_into().unwrap(),
-    }
+fn asserted(lane: &MaintenanceAuthority) -> Owner {
+    Owner::new(lane.app().clone(), lane.identity().clone())
 }
 
 async fn claim(queue: &Queue, lane: &MaintenanceAuthority) -> DeliveryGrant {
@@ -215,9 +211,10 @@ async fn durable_responsibility(fixture: &Fixture, kind: DutyKind) {
     let app = AppId::mint();
     let deployment = DeploymentId::mint();
     let revision = 1.try_into().unwrap();
+    let zone = zeroship_core::ZoneId::default_zone();
     let (a, b) = futures::join!(
-        first.ensure(&app, &deployment, revision),
-        second.ensure(&app, &deployment, revision)
+        first.ensure(&app, &zone, &deployment, revision),
+        second.ensure(&app, &zone, &deployment, revision)
     );
     a.unwrap();
     b.unwrap();
@@ -226,7 +223,7 @@ async fn durable_responsibility(fixture: &Fixture, kind: DutyKind) {
         std::slice::from_ref(&app)
     );
     let original = snapshot(fixture, &app, kind).await;
-    second.ensure(&app, &deployment, revision).await.unwrap();
+    second.ensure(&app, &zeroship_core::ZoneId::default_zone(), &deployment, revision).await.unwrap();
     assert_eq!(snapshot(fixture, &app, kind).await, original);
     let (a, b) = futures::join!(first.dispatch(&app, kind), second.dispatch(&app, kind));
     let accepted = a.unwrap().unwrap();
@@ -281,22 +278,22 @@ async fn activation(fixture: &Fixture, kind: DutyKind) {
     let first = DeploymentId::mint();
     let second = DeploymentId::mint();
     recovery
-        .ensure(&app, &first, 1.try_into().unwrap())
+        .ensure(&app, &zeroship_core::ZoneId::default_zone(), &first, 1.try_into().unwrap())
         .await
         .unwrap();
     let original = recovery.dispatch(&app, kind).await.unwrap().unwrap();
     let deadline = snapshot(fixture, &app, kind).await["next_due_at"].clone();
     assert_eq!(
-        recovery.ensure(&app, &second, 1.try_into().unwrap()).await,
+        recovery.ensure(&app, &zeroship_core::ZoneId::default_zone(), &second, 1.try_into().unwrap()).await,
         Err(Error::Conflict)
     );
     recovery
-        .ensure(&app, &second, 2.try_into().unwrap())
+        .ensure(&app, &zeroship_core::ZoneId::default_zone(), &second, 2.try_into().unwrap())
         .await
         .unwrap();
     assert_eq!(snapshot(fixture, &app, kind).await["next_due_at"], deadline);
     assert_eq!(
-        recovery.ensure(&app, &first, 1.try_into().unwrap()).await,
+        recovery.ensure(&app, &zeroship_core::ZoneId::default_zone(), &first, 1.try_into().unwrap()).await,
         Err(Error::Conflict)
     );
     assert_eq!(
@@ -319,7 +316,7 @@ async fn activation(fixture: &Fixture, kind: DutyKind) {
     assert_ne!(next.id, original.id);
     assert_eq!(next.deployment_id(), None);
     let foreign = AppId::mint();
-    queue.register_scope(&foreign).await.unwrap();
+    queue.register_scope(&foreign, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     assert_eq!(recovery.dispatch(&foreign, kind).await, Err(Error::Denied));
     assert_eq!(job_count(fixture, &foreign).await, 0);
 }
@@ -330,7 +327,7 @@ async fn pages(fixture: &Fixture, kind: DutyKind) {
     apps.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     for app in &apps {
         recovery
-            .ensure(app, &DeploymentId::mint(), 1.try_into().unwrap())
+            .ensure(app, &zeroship_core::ZoneId::default_zone(), &DeploymentId::mint(), 1.try_into().unwrap())
             .await
             .unwrap();
     }
@@ -379,7 +376,7 @@ async fn waiting_pages(fixture: &Fixture, kind: DutyKind) {
     let (recovery, queue) = host(fixture).await;
     let app = AppId::mint();
     recovery
-        .ensure(&app, &DeploymentId::mint(), 1.try_into().unwrap())
+        .ensure(&app, &zeroship_core::ZoneId::default_zone(), &DeploymentId::mint(), 1.try_into().unwrap())
         .await
         .unwrap();
     let first = recovery.dispatch(&app, kind).await.unwrap().unwrap();
@@ -402,10 +399,7 @@ async fn waiting_pages(fixture: &Fixture, kind: DutyKind) {
     let pending = snapshot(fixture, &app, kind).await;
     assert_eq!(pending["pending_job_id"], value!(next.id.as_str()));
     let (reopened, reopened_queue) = host(fixture).await;
-    let expired = Assignment {
-        expires_at: 0.try_into().unwrap(),
-        ..asserted(&owner)
-    };
+    let expired = asserted(&owner);
     assert_eq!(
         reopened_queue.settle(&expired, &command).await.unwrap(),
         receipt
@@ -440,7 +434,7 @@ async fn completed_pages(fixture: &Fixture, kind: DutyKind) {
     let app = AppId::mint();
     let deployment = DeploymentId::mint();
     recovery
-        .ensure(&app, &deployment, 1.try_into().unwrap())
+        .ensure(&app, &zeroship_core::ZoneId::default_zone(), &deployment, 1.try_into().unwrap())
         .await
         .unwrap();
     let first = recovery.dispatch(&app, kind).await.unwrap().unwrap();
@@ -462,7 +456,7 @@ async fn completed_pages(fixture: &Fixture, kind: DutyKind) {
 
     let (reopened, _) = host(fixture).await;
     reopened
-        .ensure(&app, &deployment, 1.try_into().unwrap())
+        .ensure(&app, &zeroship_core::ZoneId::default_zone(), &deployment, 1.try_into().unwrap())
         .await
         .unwrap();
     assert_eq!(snapshot(fixture, &app, kind).await, obligation);
@@ -478,7 +472,7 @@ async fn unrelated_page(fixture: &Fixture, kind: DutyKind) {
     let (recovery, queue) = host(fixture).await;
     let app = AppId::mint();
     recovery
-        .ensure(&app, &DeploymentId::mint(), 1.try_into().unwrap())
+        .ensure(&app, &zeroship_core::ZoneId::default_zone(), &DeploymentId::mint(), 1.try_into().unwrap())
         .await
         .unwrap();
     let pending = recovery.dispatch(&app, kind).await.unwrap().unwrap();
@@ -517,7 +511,7 @@ async fn settlement_rollback(fixture: &Fixture, kind: DutyKind) {
     let (recovery, queue) = host(fixture).await;
     let app = AppId::mint();
     recovery
-        .ensure(&app, &DeploymentId::mint(), 1.try_into().unwrap())
+        .ensure(&app, &zeroship_core::ZoneId::default_zone(), &DeploymentId::mint(), 1.try_into().unwrap())
         .await
         .unwrap();
     let pending = recovery.dispatch(&app, kind).await.unwrap().unwrap();
@@ -570,7 +564,7 @@ async fn rollback(fixture: &Fixture, kind: DutyKind) {
     let (recovery, _) = host(fixture).await;
     let app = AppId::mint();
     recovery
-        .ensure(&app, &DeploymentId::mint(), 1.try_into().unwrap())
+        .ensure(&app, &zeroship_core::ZoneId::default_zone(), &DeploymentId::mint(), 1.try_into().unwrap())
         .await
         .unwrap();
     let original = snapshot(fixture, &app, kind).await;

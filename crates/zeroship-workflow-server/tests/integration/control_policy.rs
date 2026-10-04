@@ -475,10 +475,10 @@ async fn source_role_cannot_write_inputs_or_read_customer_storage(fixture: &Fixt
             "{sql} must be refused for want of a grant"
         );
     }
-    // Rejection control: the columns placement reads ARE granted, so the
-    // refusals above are a column-scoped grant rather than the whole table,
-    // or the whole schema, having become unreadable to this role.
-    let granted = "SELECT id, deleted_at, execution_zone_id FROM zeroship.apps";
+    // Rejection control: the instance columns authentication reads ARE
+    // granted, so the refusals above are withheld grants rather than the whole
+    // schema having become unreadable to this role.
+    let granted = "SELECT id, status, public_key, execution_zone_id, expires_at FROM zeroship.worker_instances";
     runtime
         .batch_execute(granted)
         .await
@@ -602,7 +602,6 @@ async fn cached_authority_cannot_be_renewed_from_its_own_ledger() {
     assert!(cached.same_observation(&original));
     assert_eq!(cached.expires_at(), original.expires_at());
     source.invalidate(&fixture.app);
-    assert!(source.revalidate(&original).is_err());
     assert!(matches!(
         source.observe(&fixture.app).await,
         Err(Error::Unavailable)
@@ -611,8 +610,9 @@ async fn cached_authority_cannot_be_renewed_from_its_own_ledger() {
     let restored = source.observe(&fixture.app).await.unwrap();
     assert_eq!(restored.revision(), original.revision());
     assert!(!restored.same_observation(&original));
-    assert!(source.revalidate(&original).is_err());
-    assert!(source.revalidate(&restored).is_ok());
+    let served = source.observe(&fixture.app).await.unwrap();
+    assert!(served.same_observation(&restored), "the restored observation is the one served");
+    assert!(!served.same_observation(&original));
 }
 
 /// Two policy sources built the way two HTTP threads build theirs grant from
@@ -636,7 +636,6 @@ async fn threads_of_one_manager_grant_from_one_observation() {
     let shared = second.observe(&fixture.app).await.unwrap();
     assert!(shared.same_observation(&observed));
     assert_eq!(shared.expires_at(), observed.expires_at());
-    assert_eq!(second.revalidate(&observed).unwrap(), observed.expires_at());
 
     // The control: a source holding observations of its own reads Control for
     // itself and opens a window of its own, which neither source will recheck
@@ -650,8 +649,8 @@ async fn threads_of_one_manager_grant_from_one_observation() {
     let independent = separate.observe(&fixture.app).await.unwrap();
     assert!(!independent.same_observation(&observed));
     assert_ne!(independent.expires_at(), observed.expires_at());
-    assert!(first.revalidate(&independent).is_err());
-    assert!(separate.revalidate(&observed).is_err());
+    assert!(first.observe(&fixture.app).await.unwrap().same_observation(&observed));
+    assert!(separate.observe(&fixture.app).await.unwrap().same_observation(&independent));
 }
 
 /// AN OBSERVATION OLDER THAN THE ONE THE LEDGER ALREADY PUBLISHED FROM IS

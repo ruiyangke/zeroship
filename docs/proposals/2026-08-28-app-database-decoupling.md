@@ -167,7 +167,7 @@ project ladder with its composite ownership keys
 `db/migrations-ts/20260906000200_apps_project_ownership_key.ts`), execution zones with the
 app's zone frozen by trigger
 (`db/migrations-ts/20260914000400_execution_zones_and_join_signers.ts`,
-`db/migrations-ts/20260914000600_placement_eligibility.ts`), the project-scoped encryption
+`db/migrations-ts/20260914000600_app_execution_zones.ts`), the project-scoped encryption
 root key (`db/migrations-ts/20260911000100_project_data_keys.ts`), and the edge split routing
 `/v1/*` to the migration service (`deploy/ops/Caddyfile`).
 
@@ -409,7 +409,7 @@ apps      + UNIQUE ("apps_project_identity_key")   (id, project_id)
 ```
 
 **The zone moves to the project.** BUILT. `apps.execution_zone_id`
-(`db/migrations-ts/20260914000600_placement_eligibility.ts`) landed before anything above the app
+(`db/migrations-ts/20260914000600_app_execution_zones.ts`) landed before anything above the app
 needed a zone; with a project-owned database it is the project that has to carry it, or "same
 project" stops implying "can share" and every sharing surface has to explain a second rule. So
 `projects` carries the column and the freeze trigger `apps` already had, with
@@ -420,10 +420,8 @@ cannot disagree - the unique key that composite references is `apps_project_iden
 same migration as the projects half.
 
 Keeping the app's copy rather than deriving it is deliberate: `instance_serves_app`
-(`crates/zeroship-control/src/worker_join.rs`) joins on `app.execution_zone_id`, and
-`db/migrations-ts/20260914000600_placement_eligibility.ts` grants the workflow manager
-`SELECT (execution_zone_id, deleted_at)` on `apps`. Both keep working untouched, and the composite
-foreign key is what stops the copy drifting.
+(`crates/zeroship-control/src/worker_join.rs`) joins on `app.execution_zone_id` and keeps
+working untouched, and the composite foreign key is what stops the copy drifting.
 
 `apps_project_identity_key` is new too. `apps` today carries only `apps_name_key`, and its
 composite ownership key points outward at `projects(id, organization_id)` with nothing pointing
@@ -545,8 +543,8 @@ service invent one by presenting itself would undo that.
 
 So `execution_zones` stays declared rather than registered. The default seed is fine where it is -
 a product default for the single-host case, in the `data()` phase the corpus supports for exactly
-that, with `zeroship_workflow_manager::eligibility::ZoneId::default_zone`
-(`crates/zeroship-workflow-manager/src/eligibility.rs`) already spelling its id once. Where zones
+that, with `zeroship_core::zone_id::ZoneId::default_zone`
+(`crates/zeroship-id/src/zone_id.rs`) already spelling its id once. Where zones
 BEYOND the default are declared is Open 12: a three-zone self-host still cannot say so without
 patching the corpus, and the cheapest answer is probably the existing join-signers file, which
 already lists the zones each signer may mint for.
@@ -593,7 +591,7 @@ worker instance's zone, and the code states why:
 A datastore belongs to exactly one zone. Extending the fence to storage makes enforceable an
 assertion the tree already makes twice but cannot check: that moving an app between zones "is a
 data migration of its creator storage, not a metadata edit"
-(`db/migrations-ts/20260914000600_placement_eligibility.ts`).
+(`db/migrations-ts/20260914000600_app_execution_zones.ts`).
 
 **Co-location is required, not preferred.** With one database per app, availability was one
 cluster's availability. With several, it is the product, and across zones it is the product plus
@@ -619,8 +617,8 @@ SELECT d.id
 ```
 
 One query in the control database, runnable inside the same transaction that admits the
-placement - the discipline the workflow manager already follows for zone facts, reading them
-after taking its locks and again before commit. An empty result is a typed refusal at create
+placement - the discipline the workflow manager's claim already follows for worker enrollment,
+rechecking it after taking its lock and again before commit. An empty result is a typed refusal at create
 time; a zone with no capacity must fail loudly rather than overload a cluster.
 
 The operator's lever is `status`. A cluster that is filling gets flipped to `draining` and

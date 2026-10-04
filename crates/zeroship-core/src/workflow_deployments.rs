@@ -114,8 +114,8 @@ pub struct HoldReceipt {
 }
 
 /// Metadata only. Control derives journal ownership from the authenticated
-/// caller: the journal-holding service asserts its role and names no placement,
-/// so this request carries no authority field a body could forge.
+/// caller: the journal-holding service asserts its role and names no worker, so
+/// this request carries no authority field a body could forge.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HoldRequest {
@@ -184,7 +184,6 @@ mod tests {
         );
         for field in [
             "holderId",
-            "assignmentRevision",
             "workerId",
             "input",
             "credentials",
@@ -260,7 +259,7 @@ mod tests {
     }
     /// The journal-hold request carries no authority field: Control derives
     /// the holder from the authenticated role, and `deny_unknown_fields`
-    /// refuses a caller that tries to name a holder, a worker or a placement.
+    /// refuses a caller that tries to name a holder or a worker.
     #[test]
     fn hold_request_carries_no_caller_supplied_authority() {
         let request = HoldRequest {
@@ -276,7 +275,6 @@ mod tests {
         for (field, value) in [
             ("holderId", serde_json::json!(typed_id::generate("dhl"))),
             ("workerId", serde_json::json!(typed_id::generate("wkr"))),
-            ("assignmentRevision", serde_json::json!(1)),
             ("databaseUrl", serde_json::json!("customer-secret")),
         ] {
             let mut invalid = encoded.clone();

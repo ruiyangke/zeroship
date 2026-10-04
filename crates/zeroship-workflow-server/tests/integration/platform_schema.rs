@@ -1,8 +1,7 @@
 //! Verify platform provisioning and workflow metadata database authority.
 use crate::support::{holds, platform};
 
-use std::rc::Rc;
-use zeroship_workflow_server::coordinator::{connect_eligibility, Coordinator, Options};
+use zeroship_workflow_server::coordinator::{Coordinator, Options};
 
 /// The reserved prefix every generated journal object carries. It is what keeps
 /// the journal and the manager's own coordination tables apart inside one
@@ -328,19 +327,9 @@ async fn platform_role_serves_the_journal_without_customer_or_ddl_privileges() {
     // The subject is the platform's own grants and role reach, which every
     // case in a shared database would change under this one.
     let fixture = platform::Platform::fresh_database().await;
-    let eligibility = Rc::new(
-        connect_eligibility(&fixture.runtime_url, Options::default())
-            .await
-            .unwrap(),
-    );
-    let service = Coordinator::connect(
-        &fixture.runtime_url,
-        Options::default(),
-        holds::client(),
-        eligibility.clone(),
-    )
-    .await
-    .unwrap();
+    let service = Coordinator::connect(&fixture.runtime_url, Options::default(), holds::client())
+        .await
+        .unwrap();
     service.verify().await.unwrap();
     let runtime = platform::connect(&fixture.runtime_url).await;
     fixture
@@ -362,8 +351,7 @@ async fn platform_role_serves_the_journal_without_customer_or_ddl_privileges() {
     for sql in [
         "SELECT id FROM workflow_manager.queue_scopes",
         "SELECT id,status,public_key FROM zeroship.worker_instances",
-        "SELECT id,execution_zone_id,deleted_at FROM zeroship.apps",
-        "SELECT id,execution_zone_id FROM zeroship.worker_instances",
+        "SELECT id,execution_zone_id,expires_at FROM zeroship.worker_instances",
         "SELECT replay_key FROM service_authn.service_assertion_replay",
     ] {
         runtime.batch_execute(sql).await.unwrap();
@@ -373,6 +361,7 @@ async fn platform_role_serves_the_journal_without_customer_or_ddl_privileges() {
         "SELECT * FROM zeroship.workflow_runs",
         "SELECT * FROM zeroship.workflow_steps",
         "SELECT * FROM zeroship.apps",
+        "SELECT id FROM zeroship.apps",
         "SELECT * FROM zeroship.app_deploys",
         "SELECT * FROM zeroship.plans",
         "UPDATE zeroship.worker_instances SET status='active'",
@@ -392,6 +381,7 @@ async fn platform_role_serves_the_journal_without_customer_or_ddl_privileges() {
         );
     }
     deployment_catalog_is_out_of_reach(&runtime).await;
+    apps_are_out_of_reach(&fixture, &runtime).await;
     manager_queue_authority(&fixture, &runtime).await;
     journal_is_installed_and_served_by_one_role(&fixture).await;
     journal_payload_columns_are_a_closed_set(&fixture).await;
@@ -434,7 +424,6 @@ async fn platform_role_serves_the_journal_without_customer_or_ddl_privileges() {
         fixture.role_url(&probe).as_ref(),
         Options::default(),
         holds::client(),
-        eligibility.clone(),
     )
     .await;
     assert!(
@@ -466,6 +455,8 @@ async fn platform_role_serves_the_journal_without_customer_or_ddl_privileges() {
         ))
         .await
         .unwrap();
+    // Grants on database objects are local to this case's own clone, so these
+    // arms move the shared service role itself.
     for (grant, revoke) in [
         (
             "GRANT UPDATE ON workflow_manager.schema_version TO zeroship_workflow",
@@ -528,39 +519,6 @@ async fn platform_role_serves_the_journal_without_customer_or_ddl_privileges() {
             .unwrap();
         service.verify().await.unwrap();
     }
-    // The startup probe and the grants move together, one column at a time.
-    // `/readyz` answers from `Coordinator::verify` alone (`ready` in
-    // `zeroship_workflow_server::api`), so this call is the only continuous
-    // proof that placement's Control reads are still granted. Each of these is
-    // a column `ControlEligibility` filters or projects
-    // (crates/zeroship-workflow-manager/src/eligibility.rs); losing any one of
-    // them must fail readiness rather than leave a host that reports ready and
-    // then refuses every placement.
-    //
-    // One column per arm rather than all three at once: a probe that stopped
-    // naming exactly one of them would still be caught by the other two if
-    // they were revoked together.
-    for column in ["id", "execution_zone_id", "deleted_at"] {
-        fixture
-            .admin
-            .batch_execute(&format!(
-                "REVOKE SELECT({column}) ON zeroship.apps FROM zeroship_workflow"
-            ))
-            .await
-            .unwrap();
-        assert!(
-            service.verify().await.is_err(),
-            "readiness survived the loss of zeroship.apps({column})"
-        );
-        fixture
-            .admin
-            .batch_execute(&format!(
-                "GRANT SELECT({column}) ON zeroship.apps TO zeroship_workflow"
-            ))
-            .await
-            .unwrap();
-        service.verify().await.unwrap();
-    }
 }
 
 #[expect(
@@ -595,7 +553,12 @@ async fn manager_recovery_authority(fixture: &platform::Platform) {
     let app = AppId::mint();
     let deployment = DeploymentId::mint();
     recovery
-        .ensure(&app, &deployment, 1.try_into().unwrap())
+        .ensure(
+            &app,
+            &zeroship_core::ZoneId::default_zone(),
+            &deployment,
+            1.try_into().unwrap(),
+        )
         .await
         .unwrap();
     for (kind, operation) in [
@@ -675,7 +638,12 @@ async fn recovery_duty_constraints(
 
     let foreign = AppId::mint();
     recovery
-        .ensure(&foreign, &DeploymentId::mint(), 1.try_into().unwrap())
+        .ensure(
+            &foreign,
+            &zeroship_core::ZoneId::default_zone(),
+            &DeploymentId::mint(),
+            1.try_into().unwrap(),
+        )
         .await
         .unwrap();
     let foreign_job = recovery
@@ -741,6 +709,7 @@ async fn manager_scheduling_authority(fixture: &platform::Platform) {
     scheduler
         .prepare(&RegisterSchedules {
             app_id: app.clone(),
+            execution_zone_id: zeroship_core::ZoneId::default_zone(),
             deployment_id: deployment.clone(),
             schedules: vec![ScheduleDescriptor {
                 name: "daily".into(),
@@ -758,6 +727,7 @@ async fn manager_scheduling_authority(fixture: &platform::Platform) {
     let activation = scheduler
         .activate(&ActivateSchedules {
             app_id: app.clone(),
+            execution_zone_id: zeroship_core::ZoneId::default_zone(),
             deployment_id: deployment.clone(),
             revision: 1.try_into().unwrap(),
         })
@@ -787,6 +757,11 @@ async fn manager_scheduling_authority(fixture: &platform::Platform) {
     assert!(scheduler.due(None).await.unwrap().is_empty());
 }
 
+/// The worker-instance columns the service's authentication projects,
+/// `PostgresWorkerRegistry::active_instance` and `ready` in
+/// crates/zeroship-workflow-server/src/auth.rs.
+const INSTANCE_COLUMNS: [&str; 5] = ["id", "status", "public_key", "execution_zone_id", "expires_at"];
+
 /// Control's deployment catalog is out of this role's reach: `deploy_hash` on
 /// `zeroship.apps`, and every column of `zeroship.app_deploys`.
 ///
@@ -808,9 +783,12 @@ async fn manager_scheduling_authority(fixture: &platform::Platform) {
 /// in `zeroship` at all - passes the refusals below unchanged.
 async fn deployment_catalog_is_out_of_reach(runtime: &compio_postgres::Client) {
     runtime
-        .batch_execute("SELECT id,execution_zone_id,deleted_at FROM zeroship.apps")
+        .batch_execute(&format!(
+            "SELECT {} FROM zeroship.worker_instances",
+            INSTANCE_COLUMNS.join(",")
+        ))
         .await
-        .expect("placement's own columns of zeroship.apps stay granted");
+        .expect("the instance columns authentication reads stay granted");
     for sql in [
         "SELECT deploy_hash FROM zeroship.apps",
         "SELECT id FROM zeroship.app_deploys",
@@ -819,6 +797,112 @@ async fn deployment_catalog_is_out_of_reach(runtime: &compio_postgres::Client) {
             .batch_execute(sql)
             .await
             .expect_err("the workflow role reached the deployment catalog");
+        assert_eq!(
+            refusal.as_db_error().map(compio_postgres::error::DbError::code),
+            Some(&compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE),
+            "{sql} failed for something other than the withheld grant"
+        );
+    }
+}
+
+/// The workflow role holds nothing at all on `zeroship.apps`: no table
+/// privilege and no column privilege, on any column.
+///
+/// An app's zone and deletion reach this service in Control's app facts, and a
+/// worker is matched to an app's zone through the queue scope Control's
+/// lifecycle messages create, so no reader here needs the table and the role
+/// must not hold a grant nothing reads.
+///
+/// Read from the catalog's own privilege functions rather than by issuing reads,
+/// so a column the role could reach but this list forgot cannot pass, and with
+/// SQLSTATE refusals beside them for the columns a zone lookup would want.
+///
+/// THE CONTROL is the instance table: the same functions, on the same role,
+/// answer `true` for the columns authentication projects and `false` for one it
+/// does not, so the checks below read real grants rather than a function that
+/// answers `false` for everything.
+async fn apps_are_out_of_reach(fixture: &platform::Platform, runtime: &compio_postgres::Client) {
+    let column_privilege = async |table: &str, column: &str| -> bool {
+        fixture
+            .admin
+            .query_one(
+                "SELECT has_column_privilege('zeroship_workflow', $1, $2, 'SELECT')",
+                &[&table, &column],
+            )
+            .await
+            .unwrap()
+            .get(0)
+    };
+    for column in INSTANCE_COLUMNS {
+        assert!(
+            column_privilege("zeroship.worker_instances", column).await,
+            "the workflow role lost zeroship.worker_instances({column})"
+        );
+    }
+    assert!(
+        !column_privilege("zeroship.worker_instances", "advertise_host").await,
+        "the workflow role reads an instance column authentication never projects"
+    );
+
+    let columns: Vec<String> = fixture
+        .admin
+        .query(
+            "SELECT column_name::text FROM information_schema.columns \
+             WHERE table_schema='zeroship' AND table_name='apps' ORDER BY column_name",
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert!(
+        columns.iter().any(|column| column == "execution_zone_id"),
+        "the column list does not describe zeroship.apps: {columns:?}"
+    );
+    for column in &columns {
+        for privilege in ["SELECT", "INSERT", "UPDATE", "REFERENCES"] {
+            let granted: bool = fixture
+                .admin
+                .query_one(
+                    "SELECT has_column_privilege('zeroship_workflow', 'zeroship.apps', $1, $2)",
+                    &[column, &privilege],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert!(!granted, "the workflow role holds {privilege} on zeroship.apps({column})");
+        }
+    }
+    for privilege in [
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+        "TRUNCATE",
+        "REFERENCES",
+        "TRIGGER",
+    ] {
+        let granted: bool = fixture
+            .admin
+            .query_one(
+                "SELECT has_table_privilege('zeroship_workflow', 'zeroship.apps', $1)",
+                &[&privilege],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(!granted, "the workflow role holds {privilege} on zeroship.apps");
+    }
+    for sql in [
+        "SELECT id FROM zeroship.apps",
+        "SELECT execution_zone_id FROM zeroship.apps",
+        "SELECT deleted_at FROM zeroship.apps",
+    ] {
+        let refusal = runtime
+            .batch_execute(sql)
+            .await
+            .expect_err("the workflow role read zeroship.apps");
         assert_eq!(
             refusal.as_db_error().map(compio_postgres::error::DbError::code),
             Some(&compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE),
@@ -874,14 +958,11 @@ async fn manager_queue_authority(fixture: &platform::Platform, runtime: &compio_
     assert_eq!(
         manager,
         [
-            "assignments",
-            "capacity_demands",
             "capacity_targets",
             "deployment_holds",
             "jobs",
             "management",
             "management_scopes",
-            "placement_receipts",
             "queue_scopes",
             "recovery_duties",
             "recovery_scopes",
@@ -892,7 +973,6 @@ async fn manager_queue_authority(fixture: &platform::Platform, runtime: &compio_
             "schedule_scopes",
             "schedules",
             "schema_version",
-            "workers"
         ]
     );
     for table in &tables {
@@ -922,8 +1002,8 @@ async fn manager_queue_authority(fixture: &platform::Platform, runtime: &compio_
     assert_eq!(
         runtime
             .execute(
-                "INSERT INTO workflow_manager.queue_scopes(id) VALUES($1)",
-                &[&app.as_str()],
+                "INSERT INTO workflow_manager.queue_scopes(id,execution_zone_id) VALUES($1,$2)",
+                &[&app.as_str(), &zeroship_core::ZoneId::default_zone().as_str()],
             )
             .await
             .unwrap(),

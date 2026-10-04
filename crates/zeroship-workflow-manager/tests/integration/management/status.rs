@@ -49,7 +49,7 @@ async fn postgres_management_status_serializes_with_atomic_acceptance() {
     .unwrap();
     let status_coordinator = support::coordinator(&status_queue, CoordinatorOptions::default());
     let app = AppId::mint();
-    host.queue.register_scope(&app).await.unwrap();
+    host.queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     let request = command(&app, &RunId::mint(), RunOperation::Pause);
     let support::Admin::Postgres(admin) = &fixture.admin else {
         unreachable!()

@@ -1,9 +1,9 @@
 //! Dev-only fixtures shared by the workflow crates.
 //!
 //! The workflow server, the worker registry and the control plane all build the
-//! same harnesses - the migrated platform database, its journal rows, a live
-//! placement and a manager queue. They live here once rather than as a private
-//! copy per crate.
+//! same harnesses - the migrated platform database, its journal rows, an app's
+//! queue scope and a manager queue. They live here once rather than as a
+//! private copy per crate.
 //!
 //! The surface speaks plain data and leaf crates only. It never names a domain
 //! crate whose own unit tests reach it, so `zeroship-workflow`,
@@ -20,5 +20,5 @@ pub mod deployments;
 pub mod journal;
 pub mod journal_server;
 pub mod manager_queue;
-pub mod placement;
+pub mod zone;
 pub mod platform;

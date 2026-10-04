@@ -20,7 +20,7 @@ use std::time::Duration;
 use zeroship_workflow::service::delivery::{
     AcceptedJob, ClaimedTask, RenewedTask, ReportedExecution,
 };
-use zeroship_workflow_client::{ClaimedDelivery, RenewDelivery, RenewedDelivery, SettleDelivery};
+use zeroship_workflow_client::{RenewDelivery, RenewedDelivery, SettleDelivery};
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_workflow_manager::{
     maintenance::MaintenanceAuthority, Options as QueueOptions, Queue,
@@ -31,11 +31,9 @@ use zeroship_core::{
     service_assertion::{ServiceAssertionMinter, ServiceIssuer, ServiceSigningKey},
     service_identity::{endpoints, ServiceEndpoint},
     service_peers::{service_issuer, CONTROL_SERVICE_NAME},
-    workflow_coordination::{
-        AssignedScope, Assignment, RequestId, RunId, RunOperation, WorkerId, AUDIENCE,
-    },
+    workflow_coordination::{RequestId, RunId, RunOperation, WorkerId, AUDIENCE},
     workflow_jobs::{
-        Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
+        ClaimJobs, ClaimedJobs, Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
         ManagementCommand, SettlementReceipt,
     },
     workflow_policy::AppPolicy,
@@ -48,6 +46,25 @@ fn renewal(delivery: &Delivery) -> RenewDelivery<ClaimedTask> {
         delivery: delivery.clone(),
         task: None,
     }
+}
+
+/// One zone claim for at most one delivery, from no cursor.
+const fn claim_one() -> ClaimJobs {
+    ClaimJobs {
+        max: std::num::NonZeroU32::MIN,
+        wait_ms: std::num::NonZeroU64::new(5_000).unwrap(),
+        after: None,
+        exclude: Vec::new(),
+    }
+}
+
+/// The deliveries a claim reply carries, read from the reply rather than
+/// trusted to its status.
+fn delivered(body: &Value) -> Vec<Value> {
+    body["deliveries"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a claim reply carries a delivery list: {body}"))
+        .clone()
 }
 
 struct Worker {
@@ -78,14 +95,16 @@ struct Fixture {
     http: Client,
     server: server_process::ServerProcess,
     worker: Worker,
-    assignment: Assignment,
+    /// The app this case's jobs belong to, in the deployment's one zone, which
+    /// is the zone the fixture's worker enrolled in.
+    app: AppId,
     control: ServiceIssuer,
     control_key: ServiceSigningKey,
     /// The journal run and deployment this service's own journal holds for the
-    /// placed app.
+    /// app.
     ///
-    /// A claim now accepts into that journal in the same exchange, so the app has
-    /// to exist there for any advance job to be claimable at all -- the journal's
+    /// A claim accepts into that journal in the same exchange, so the app has to
+    /// exist there for any advance job to be claimable at all -- the journal's
     /// `lock_app_state` refuses an app it has never seen. Seeding is the ARRANGE
     /// step: nothing asserted below is written by it.
     run: RunId,
@@ -99,9 +118,10 @@ struct Fixture {
 }
 impl Fixture {
     async fn new() -> Self {
-    // The spawned process composes the manager driver and sweep lane, which
-    // enumerate the whole queue, so this case gets a database of its own.
-    let platform = platform::Platform::fresh_database().await;
+        // The spawned process composes the manager driver, which enumerates the
+        // whole queue, and a zone claim pages every app of its zone, so this case
+        // gets a database of its own.
+        let platform = platform::Platform::fresh_database().await;
         let control = service_issuer(CONTROL_SERVICE_NAME).unwrap();
         let control_key = ServiceSigningKey::generate();
         let peers = platform.work.path().join("queue-peers.json");
@@ -114,11 +134,11 @@ impl Fixture {
         );
         let http = Client::new().await;
         // No sweep lane on this host. Every case in this target is about a queue
-        // ROUTE -- what submit, claim, renew and settle accept, authenticate and
-        // record -- and the sweep it arranges is arranged so the settle route has
-        // a delivery to discharge. The lane claims under an authority no
-        // placement expiry fences, so a running one would take that row first and
-        // the route under test would never see it.
+        // ROUTE -- what claim, renew and settle accept, authenticate and record
+        // -- and the sweep it arranges is arranged so the settle route has a
+        // delivery to discharge. The lane claims under an authority of its own,
+        // so a running one would take that row first and the route under test
+        // would never see it.
         let server = server_process::ServerProcess::without_maintenance_sweeps(
             &platform,
             &peers,
@@ -128,12 +148,11 @@ impl Fixture {
         )
         .await;
         let worker = Worker::new();
-        enroll(&platform, &http, &server.url, &worker).await;
+        enroll(&platform, &worker).await;
         let app = AppId::mint();
         provision::provision(&platform, &app, &AppPolicy::default()).await;
-        let assignment = platform
-            .seed_placement(&app, &worker.id, Duration::from_secs(30))
-            .await;
+        // The scope Control's lifecycle publication creates, in the app's zone.
+        platform.seed_scope(&app, platform::DEFAULT_ZONE_ID).await;
         let run = journal::seed_run(&platform, &app).await;
         let deploy = DeploymentId::parse(&app.as_str().replacen("app_", "dep_", 1)).unwrap();
         let queue = Queue::connect(
@@ -148,13 +167,13 @@ impl Fixture {
         )
         .await
         .unwrap();
-        let lane = MaintenanceAuthority::new(app, worker.id.clone());
+        let lane = MaintenanceAuthority::new(app.clone(), worker.id.clone());
         Self {
             platform,
             http,
             server,
             worker,
-            assignment,
+            app,
             control,
             control_key,
             run,
@@ -163,16 +182,10 @@ impl Fixture {
             lane,
         }
     }
-    fn scope(&self) -> AssignedScope {
-        AssignedScope {
-            app_id: self.assignment.app_id.clone(),
-            assignment_revision: self.assignment.revision,
-        }
-    }
     fn job(&self) -> JobSpec {
         JobSpec {
             id: JobId::mint(),
-            app_id: self.assignment.app_id.clone(),
+            app_id: self.app.clone(),
             operation: JobOperation::Advance {
                 deployment_id: DeploymentId::mint(),
                 run_id: RunId::mint(),
@@ -205,17 +218,16 @@ impl Fixture {
     /// One exchange, both halves: the queue lease and, for the one operation that
     /// hands out a task, the journal acceptance that authorizes executing it.
     async fn claimed(&self, job: &JobSpec) -> (Delivery, Option<AcceptedJob>) {
-        let (status, body) = self
-            .post(endpoints::WORKFLOW_JOB_CLAIM, &self.scope())
-            .await;
+        let (status, body) = self.post(endpoints::WORKFLOW_JOB_CLAIM, &claim_one()).await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        let claimed: ClaimedDelivery<AcceptedJob> = serde_json::from_value(body).unwrap();
+        let claimed: ClaimedJobs<AcceptedJob> = serde_json::from_value(body).unwrap();
+        let [claimed] = <[_; 1]>::try_from(claimed.deliveries)
+            .unwrap_or_else(|deliveries| panic!("one claim, one delivery: {deliveries:?}"));
         let lease = claimed.lease;
         assert!(lease.remaining_ms.get() > 0);
+        assert!(lease.attempt_remaining_ms >= lease.remaining_ms);
         assert_eq!(lease.delivery.job, *job);
         assert_eq!(lease.delivery.worker_id, self.worker.id);
-        assert_eq!(lease.delivery.assignment_revision, self.assignment.revision);
-        assert!(lease.delivery.deadline <= self.assignment.expires_at);
         assert_eq!(
             claimed.accepted.is_some(),
             job.operation.accepts_execution(),
@@ -228,24 +240,20 @@ impl Fixture {
     /// the service's own maintenance lane asserts.
     ///
     /// THERE IS NO WIRE CLAIM FOR A SWEEP. `WORKFLOW_JOB_CLAIM` claims as
-    /// `Claimant::Placed` (`Coordinator::claim_job`), and that claimant admits
-    /// `advance` alone, so every journal sweep belongs to the lane. The cases
-    /// below are about what the SETTLE route does with a sweep's delivery, and
-    /// `Queue::settle` is not claimant-scoped: it authorizes on the assignment
-    /// and on `settlement.delivery.worker_id`. So the delivery is arranged here
-    /// and exercised over HTTP from there.
+    /// `Claimant::Worker`, and that claimant admits `advance` alone, so every
+    /// journal sweep belongs to the lane. The cases below are about what the
+    /// SETTLE route does with a sweep's delivery, and `Queue::settle` is not
+    /// claimant-scoped: it authorizes on `settlement.delivery.worker_id`. So the
+    /// delivery is arranged here and exercised over HTTP from there.
     ///
     /// The authority carries this fixture's own worker id rather than a fresh
-    /// one, because that is the identity the settle route authenticates. Its
-    /// asserted revision is `1`, which is the revision `seed_placement` records,
-    /// so the placement read behind the settle route resolves the same authority
-    /// this lease names.
+    /// one, because that is the identity the settle route authenticates.
     async fn swept(&self) -> Delivery {
-        assert_eq!(
-            self.post(endpoints::WORKFLOW_JOB_CLAIM, &self.scope())
-                .await,
-            (StatusCode::OK, Value::Null),
-            "the wire claim offers a placed worker no sweep"
+        let (status, body) = self.post(endpoints::WORKFLOW_JOB_CLAIM, &claim_one()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            delivered(&body).is_empty(),
+            "the wire claim offers a worker no sweep: {body}"
         );
         let delivery = self
             .lane
@@ -256,7 +264,6 @@ impl Fixture {
             .delivery()
             .clone();
         assert_eq!(delivery.worker_id, self.worker.id);
-        assert_eq!(delivery.assignment_revision, self.assignment.revision);
         delivery
     }
 
@@ -273,7 +280,7 @@ impl Fixture {
     fn executable(&self) -> JobSpec {
         JobSpec {
             id: JobId::mint(),
-            app_id: self.assignment.app_id.clone(),
+            app_id: self.app.clone(),
             operation: JobOperation::Advance {
                 deployment_id: self.deploy.clone(),
                 run_id: self.run.clone(),
@@ -330,10 +337,10 @@ impl Fixture {
     /// An advance job for a run of its own, so its claim hands out a task and its
     /// execution can complete without another case's run being in the way.
     async fn fresh_executable(&self) -> JobSpec {
-        let run = journal::seed_run(&self.platform, &self.assignment.app_id).await;
+        let run = journal::seed_run(&self.platform, &self.app).await;
         JobSpec {
             id: JobId::mint(),
-            app_id: self.assignment.app_id.clone(),
+            app_id: self.app.clone(),
             operation: JobOperation::Advance {
                 deployment_id: self.deploy.clone(),
                 run_id: run,
@@ -366,10 +373,10 @@ impl Fixture {
         )
     }
 
-    /// A second enrolled worker, holding no placement and no delivery.
+    /// A second enrolled worker of the same zone, holding no delivery.
     async fn other_worker(&self) -> Worker {
         let worker = Worker::new();
-        enroll(&self.platform, &self.http, &self.server.url, &worker).await;
+        enroll(&self.platform, &worker).await;
         worker
     }
 
@@ -445,21 +452,15 @@ async fn post<T: Serialize>(
     (status, serde_json::from_slice(&body).unwrap())
 }
 
-async fn enroll(platform: &platform::Platform, http: &Client, url: &str, worker: &Worker) {
+/// Enroll `worker` the way Control's join leaves an instance: an `active` row in
+/// the deployment's one zone, holding the key its assertions verify under. There
+/// is no registration step after it; the row is the whole of what a claim needs.
+async fn enroll(platform: &platform::Platform, worker: &Worker) {
     platform.admin.execute(
         "INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,join_signer_id,join_token_id,execution_zone_id,expires_at) \
-         VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4,'tok_testfixturedefault','ezn_default000000000000000000',now() + interval '1 hour')",
-        &[&worker.id.as_str(), &vec![1_u8], &worker.key.verifying_key_bytes().to_vec(), &platform::DEFAULT_JOIN_SIGNER_ID],
+         VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4,'tok_testfixturedefault',$5,now() + interval '1 hour')",
+        &[&worker.id.as_str(), &vec![1_u8], &worker.key.verifying_key_bytes().to_vec(), &platform::DEFAULT_JOIN_SIGNER_ID, &platform::DEFAULT_ZONE_ID],
     ).await.unwrap();
-    let (status, body) = post(
-        http,
-        url,
-        endpoints::WORKFLOW_REGISTER,
-        &worker.assertion(),
-        &json!({"capacity":1,"state":"ready"}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
 }
 
 /// A worker cannot publish a job over HTTP: a committed creator intent reaches
@@ -479,19 +480,18 @@ async fn a_worker_cannot_submit_a_job() {
 }
 
 #[ntex::test]
-async fn delivery_and_receipts_remain_scoped_across_process_restart_and_placement_expiry() {
+async fn delivery_and_receipts_remain_scoped_across_process_restart() {
     let mut fixture = Fixture::new().await;
     let job = fixture.fresh_executable().await;
     // `held` submits it again: the second submission of one job is idempotent.
     fixture.submit(&job).await;
     let (original, task) = fixture.held(&job).await;
     assert_eq!(original.attempt.get(), 1);
-    assert_eq!(
-        fixture
-            .post(endpoints::WORKFLOW_JOB_CLAIM, &fixture.scope())
-            .await,
-        (StatusCode::OK, Value::Null)
-    );
+    let (status, body) = fixture
+        .post(endpoints::WORKFLOW_JOB_CLAIM, &claim_one())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(delivered(&body).is_empty(), "a leased job is offered again: {body}");
     let (status, body) = fixture
         .post(endpoints::WORKFLOW_JOB_HEARTBEAT, &renewal(&original))
         .await;
@@ -520,11 +520,10 @@ async fn delivery_and_receipts_remain_scoped_across_process_restart_and_placemen
     assert_receipt_replay(&mut fixture, &original, &execution, body).await;
 }
 
-/// A settled delivery's exact retry replays its receipt across a restart and
-/// after its placement and registration have expired, and stops once the
-/// worker's enrollment does. Both retries a holder can send replay: the delivery
-/// alone, and the same execution again, which the journal answers from the task
-/// it already completed rather than committing twice.
+/// A settled delivery's exact retry replays its receipt across a restart, and
+/// stops once the worker's enrollment does. Both retries a holder can send
+/// replay: the delivery alone, and the same execution again, which the journal
+/// answers from the task it already completed rather than committing twice.
 async fn assert_receipt_replay(
     fixture: &mut Fixture,
     delivery: &Delivery,
@@ -535,24 +534,6 @@ async fn assert_receipt_replay(
     let before = fixture.job_snapshot(job).await;
     assert_eq!(before.len(), 1);
     fixture.server.restart(&fixture.http).await;
-    fixture
-        .platform
-        .admin
-        .execute(
-            "UPDATE workflow_manager.assignments SET expires_at=0 WHERE app_id=$1",
-            &[&job.app_id.as_str()],
-        )
-        .await
-        .unwrap();
-    fixture
-        .platform
-        .admin
-        .execute(
-            "UPDATE workflow_manager.workers SET expires_at=0 WHERE id=$1",
-            &[&fixture.worker.id.as_str()],
-        )
-        .await
-        .unwrap();
     for retry in [&committed(delivery), execution] {
         assert_eq!(
             fixture.post(endpoints::WORKFLOW_JOB_SETTLE, retry).await,
@@ -561,13 +542,11 @@ async fn assert_receipt_replay(
         );
         assert_eq!(fixture.job_snapshot(job).await, before);
     }
-    assert_eq!(
-        fixture
-            .post(endpoints::WORKFLOW_JOB_CLAIM, &fixture.scope())
-            .await
-            .0,
-        StatusCode::FORBIDDEN
-    );
+    let (status, reply) = fixture
+        .post(endpoints::WORKFLOW_JOB_CLAIM, &claim_one())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    assert!(delivered(&reply).is_empty(), "a settled job is offered again: {reply}");
     fixture
         .platform
         .admin
@@ -586,36 +565,27 @@ async fn assert_receipt_replay(
     );
 }
 
+/// Another worker of the same zone is offered nothing the holder holds, and may
+/// neither renew nor settle the holder's delivery.
 async fn assert_foreign_worker_denied(fixture: &Fixture, delivery: &Delivery) {
-    let foreign = Worker::new();
-    enroll(
-        &fixture.platform,
-        &fixture.http,
-        &fixture.server.url,
-        &foreign,
-    )
-    .await;
+    let foreign = fixture.other_worker().await;
+    let before = fixture.job_snapshot(&delivery.job).await;
+    let (status, body) = fixture
+        .post_as(&foreign, endpoints::WORKFLOW_JOB_CLAIM, &claim_one())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(delivered(&body).is_empty(), "a held job was offered again: {body}");
     for (endpoint, body) in [
-        (
-            endpoints::WORKFLOW_JOB_CLAIM,
-            serde_json::to_value(fixture.scope()).unwrap(),
-        ),
         (
             endpoints::WORKFLOW_JOB_HEARTBEAT,
             serde_json::to_value(renewal(delivery)).unwrap(),
         ),
         (endpoints::WORKFLOW_JOB_SETTLE, committed(delivery)),
     ] {
-        let (status, body) = post(
-            &fixture.http,
-            &fixture.server.url,
-            endpoint,
-            &foreign.assertion(),
-            &body,
-        )
-        .await;
+        let (status, body) = fixture.post_as(&foreign, endpoint, &body).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     }
+    assert_eq!(fixture.job_snapshot(&delivery.job).await, before);
 }
 
 #[ntex::test]
@@ -627,7 +597,7 @@ async fn queue_routes_authenticate_before_body_and_reject_open_metadata() {
     for (endpoint, mut body) in [
         (
             endpoints::WORKFLOW_JOB_CLAIM,
-            serde_json::to_value(fixture.scope()).unwrap(),
+            serde_json::to_value(claim_one()).unwrap(),
         ),
         (
             endpoints::WORKFLOW_JOB_HEARTBEAT,
@@ -689,19 +659,16 @@ async fn queue_routes_authenticate_before_body_and_reject_open_metadata() {
             StatusCode::PAYLOAD_TOO_LARGE
         );
     }
-    let scope = AssignedScope {
-        app_id: AppId::mint(),
-        ..fixture.scope()
-    };
-    // Authorization settles before the delivery ceiling is read, so an
-    // unplaced worker is refused 403 rather than told 503 and left retrying a
-    // scope it can never hold. Same contract as `tests/e2e/http.rs`.
+    // A claim names no app at all: a body that tries to is refused as a body,
+    // so a worker cannot steer the claim to an app of its choosing.
+    let mut steered = serde_json::to_value(claim_one()).unwrap();
+    steered["appId"] = json!(AppId::mint());
     assert_eq!(
-        fixture.post(endpoints::WORKFLOW_JOB_CLAIM, &scope).await.0,
-        StatusCode::FORBIDDEN
+        fixture.post(endpoints::WORKFLOW_JOB_CLAIM, &steered).await,
+        (StatusCode::BAD_REQUEST, json!({"code":"invalid"}))
     );
     let token = fixture.worker.assertion();
-    let body = serde_json::to_value(fixture.scope()).unwrap();
+    let body = serde_json::to_value(claim_one()).unwrap();
     assert_eq!(
         post(
             &fixture.http,
@@ -732,7 +699,7 @@ async fn queue_routes_authenticate_before_body_and_reject_open_metadata() {
         .post(endpoints::WORKFLOW_JOB_SETTLE, &committed(&delivery))
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let receipt: SettlementReceipt = serde_json::from_value(body.clone()).unwrap();
+    let receipt: SettlementReceipt = serde_json::from_value(body).unwrap();
     assert_eq!(receipt.job_id, job.id);
     assert_eq!(receipt.outcome, JobOutcome::Rejected {});
 }
@@ -756,12 +723,18 @@ async fn rejects_before_body(address: std::net::SocketAddr, endpoint: ServiceEnd
     }).await.expect("authentication must reject without waiting for request bytes");
 }
 
+/// A renewal or settlement that waits on the app lock rechecks enrollment once
+/// it holds the lock, so a revocation or a key replacement that lands during
+/// the wait refuses it and changes nothing.
+///
+/// A claim is not among them: it never waits on an app lock, and the claim's
+/// own contention contract is `a_claim_passes_an_app_whose_scope_is_locked`
+/// in `crates/zeroship-workflow-server/tests/integration/http_claims.rs`.
 #[ntex::test]
 async fn enrollment_revocation_and_key_replacement_fence_blocked_queue_operations() {
     let fixture = Fixture::new().await;
     for replace_key in [false, true] {
         for operation in [
-            RequestKind::Claim,
             RequestKind::Heartbeat,
             RequestKind::Settle,
             RequestKind::Replay,
@@ -790,8 +763,8 @@ async fn enrollment_revocation_and_key_replacement_fence_blocked_queue_operation
 async fn revoking_a_join_signer_denies_its_worker_while_a_sibling_signer_stays_active() {
     let fixture = Fixture::new().await;
 
-    // A second signer F, and a second worker joined under it, assigned to its
-    // own app - independent of the fixture's default signer and worker. Reuse
+    // A second signer F, and a second worker G joined under it in the same
+    // zone - independent of the fixture's default signer and worker. Reuse
     // WorkerId's own base36 body under the join signer prefix - this crate has
     // no direct dependency on a UUID generator, and the typed-id shape
     // constraints only care about the body's alphabet and width, not which
@@ -833,43 +806,18 @@ async fn revoking_a_join_signer_denies_its_worker_while_a_sibling_signer_stays_a
         )
         .await
         .unwrap();
-    // Registration, like `enroll()` does for the fixture's own worker: the
-    // coordinator must know G is a live, ready worker before it is assignable.
-    let (register_status, body) = post(
-        &fixture.http,
-        &fixture.server.url,
-        endpoints::WORKFLOW_REGISTER,
-        &worker_g.assertion(),
-        &json!({"capacity":1,"state":"ready"}),
-    )
-    .await;
-    assert_eq!(register_status, StatusCode::OK, "{body}");
-    let app_g = AppId::mint();
-    provision::provision(&fixture.platform, &app_g, &AppPolicy::default()).await;
-    // A second app claims here too, and a claim now accepts into this service.s
-    // journal in the same exchange, so this app has to exist there as well.
-    journal::seed_run(&fixture.platform, &app_g).await;
-    let assignment_g = fixture
-        .platform
-        .seed_placement(&app_g, &worker_g.id, Duration::from_secs(30))
-        .await;
-    let scope_g = AssignedScope {
-        app_id: assignment_g.app_id.clone(),
-        assignment_revision: assignment_g.revision,
-    };
-    let job_g = JobSpec {
-        id: JobId::mint(),
-        app_id: assignment_g.app_id.clone(),
-        operation: JobOperation::Advance {
-            deployment_id: DeploymentId::mint(),
-            run_id: RunId::mint(),
-            generation: 0,
-            revision: 1.try_into().unwrap(),
-        },
-        available_at: 1.try_into().unwrap(),
+    let claimed = async |worker: &Worker| {
+        post(
+            &fixture.http,
+            &fixture.server.url,
+            endpoints::WORKFLOW_JOB_CLAIM,
+            &worker.assertion(),
+            &claim_one(),
+        )
+        .await
     };
 
-    // BEFORE: both workers can claim from their own scope.
+    // BEFORE: both workers claim from their zone, each taking the one ready job.
     let job_e = fixture.job();
     fixture.submit(&job_e).await;
     let claimed_e_before = fixture.claim(&job_e).await;
@@ -877,17 +825,11 @@ async fn revoking_a_join_signer_denies_its_worker_while_a_sibling_signer_stays_a
         .post(endpoints::WORKFLOW_JOB_HEARTBEAT, &renewal(&claimed_e_before))
         .await;
     assert_eq!(renew_e_before.0, StatusCode::OK, "{:?}", renew_e_before.1);
-
-    fixture.queue.submit(&job_g).await.unwrap();
-    let (claim_g_before_status, _) = post(
-        &fixture.http,
-        &fixture.server.url,
-        endpoints::WORKFLOW_JOB_CLAIM,
-        &worker_g.assertion(),
-        &scope_g,
-    )
-    .await;
-    assert_eq!(claim_g_before_status, StatusCode::OK);
+    let job_g = fixture.job();
+    fixture.submit(&job_g).await;
+    let (status, body) = claimed(&worker_g).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(delivered(&body).len(), 1, "{body}");
 
     // Purge ONLY the fixture's default signer.
     fixture
@@ -901,45 +843,21 @@ async fn revoking_a_join_signer_denies_its_worker_while_a_sibling_signer_stays_a
         .unwrap();
 
     // AFTER: E's worker is refused at the manager; F's worker is unaffected.
-    let (claim_e_after_status, _) = post(
-        &fixture.http,
-        &fixture.server.url,
-        endpoints::WORKFLOW_JOB_CLAIM,
-        &fixture.worker.assertion(),
-        &fixture.scope(),
-    )
-    .await;
+    let job_g_2 = fixture.job();
+    fixture.submit(&job_g_2).await;
+    let (status, _) = claimed(&fixture.worker).await;
     assert_eq!(
-        claim_e_after_status,
+        status,
         StatusCode::UNAUTHORIZED,
         "a revoked signer's worker must lose manager access"
     );
-
-    let job_g_2 = JobSpec {
-        id: JobId::mint(),
-        app_id: assignment_g.app_id.clone(),
-        operation: JobOperation::Advance {
-            deployment_id: DeploymentId::mint(),
-            run_id: RunId::mint(),
-            generation: 0,
-            revision: 1.try_into().unwrap(),
-        },
-        available_at: 1.try_into().unwrap(),
-    };
-    fixture.queue.submit(&job_g_2).await.unwrap();
-    let (claim_g_after_status, body) = post(
-        &fixture.http,
-        &fixture.server.url,
-        endpoints::WORKFLOW_JOB_CLAIM,
-        &worker_g.assertion(),
-        &scope_g,
-    )
-    .await;
+    let (status, body) = claimed(&worker_g).await;
     assert_eq!(
-        claim_g_after_status,
+        status,
         StatusCode::OK,
         "an untouched signer's worker must be unaffected by a sibling's revocation: {body}"
     );
+    assert_eq!(delivered(&body).len(), 1, "{body}");
 }
 
 /// A worker cannot decide the outcome of a management command Control reads.
@@ -955,7 +873,7 @@ async fn a_worker_cannot_decide_a_management_outcome() {
 
     let fixture = Fixture::new().await;
     let request = ManageRun {
-        app_id: fixture.assignment.app_id.clone(),
+        app_id: fixture.app.clone(),
         request_id: RequestId::mint(),
         run_id: RunId::mint(),
         command: ManagementOperation::Transition {
@@ -1010,13 +928,12 @@ async fn management_snapshot(fixture: &Fixture) -> Vec<(String, String)> {
          UNION ALL SELECT 'command',to_jsonb(m)::text FROM workflow_manager.management m WHERE app_id=$1 \
          UNION ALL SELECT 'order',to_jsonb(o)::text FROM workflow_manager.management_scopes o WHERE app_id=$1 \
          UNION ALL SELECT 'queue_scope',to_jsonb(s)::text FROM workflow_manager.queue_scopes s WHERE id=$1 \
-         UNION ALL SELECT 'assignment',to_jsonb(a)::text FROM workflow_manager.assignments a WHERE app_id=$1 \
          ORDER BY kind,body",
-        &[&fixture.assignment.app_id.as_str()],
+        &[&fixture.app.as_str()],
     ).await.unwrap();
     assert_eq!(
         rows.len(),
-        5,
+        4,
         "fixture must include all linked receipt and scope records"
     );
     rows.iter().map(|row| (row.get(0), row.get(1))).collect()
@@ -1024,7 +941,6 @@ async fn management_snapshot(fixture: &Fixture) -> Vec<(String, String)> {
 
 #[derive(Clone, Copy)]
 enum RequestKind {
-    Claim,
     Heartbeat,
     Settle,
     Replay,
@@ -1033,7 +949,6 @@ enum RequestKind {
 impl RequestKind {
     const fn endpoint(self) -> ServiceEndpoint {
         match self {
-            Self::Claim => endpoints::WORKFLOW_JOB_CLAIM,
             Self::Heartbeat => endpoints::WORKFLOW_JOB_HEARTBEAT,
             Self::Settle | Self::Replay => endpoints::WORKFLOW_JOB_SETTLE,
         }
@@ -1057,9 +972,6 @@ async fn blocked_request(fixture: &Fixture, job: &JobSpec, kind: RequestKind) ->
         return committed(&delivery);
     }
     fixture.submit(job).await;
-    if matches!(kind, RequestKind::Claim) {
-        return serde_json::to_value(fixture.scope()).unwrap();
-    }
     let delivery = fixture.claim(job).await;
     serde_json::to_value(renewal(&delivery)).unwrap()
 }

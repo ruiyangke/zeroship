@@ -8,12 +8,9 @@
 use compio_postgres::{types::FromSql, Pool, PoolConfig, Row};
 use std::{rc::Rc, time::Duration};
 use zeroship_core::schema_name::SchemaName;
-use zeroship_data_orm::{
-    binding::DbBinding, encryption::ProjectKeySource, orm::Database, ConnectOptions,
-};
+use zeroship_data_orm::binding::DbBinding;
 use zeroship_workflow_manager::{
     coordinator::{Coordinator as NativeCoordinator, Options as NativeOptions},
-    eligibility::{self, ControlEligibility, EligibilitySource},
     recovery::{Options as RecoveryOptions, Recovery},
     retention::HoldClient,
     Options as QueueOptions, Queue,
@@ -22,12 +19,9 @@ use zeroship_workflow_manager::{
 pub const SCHEMA_SQL: &str = include_str!("../../zeroship-workflow-manager/schema/postgres.sql");
 /// Manager tables the runtime role must read and write, and nothing more.
 const MANAGER_TABLES: &[&str] = &[
-    "workers",
     "queue_scopes",
     "deployment_holds",
     "jobs",
-    "assignments",
-    "placement_receipts",
     "management",
     "management_scopes",
     "schedule_deployments",
@@ -38,7 +32,6 @@ const MANAGER_TABLES: &[&str] = &[
     "schedule_occurrences",
     "recovery_scopes",
     "recovery_duties",
-    "capacity_demands",
     "capacity_targets",
 ];
 const FINGERPRINT: &str = include_str!("../../zeroship-workflow-manager/schema/fingerprint.txt");
@@ -59,7 +52,7 @@ impl std::fmt::Display for Error {
             Self::Invalid => "invalid coordination request",
             Self::Unauthenticated => "coordination authentication required",
             Self::RequestTooLarge => "coordination request exceeds metadata limit",
-            Self::Denied => "coordination assignment denied",
+            Self::Denied => "coordination request denied",
             Self::Conflict => "coordination revision or request conflict",
             Self::Capacity => "coordination capacity exhausted",
             Self::Unavailable => "coordination database unavailable",
@@ -83,29 +76,38 @@ pub struct Options {
     /// [`Options::startup_timeout`], each step of opening the database.
     pub acquire_timeout: Duration,
     pub command_timeout: Duration,
-    pub worker_ttl: Duration,
-    pub assignment_ttl: Duration,
     pub batch_limit: usize,
     pub max_pending_management: usize,
+    /// The server's work budget inside the wait a batch claim states,
+    /// `workflow.claim_budget_ms`.
+    pub claim_budget: Duration,
+    /// How long a claimed delivery stays leased without a heartbeat,
+    /// `workflow.delivery_lease_ms`. A worker that stops renewing loses the job
+    /// to redelivery one lease after its last renewal.
+    pub lease: Duration,
+    /// How far heartbeats may extend one attempt, `workflow.max_attempt_ms`. At
+    /// least [`Options::lease`].
+    pub max_attempt: Duration,
 }
 impl Default for Options {
     fn default() -> Self {
+        let queue = QueueOptions::default();
         Self {
             connections: 8,
             acquire_timeout: Duration::from_secs(5),
             command_timeout: Duration::from_secs(10),
-            worker_ttl: Duration::from_secs(30),
-            assignment_ttl: Duration::from_secs(30),
             batch_limit: 128,
             max_pending_management: 1024,
+            claim_budget: Duration::from_secs(5),
+            lease: queue.lease,
+            max_attempt: queue.max_attempt,
         }
     }
 }
 impl Options {
     /// The budget for each step of opening the metadata database: the service's
     /// authentication connection, constructing the coordinator's pool, binding
-    /// its queue, binding placement eligibility ([`connect_eligibility`]),
-    /// opening the journal and opening the policy ledger.
+    /// its queue, opening the journal and opening the policy ledger.
     ///
     /// It is [`Options::acquire_timeout`]. One operator setting bounds startup
     /// and checkouts alike, so a database that accepts connections and never
@@ -116,22 +118,40 @@ impl Options {
         self.acquire_timeout
     }
 
+    /// Everything [`Coordinator::connect`] would refuse before it opens a
+    /// connection, so a configuration check refuses what startup would.
+    ///
+    /// The queue and the native coordinator judge their own options; this
+    /// builds exactly the options `connect` hands them and asks each.
+    ///
     /// # Errors
-    /// Rejects empty limits or durations that cannot be represented in storage.
+    /// Rejects empty limits, durations that cannot be represented in storage,
+    /// an empty claim budget and an attempt cap shorter than the lease.
     pub fn validate(&self) -> Result<(), Error> {
-        if self.connections == 0
-            || self.acquire_timeout.is_zero()
-            || self.command_timeout.is_zero()
-            || self.batch_limit == 0
-            || self.max_pending_management == 0
-            || i64::try_from(self.batch_limit).is_err()
-            || i64::try_from(self.max_pending_management).is_err()
-        {
+        if self.acquire_timeout.is_zero() {
             return Err(Error::Invalid);
         }
-        duration_ms(self.worker_ttl)?;
-        duration_ms(self.assignment_ttl)?;
+        self.queue_options()?.validate()?;
+        self.native_options().validate()?;
         Ok(())
+    }
+
+    fn queue_options(&self) -> Result<QueueOptions, Error> {
+        Ok(QueueOptions {
+            max_connections: std::num::NonZeroUsize::new(self.connections).ok_or(Error::Invalid)?,
+            transaction_timeout: self.command_timeout,
+            lease: self.lease,
+            max_attempt: self.max_attempt,
+            ..QueueOptions::default()
+        })
+    }
+
+    const fn native_options(&self) -> NativeOptions {
+        NativeOptions {
+            batch_limit: self.batch_limit,
+            max_pending_management: self.max_pending_management,
+            claim_budget: self.claim_budget,
+        }
     }
 }
 
@@ -143,9 +163,6 @@ pub struct Coordinator {
     pub manager: NativeCoordinator,
 }
 impl Coordinator {
-    /// Placement reads zone and enrollment facts through `eligibility`; the
-    /// production host passes [`connect_eligibility`] over the same database.
-    ///
     /// Constructing the pool and binding the queue are each bounded by
     /// [`Options::startup_timeout`].
     ///
@@ -156,7 +173,6 @@ impl Coordinator {
         url: &str,
         options: Options,
         holds: Rc<dyn HoldClient>,
-        eligibility: Rc<dyn EligibilitySource>,
     ) -> Result<Self, Error> {
         options.validate()?;
         let mut config = PoolConfig::default();
@@ -174,30 +190,11 @@ impl Coordinator {
         );
         let queue = compio::time::timeout(
             options.startup_timeout(),
-            Queue::connect(
-                binding,
-                url,
-                QueueOptions {
-                    max_connections: std::num::NonZeroUsize::new(options.connections)
-                        .ok_or(Error::Invalid)?,
-                    transaction_timeout: options.command_timeout,
-                    ..QueueOptions::default()
-                },
-                holds,
-            ),
+            Queue::connect(binding, url, options.queue_options()?, holds),
         )
         .await
         .map_err(|_| Error::Unavailable)??;
-        let manager = NativeCoordinator::new(
-            queue.clone(),
-            NativeOptions {
-                worker_ttl: options.worker_ttl,
-                assignment_ttl: options.assignment_ttl,
-                batch_limit: options.batch_limit,
-                max_pending_management: options.max_pending_management,
-            },
-            eligibility,
-        )?;
+        let manager = NativeCoordinator::new(queue.clone(), options.native_options())?;
         let service = Self {
             pool,
             queue,
@@ -278,21 +275,11 @@ impl Coordinator {
             return Err(Error::Unavailable);
         }
         // Every column this process reads, and nothing beyond it. `/readyz`
-        // answers from this call alone (`ready` in `crate::api`), so the
-        // `zeroship.apps` line is the only continuous proof that placement's
-        // Control reads are still granted: it projects exactly what
-        // `ControlEligibility::app`
-        // (crates/zeroship-workflow-manager/src/eligibility.rs) filters and
-        // selects. A probe narrower than those reads reports ready and then
-        // refuses every placement; a probe wider than the grants fails
-        // readiness for a capability nothing here reads.
+        // answers from this call alone.
         self.pool.batch_execute(
-            "SELECT id,capacity,state,expires_at,lock_version,execution_zone_id FROM workflow_manager.workers LIMIT 0;
-             SELECT id,lock_version,dispatch_cursor FROM workflow_manager.queue_scopes LIMIT 0;
+            "SELECT id,execution_zone_id,lock_version,dispatch_cursor FROM workflow_manager.queue_scopes LIMIT 0;
              SELECT id,app_id,deployment_id,holder_id,deploy_hash,generation,state,held_at FROM workflow_manager.deployment_holds LIMIT 0;
-             SELECT id,app_id,deployment_id,operation,operation_kind,run_id,management_request_id,spec_digest,available_at,dispatch_order,state,attempt,worker_id,assignment_revision,lease_deadline,outcome,settlement_digest,created_at FROM workflow_manager.jobs LIMIT 0;
-             SELECT app_id,worker_id,revision,expires_at,released,refused FROM workflow_manager.assignments LIMIT 0;
-             SELECT app_id,request_id,operation,worker_id,expected_revision,reason,result_revision,result_expires_at FROM workflow_manager.placement_receipts LIMIT 0;
+             SELECT id,app_id,deployment_id,operation,operation_kind,run_id,management_request_id,spec_digest,available_at,dispatch_order,state,attempt,execution_attempts,executed_attempt,worker_id,lease_deadline,leased_at,deferred_until,deferrals,outcome,settlement_digest,created_at FROM workflow_manager.jobs LIMIT 0;
              SELECT id,app_id,request_id,run_id,revision,actor,request,request_digest,blocks_execution,created_at,outcome FROM workflow_manager.management LIMIT 0;
              SELECT id,app_id,run_id,accepted_revision,settled_revision FROM workflow_manager.management_scopes LIMIT 0;
              SELECT id,app_id,definition,interpretation,created_at FROM workflow_manager.schedule_deployments LIMIT 0;
@@ -303,51 +290,10 @@ impl Coordinator {
              SELECT id,app_id,schedule_id,revision,scheduled_at,run_id,job_id,activation_id FROM workflow_manager.schedule_occurrences LIMIT 0;
              SELECT id,deployment_id,activation_revision,ingress_epoch,state,closing_watermark,close_job_id,active_at,close_after,close_attempts FROM workflow_manager.recovery_scopes LIMIT 0;
              SELECT id,app_id,kind,next_due_at,pending_job_id FROM workflow_manager.recovery_duties LIMIT 0;
-             SELECT id,execution_zone_id,recorded_at FROM workflow_manager.capacity_demands LIMIT 0;
-             SELECT id,revision,desired,state,refusal,observed,attempt,attempt_deadline,retry_at,below_since,lock_version FROM workflow_manager.capacity_targets LIMIT 0;
-             SELECT id,execution_zone_id,deleted_at FROM zeroship.apps LIMIT 0;"
+             SELECT id,revision,desired,state,refusal,backlog_depth,oldest_available_at,exhausted_jobs,backed_off_jobs,withheld_jobs,attempt,attempt_deadline,retry_at,below_since,lock_version FROM workflow_manager.capacity_targets LIMIT 0;"
         ).await?;
         Ok(())
     }
-}
-
-/// Bind Control's zone and enrollment rows for placement and verify the
-/// manager role's column grants on them, within [`Options::startup_timeout`].
-///
-/// # Errors
-/// Returns `Unavailable` for an unreachable or unanswering database or missing
-/// grants.
-pub async fn connect_eligibility(url: &str, options: Options) -> Result<ControlEligibility, Error> {
-    options.validate()?;
-    compio::time::timeout(options.startup_timeout(), async {
-        let database = Database::connect(
-            DbBinding::platform(
-                "platform",
-                "workflow-eligibility",
-                SchemaName::new("zeroship").map_err(|_| Error::Invalid)?,
-            ),
-            ConnectOptions::new(url, ProjectKeySource::unavailable())
-                .max_connections(
-                    std::num::NonZeroUsize::new(options.connections).ok_or(Error::Invalid)?,
-                )
-                .connection_authority(),
-            eligibility::collections().map_err(Error::from)?,
-        )
-        .await
-        .map_err(|_| Error::Unavailable)?;
-        let source = ControlEligibility::new(database).map_err(Error::from)?;
-        source.ready().await.map_err(Error::from)?;
-        Ok(source)
-    })
-    .await
-    .map_err(|_| Error::Unavailable)?
-}
-
-fn duration_ms(value: Duration) -> Result<i64, Error> {
-    i64::try_from(value.as_millis())
-        .ok()
-        .filter(|value| *value > 0)
-        .ok_or(Error::Invalid)
 }
 
 fn get<'a, T: FromSql<'a>>(row: &'a Row, name: &str) -> Result<T, Error> {
@@ -362,7 +308,10 @@ impl From<zeroship_workflow_manager::Error> for Error {
             NativeError::Denied => Self::Denied,
             NativeError::Conflict => Self::Conflict,
             NativeError::Capacity => Self::Capacity,
-            NativeError::Timeout | NativeError::Unavailable | NativeError::Storage => {
+            NativeError::Timeout
+            | NativeError::Unavailable
+            | NativeError::Contended
+            | NativeError::Storage => {
                 Self::Unavailable
             }
         }

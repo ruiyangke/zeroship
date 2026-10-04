@@ -9,14 +9,13 @@
 //!   cargo test -p zeroship-workflow-manager --test main -- `integration::queue::`
 
 mod capacity;
+mod claim;
 mod closing;
-mod coordinator;
 mod dispatch_fairness;
 mod driver;
+mod give_back;
 mod hold_release;
 mod management;
-mod placement;
-mod policy;
 mod queue;
 mod recovery;
 mod retention;

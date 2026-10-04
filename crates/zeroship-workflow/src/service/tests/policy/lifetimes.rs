@@ -102,6 +102,9 @@ impl JobLease for Lease {
     fn delivery(&self) -> &Delivery {
         &self.delivery
     }
+    fn attempt_remaining(&self) -> Option<Duration> {
+        self.remaining()
+    }
     fn remaining(&self) -> Option<Duration> {
         self.expires.checked_duration_since(Instant::now())
     }
@@ -197,7 +200,6 @@ async fn retired_publication(store: Rc<OrmStore>) {
         delivery: Delivery {
             job: pending.clone(),
             worker_id: WorkerId::mint(),
-            assignment_revision: 1.try_into().unwrap(),
             attempt: 1.try_into().unwrap(),
             deadline: 1.try_into().unwrap(),
         },

@@ -466,10 +466,15 @@ db.transaction(|tx| async move {
 to lock and can be repeated; the two cannot be mixed on one read. PostgreSQL
 renders `FOR UPDATE [OF ...]` after the page bounds, using the aliases the read
 already emits, so only the locked sources need `UPDATE` privilege. The strength
-is always exclusive and a competing lock waits. There is no `NOWAIT` or
-`SKIP LOCKED`: skipping locked rows would silently omit them. Waits are bounded
-by the transaction's lock timeout (`budgets::DB_LOCK_TIMEOUT_MS`) and surface as
-`lock_not_available`.
+is always exclusive and a competing lock waits. Waits are bounded by the
+transaction's lock timeout (`budgets::DB_LOCK_TIMEOUT_MS`) and surface as
+`lock_not_available`. `for_update_nowait` takes the same lock without waiting:
+PostgreSQL renders `FOR UPDATE NOWAIT`, and a row another transaction holds
+refuses the read at once as `DbError::LockContention`, so a caller that has
+other work to do can pass the row rather than queue behind it. It applies the
+same transaction, query-shape and backend requirements as `for_update`. There is
+no `SKIP LOCKED`: skipping locked rows would silently omit them, while `NOWAIT`
+refuses and so tells the caller which row it did not get.
 
 Under read committed, a waiter returns the latest committed version of the row
 it waited for. Under repeatable read or serializable, locking a row changed

@@ -13,13 +13,11 @@
 //!   cargo test -p zeroship-workflow-server --test main integration:: -- `http_runs::`
 
 mod control_policy;
-mod coordination_wire;
 mod coordinator;
-mod http_policy;
+mod http_claims;
 mod http_runs;
 mod lifecycle;
 mod maintenance_lane;
-mod placement_eligibility;
 mod platform_schema;
 mod publication_wake;
 mod worker_zone;

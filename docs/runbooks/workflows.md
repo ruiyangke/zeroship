@@ -54,14 +54,16 @@ rows are left in place.
 
 The workflow manager (`zeroship-workflow-server`, over
 `crates/zeroship-workflow-manager/`) owns calendar evaluation, the durable job
-queue, delivery attempts, placement and recovery responsibility. It reads the
+queue and the zone claim workers pull from, delivery attempts, recovery
+responsibility, and each execution zone's capacity target. It reads the
 platform database under its own login and holds no creator database connection.
 Outside its own `workflow_manager` schema that login is column-scoped: named
-columns of `zeroship.apps` and `zeroship.worker_instances` for placement and
-worker identity, and the shared assertion replay store
+columns of `zeroship.worker_instances` for worker identity, zone and lease, and
+the shared assertion replay store
 (`db/migrations-ts/20260911000050_workflow_platform_grants.ts` and
-`db/migrations-ts/20260914000600_placement_eligibility.ts`, whose union is the
-whole of it). Control-owned app and plan facts sit outside it. They arrive over
+`db/migrations-ts/20260914000600_app_execution_zones.ts`, whose union is the
+whole of it); it holds nothing on `zeroship.apps`. Control-owned app and plan
+facts sit outside it. They arrive over
 Control's authenticated `POST /v1/app-facts` endpoint, behind the
 `AppFactsSource` capability in
 `crates/zeroship-workflow-manager/src/app_facts.rs`, so the manager holds no
@@ -77,17 +79,78 @@ asserts that summary over `POST /v1/deploy-registration`
 bundle derives the same summary from the bytes instead. Reading the artifacts is
 refused by name on this process, not silently skipped.
 
-A creator run is executed by the `zeroship-worker` that the manager placed the
-app on (`crates/zeroship-worker/src/workflow_host.rs`). That host holds NO
-journal: it reaches the workflow service for every journal fact, and writes
-payload bytes into the worker's own object store under the reserved
-`platform:workflow` namespace, which creator code cannot address. It receives
-work only as a job the manager delivered; it runs no due-work scan and no
-maintenance loop of its own.
+A creator run is executed by any enrolled `zeroship-worker` in the app's
+execution zone (`crates/zeroship-worker/src/workflow_host.rs`). A worker asks
+the manager for as many claimable `advance` jobs as it has free execution
+slots, and the claim pages only the apps of the zone frozen on the worker's
+instance row (`Coordinator::claim_in_zone` in
+`crates/zeroship-workflow-manager/src/coordinator/jobs.rs`); there is no
+registration or assignment step, and no worker reaches an app of another zone.
+The worker prepares a claimed app when its first job arrives and keeps it in a
+bounded cache. That host holds NO journal: it reaches the workflow service for
+every journal fact, and writes payload bytes into the worker's own object store
+under the reserved `platform:workflow` namespace, which creator code cannot
+address. It receives work only as a job the manager delivered; it runs no
+due-work scan and no maintenance loop of its own. The service's own maintenance
+lane claims every other job kind.
+
+The execution zone is the isolation unit. A worker can read the environment,
+data key and metadata of every app in its zone, and run calls and claims are
+admitted for exactly those apps, so apps that must not share a compromised
+worker belong in separate execution zones.
 
 Control publishes deployment lifecycle intents to the manager and arbitrates
-deployment holds. It reaches no creator journal, and there is no advance
-transport through the gateway.
+deployment holds. Each register, activate and disable message names the app's
+frozen execution zone, which the queue scope the manager creates for the app
+records. Control reaches no creator journal, and there is no advance transport
+through the gateway.
+
+## Zone backlog and capacity
+
+Each execution zone has one row in `workflow_manager.capacity_targets`, whose
+`id` is the zone. The driver's capacity lane (`Capacity::reconcile` in
+`crates/zeroship-workflow-manager/src/capacity.rs`) visits it on every pass,
+reading each app's policy through the service's own policy source: an app's
+demand is its live leases plus as many claimable rows as its `max_running`
+leaves room for. `desired` is the zone's demand held between
+`workflow.capacity_min_slots` and `workflow.capacity_max_slots`; a rise applies
+at once and a fall only after `workflow.capacity_hold_down_ms`. A deployment
+whose workers are started outside the platform is a static pool of
+`workflow.static_pool_slots` execution slots, and a target above it is recorded
+`state = 'refused'` with `refusal = 'pool_exhausted'`.
+
+```sql
+SELECT id AS zone, desired, state, refusal,
+       backlog_depth, oldest_available_at,
+       exhausted_jobs, backed_off_jobs, withheld_jobs
+  FROM workflow_manager.capacity_targets;
+```
+
+`backlog_depth` and `oldest_available_at` describe the claimable demand the
+last complete visit found. The other three count creator work that cannot be
+delivered now and never counts toward demand:
+
+- `exhausted_jobs`: rows whose counted executions reached the app's
+  `max_delivery_attempts`. They stay unsettled and are never claimed again
+  unless policy raises the budget. Resolve the run through management (cancel or
+  restart) or a redeploy.
+- `backed_off_jobs`: rows given back to the queue, by a journal deferral or a
+  worker that could not prepare the app, and still inside their back-off. A
+  preparation failure's back-off grows with each consecutive one, so a count
+  that stays high names an app no worker can prepare; check its environment and
+  deployment.
+- `withheld_jobs`: unsettled rows of apps whose policy withholds dispatch or
+  which Control deleted. When the closing lane abandons a deleted app it settles
+  that app's unsettled creator rows `Rejected`.
+
+A worker stopping for scale-down drains for up to `worker.shutdown_timeout`,
+which the worker refuses at boot below what one delivery needs: its app's
+preparation, its execution at the ceiling and its settlement
+(`validate_shutdown_timeout` in `crates/zeroship-worker/src/workflow_host.rs`).
+The orchestrator's termination grace must cover that drain and the instance's
+retirement call, as `stop_grace_period` does in
+`deploy/compose/docker-compose.yml`. Work cut off by a shorter grace runs again
+on another worker once its lease lapses.
 
 
 ## Dispatch Pause
@@ -106,8 +169,9 @@ on `zeroship.plans`
 Plan policy follows the closed `AppPolicy` contract in
 `crates/zeroship-core/src/workflow_policy.rs`. Missing fields are not defaulted.
 The SQL placeholders below require that chosen validity when inserting the global
-row; updates preserve its current bound. Manager and worker caches retain their
-original lease deadlines, so a switch update does not prove execution quiescence.
+row; updates preserve its current bound. The service's policy cache keeps each
+observation until its original deadline, and workers hold no policy of their
+own, so a switch update does not prove execution quiescence.
 
 Use this when the replay engine is suspect.
 
@@ -129,9 +193,14 @@ UPDATE workflow_manager.workflow_rollout_config
  WHERE id = 'global';
 ```
 
-Effect: scheduler dispatch ticks return zero before cancel reaping,
-waiting-run rearm, or due-run claiming. In-flight dispatches finish their
-commit; everything else remains durably parked in the journal.
+Effect: the switch masks `dispatch` in every app's observed policy. A worker's
+zone claim passes each app whose observation has dispatch off, and a job the
+journal is handed while dispatch is off is deferred and given back to the queue
+until that observation lapses. A heartbeat for an execution already running
+extends nothing, which interrupts it at its next renewal; its row returns to the
+queue. Queued, sleeping and waiting work stays durable in the journal. Cached
+observations answer until they lapse, so both the pause and the resume take
+effect within one `source_validity_ms` of the update.
 
 ## Ingress Disable
 

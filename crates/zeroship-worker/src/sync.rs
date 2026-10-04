@@ -303,6 +303,13 @@ async fn reconcile_once(
         if cached_version == Some(info.env_version) {
             continue;
         }
+        // A refresh supplies material, so it holds the app while it does. An
+        // app nothing holds any more had its material withdrawn after the
+        // snapshot above, and refreshing it would supply credentials no holder
+        // will withdraw.
+        let Some(_refreshing) = cache::hold_if_held(app_id) else {
+            continue;
+        };
         match fetch_app_env(&config.control_url, &config.service_auth, app_id).await {
             Ok(env_json) => {
                 if let Err(e) = put_env_from_json(envs, app_id.clone(), &env_json, info.env_version)
@@ -336,6 +343,14 @@ async fn reconcile_once(
                             continue;
                         }
                     };
+                    // Held across the whole swap and adopted by the
+                    // replacement. The isolate being replaced holds the app
+                    // too, but every await below hands this thread to other
+                    // dispatches, and one of them can evict it; without this
+                    // hold that eviction would withdraw the key, bindings and
+                    // environment the checks below found supplied, and the
+                    // replacement would be built without them.
+                    let hold = cache::hold(local_id);
                     match load_executable(manifest, &config.blob_store).await {
                         Ok(executable) => {
                             // Order: make sure SharedEnvs is current BEFORE
@@ -409,7 +424,7 @@ async fn reconcile_once(
                             }
 
                             match cache::load_app(
-                                local_id.clone(),
+                                hold,
                                 executable.modules,
                                 info.runtime.clone(),
                                 info.net_policy.clone(),
@@ -797,14 +812,6 @@ pub fn get_env(envs: &SharedEnvs, app_id: &AppId) -> Option<Arc<CachedEnv>> {
 /// version, no fetch needed.
 pub fn cached_env_version(envs: &SharedEnvs, app_id: &AppId) -> Option<i64> {
     envs.read().ok()?.get(app_id).map(|e| e.version)
-}
-
-/// Remove the cached env for an app. Used when the bundle load /
-/// env-fetch fails so the next request retries from scratch.
-pub fn remove_env(envs: &SharedEnvs, app_id: &AppId) {
-    if let Ok(mut e) = envs.write() {
-        e.remove(app_id);
-    }
 }
 
 /// Simple HTTP GET returning response body as string.

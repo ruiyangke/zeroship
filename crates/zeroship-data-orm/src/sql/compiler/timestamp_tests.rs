@@ -39,6 +39,7 @@ fn timestamp_statement(upsert: bool, offset_micros: i64) -> Result<Statement, Co
             condition: None,
             returning: vec![],
             insert_generated_identity: false,
+            do_nothing: false,
         })
         .map(Statement::Upsert)
     } else {

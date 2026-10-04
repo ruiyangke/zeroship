@@ -1,10 +1,9 @@
 //! The journal-scoped hold pair taken by the service that holds the journal.
 //!
-//! Nothing here places an app on a worker, and the first contract asserts the
-//! worker registry is empty. That is the point: a journal hold decided by the
-//! workflow service has no placement for Control to verify, so a hold that
-//! succeeds against an unreachable coordinator is what the trust decision
-//! bought. The queue-scoped pair beside it proves the same for a different
+//! No worker takes part, and the first contract asserts the worker registry is
+//! empty. That is the point: a journal hold is decided by the workflow service
+//! alone, so a hold that succeeds against an unreachable coordinator is what
+//! the trust decision bought. The queue-scoped pair beside it proves the same for a different
 //! scope; this one proves it for `HoldScope::for_app`, which is the scope
 //! `require_journal_hold` reads.
 
@@ -47,11 +46,7 @@ impl PolicySource for Source {
                 Err(ManagerError::Denied)
             }
         })
-    }
-    fn revalidate(&self, observation: &PolicyObservation) -> Result<Instant, ManagerError> {
-        Ok(observation.expires_at())
-    }
-}
+    }}
 
 /// A catalog deployment for an app the workflow fixtures already seeded.
 ///
@@ -110,11 +105,11 @@ async fn workers(fixture: &Fixture) -> i64 {
 }
 
 #[compio::test(crate = "crate::support::live::system")]
-async fn journal_holds_are_taken_by_the_service_role_without_any_placement() {
+async fn journal_holds_are_taken_by_the_service_role_without_any_worker() {
     let fixture = Fixture::new().await;
     let (app, deployment, hash) = fixture.deployment("journal-asserted").await;
     let (_, foreign_deployment, _) = fixture.deployment("journal-asserted-foreign").await;
-    // No coordinator is listening: journal authority must not read a placement.
+    // No coordinator is listening: journal authority reads no worker state.
     let control_server = fixture.control().await;
     let client = RemoteDeploymentHolds::asserted(
         &origin(&control_server),
@@ -139,8 +134,8 @@ async fn journal_holds_are_taken_by_the_service_role_without_any_placement() {
     assert_eq!(rows[0].1, first.holder_id);
     assert_eq!(rows[0].3, "held");
 
-    // What the placement check never covered, and what therefore must still
-    // refuse: a deployment belonging to another app, and a stale generation.
+    // What the service role still may not do: hold a deployment belonging to
+    // another app, or a stale generation.
     assert_eq!(
         client.acquire(&foreign_deployment, generation(1)).await,
         Err(WorkflowServiceError::PermissionDenied)
@@ -163,7 +158,7 @@ async fn journal_holds_are_taken_by_the_service_role_without_any_placement() {
     // because only the service that holds the journal is granted this pair.
     let http = Client::new().await;
     let named = json!({
-        "appId":app, "assignmentRevision":1, "deployId":deployment, "generation":2
+        "appId":app, "workerId":"wkr_named", "deployId":deployment, "generation":2
     });
     for endpoint in [
         endpoints::CONTROL_DEPLOYMENT_HOLD_ACQUIRE,
@@ -243,16 +238,11 @@ async fn the_lane_settles_a_hold_release_control_accepted() {
         Rc::new(zeroship_workflow_manager::retention::CatalogClient::new(
             DeploymentHolds::new(database(&fixture.control_url).await).unwrap(),
         )),
-        Rc::new(
-            zeroship_workflow_manager::eligibility::LocalEligibility::new(
-                zeroship_core::ZoneId::default_zone(),
-            ),
-        ),
     )
     .await
     .unwrap();
     let queue: Queue = service.manager.queue().clone();
-    queue.register_scope(&app).await.unwrap();
+    queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     // The journal rows the app needs to exist at all, and the held intent this
     // release gives back. The intent names the journal holder, which is what
     // Control has to accept from a caller that is not a worker.
@@ -354,7 +344,7 @@ async fn the_lane_settles_a_hold_release_control_accepted() {
     assert_eq!(
         workers(&fixture).await,
         0,
-        "no worker exists, so no placement authorized this hold"
+        "no worker exists, so no worker authorized this hold"
     );
 }
 
@@ -363,6 +353,9 @@ struct Delivered(zeroship_core::workflow_jobs::Delivery, Instant);
 impl zeroship_core::workflow_jobs::JobLease for Delivered {
     fn delivery(&self) -> &zeroship_core::workflow_jobs::Delivery {
         &self.0
+    }
+    fn attempt_remaining(&self) -> Option<Duration> {
+        zeroship_core::workflow_jobs::JobLease::remaining(self)
     }
     fn remaining(&self) -> Option<Duration> {
         self.1
@@ -384,7 +377,6 @@ fn activation(app: &AppId, deployment: &str) -> Delivered {
                 available_at: 0.try_into().unwrap(),
             },
             worker_id: WorkerId::mint(),
-            assignment_revision: 1.try_into().unwrap(),
             attempt: 1.try_into().unwrap(),
             deadline: 0.try_into().unwrap(),
         },
@@ -419,11 +411,6 @@ async fn the_activation_sweep_records_controls_asserted_registration() {
         Rc::new(zeroship_workflow_manager::retention::CatalogClient::new(
             DeploymentHolds::new(database(&fixture.control_url).await).unwrap(),
         )),
-        Rc::new(
-            zeroship_workflow_manager::eligibility::LocalEligibility::new(
-                zeroship_core::ZoneId::default_zone(),
-            ),
-        ),
     )
     .await
     .unwrap();
@@ -543,7 +530,7 @@ async fn the_activation_sweep_records_controls_asserted_registration() {
     assert_eq!(
         workers(&fixture).await,
         0,
-        "no worker exists, so no placement authorized this activation"
+        "no worker exists, so no worker authorized this activation"
     );
 }
 

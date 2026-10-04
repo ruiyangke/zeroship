@@ -512,6 +512,11 @@ pub(crate) fn compile_upsert(
         comma(&mut writer, index);
         writer.identifier(column.name().as_str());
     }
+    if parts.do_nothing {
+        writer.sql.push_str(") DO NOTHING");
+        write_returning(&mut writer, &parts.returning);
+        return Ok(writer.finish());
+    }
     writer.sql.push_str(") DO UPDATE SET ");
     for (index, assignment) in parts.update.into_iter().enumerate() {
         comma(&mut writer, index);
@@ -726,7 +731,7 @@ pub(crate) fn compile_select(
         crate::sql::statement::RowLock::WriteTargets => {
             writer.sql.push_str(syntax.write_target_lock);
         }
-        crate::sql::statement::RowLock::Required { of } => {
+        crate::sql::statement::RowLock::Required { of, nowait } => {
             let clause = syntax
                 .required_row_lock
                 .ok_or(CompileError::Unsupported("row locks"))?;
@@ -734,6 +739,9 @@ pub(crate) fn compile_select(
             for (index, alias) in of.iter().enumerate() {
                 writer.sql.push_str(if index == 0 { " OF " } else { ", " });
                 writer.identifier(alias.as_str());
+            }
+            if *nowait {
+                writer.sql.push_str(" NOWAIT");
             }
         }
     }

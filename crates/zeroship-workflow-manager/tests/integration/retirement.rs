@@ -10,32 +10,28 @@ use futures::future::ready;
 use std::{
     cell::{Cell, RefCell},
     future::Future,
-    num::NonZeroU32,
     pin::Pin,
     time::{Duration, Instant},
 };
 use crate::support::{Admin, Backend, Fixture};
 use zeroship_core::{
     app_id::AppId,
-    workflow_coordination::{
-        AssignedScope, RegisterWorker, Revision, RunId, WorkerId, WorkerState,
-    },
+    workflow_coordination::{Revision, RunId, WorkerId},
     workflow_jobs::{
         BroadcastId, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
         SettlementReceipt,
     },
-    workflow_policy::{AppPolicy, EstablishIngress, PolicyLeaseRequest},
+    workflow_policy::AppPolicy,
 };
 use zeroship_data_orm::{
     orm::{Operation, Output},
     value, Value,
 };
 use zeroship_workflow_manager::{
-    coordinator::{self, Coordinator, Placed},
     maintenance::MaintenanceAuthority,
     policy::{PolicyObservation, PolicySource},
     recovery::{self, DutyKind, Recovery, Responsibility, ScopeState},
-    DeliveryGrant, Error, Queue,
+    Claimant, DeliveryGrant, Error, Queue,
 };
 
 macro_rules! case {
@@ -107,7 +103,6 @@ case!(
     submission_refuses_closure
 );
 
-const KEY: &str = "verified-enrolled-key";
 const LONG: Duration = Duration::from_secs(600);
 
 fn revision(value: i64) -> Revision {
@@ -158,14 +153,6 @@ impl PolicySource for Source {
     ) -> Pin<Box<dyn Future<Output = Result<PolicyObservation, Error>> + 'a>> {
         Box::pin(async move { Ok(self.observation.borrow().clone()) })
     }
-
-    fn revalidate(&self, observation: &PolicyObservation) -> Result<Instant, Error> {
-        if self.observation.borrow().same_observation(observation) {
-            Ok(observation.expires_at())
-        } else {
-            Err(Error::Unavailable)
-        }
-    }
 }
 
 /// The archive mask: admission, dispatch and ingress are all disabled.
@@ -181,13 +168,11 @@ fn archived_policy() -> AppPolicy {
 struct Host {
     queue: Queue,
     recovery: Recovery,
-    coordinator: Coordinator,
     app: AppId,
     worker: WorkerId,
-    scope: AssignedScope,
     /// The lane of the process that owns this queue. Every sweep the manager
     /// enqueues - closure, reconciliation, collection, fanout - is claimed
-    /// through it, because a placed worker takes creator work alone.
+    /// through it, because a pulling worker takes creator work alone.
     lane: MaintenanceAuthority,
 }
 
@@ -195,7 +180,7 @@ async fn host(fixture: &Fixture) -> Host {
     host_with(fixture, AppId::mint()).await
 }
 
-/// An activated scope at ingress epoch one, placed on one ready worker.
+/// An activated scope at ingress epoch one, with one enrolled worker.
 async fn host_with(fixture: &Fixture, app: AppId) -> Host {
     let queue = Queue::connect(
         fixture.binding(),
@@ -215,46 +200,18 @@ async fn host_with(fixture: &Fixture, app: AppId) -> Host {
         },
     )
     .unwrap();
-    let coordinator = support::coordinator(&queue, coordinator::Options::default());
-    let (worker, scope) = place(&coordinator, &app).await;
+    let worker = WorkerId::mint();
     recovery
-        .ensure(&app, &DeploymentId::mint(), revision(1))
+        .ensure(&app, &zeroship_core::ZoneId::default_zone(), &DeploymentId::mint(), revision(1))
         .await
         .unwrap();
     Host {
         lane: MaintenanceAuthority::new(app.clone(), WorkerId::mint()),
         queue,
         recovery,
-        coordinator,
         app,
         worker,
-        scope,
     }
-}
-
-/// Register an instance and let the manager place the app; the placement
-/// names the instance selection chose, which need not be the new one.
-async fn place(coordinator: &Coordinator, app: &AppId) -> (WorkerId, AssignedScope) {
-    coordinator
-        .register(
-            &WorkerId::mint(),
-            &RegisterWorker {
-                capacity: NonZeroU32::new(4).unwrap(),
-                state: WorkerState::Ready,
-            },
-        )
-        .await
-        .unwrap();
-    let Placed::Assigned(assignment) = coordinator.place(app).await.unwrap() else {
-        panic!("the app has an eligible worker");
-    };
-    (
-        assignment.worker_id,
-        AssignedScope {
-            app_id: assignment.app_id,
-            assignment_revision: assignment.revision,
-        },
-    )
 }
 
 impl Host {
@@ -266,43 +223,75 @@ impl Host {
             .expect("activated scope")
     }
 
+    /// Observe or establish the scope through its responsibility, the
+    /// service's own door. An establishment is gated by the observation's
+    /// policy, which is what the archived case exercises.
     async fn lease(
         &self,
         source: &Source,
         establish_after: Option<i64>,
         ingress_used: bool,
     ) -> Result<Option<Revision>, Error> {
-        let request = PolicyLeaseRequest {
-            scope: self.scope.clone(),
-            establish: establish_after.map(|after| EstablishIngress {
-                after: (after > 0).then(|| revision(after)),
-            }),
-            ingress_used,
-        };
-        let grant = self
-            .coordinator
-            .policy_lease(&self.worker, KEY, &request, source, || {
-                ready(Ok(self.worker.clone()))
-            })
-            .await?;
-        let lease = grant.lease()?;
-        assert_eq!(lease.ingress_epoch, grant.ingress_epoch());
-        Ok(grant.ingress_epoch())
+        let observation = source.observe(&self.app).await?;
+        let policy = observation.policy();
+        match establish_after {
+            Some(after) => {
+                if !policy.admission || !policy.ingress {
+                    return Err(Error::Denied);
+                }
+                let after = (after > 0).then(|| revision(after));
+                self.recovery
+                    .establish(&self.app, after, true)
+                    .await
+                    .map(Some)
+            }
+            None => {
+                if ingress_used {
+                    self.recovery.note_ingress(&self.app).await?;
+                }
+                match self.recovery.responsibility(&self.app).await? {
+                    Some(state)
+                        if matches!(state.state, ScopeState::Open | ScopeState::Closing) =>
+                    {
+                        Ok(Some(state.ingress_epoch))
+                    }
+                    _ => Ok(None),
+                }
+            }
+        }
     }
 
-    async fn claim_as(&self, worker: &WorkerId, scope: &AssignedScope) -> Option<DeliveryGrant> {
-        self.coordinator
-            .claim_job(worker, scope, Ok(support::delivery_ceiling()), || ready(Ok(worker.clone())))
-            .await
-            .unwrap()
+    async fn claim_as(&self, worker: &WorkerId) -> Option<DeliveryGrant> {
+        let worker = worker.clone();
+        loop {
+            match self
+                .queue
+                .claim_authorized(
+                    &self.app,
+                    &worker,
+                    Claimant::Worker,
+                    Ok(support::delivery_ceiling()),
+                    |_| ready(Ok(worker.clone())),
+                )
+                .await
+            {
+                Ok(grant) => return grant,
+                // A concurrent holder of the app scope is skipped; a worker
+                // polling for work retries rather than treating it as empty.
+                Err(Error::Contended) => {
+                    compio::time::sleep(Duration::from_millis(2)).await;
+                }
+                Err(error) => panic!("claim: {error:?}"),
+            }
+        }
     }
 
     async fn claim(&self) -> Option<DeliveryGrant> {
-        self.claim_as(&self.worker, &self.scope).await
+        self.claim_as(&self.worker).await
     }
 
-    /// Take the next sweep off this app's queue as the lane, which needs no
-    /// placement and no registration.
+    /// Take the next sweep off this app's queue as the lane, which asserts its
+    /// own authority.
     async fn claim_sweep(&self) -> Option<DeliveryGrant> {
         self.claim_sweep_as(&self.lane).await
     }
@@ -340,11 +329,13 @@ impl Host {
         grant: &DeliveryGrant,
         outcome: JobOutcome,
     ) -> Result<SettlementReceipt, Error> {
-        self.coordinator
-            .settle_job(
-                worker,
+        let worker = worker.clone();
+        self.queue
+            .settle_authorized(
+                &worker,
                 &support::settlement_from(grant.delivery().clone(), outcome),
-                || ready(Ok(worker.clone())),
+                |_| ready(Ok(worker.clone())),
+                |_| ready(Ok(worker.clone())),
             )
             .await
     }
@@ -376,7 +367,7 @@ impl Host {
     }
 }
 
-/// Creator work: the only kind a placed worker claims, and intent-producing.
+/// Creator work: the only kind a worker claims, and intent-producing.
 fn advance(app: &AppId, available_at: i64) -> JobSpec {
     JobSpec {
         id: JobId::mint(),
@@ -633,15 +624,21 @@ async fn claim_rearm(fixture: &Fixture) {
     // A claim that fails its final authorization rolls its reopen back.
     let checks = Cell::new(0);
     let refused = host
-        .coordinator
-        .claim_job(&host.worker, &host.scope, Ok(support::delivery_ceiling()), || {
-            checks.set(checks.get() + 1);
-            ready(if checks.get() >= 2 {
-                Err(Error::Denied)
-            } else {
-                Ok(host.worker.clone())
-            })
-        })
+        .queue
+        .claim_authorized(
+            &host.app,
+            &host.worker,
+            Claimant::Worker,
+            Ok(support::delivery_ceiling()),
+            |_| {
+                checks.set(checks.get() + 1);
+                ready(if checks.get() >= 2 {
+                    Err(Error::Denied)
+                } else {
+                    Ok(host.worker.clone())
+                })
+            },
+        )
         .await;
     assert_eq!(refused.unwrap_err(), Error::Denied);
     assert_eq!(checks.get(), 2, "the refusal came after the reopen");
@@ -823,7 +820,7 @@ async fn preconditions(fixture: &Fixture) {
 /// and a lost settlement reply all converge on one retirement.
 ///
 /// Closure is a sweep, so the identity that takes it is a lane holder rather
-/// than a placement: a restart is another holder of the same lane, and it is
+/// than a worker: a restart is another holder of the same lane, and it is
 /// the lapsed lease alone that lets the redelivery move between them.
 async fn lost_replies(fixture: &Fixture) {
     let host = host(fixture).await;
@@ -942,10 +939,8 @@ async fn submission_refuses_closure(fixture: &Fixture) {
     let job = advance(&host.app, 0);
     host.publish(&job).await.unwrap();
     let grant = host.claim().await.unwrap();
-    let settlement = support::settlement_from(grant.delivery().clone(), JobOutcome::Completed {});
     assert_eq!(
-        host.coordinator
-            .settle_job(&host.worker, &settlement, || ready(Ok(host.worker.clone())))
+        host.settle(&grant, JobOutcome::Completed {})
             .await
             .unwrap()
             .outcome,
@@ -1021,7 +1016,9 @@ async fn postgres_claim_and_establishment_share_the_app_lock_and_reopen_once() {
     assert_eq!(locked.len(), 1);
     let replica = replica_establishment(&fixture, &host, 1);
     let release = async {
-        blocked_manager(admin, BLOCKED_BY_ADMIN, 2).await;
+        // Only the establishment waits on the administrator's row lock; the
+        // claim skips a contended app rather than queuing on it.
+        blocked_manager(admin, BLOCKED_BY_ADMIN, 1).await;
         assert_eq!(admin_state(admin, &host.app).await, "retired");
         admin.batch_execute("ROLLBACK").await.unwrap();
     };
@@ -1048,8 +1045,6 @@ fn replica_establishment(
     let binding = fixture.binding();
     let url = fixture.url().to_owned();
     let app = host.app.clone();
-    let worker = host.worker.clone();
-    let scope = host.scope.clone();
     std::thread::spawn(move || {
         compio::runtime::Runtime::new().unwrap().block_on(async move {
             let queue = Queue::connect(
@@ -1060,21 +1055,11 @@ fn replica_establishment(
             )
             .await
             .unwrap();
-            let coordinator = support::coordinator(&queue, coordinator::Options::default());
-            let source = Source::new(&app, AppPolicy::default());
-            let request = PolicyLeaseRequest {
-                scope,
-                establish: Some(EstablishIngress {
-                    after: Some(revision(after)),
-                }),
-                ingress_used: false,
-            };
-            coordinator
-                .policy_lease(&worker, KEY, &request, &source, || {
-                    ready(Ok(worker.clone()))
-                })
+            let recovery = Recovery::new(queue, recovery::Options::default()).unwrap();
+            recovery
+                .establish(&app, Some(revision(after)), true)
                 .await
-                .map(|grant| grant.ingress_epoch())
+                .map(Some)
         })
     })
 }
@@ -1137,7 +1122,7 @@ async fn activation(fixture: &Fixture) {
     assert_eq!(host.retire().await, revision(1));
     let deployment = DeploymentId::mint();
     host.recovery
-        .ensure(&host.app, &deployment, revision(2))
+        .ensure(&host.app, &zeroship_core::ZoneId::default_zone(), &deployment, revision(2))
         .await
         .unwrap();
     let reopened = host.state().await;
@@ -1145,7 +1130,7 @@ async fn activation(fixture: &Fixture) {
     assert_eq!(reopened.ingress_epoch, revision(2));
     assert_eq!(duties(fixture, &host.app).await.len(), 2);
     host.recovery
-        .ensure(&host.app, &deployment, revision(2))
+        .ensure(&host.app, &zeroship_core::ZoneId::default_zone(), &deployment, revision(2))
         .await
         .unwrap();
     assert_eq!(host.state().await, reopened);
@@ -1154,7 +1139,7 @@ async fn activation(fixture: &Fixture) {
     assert_eq!(host.retire().await, revision(2));
     assert_eq!(
         host.recovery
-            .ensure(&host.app, &DeploymentId::mint(), revision(1))
+            .ensure(&host.app, &zeroship_core::ZoneId::default_zone(), &DeploymentId::mint(), revision(1))
             .await,
         Err(Error::Conflict)
     );

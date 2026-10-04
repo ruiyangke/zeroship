@@ -400,12 +400,34 @@ impl<P> ReadBuilder<P> {
     /// `unsupported_backend_feature`.
     pub fn for_update(mut self) -> Result<Self, DbError> {
         require_lock_receiver(&self.database)?;
-        if matches!(&self.query.lock, read::ReadLock::Update { of } if !of.is_empty()) {
+        if matches!(&self.query.lock, read::ReadLock::Update { of, .. } if !of.is_empty()) {
             return Err(read::invalid(
                 "a read locks either every source or the named sources",
             ));
         }
-        self.query.lock = read::ReadLock::Update { of: Vec::new() };
+        self.query.lock = read::ReadLock::Update {
+            of: Vec::new(),
+            nowait: false,
+        };
+        Ok(self)
+    }
+
+    /// Lock every returned row without waiting for a competing lock.
+    ///
+    /// # Errors
+    /// Applies the same transaction, query-shape and backend requirements as
+    /// [`Self::for_update`].
+    pub fn for_update_nowait(mut self) -> Result<Self, DbError> {
+        require_lock_receiver(&self.database)?;
+        if matches!(&self.query.lock, read::ReadLock::Update { of, .. } if !of.is_empty()) {
+            return Err(read::invalid(
+                "a read locks either every source or the named sources",
+            ));
+        }
+        self.query.lock = read::ReadLock::Update {
+            of: Vec::new(),
+            nowait: true,
+        };
         Ok(self)
     }
     /// Lock only the rows of `source`, a source already joined into this read.
@@ -435,16 +457,21 @@ impl<P> ReadBuilder<P> {
         }
         let alias = source.source.alias.clone();
         match &mut self.query.lock {
-            read::ReadLock::None => self.query.lock = read::ReadLock::Update { of: vec![alias] },
-            read::ReadLock::Update { of } if of.is_empty() => {
+            read::ReadLock::None => {
+                self.query.lock = read::ReadLock::Update {
+                    of: vec![alias],
+                    nowait: false,
+                }
+            }
+            read::ReadLock::Update { of, .. } if of.is_empty() => {
                 return Err(read::invalid(
                     "a read locks either every source or the named sources",
                 ));
             }
-            read::ReadLock::Update { of } if of.contains(&alias) => {
+            read::ReadLock::Update { of, .. } if of.contains(&alias) => {
                 return Err(read::invalid("duplicate row lock target"));
             }
-            read::ReadLock::Update { of } => of.push(alias),
+            read::ReadLock::Update { of, .. } => of.push(alias),
         }
         Ok(self)
     }

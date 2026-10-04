@@ -93,7 +93,10 @@ impl Manager {
             ))
             .unwrap();
         let queue = Self::open_with_options(&path, options).await;
-        queue.register_scope(app).await.unwrap();
+        queue
+            .register_scope(app, &zeroship_core::ZoneId::default_zone())
+            .await
+            .unwrap();
         Self {
             _directory: directory,
             path,

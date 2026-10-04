@@ -34,7 +34,7 @@ use crate::support::{
 
 use ntex::client::Client;
 use serde_json::json;
-use std::{num::NonZeroU32, rc::Rc, sync::Arc, time::Duration};
+use std::sync::Arc;
 use zeroship_core::{
     app_id::AppId,
     service_assertion::{
@@ -42,29 +42,29 @@ use zeroship_core::{
     },
     service_peers::{service_issuer, ServiceAuth, ServiceKeyring, CONTROL_SERVICE_NAME},
     workflow_coordination::{
-        AssignedScope, ConflictPolicy, CreatorStartOptions, FailureCode, PayloadReservation,
-        ReadStepOutput, ReadTaskPayload, ReservePayload, ResolveTaskExecutable,
-        RegisterWorker, RequestId, RestartOptions, RestartRun, RunFailure, RunId, RunOperation,
-        Revision, RunScope, RunState, SignalOptions, SignalRun, StartRun, TransitionRun, WorkerId,
-        WorkerState, WorkflowOutputRef,
+        ConflictPolicy, CreatorStartOptions, FailureCode, PayloadReservation, ReadStepOutput,
+        ReadTaskPayload, ReservePayload, ResolveTaskExecutable, RequestId, RestartOptions,
+        RestartRun, RunFailure, RunId, RunOperation, Revision, RunScope, RunState, SignalOptions,
+        SignalRun, StartRun, TransitionRun, WorkerId, WorkflowOutputRef,
     },
-    workflow_jobs::{DeploymentId, JobOperation, JobSpec},
+    workflow_jobs::{ClaimJobs, DeploymentId, JobOperation, JobSpec},
     workflow_policy::AppPolicy,
 };
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_core::schema_name::SchemaName;
-use zeroship_workflow_client::{Options as ClientOptions, RunError, WorkerCoordinator};
+use zeroship_workflow_client::{
+    GiveBackReason, Options as ClientOptions, RunError, WorkerCoordinator,
+};
 use zeroship_workflow::service::delivery::{AcceptedJob, AppJournal, ClaimedTask};
 use zeroship_workflow_manager::recovery::Options as RecoveryOptions;
 use zeroship_workflow_manager::{Options as QueueOptions, Queue};
-use zeroship_workflow_server::coordinator::{connect_eligibility, Coordinator, Options};
+use zeroship_workflow_server::coordinator::{Coordinator, Options};
 
 struct Fixture {
     platform: platform::Platform,
     /// Held for the lifetime of the case: dropping it kills the service.
     _server: server_process::ServerProcess,
     client: WorkerCoordinator,
-    scope: AssignedScope,
     app: AppId,
     /// The service's queue, open in this process so a case can publish a
     /// committed creator intent the way the service's own publication does.
@@ -124,21 +124,13 @@ impl Fixture {
         ));
         let client = WorkerCoordinator::new(&server.url, auth, ClientOptions::default()).unwrap();
         assert_eq!(client.worker_id(), &worker);
-        // Registration goes through the same client, so the placement below is
-        // held against a worker this service has actually seen.
-        client
-            .register(&RegisterWorker {
-                capacity: NonZeroU32::new(1).unwrap(),
-                state: WorkerState::Ready,
-            })
-            .await
-            .unwrap();
 
+        // The app, in the zone the worker enrolled in, and the queue scope
+        // Control's lifecycle publication creates for it. Nothing places the
+        // app on the worker: the zone is the whole of what authorizes its calls.
         let app = AppId::mint();
         provision::provision(&platform, &app, &AppPolicy::default()).await;
-        let assignment = platform
-            .seed_placement(&app, &worker, Duration::from_mins(2))
-            .await;
+        platform.seed_scope(&app, platform::DEFAULT_ZONE_ID).await;
         let queue = Queue::connect(
             DbBinding::platform(
                 "workflow_manager",
@@ -155,10 +147,6 @@ impl Fixture {
             platform,
             _server: server,
             client,
-            scope: AssignedScope {
-                app_id: assignment.app_id,
-                assignment_revision: assignment.revision,
-            },
             app,
             queue,
         }
@@ -171,22 +159,17 @@ impl Fixture {
     /// writes them through the manager's own API against the same database
     /// rather than inventing their shape in SQL.
     async fn ensure_recovery(&self) {
-        let eligibility = Rc::new(
-            connect_eligibility(&self.platform.runtime_url, Options::default())
-                .await
-                .unwrap(),
-        );
-        Coordinator::connect(
-            &self.platform.runtime_url,
-            Options::default(),
-            holds::client(),
-            eligibility,
-        )
-        .await
-        .unwrap()
-        .recovery(RecoveryOptions::default())
-        .unwrap()
-        .ensure(&self.app, &DeploymentId::mint(), 1.try_into().unwrap())
+        Coordinator::connect(&self.platform.runtime_url, Options::default(), holds::client())
+            .await
+            .unwrap()
+            .recovery(RecoveryOptions::default())
+            .unwrap()
+            .ensure(
+                &self.app,
+                &zeroship_core::ZoneId::default_zone(),
+                &DeploymentId::mint(),
+                1.try_into().unwrap(),
+            )
         .await
         .unwrap();
     }
@@ -286,13 +269,13 @@ impl Fixture {
 async fn the_client_and_the_service_agree_on_every_run_call() {
     let fixture = Box::pin(Fixture::new()).await;
     let run = journal::seed_run(&fixture.platform, &fixture.app).await;
-    let scope = || fixture.scope.clone();
+    let app_id = || fixture.app.clone();
 
     // READ. The reply must say what the journal says, not merely parse.
     let status = fixture
         .client
         .run_status(&RunScope {
-            scope: scope(),
+            app_id: app_id(),
             run_id: run.clone(),
         })
         .await
@@ -316,7 +299,7 @@ async fn the_client_and_the_service_agree_on_every_run_call() {
     let missing = fixture
         .client
         .run_status(&RunScope {
-            scope: scope(),
+            app_id: app_id(),
             run_id: RunId::mint(),
         })
         .await
@@ -334,7 +317,7 @@ async fn the_client_and_the_service_agree_on_every_run_call() {
         .client
         .signal_run(&SignalRun {
             request_id: RequestId::mint(),
-            scope: scope(),
+            app_id: app_id(),
             run_id: run.clone(),
             options: SignalOptions {
                 signal_type: "ping".to_owned(),
@@ -362,7 +345,7 @@ async fn the_client_and_the_service_agree_on_every_run_call() {
         .client
         .transition_run(&TransitionRun {
             request_id: RequestId::mint(),
-            scope: scope(),
+            app_id: app_id(),
             run_id: run.clone(),
             operation: RunOperation::Pause,
         })
@@ -383,7 +366,7 @@ async fn the_client_and_the_service_agree_on_every_run_call() {
         .client
         .restart_run(&RestartRun {
             request_id: RequestId::mint(),
-            scope: scope(),
+            app_id: app_id(),
             run_id: run.clone(),
             options: RestartOptions::default(),
         })
@@ -399,7 +382,7 @@ async fn the_client_and_the_service_agree_on_every_run_call() {
         .client
         .start_run(&StartRun {
             request_id: RequestId::mint(),
-            scope: scope(),
+            app_id: app_id(),
             workflow_name: "demo".to_owned(),
             input: json!({"order": 7}),
             options: CreatorStartOptions {
@@ -440,7 +423,7 @@ async fn the_client_and_the_service_agree_on_every_run_call() {
     let absent = fixture
         .client
         .read_run_output(&RunScope {
-            scope: scope(),
+            app_id: app_id(),
             run_id: started_run.clone(),
         })
         .await
@@ -452,7 +435,7 @@ async fn the_client_and_the_service_agree_on_every_run_call() {
     let unrecorded = fixture
         .client
         .read_step_output(&ReadStepOutput {
-            scope: scope(),
+            app_id: app_id(),
             run_id: started_run,
             name: "charge".to_owned(),
             occurrence: 0,
@@ -468,10 +451,11 @@ async fn the_client_and_the_service_agree_on_every_run_call() {
 /// The task payload read, client to service, over a real socket.
 ///
 /// Separate from the run calls because the AUTHORITY is different in kind: a run
-/// call is authorized by the placement the manager holds for this worker, and
-/// this one by a dispatch credential the journal minted and keeps only a hash
-/// of. Sharing the run test's body would hide that, since the fixture's
-/// placement would satisfy both and neither arm would say which one answered.
+/// call is authorized by the worker's zone, and this one by a dispatch
+/// credential the journal minted and keeps only a hash of, held under a live
+/// delivery of the app. Sharing the run test's body would hide that, since the
+/// fixture's zone would satisfy both and neither arm would say which one
+/// answered.
 ///
 /// THREE ARMS, and the pairing is the point. The located reply proves the
 /// journal was reached and answered from its own rows. The two refusals prove it
@@ -644,17 +628,12 @@ async fn the_client_and_the_service_agree_on_a_task_executable_resolution() {
 /// committed. Driving them together is what shows the pair agrees about the same
 /// delivery rather than each agreeing with the test.
 ///
-/// THE RECEIPT IS READ TWICE, before and after the release, and both answers are
-/// `None`. That is the property, not an oversight: a release commits no
-/// execution, so it must not leave an outcome behind. A single read could not
-/// tell "no outcome yet" from "no outcome ever", and the pair of reads is what
-/// makes the absence attributable to the release.
-///
-/// THE RELEASE IS ALSO ASSERTED IDEMPOTENT. `release_job` returns early on a task
-/// already released, so a holder whose acknowledgement was lost may repeat it --
-/// which is the same uncertain-reply situation the receipt read exists for, and
-/// it would be a strange pair if one half tolerated a retry and the other did
-/// not.
+/// THE RELEASE GIVES THE ROW BACK. The queue row returns to `ready` holding
+/// nobody, so the releasing client stops being the job's holder in the same
+/// exchange: a repeated release is refused as superseded, and so is its receipt
+/// read. A release commits no execution, so it must leave no outcome behind;
+/// that is read from both stores rather than from a reply the client is no
+/// longer entitled to.
 #[ntex::test]
 async fn the_client_and_the_service_agree_on_a_release_and_a_receipt() {
     let fixture = Box::pin(Fixture::new()).await;
@@ -662,8 +641,8 @@ async fn the_client_and_the_service_agree_on_a_release_and_a_receipt() {
     run_journal::seed_journal_hold(&fixture.platform, &fixture.app).await;
     // NO SEEDED DISPATCH HERE, deliberately: `tasks::assign` claims a run only
     // while `runs.task_id` is null, so a hand-seeded task would hold the run and
-    // the claim below would answer deferred instead of handing out work. The
-    // claim creates the dispatch this case releases.
+    // the claim below would be deferred instead of handing out work. The claim
+    // creates the dispatch this case releases.
     let job = JobSpec {
         id: zeroship_core::workflow_jobs::JobId::mint(),
         app_id: fixture.app.clone(),
@@ -682,7 +661,7 @@ async fn the_client_and_the_service_agree_on_a_release_and_a_receipt() {
     // A REAL CLAIM, because `LeasedJob` has no public constructor and should not:
     // delivery authority comes from the manager granting it, never from a struct a
     // caller fills in. So the release is driven against the job this same client
-    // submitted and claimed, which exercises the claim and its journal acceptance
+    // claimed from its zone, which exercises the claim and its journal acceptance
     // on the way.
     let submitted = fixture
         .queue
@@ -690,16 +669,23 @@ async fn the_client_and_the_service_agree_on_a_release_and_a_receipt() {
         .await
         .expect("the queue accepts a creator advance");
     assert_eq!(submitted, job);
-    let claimed = fixture
+    let batch = fixture
         .client
-        .claim_job::<AppJournal>(&fixture.scope)
+        .claim_jobs::<AppJournal>(&ClaimJobs {
+            max: std::num::NonZeroU32::MIN,
+            wait_ms: std::num::NonZeroU64::new(5_000).unwrap(),
+            after: None,
+            exclude: Vec::new(),
+        })
         .await
-        .expect("the claim exchange answers")
-        .expect("the submitted advance is claimable");
+        .expect("the claim exchange answers");
+    let [claimed] = <[_; 1]>::try_from(batch.deliveries)
+        .unwrap_or_else(|deliveries| panic!("the submitted advance is claimable: {deliveries:?}"));
     let accepted = claimed
         .accepted
         .expect("an advance carries a journal acceptance");
     let lease = claimed.lease;
+    assert_eq!(lease.delivery().job, job);
     let AcceptedJob::Execute {
         assignment,
         remaining_ms,
@@ -725,28 +711,61 @@ async fn the_client_and_the_service_agree_on_a_release_and_a_receipt() {
 
     fixture
         .client
-        .release_job::<AppJournal>(&lease, &claim)
+        .release_job::<AppJournal>(&lease, &claim, GiveBackReason::PreparationFailed)
         .await
         .expect("a held task is handed back");
     assert_eq!(
         fixture.task_column(&assignment.id, "state").await,
         "released"
     );
-
-    // Idempotent: the same release again, as a holder that lost its reply sends.
-    fixture
-        .client
-        .release_job::<AppJournal>(&lease, &claim)
+    let row = fixture
+        .platform
+        .admin
+        .query_one(
+            "SELECT state, worker_id, outcome FROM workflow_manager.jobs WHERE app_id=$1 AND id=$2",
+            &[&job.app_id.as_str(), &job.id.as_str()],
+        )
         .await
-        .expect("a repeated release is an acknowledgement, not a conflict");
-
-    // And a release leaves no outcome behind.
-    let after = fixture
-        .client
-        .job_receipt::<AppJournal>(&job)
+        .unwrap();
+    assert_eq!(row.get::<_, String>(0), "ready");
+    assert_eq!(row.get::<_, Option<String>>(1), None);
+    assert_eq!(row.get::<_, Option<String>>(2), None, "a release settled the job");
+    let committed: Option<String> = fixture
+        .platform
+        .admin
+        .query_one(
+            "SELECT outcome FROM workflow_manager.__zeroship_workflow_job_receipts \
+             WHERE app_id=$1 AND id=$2",
+            &[&job.app_id.as_str(), &job.id.as_str()],
+        )
         .await
-        .expect("the receipt read still answers after a release");
-    assert!(after.is_none(), "{after:?}");
+        .unwrap()
+        .get(0);
+    assert_eq!(committed, None, "a release left a journal outcome behind");
+
+    // The row went back, so this delivery holds nothing: a holder that lost its
+    // reply and repeats the release is told it was superseded, and so is its
+    // receipt read.
+    for refused in [
+        fixture
+            .client
+            .release_job::<AppJournal>(&lease, &claim, GiveBackReason::PreparationFailed)
+            .await
+            .expect_err("a delivery given back was released again"),
+        fixture
+            .client
+            .job_receipt::<AppJournal>(&job)
+            .await
+            .expect_err("a worker that gave the job back read its receipt"),
+    ] {
+        assert!(
+            matches!(
+                refused,
+                zeroship_workflow_client::Error::Refused(FailureCode::Conflict)
+            ),
+            "{refused:?}"
+        );
+    }
 }
 
 /// The payload reservation, client to service, over a real socket.

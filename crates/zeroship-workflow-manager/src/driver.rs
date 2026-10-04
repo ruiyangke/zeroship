@@ -9,9 +9,10 @@ use crate::{
     coordinator::Coordinator,
     lifecycle::AppLifecycle,
     models::{
-        capacity_demands, capacity_targets, jobs, recovery_duties,
+        capacity_targets, recovery_duties,
         schema::{deployment_holds, schedules},
     },
+    policy::PolicySource,
     recovery::{self, DutyKind, Recovery},
     retention,
     scheduling::{self, Due as Scheduled, Scheduler},
@@ -109,11 +110,6 @@ pub struct TickReport {
     pub collection: LaneReport,
     pub retention: LaneReport,
     pub closing: LaneReport,
-    /// Apps with claimable work, placed on free eligible capacity or recorded
-    /// as unplaced demand.
-    pub placement: LaneReport,
-    /// Apps already recorded as unplaced, revisited until placed or idle.
-    pub unplaced: LaneReport,
     /// Per-zone capacity targets applied through the injected provider.
     pub capacity: LaneReport,
 }
@@ -121,15 +117,13 @@ pub struct TickReport {
 impl TickReport {
     /// Every lane's report with its name, in a stable order for host logging.
     #[must_use]
-    pub fn lanes(self) -> [(&'static str, LaneReport); 8] {
+    pub fn lanes(self) -> [(&'static str, LaneReport); 6] {
         [
             ("scheduling", self.scheduling),
             ("reconciliation", self.reconciliation),
             ("collection", self.collection),
             ("retention", self.retention),
             ("closing", self.closing),
-            ("placement", self.placement),
-            ("unplaced", self.unplaced),
             ("capacity", self.capacity),
         ]
     }
@@ -140,27 +134,27 @@ impl TickReport {
 /// Cursors are disposable scan positions, not authority or durable work. Failed
 /// candidates advance within a captured identity range and retry on another sweep.
 /// Existing operation transactions own publication, retention and commit fences.
-/// No placement or worker is required to generate due jobs.
+/// No worker is required to generate due jobs.
 ///
 /// The closing lane visits closing attempts and open scopes that are archived
 /// or idle past their backoff. It abandons the responsibility of an app whose
 /// deletion `lifecycle` reports instead of closing it; a page whose deletion
 /// state cannot be read visits nothing.
 ///
-/// The placement lanes key on claimable jobs. The recovery lanes turn every due
-/// duty into a pending job before them, and a closing scope's Close job is a
-/// job, so every scope that still holds responsibility gets an owner when its
-/// work falls due. Apps whose demand free capacity cannot absorb become the
-/// durable input of the capacity lane.
+/// The recovery lanes turn every due duty into a pending job, and a closing
+/// scope's Close job is a job, so every scope that still holds responsibility
+/// has a job some claimant takes when its work falls due. The capacity lane
+/// pages zones and sizes each from the claimable creator rows of its apps.
 #[derive(Debug)]
 pub struct Driver {
     queue: Queue,
     scheduler: Scheduler,
     recovery: Recovery,
     lifecycle: Rc<dyn AppLifecycle>,
+    policies: Rc<dyn PolicySource>,
     capacity: Capacity,
     options: Options,
-    cursors: [Cursor; 8],
+    cursors: [Cursor; 6],
     next_lane: usize,
 }
 
@@ -172,9 +166,9 @@ struct Cursor {
 
 impl Driver {
     /// Construct every maintenance operation over the coordinator's platform
-    /// queue. The coordinator carries the eligibility source placement reads;
-    /// `provider` applies each zone's capacity target. `lifecycle` reports
-    /// Control's terminal deletions to the closing lane.
+    /// queue. `policies` is what the capacity lane reads each app's policy,
+    /// zone and deletion from; `provider` applies each zone's capacity target.
+    /// `lifecycle` reports Control's terminal deletions to the closing lane.
     ///
     /// # Errors
     /// Rejects invalid maintenance options or incompatible native metadata.
@@ -182,6 +176,7 @@ impl Driver {
         coordinator: Coordinator,
         options: Options,
         lifecycle: Rc<dyn AppLifecycle>,
+        policies: Rc<dyn PolicySource>,
         provider: Rc<dyn CapacityProvider>,
     ) -> Result<Self, Error> {
         options.validate()?;
@@ -196,7 +191,8 @@ impl Driver {
             scheduler: Scheduler::new(queue.clone(), options.scheduling)?,
             recovery: Recovery::new(queue.clone(), options.recovery)?,
             lifecycle,
-            capacity: Capacity::new(coordinator, provider, options.capacity)?,
+            policies,
+            capacity: Capacity::new(queue.clone(), provider, options.capacity)?,
             queue,
             options,
             cursors: Default::default(),
@@ -204,14 +200,14 @@ impl Driver {
         })
     }
 
-    /// The placement demand and capacity operations this driver runs.
+    /// The zone capacity operations this driver runs.
     #[must_use]
     pub const fn capacity(&self) -> &Capacity {
         &self.capacity
     }
 
     /// Visit bounded calendar, recovery, transitional-hold, closing and
-    /// placement pages independently.
+    /// capacity pages independently.
     ///
     /// A lane's deadline covers its scans and candidate operations together.
     /// Failures never prevent another lane's turn. The retention lane resumes
@@ -231,8 +227,6 @@ impl Driver {
                 2 => report.collection = result,
                 3 => report.retention = result,
                 4 => report.closing = result,
-                5 => report.placement = result,
-                6 => report.unplaced = result,
                 _ => report.capacity = result,
             }
         }
@@ -244,7 +238,7 @@ impl Driver {
         let page = match lane {
             0..=3 => self.maintenance_page(lane, deadline).await,
             4 => self.closing_candidates(deadline).await.map(whole),
-            _ => Box::pin(self.placement_page(lane, deadline)).await,
+            _ => self.capacity_page(deadline).await,
         };
         let mut report = LaneReport::default();
         let (page, fetched) = match page {
@@ -263,7 +257,7 @@ impl Driver {
             let id = candidate.id();
             self.cursors[lane].after = Some(id.to_owned());
             report.visited += 1;
-            match deadline.run(self.dispatch(candidate)).await {
+            match deadline.run(self.dispatch(candidate, deadline)).await {
                 Ok(()) => report.completed += 1,
                 Err(error) => report.failures.push(CandidateFailure {
                     id: id.to_owned(),
@@ -326,63 +320,25 @@ impl Driver {
         }
     }
 
-    /// The placement lanes' pages: claimable jobs by app, recorded demand,
-    /// and capacity requests. A deduplicated page reports the rows its scan
-    /// fetched, which can exceed the candidates it yields.
-    async fn placement_page(
+    async fn capacity_page(
         &mut self,
-        lane: usize,
         deadline: Deadline,
     ) -> Result<(Vec<Candidate>, usize), Error> {
         let limit = self.options.page_limit;
-        let cursor = &mut self.cursors[lane];
-        match lane {
-            // Claimable jobs by app, including leases a dead worker let lapse.
-            // Rows arrive in app order, so one app's jobs are adjacent.
-            5 => scan::<_, Claimable>(&self.queue, cursor, deadline, limit, jobs::app_id, |now| {
-                Ok(jobs::state
-                    .eq("ready")?
-                    .and(jobs::available_at.lte(now)?)
-                    .or(jobs::state
-                        .eq("leased")?
-                        .and(jobs::lease_deadline.lte(Some(now))?)))
-            })
-            .await
-            .map(|rows| {
-                let fetched = rows.len();
-                let mut apps: Vec<Candidate> = Vec::with_capacity(fetched);
-                for row in rows {
-                    if !matches!(apps.last(), Some(Candidate::Visit(last)) if *last == row.app_id)
-                    {
-                        apps.push(Candidate::Visit(row.app_id));
-                    }
-                }
-                (apps, fetched)
-            }),
-            6 => scan::<_, Demanded>(
-                &self.queue,
-                cursor,
-                deadline,
-                limit,
-                capacity_demands::id,
-                |_| Ok(Filter::all()),
-            )
-            .await
-            .map(|rows| whole(rows.into_iter().map(|row| Candidate::Visit(row.id)).collect())),
-            _ => scan::<_, Targeted>(
-                &self.queue,
-                cursor,
-                deadline,
-                limit,
-                capacity_targets::id,
-                |_| Ok(Filter::all()),
-            )
-            .await
-            .map(|rows| whole(rows.into_iter().map(|row| Candidate::Zone(row.id)).collect())),
-        }
+        let cursor = &mut self.cursors[5];
+        scan::<_, Targeted>(
+            &self.queue,
+            cursor,
+            deadline,
+            limit,
+            capacity_targets::id,
+            |_| Ok(Filter::all()),
+        )
+        .await
+        .map(|rows| whole(rows.into_iter().map(|row| Candidate::Zone(row.id)).collect()))
     }
 
-    async fn dispatch(&self, candidate: &Candidate) -> Result<(), Error> {
+    async fn dispatch(&self, candidate: &Candidate, deadline: Deadline) -> Result<(), Error> {
         match candidate {
             Candidate::Scheduled(row) => {
                 let app = AppId::parse(&row.app_id).map_err(|_| Error::Storage)?;
@@ -409,13 +365,13 @@ impl Driver {
                     self.recovery.closing_turn(&app).await?;
                 }
             }
-            Candidate::Visit(app) => {
-                let app = AppId::parse(app).map_err(|_| Error::Storage)?;
-                self.capacity.visit(&app).await?;
-            }
             Candidate::Zone(zone) => {
                 self.capacity
-                    .reconcile(&ZoneId::parse(zone).map_err(|_| Error::Storage)?)
+                    .reconcile(
+                        &ZoneId::parse(zone).map_err(|_| Error::Storage)?,
+                        self.policies.as_ref(),
+                        deadline.halfway(),
+                    )
                     .await?;
             }
         }
@@ -450,6 +406,13 @@ struct Deadline(Instant);
 impl Deadline {
     fn expired(self) -> bool {
         Instant::now() >= self.0
+    }
+
+    /// Half of what remains: the capacity visit measures until here, leaving
+    /// the rest of the lane for the target transaction and the provider.
+    fn halfway(self) -> Instant {
+        let now = Instant::now();
+        now + self.0.saturating_duration_since(now) / 2
     }
 
     async fn run<T>(self, future: impl Future<Output = Result<T, Error>>) -> Result<T, Error> {
@@ -503,28 +466,6 @@ impl ScanRow for Hold {
 }
 
 #[derive(FromRow)]
-#[orm(entity = jobs)]
-struct Claimable {
-    app_id: String,
-}
-impl ScanRow for Claimable {
-    fn id(&self) -> &str {
-        &self.app_id
-    }
-}
-
-#[derive(FromRow)]
-#[orm(entity = capacity_demands)]
-struct Demanded {
-    id: String,
-}
-impl ScanRow for Demanded {
-    fn id(&self) -> &str {
-        &self.id
-    }
-}
-
-#[derive(FromRow)]
 #[orm(entity = capacity_targets)]
 struct Targeted {
     id: String,
@@ -540,8 +481,6 @@ enum Candidate {
     Recoverable(DutyKind, Recoverable),
     Hold(Hold),
     Closing { id: String, deleted: bool },
-    /// An app to give an owner or to clear from demand.
-    Visit(String),
     /// An execution zone whose capacity target to reconcile.
     Zone(String),
 }
@@ -551,7 +490,7 @@ impl Candidate {
             Self::Scheduled(row) => row.id(),
             Self::Recoverable(_, row) => row.id(),
             Self::Hold(row) => row.id(),
-            Self::Closing { id, .. } | Self::Visit(id) | Self::Zone(id) => id,
+            Self::Closing { id, .. } | Self::Zone(id) => id,
         }
     }
 }

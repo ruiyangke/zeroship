@@ -18,6 +18,7 @@ zeroship_data_orm::orm::schema! {
             manifest_json: Nullable<Text>,
             env_version: BigInt,
             lifecycle_revision: BigInt,
+            execution_zone_id: Text,
             archived_at: Nullable<Timestamp>,
             deleted_at: Nullable<Timestamp>,
             updated_at: Timestamp,

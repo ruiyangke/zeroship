@@ -11,7 +11,7 @@ case!(
 pub async fn refused(
     fixture: &Fixture,
     queue: &Queue,
-    authority: &Assignment,
+    authority: &Owner,
     settlement: &JournalSettlement,
     expected: Error,
 ) {
@@ -21,11 +21,11 @@ pub async fn refused(
     assert_eq!(
         queue
             .settle_authorized(
-                &authority.into(),
+                &authority.worker_id,
                 settlement,
                 |_| {
                     authorizations.set(authorizations.get() + 1);
-                    ready(Ok(authority.clone()))
+                    ready(Ok(authority.worker_id.clone()))
                 },
                 |_| {
                     replays.set(replays.get() + 1);
@@ -77,7 +77,7 @@ async fn outcome_families(fixture: &Fixture) {
         JobOutcome::Rejected {},
     ] {
         let app = AppId::mint();
-        queue.register_scope(&app).await.unwrap();
+        queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
         let authority = assignment(&app);
         let spec = job(&app, &DeploymentId::mint());
         queue.submit(&spec).await.unwrap();
@@ -155,9 +155,8 @@ async fn reject_before_lookup(fixture: &Fixture, _queue: &Queue) {
     let delivery = zeroship_core::workflow_jobs::Delivery {
         job: spec,
         worker_id: authority.worker_id.clone(),
-        assignment_revision: authority.revision,
         attempt: 1.try_into().unwrap(),
-        deadline: authority.expires_at,
+        deadline: 1_000_000_000_i64.try_into().unwrap(),
     };
     // Outcome-family validation is part of construction, so it runs before any
     // app registration or delivery lookup: the unknown app is never touched.

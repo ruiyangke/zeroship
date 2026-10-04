@@ -502,28 +502,6 @@ pub mod endpoints {
         ServiceEndpoint::new("workflow", "POST", "/v1/schedules/activate");
     pub const WORKFLOW_SCHEDULE_DISABLE: ServiceEndpoint =
         ServiceEndpoint::new("workflow", "POST", "/v1/schedules/disable");
-    pub const WORKFLOW_REGISTER: ServiceEndpoint = ServiceEndpoint::new(
-        "workflow",
-        "POST",
-        "/v1/workers/register",
-    );
-    pub const WORKFLOW_ASSIGNMENTS: ServiceEndpoint = ServiceEndpoint::new(
-        "workflow",
-        "POST",
-        "/v1/assignments/list",
-    );
-    pub const WORKFLOW_RENEW: ServiceEndpoint = ServiceEndpoint::new(
-        "workflow",
-        "POST",
-        "/v1/assignments/renew",
-    );
-    pub const WORKFLOW_RELEASE: ServiceEndpoint = ServiceEndpoint::new(
-        "workflow",
-        "POST",
-        "/v1/assignments/release",
-    );
-    pub const WORKFLOW_POLICY_LEASE: ServiceEndpoint =
-        ServiceEndpoint::new("workflow", "POST", "/v1/policy/lease");
     pub const WORKFLOW_JOB_CLAIM: ServiceEndpoint =
         ServiceEndpoint::new("workflow", "POST", "/v1/jobs/claim");
     pub const WORKFLOW_JOB_HEARTBEAT: ServiceEndpoint =
@@ -557,11 +535,11 @@ pub mod endpoints {
     /// The creator-facing run calls, answered from the service own journal.
     ///
     /// Addressed by body, like every other endpoint on this service. The body
-    /// names the app and the placement revision the caller claims; it never
-    /// names the WORKER, because the credential that verified the call already
-    /// says which worker it is. Substituting that identity for anything a body
-    /// could claim is what makes the placement lookup an authorization rather
-    /// than a formality.
+    /// names the app; it never names the WORKER, because the credential that
+    /// verified the call already says which worker it is, and that worker's
+    /// frozen zone is what admits the app. Taking the zone from the verified
+    /// identity rather than from anything a body could claim is what makes the
+    /// zone check an authorization rather than a formality.
     pub const WORKFLOW_RUN_STATUS: ServiceEndpoint =
         ServiceEndpoint::new("workflow", "POST", "/v1/runs/status");
     pub const WORKFLOW_RUN_SIGNAL: ServiceEndpoint =
@@ -583,8 +561,7 @@ pub mod endpoints {
     /// Locate one object a running task's replay edge names.
     ///
     /// Answers with a descriptor and a key, for the reason the two above do. What
-    /// authorizes it is the TASK CREDENTIAL in the body, not a placement: a
-    /// dispatch holds one, the journal holds only its hash, and the app named
+    /// authorizes it is the TASK CREDENTIAL in the body: a dispatch holds one, the journal holds only its hash, and the app named
     /// beside it selects the journal to ask rather than asserting a claim on it.
     pub const WORKFLOW_TASK_PAYLOAD: ServiceEndpoint =
         ServiceEndpoint::new("workflow", "POST", "/v1/tasks/payload");
@@ -723,19 +700,14 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                 principal("svc/worker"),
                 &[
                     endpoints::CONTROL_VERSIONS,
-                    endpoints::WORKFLOW_REGISTER,
-                    endpoints::WORKFLOW_ASSIGNMENTS,
-                    endpoints::WORKFLOW_RENEW,
-                    endpoints::WORKFLOW_RELEASE,
-                    endpoints::WORKFLOW_POLICY_LEASE,
                     endpoints::WORKFLOW_JOB_CLAIM,
                     endpoints::WORKFLOW_JOB_HEARTBEAT,
                     endpoints::WORKFLOW_JOB_SETTLE,
                     endpoints::WORKFLOW_JOB_RELEASE,
                     endpoints::WORKFLOW_JOB_RECEIPT,
                     // Creator calls the worker makes on behalf of app code.
-                    // The app they may act for is decided by the placement the
-                    // manager holds for THIS worker, never by the body.
+                    // The app they may act for is decided by the worker's zone,
+                    // never by the body alone.
                     endpoints::WORKFLOW_RUN_START,
                     endpoints::WORKFLOW_RUN_STATUS,
                     endpoints::WORKFLOW_RUN_SIGNAL,
@@ -744,18 +716,19 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                     endpoints::WORKFLOW_RUN_STEP_OUTPUT,
                     endpoints::WORKFLOW_RUN_OUTPUT,
                     // A dispatch reading its own replay edge. Not a creator
-                    // call and not a placement one: the task credential in the
-                    // body is what the journal checks, and this grant only says
-                    // a worker is the kind of peer that may present one.
+                    // call: the task credential in the body is what the journal
+                    // checks, and this grant only says a worker is the kind of
+                    // peer that may present one.
                     endpoints::WORKFLOW_TASK_PAYLOAD,
                     endpoints::WORKFLOW_TASK_EXECUTABLE,
                     endpoints::WORKFLOW_TASK_PAYLOAD_RESERVE,
                     endpoints::CDC_SUBSCRIBE,
-                    // Host app reads are role-scoped: an authenticated worker
-                    // may request any app's version, environment, and project
-                    // data key. The instance identity provides attribution,
-                    // revocation and expiry; it does not establish app
-                    // assignment.
+                    // Host app reads: an authenticated worker may request the
+                    // version, environment and project data key of any app in
+                    // its own zone, which Control checks per read
+                    // (`zone_scoped_app_read` in crates/zeroship-control/src/internal.rs).
+                    // The instance identity provides attribution, revocation
+                    // and expiry.
                     endpoints::CONTROL_APP,
                     endpoints::CONTROL_APP_ENV,
                     endpoints::CONTROL_APP_DATA_KEY,

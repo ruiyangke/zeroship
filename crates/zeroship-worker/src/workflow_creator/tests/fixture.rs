@@ -9,22 +9,24 @@ use zeroship_core::service_peers::{
 };
 use zeroship_runtime::{transport::net_policy::NetPolicy, EnvSnapshot, RuntimeLimits};
 use zeroship_storage::{LocalFs, StorageStore};
-use zeroship_core::workflow_coordination::Revision;
 use serde_json::{json, Value};
 use zeroship_core::{typed_id, workflow_jobs::DeploymentId};
-use zeroship_workflow::service::{
-    AppPolicy, DeployRegistration, IngressEpochs, PolicySnapshot, TaskAssignment,
-};
+use zeroship_workflow::service::{DeployRegistration, TaskAssignment};
 use zeroship_core::workflow_coordination::WorkerId;
 use zeroship_workflow_client::{Options as ClientOptions, WorkerCoordinator};
+
+/// The residency a provider resolves resources under. Only its identity and
+/// its reference count are observed.
+#[derive(Debug)]
+pub(super) struct HeldApp;
 
 #[derive(Clone)]
 pub(super) struct Provider(Rc<ProviderState>);
 
 struct ProviderState {
-    expected: AssignedScope,
+    expected: AppId,
     resources: RefCell<WorkflowResources>,
-    calls: RefCell<Vec<AssignedScope>>,
+    calls: RefCell<Vec<AppId>>,
     gate: RefCell<Option<Gate>>,
     dropped: Cell<bool>,
 }
@@ -45,7 +47,7 @@ impl Provider {
     pub fn resources(&self) -> WorkflowResources {
         self.0.resources.borrow().clone()
     }
-    pub fn calls(&self) -> Vec<AssignedScope> {
+    pub fn calls(&self) -> Vec<AppId> {
         self.0.calls.borrow().clone()
     }
     pub fn dropped(&self) -> bool {
@@ -69,12 +71,9 @@ impl Provider {
 }
 
 impl WorkflowResourceProvider for Provider {
-    async fn resolve(
-        &self,
-        scope: &AssignedScope,
-    ) -> Result<WorkflowResources, WorkflowServiceError> {
-        self.0.calls.borrow_mut().push(scope.clone());
-        if scope != &self.0.expected {
+    async fn resolve(&self, app: &AppId) -> Result<WorkflowResources, WorkflowServiceError> {
+        self.0.calls.borrow_mut().push(app.clone());
+        if app != &self.0.expected {
             return Err(WorkflowServiceError::PermissionDenied);
         }
         let _resolving = Resolving(self.0.clone());
@@ -102,66 +101,18 @@ impl WorkflowContextProvider for Contexts {
 pub(super) struct Fixture {
     /// Held so the object and artifact stores outlive the fixture.
     _directory: tempfile::TempDir,
-    pub scope: AssignedScope,
+    pub app: AppId,
     pub worker: WorkerId,
-    pub policies: Arc<HostPolicies>,
-    pub policy: PolicyBinding,
     pub contexts: Rc<Contexts>,
     pub provider: Provider,
     pub deployments: deployment_fixture::Deployments,
-}
-
-/// The placement's ingress establishment, as `AssignedPolicies` provides it:
-/// each request installs the manager's next epoch into the policy binding.
-pub(super) struct Epochs {
-    binding: PolicyBinding,
-    pub requested: RefCell<Vec<Option<Revision>>>,
-    pub accepted: Cell<usize>,
-}
-
-impl IngressEpochs for Epochs {
-    fn establish(
-        &self,
-        after: Option<Revision>,
-    ) -> futures::future::LocalBoxFuture<'_, Result<(), WorkflowServiceError>> {
-        self.requested.borrow_mut().push(after);
-        Box::pin(async move {
-            let next = after.map_or(1, |after| after.get() + 1);
-            self.binding.begin_refresh()?.install(
-                PolicySnapshot::configuration(1.try_into().unwrap(), AppPolicy::default())?
-                    .with_ingress_epoch(Some(next.try_into().unwrap())),
-            )
-        })
-    }
-
-    fn accepted(&self) {
-        self.accepted.set(self.accepted.get() + 1);
-    }
-}
-
-pub(super) fn install(policies: &Arc<HostPolicies>, app: AppId) -> PolicyBinding {
-    let binding = policies.bind(app).unwrap();
-    binding
-        .begin_refresh()
-        .unwrap()
-        .install(
-            PolicySnapshot::configuration(1.try_into().unwrap(), AppPolicy::default()).unwrap(),
-        )
-        .unwrap();
-    binding
 }
 
 impl Fixture {
     pub async fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
         let app = AppId::mint();
-        let policies = Arc::new(HostPolicies::default());
-        let policy = install(&policies, app.clone());
         let deployments = deployment_fixture::Deployments::new().await;
-        let scope = AssignedScope {
-            app_id: app.clone(),
-            assignment_revision: 3.try_into().unwrap(),
-        };
         let contexts = Rc::new(Contexts {
             current: RefCell::new(WorkflowAppContext {
                 app: app.clone(),
@@ -186,16 +137,15 @@ impl Fixture {
             artifacts: deployments.source.clone(),
             max_source_bytes: 1024 * 1024,
             contexts: contexts.clone(),
+            residency: Rc::new(HeldApp),
         };
         Self {
             _directory: directory,
-            scope: scope.clone(),
+            app: app.clone(),
             worker: WorkerId::mint(),
-            policies,
-            policy,
             contexts,
             provider: Provider(Rc::new(ProviderState {
-                expected: scope,
+                expected: app,
                 resources: RefCell::new(resources),
                 calls: RefCell::new(Vec::new()),
                 gate: RefCell::new(None),
@@ -203,15 +153,6 @@ impl Fixture {
             })),
             deployments,
         }
-    }
-
-    /// Ingress establishment for the fixture's placement and policy binding.
-    pub fn ingress(&self) -> Rc<Epochs> {
-        Rc::new(Epochs {
-            binding: self.policy.clone(),
-            requested: RefCell::new(Vec::new()),
-            accepted: Cell::new(0),
-        })
     }
 
     /// An enrolled client of the worker's own identity, against `origin`.
@@ -248,11 +189,18 @@ impl Fixture {
     }
 
     pub fn factory_through(&self, client: WorkerCoordinator) -> WorkflowCreatorFactory<Provider> {
+        let limits = TaskPayloadLimits::default();
+        let workflows = RemoteWorkflows::new(
+            client.clone(),
+            self.provider.resources().objects,
+            limits.max_payload_bytes,
+        )
+        .unwrap();
         WorkflowCreatorFactory::new(
             self.provider.clone(),
-            self.policies.clone(),
             client,
-            TaskPayloadLimits::default(),
+            workflows,
+            limits,
             Duration::from_secs(5),
         )
         .unwrap()
@@ -263,7 +211,7 @@ impl Fixture {
     pub async fn publish(&self, source: &str) -> String {
         self.deployments
             .publish(
-                &self.scope.app_id,
+                &self.app,
                 &DeployRegistration {
                     id: DeploymentId::mint().as_str().to_owned(),
                     hash: String::new(),
@@ -350,7 +298,7 @@ impl Fixture {
             "deadline": 10_000,
             "leaseMs": 5_000,
             "invocation": {
-                "appId": self.scope.app_id.as_str(),
+                "appId": self.app.as_str(),
                 "deployId": typed_id::generate("dep"),
                 "deployHash": deploy_hash,
                 "runId": typed_id::generate(typed_id::WORKFLOW_RUN_PREFIX),

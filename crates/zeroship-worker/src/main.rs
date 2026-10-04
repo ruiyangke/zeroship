@@ -104,7 +104,7 @@ fn worker_rejects_db_url(db_url: &str) -> bool {
 
 /// A workflow host runs creator code against the worker's own database and
 /// stages payloads in its own object store, so it cannot run without either.
-/// Refusing the boot beats a host that registers capacity it can never use.
+/// Refusing the boot beats a host that claims jobs it can never run.
 fn workflow_host_prerequisites(database: bool, storage: bool) -> Result<(), &'static str> {
     if !database {
         return Err("worker.workflow_manager_url requires worker.database_url: creator \
@@ -244,7 +244,15 @@ fn main() -> std::io::Result<()> {
             }
         };
     let db_url = settings.database_url.expose_str().to_owned();
-    let shutdown_timeout = *settings.shutdown_timeout.get();
+    let shutdown_timeout = match zeroship_worker::workflow_host::validate_shutdown_timeout(
+        *settings.shutdown_timeout.get(),
+    ) {
+        Ok(secs) => secs,
+        Err(message) => {
+            tracing::error!("worker: {message}");
+            std::process::exit(2);
+        }
+    };
     let blob_store_root = settings.blob_store.get().clone();
     // `s3://…` → remote S3 store, bare path → local disk (dev default).
     // Validated now so a bad `s3://` URL fails fast.
@@ -280,17 +288,17 @@ fn main() -> std::io::Result<()> {
     // The workflow host is optional: without a manager origin no host runs
     // and `env.workflows` refuses every app. A configured one must be usable.
     let workflow_manager_url = settings.workflow_manager_url.get().clone();
-    // One list for the process. It bounds the manager client and the
-    // deployment-hold client towards Control alike, so it is resolved once and
-    // reported once rather than per client.
+    // One list for the process, resolved once and reported once: it bounds the
+    // manager client every claim, delivery and run call crosses on.
     let plaintext_peers =
         zeroship_core::config::PlaintextPeers::from(settings.plaintext_peers.get().clone());
     let workflow_host_config = (!workflow_manager_url.is_empty()).then(|| {
         zeroship_worker::workflow_host::WorkflowHostConfig {
             manager_url: workflow_manager_url.clone(),
-            capacity: *settings.workflow_capacity.get(),
+            prepared_apps: *settings.workflow_prepared_apps.get(),
             slots: *settings.workflow_slots.get(),
             plaintext_peers: plaintext_peers.clone(),
+            shutdown_timeout: std::time::Duration::from_secs(shutdown_timeout),
         }
     });
     if let Some(config) = &workflow_host_config {
@@ -351,6 +359,16 @@ fn main() -> std::io::Result<()> {
             "shutdown_timeout_secs",
             CheckValue::Count(usize::try_from(shutdown_timeout).unwrap_or(usize::MAX)),
         );
+        // The orchestrator's termination grace this worker needs: the drain, then
+        // the retirement call within its own bound. Deployment files are checked
+        // against this figure, so it is the binary that states the requirement.
+        report.field(
+            "termination_grace_secs",
+            CheckValue::Count(
+                usize::try_from(join::termination_grace(shutdown_timeout).as_secs())
+                    .unwrap_or(usize::MAX),
+            ),
+        );
         report.field("log_filter", CheckValue::Plain(boot.log_filter.clone()));
         report.field("log_format", CheckValue::Plain(log_format));
         report.field("blob_store", CheckValue::Plain(blob_store_root.clone()));
@@ -375,8 +393,8 @@ fn main() -> std::io::Result<()> {
             CheckValue::Plain(plaintext_peers.joined()),
         );
         report.field(
-            "workflow_capacity",
-            CheckValue::Count(*settings.workflow_capacity.get()),
+            "workflow_prepared_apps",
+            CheckValue::Count(*settings.workflow_prepared_apps.get()),
         );
         report.field(
             "workflow_slots",
@@ -733,7 +751,15 @@ fn main() -> std::io::Result<()> {
         ),
         None => None,
     };
-
+    // ONE registry for the process: every HTTP thread and the workflow host
+    // hold apps through it, so an app's project key, database bindings and
+    // decrypted environment stay supplied exactly while something here holds
+    // the app, whichever thread that is.
+    let residency = zeroship_worker::residency::AppResidency::new(
+        db_service.as_ref().map(|service| service.project_keys().clone()),
+        db_service.as_ref().map(|service| service.app_bindings().clone()),
+        shared_envs.clone(),
+    );
 
     // Kept back for the retirement after the server drains: the config itself
     // moves into the server factory below.
@@ -777,13 +803,12 @@ fn main() -> std::io::Result<()> {
     // ── THE WORKFLOW HOST ────────────────────────────────────────────────
     //
     // ONE host for the whole process, on its own thread, holding this
-    // instance's identity towards the manager. HTTP threads only ever see the
-    // `ReadyApps` it publishes into: an app is reachable through
-    // `env.workflows` once its assignment's preparation passed its final
-    // checks, and not before or after. With no manager configured the
-    // registry simply stays empty.
-    let workflows = zeroship_workflow_runner::ready::ReadyApps::default();
-    let workflow_host = match workflow_host_config {
+    // instance's identity towards the manager. HTTP threads share the
+    // `RemoteWorkflows` it builds: an app is reachable through `env.workflows`
+    // for any app the worker's zone may act for, whether or not this process
+    // ever prepared it. With no manager configured there is no registry and
+    // the `workflows` namespace refuses every call as retryable.
+    let (workflow_host, workflows) = match workflow_host_config {
         Some(host_config) => {
             let resources = zeroship_worker::workflow_host::HostResources {
                 service_auth: Arc::clone(&config.service_auth),
@@ -800,13 +825,10 @@ fn main() -> std::io::Result<()> {
                 meter: Arc::clone(&meter),
                 versions: shared_versions.clone(),
                 envs: shared_envs.clone(),
+                residency: residency.clone(),
             };
-            match zeroship_worker::workflow_host::WorkflowHost::start(
-                host_config,
-                resources,
-                workflows.clone(),
-            ) {
-                Ok(host) => Some(host),
+            match zeroship_worker::workflow_host::WorkflowHost::start(host_config, resources) {
+                Ok((host, workflows)) => (Some(host), Some(workflows)),
                 Err(error) => {
                     tracing::error!(%error, "worker: refusing to start - the workflow host did not start");
                     std::process::exit(1);
@@ -815,7 +837,7 @@ fn main() -> std::io::Result<()> {
         }
         None => {
             tracing::info!("worker: no workflow manager configured; env.workflows refuses every app");
-            None
+            (None, None)
         }
     };
 
@@ -847,6 +869,7 @@ fn main() -> std::io::Result<()> {
                 storage_backend: config.storage_backend.clone(),
                 // The ONE process-wide meter the usage-event outbox drains.
                 meter: Arc::clone(&meter),
+                residency: Some(residency.clone()),
             },
         );
         // Per-thread reconcile loop — reads from the shared version map,
@@ -885,9 +908,29 @@ fn main() -> std::io::Result<()> {
         server = server.bind_uds(&socket_path)?;
     }
 
-    // `server.run()` blocks until SIGINT/SIGTERM arrives; ntex then stops
+    // THE STOP SIGNAL, observed beside ntex rather than instead of it. ntex
+    // starts the HTTP drain on SIGTERM, SIGINT or SIGQUIT; this resolves on the
+    // same signal so the workflow host stops claiming at that moment rather
+    // than after HTTP has drained. Registered before the server starts
+    // handling signals.
+    let first_signal = ntex::server::signal();
+    let stop_signal = async move {
+        let mut next = first_signal;
+        while let Ok(signal) = next.await {
+            // SIGHUP stops nothing: ntex ignores it, and so does the host.
+            if signal != ntex::server::Signal::Hup {
+                return;
+            }
+            next = ntex::server::signal();
+        }
+        // The registration ended without a signal. Only the server stopping
+        // can start the host's drain now, and the drain watches for that too.
+        std::future::pending::<()>().await;
+    };
+
+    // `server.run()` serves until SIGINT/SIGTERM arrives; ntex then stops
     // accepting, waits up to `shutdown_timeout` for workers to finish
-    // serving their current requests, and returns. Detached tasks
+    // serving their current requests, and resolves. Detached tasks
     // (fetch body readers, stream drainers) whose futures the pump is
     // polling get one last chance to run during the drain window.
     let server = server.run();
@@ -908,30 +951,35 @@ fn main() -> std::io::Result<()> {
         });
     }
 
-    // `server` resolves once SIGINT/SIGTERM (or a failed host) stopped it and
-    // the HTTP drain finished.
-    let run_result = server.await;
-
-    // HTTP HAS DRAINED; NOW THE WORKFLOW HOST. No request can resolve an app
-    // backend any more, so the host closes its assignment bindings - which
-    // withdraws every published backend and revokes its policy generation -
-    // reports draining to the manager while delivered executions join, and
-    // its thread is joined. Only then does the instance retire, because the
-    // host's final manager exchange is signed with the instance key.
-    if let Some(host) = workflow_host {
-        match host.shutdown().await {
+    // THE DRAIN: HTTP and the workflow host side by side, each within
+    // `shutdown_timeout` of the signal. The host stops claiming at once and
+    // its delivered executions finish and settle while HTTP drains, so the
+    // whole drain fits the one setting the termination grace is stated from.
+    let hosted = workflow_host.is_some();
+    let (run_result, host_result) = zeroship_worker::workflow_host::drain(
+        stop_signal,
+        server,
+        workflow_host,
+        // The bound ntex holds the HTTP drain to, so the two drains share one.
+        std::time::Duration::from_secs(u64::from(shutdown_timeout_secs)),
+    )
+    .await;
+    if hosted {
+        match host_result {
             Ok(()) => tracing::info!("worker: workflow host drained"),
             Err(error) => tracing::warn!(%error, "worker: workflow host drain failed"),
         }
     }
 
-    // THE INSTANCE RETIRES ITSELF, and only here: after the drain, so no
-    // request still in flight loses its identity mid-read, and only on the
+    // THE INSTANCE RETIRES ITSELF, and only here: after both drains, so no
+    // request still in flight loses its identity mid-read and the host's last
+    // settlement, signed with the instance key, has been made; and only on the
     // graceful path, because a process that crashed says nothing at all. The
     // server factory does not stop this runtime when it stops, so the call
-    // runs on the same thread that joined. A retirement that fails is
-    // logged and the exit carries on - the row then stays `active` with no
-    // process behind it, which is what a crash leaves.
+    // runs on the same thread that drained. One attempt, bounded by
+    // `join::RETIREMENT_TIMEOUT`. A retirement that fails is logged and the
+    // exit carries on - the row then stays `active` with no process behind it,
+    // which is what a crash leaves.
     let (retirement_auth, retirement_control) = retirement;
     match join::retire(&retirement_auth, &retirement_control).await {
         Ok(()) => tracing::info!("worker: instance retired at control"),

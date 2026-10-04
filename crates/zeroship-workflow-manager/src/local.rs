@@ -1,7 +1,7 @@
 //! The local host's platform metadata file.
 //!
 //! One `SQLite` file holds the normal deployment catalog and the manager's
-//! queue, placement, scheduling and recovery records. Both schemas are
+//! queue, scheduling and recovery records. Both schemas are
 //! migration compiler output. Bootstrap installs them together into an empty
 //! file and otherwise refuses a file whose stored DDL differs from that
 //! combination, without altering it. Production hosts bind their already
@@ -15,6 +15,7 @@
 
 use crate::{
     deployments::{self, DeploymentHolds},
+    policy::{PolicyObservation, PolicySource},
     retention::CatalogClient,
     Options, Queue,
 };
@@ -23,7 +24,9 @@ use std::{
     rc::Rc,
     time::{Duration, Instant},
 };
-use zeroship_core::schema_name::SchemaName;
+use zeroship_core::{
+    app_id::AppId, schema_name::SchemaName, workflow_policy::AppPolicy, zone_id::ZoneId,
+};
 use zeroship_data_orm::{
     binding::DbBinding, encryption::ProjectKeySource, error::DbError, orm::Database, ConnectOptions,
 };
@@ -41,6 +44,43 @@ pub const SQLITE_SCHEMA: &str = concat!(
 /// How long opening waits on a file another local host still holds, such as
 /// the process a restart replaces while it finishes shutting down.
 const CONTENTION_BOUND: Duration = Duration::from_secs(30);
+
+/// Policy authority for the local host's single configured app.
+#[derive(Debug, Clone)]
+pub struct ConfiguredPolicies {
+    app: AppId,
+    policy: AppPolicy,
+}
+
+impl ConfiguredPolicies {
+    pub fn new(app: AppId, policy: AppPolicy) -> Result<Self, crate::Error> {
+        policy.validate().map_err(|_| crate::Error::Invalid)?;
+        Ok(Self { app, policy })
+    }
+}
+
+impl PolicySource for ConfiguredPolicies {
+    fn observe<'a>(
+        &'a self,
+        app: &'a AppId,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<PolicyObservation, crate::Error>> + 'a>,
+    > {
+        Box::pin(async move {
+            if app != &self.app {
+                return Err(crate::Error::Denied);
+            }
+            PolicyObservation::new(
+                self.app.clone(),
+                1.try_into().map_err(|_| crate::Error::Storage)?,
+                self.policy.clone(),
+                ZoneId::default_zone(),
+                false,
+                Instant::now() + Duration::from_secs(60),
+            )
+        })
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct LocalPlatform {

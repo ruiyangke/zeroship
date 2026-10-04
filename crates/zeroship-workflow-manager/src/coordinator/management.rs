@@ -91,7 +91,7 @@ impl Coordinator {
         actor: &ServiceIssuer,
         request: &ManageRun,
     ) -> Result<Acceptance, Error> {
-        self.scope(tx, &request.app_id, true).await?;
+        self.scope(tx, &request.app_id).await?;
         if let Some(row) = commands::record(tx, &request.app_id, &request.request_id).await? {
             commands::linked(tx, &row).await?;
             if row.request_digest != commands::request_digest(actor.as_str(), request)? {
@@ -218,7 +218,7 @@ impl Coordinator {
                 {
                     return Ok(None);
                 }
-                self.scope(&tx, app, false).await?;
+                self.scope(&tx, app).await?;
                 let Some(row) = commands::record(&tx, app, request).await? else {
                     return Ok(None);
                 };

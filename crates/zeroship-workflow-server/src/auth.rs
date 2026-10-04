@@ -155,19 +155,6 @@ impl WorkflowAuth {
         }
     }
 
-    /// Control may verify placement only for an instance still live: enrolled
-    /// as active and inside its lease.
-    ///
-    /// # Errors
-    /// Refuses revoked, lapsed or missing workers and unavailable registry storage.
-    pub async fn active_worker(&self, worker: &WorkerId) -> Result<(), Error> {
-        self.workers
-            .active_instance(worker.as_str())
-            .await?
-            .map(|_| ())
-            .ok_or(Error::Denied)
-    }
-
     /// # Errors
     /// Returns `Unavailable` when the worker registry cannot be queried.
     pub async fn ready(&self) -> Result<(), Error> {

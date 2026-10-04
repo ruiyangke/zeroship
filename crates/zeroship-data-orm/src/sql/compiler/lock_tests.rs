@@ -61,6 +61,7 @@ fn parts(join: Option<JoinKind>, lock: RowLock) -> SelectParts {
 fn required(of: &[&str]) -> RowLock {
     RowLock::Required {
         of: of.iter().map(|name| alias(name)).collect(),
+        nowait: false,
     }
 }
 

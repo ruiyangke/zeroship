@@ -19,9 +19,21 @@ fn observation(app: &AppId) -> PolicyObservation {
 fn reserve<'a>(cache: &'a Cache, app: &AppId) -> Ticket<'a> {
     match cache.reserve(app).unwrap() {
         Reservation::Refresh(ticket) => ticket,
-        Reservation::Cached(_) | Reservation::Wait(_) => {
+        Reservation::Cached(_) | Reservation::Ahead(..) | Reservation::Wait(_) => {
             panic!("expected an authoritative refresh")
         }
+    }
+}
+
+/// Whether `observation` is the one this cache answers its app with now, read
+/// through the reservation every caller takes. A reservation that would read
+/// the source is released unread.
+fn serves(cache: &Cache, observation: &PolicyObservation) -> bool {
+    match cache.reserve(observation.app_id()).unwrap() {
+        Reservation::Cached(current) | Reservation::Ahead(_, current) => {
+            current.same_observation(observation)
+        }
+        Reservation::Refresh(_) | Reservation::Wait(_) => false,
     }
 }
 
@@ -36,7 +48,6 @@ fn cached_requests_preserve_identity_and_original_deadline() {
         };
         assert!(cached.same_observation(&original));
         assert_eq!(cached.expires_at(), original.expires_at());
-        assert_eq!(cache.revalidate(&cached).unwrap(), original.expires_at());
     }
 }
 
@@ -59,7 +70,7 @@ fn a_concurrent_miss_waits_for_the_inflight_refresh_and_a_cancel_releases_it() {
     assert!(
         matches!(answered, Ok(Ok(ref observation)) if observation.same_observation(&installed))
     );
-    assert!(cache.revalidate(&installed).is_ok());
+    assert!(serves(&cache, &installed));
 
     // A cancelled refresh releases its waiter rather than leaving it hanging.
     let cancelled_app = AppId::mint();
@@ -74,7 +85,7 @@ fn a_concurrent_miss_waits_for_the_inflight_refresh_and_a_cancel_releases_it() {
         Ok(Err(Error::Unavailable))
     ));
 
-    assert!(cache.revalidate(&peer).is_ok());
+    assert!(serves(&cache, &peer));
 }
 
 /// A waiter whose refresh outlives the read budget is refused inside the
@@ -139,7 +150,7 @@ fn invalidation_during_refresh_fences_old_completion_and_its_cleanup() {
         pending.complete(observation(&app)),
         Err(Error::Unavailable)
     ));
-    assert!(cache.revalidate(&replacement).is_ok());
+    assert!(serves(&cache, &replacement));
 }
 
 #[test]
@@ -158,8 +169,8 @@ fn equal_policy_restoration_never_revives_retired_observation() {
     )
     .unwrap();
     let restored = reserve(&cache, &app).complete(restored).unwrap();
-    assert!(cache.revalidate(&retired).is_err());
-    assert!(cache.revalidate(&restored).is_ok());
+    assert!(!serves(&cache, &retired));
+    assert!(serves(&cache, &restored));
 }
 
 #[test]
@@ -171,10 +182,12 @@ fn eviction_bounds_entries_and_a_late_result_cannot_recreate_them() {
     let current = reserve(&cache, &peer).complete(observation(&peer)).unwrap();
     assert!(pending.complete(observation(&app)).is_err());
     assert_eq!(cache.entries().unwrap().len(), 1);
-    assert!(cache.revalidate(&current).is_ok());
+    assert!(serves(&cache, &current));
     let next = reserve(&cache, &app).complete(observation(&app)).unwrap();
-    assert!(cache.revalidate(&current).is_err());
-    assert!(cache.revalidate(&next).is_ok());
+    assert!(serves(&cache, &next));
+    // Last: probing the evicted app reserves a refresh for it, which evicts
+    // the other.
+    assert!(!serves(&cache, &current));
 }
 
 #[test]
@@ -193,7 +206,7 @@ fn expired_and_foreign_source_results_are_refused() {
 }
 
 #[compio::test]
-async fn expiration_requires_new_authoritative_values_and_never_revalidates_old_grants() {
+async fn expiration_requires_new_authoritative_values_and_never_serves_the_expired_one() {
     let cache = cache(1);
     let app = AppId::mint();
     let deadline = Instant::now() + Duration::from_millis(50);
@@ -208,10 +221,10 @@ async fn expiration_requires_new_authoritative_values_and_never_revalidates_old_
     .unwrap();
     let original = reserve(&cache, &app).complete(original).unwrap();
     compio::time::sleep_until(deadline).await;
-    assert!(cache.revalidate(&original).is_err());
+    assert!(!serves(&cache, &original));
     let replacement = reserve(&cache, &app).complete(observation(&app)).unwrap();
-    assert!(cache.revalidate(&original).is_err());
-    assert!(cache.revalidate(&replacement).is_ok());
+    assert!(!serves(&cache, &original));
+    assert!(serves(&cache, &replacement));
 }
 
 /// One manager answers for an app from ONE observation, whichever of its HTTP
@@ -246,10 +259,7 @@ fn one_process_observation_answers_every_thread_that_asks() {
     });
     assert_eq!(revision, installed.revision());
     assert_eq!(expires_at, installed.expires_at());
-    assert_eq!(
-        observations.cache().revalidate(&installed).unwrap(),
-        installed.expires_at()
-    );
+    assert!(serves(observations.cache(), &installed));
 
     // The control: a store of its own holds nothing this one observed, which is
     // what separate stores give and why one manager may not have two.
@@ -258,7 +268,7 @@ fn one_process_observation_answers_every_thread_that_asks() {
         separate.cache().reserve(&app).unwrap(),
         Reservation::Refresh(_)
     ));
-    assert!(separate.cache().revalidate(&installed).is_err());
+    assert!(!serves(separate.cache(), &installed));
 }
 
 /// Nothing a caller holds across its source read carries the map lock.
@@ -273,4 +283,82 @@ fn a_reservation_carries_no_lock_across_its_source_read() {
     const fn escapes_no_guard<T: Send>() {}
     escapes_no_guard::<Reservation<'static>>();
     escapes_no_guard::<Ticket<'static>>();
+}
+
+fn valid_for(app: &AppId, validity: Duration) -> PolicyObservation {
+    PolicyObservation::new(
+        app.clone(),
+        1.try_into().unwrap(),
+        AppPolicy::default(),
+        zeroship_core::ZoneId::default_zone(),
+        false,
+        Instant::now() + validity,
+    )
+    .unwrap()
+}
+
+/// Wait on the monotonic clock until `instant` has passed.
+async fn until(instant: Instant) {
+    while Instant::now() <= instant {
+        compio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
+/// An observation is read again once half its validity has passed, while it is
+/// still valid, so no grant is capped by an observation about to expire. Until
+/// that point it is served from the cache, and while the read is in flight
+/// every other caller keeps it; the completed read replaces it.
+#[compio::test]
+async fn an_observation_is_read_again_halfway_through_its_validity() {
+    let cache = cache(1);
+    let app = AppId::mint();
+    let validity = Duration::from_millis(400);
+    let first = reserve(&cache, &app)
+        .complete(valid_for(&app, validity))
+        .unwrap();
+    let Reservation::Cached(early) = cache.reserve(&app).unwrap() else {
+        panic!("an observation inside the first half of its validity is served as it is");
+    };
+    assert!(early.same_observation(&first));
+
+    until(first.expires_at().checked_sub(validity / 2).unwrap()).await;
+    let Reservation::Ahead(ticket, current) = cache.reserve(&app).unwrap() else {
+        panic!("an observation past half its validity is read again");
+    };
+    assert!(current.same_observation(&first));
+    assert!(current.expires_at() > Instant::now(), "it is read again while still valid");
+    let Reservation::Cached(meanwhile) = cache.reserve(&app).unwrap() else {
+        panic!("one read ahead of expiry at a time; the others keep the current observation");
+    };
+    assert!(meanwhile.same_observation(&first));
+
+    let second = ticket
+        .complete(valid_for(&app, Duration::from_secs(30)))
+        .unwrap();
+    let Reservation::Cached(after) = cache.reserve(&app).unwrap() else {
+        panic!("the completed read is served");
+    };
+    assert!(after.same_observation(&second));
+    assert!(second.expires_at() > first.expires_at());
+}
+
+/// A read ahead of expiry that does not complete leaves the current
+/// observation serving while it is valid, and the next caller reads again.
+#[compio::test]
+async fn a_failed_read_ahead_of_expiry_keeps_the_current_observation() {
+    let cache = cache(1);
+    let app = AppId::mint();
+    let validity = Duration::from_millis(400);
+    let first = reserve(&cache, &app)
+        .complete(valid_for(&app, validity))
+        .unwrap();
+    until(first.expires_at().checked_sub(validity / 2).unwrap()).await;
+    let Reservation::Ahead(ticket, _) = cache.reserve(&app).unwrap() else {
+        panic!("an observation past half its validity is read again");
+    };
+    drop(ticket);
+    let Reservation::Ahead(_, current) = cache.reserve(&app).unwrap() else {
+        panic!("the next caller reads again after a failed read");
+    };
+    assert!(current.same_observation(&first));
 }

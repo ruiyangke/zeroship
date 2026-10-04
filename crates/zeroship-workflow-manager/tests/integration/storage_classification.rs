@@ -67,6 +67,9 @@ fn the_manager_retries_a_serialization_failure() {
 
 #[test]
 fn the_manager_retries_lock_contention() {
+    // A lock wait that ran out is retryable on either backend. `Contended` is
+    // reserved for the zone claim's non-waiting scope lock, which reports it
+    // at that site rather than through this conversion.
     assert_eq!(Error::from(lock_contention()), Error::Unavailable);
 }
 

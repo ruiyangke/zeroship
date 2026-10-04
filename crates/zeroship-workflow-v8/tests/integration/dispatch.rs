@@ -13,13 +13,14 @@ use zeroship_runtime::{
 };
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::runtime::Runtime;
-use zeroship_workflow_runner::ready::ReadyApps;
 use zeroship_workflow_v8::WorkflowBinding;
 
 /// The binding registers the host dispatch module, so a runtime without it
 /// cannot replay a workflow at all.
 fn workflow_plugin() -> Arc<dyn NativePlugin> {
-    Arc::new(WorkflowBinding::ready(ReadyApps::default()))
+    Arc::new(WorkflowBinding::remote_workflows(
+        crate::support::unreachable::unreachable_workflows(),
+    ))
 }
 
 fn build_runtime(user_src: &str) -> Runtime {

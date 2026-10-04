@@ -1,7 +1,7 @@
 use super::{Error, Options, RunError};
 use futures::StreamExt;
 use serde::{Serialize, de::DeserializeOwned};
-use std::{io::Write, sync::Arc};
+use std::{io::Write, sync::Arc, time::Duration};
 use url::{Host, Url};
 use zeroship_core::{
     service_assertion::ServiceIssuer,
@@ -156,6 +156,7 @@ impl Transport {
         endpoint: ServiceEndpoint,
         request: &T,
         limit: usize,
+        timeout: Duration,
     ) -> Result<(u16, Vec<u8>), Error> {
         let mut body = BoundedBody {
             bytes: Vec::new(),
@@ -206,7 +207,7 @@ impl Transport {
             }
             Ok((status, bytes))
         };
-        compio::time::timeout(self.options.timeout, exchange)
+        compio::time::timeout(timeout, exchange)
             .await
             .map_err(|_| Error::Timeout)?
     }
@@ -223,7 +224,29 @@ impl Transport {
         request: &T,
     ) -> Result<R, Error> {
         let (status, bytes) = self
-            .exchange(endpoint, request, self.options.max_request_bytes)
+            .exchange(endpoint, request, self.options.max_request_bytes, self.options.timeout)
+            .await?;
+        if status != 200 {
+            return Err(refusal(status, &bytes));
+        }
+        serde_json::from_slice(&bytes).map_err(|_| Error::InvalidResponse)
+    }
+
+    /// [`Self::post`] for an exchange that states its own wait, bounded by that
+    /// wait instead of [`Options::timeout`]: the request carries the instant
+    /// the peer stops working for it, and this side stops waiting at the same
+    /// instant, never earlier.
+    ///
+    /// # Errors
+    /// Rejects the same conditions as [`Self::post`].
+    pub(crate) async fn post_within<T: Serialize, R: DeserializeOwned>(
+        &self,
+        endpoint: ServiceEndpoint,
+        request: &T,
+        wait: Duration,
+    ) -> Result<R, Error> {
+        let (status, bytes) = self
+            .exchange(endpoint, request, self.options.max_request_bytes, wait)
             .await?;
         if status != 200 {
             return Err(refusal(status, &bytes));
@@ -242,7 +265,7 @@ impl Transport {
         request: &T,
     ) -> Result<R, Error> {
         let (status, bytes) = self
-            .exchange(endpoint, request, self.options.max_journal_request_bytes)
+            .exchange(endpoint, request, self.options.max_journal_request_bytes, self.options.timeout)
             .await?;
         if status != 200 {
             return Err(refusal(status, &bytes));
@@ -265,7 +288,7 @@ impl Transport {
         request: &T,
     ) -> Result<R, RunError> {
         let (status, bytes) = self
-            .exchange(endpoint, request, self.options.max_request_bytes)
+            .exchange(endpoint, request, self.options.max_request_bytes, self.options.timeout)
             .await
             .map_err(RunError::Transport)?;
         if status != 200 {

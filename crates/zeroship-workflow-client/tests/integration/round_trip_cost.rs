@@ -370,7 +370,7 @@ fn load_average() -> String {
 #[compio::test]
 async fn the_harness_completes_every_exchange_it_is_asked_for() {
     for peer in [Peer::PerExchange, Peer::KeepAlive] {
-        let request = json!({"appId": "app_probe", "assignmentRevision": 1});
+        let request = json!({"max": 1, "waitMs": 5000, "after": null, "exclude": []});
         let samples = Box::pin(exchange(peer, 4, &request, &frontier(2, 16))).await;
         assert_eq!(samples.exchanges.len(), 4);
         assert!(samples.connections >= 1, "no connection was opened");
@@ -388,10 +388,10 @@ async fn one_round_trip_costs() {
     const ITERATIONS: usize = 400;
     println!("load before: {}", load_average());
     // A claim-shaped request with a small reply: the cheapest crossing.
-    let small_request = json!({"appId": "app_probe", "assignmentRevision": 1});
+    let small_request = json!({"max": 1, "waitMs": 5000, "after": null, "exclude": []});
     // A completion-shaped request: the batch a whole dispatch folds at once.
     let batch_request = frontier(64, 256);
-    // A reply the size of a replay journal handed back with an assignment.
+    // A reply the size of a replay journal handed back with a claimed task.
     let large_reply = frontier(64, 4096);
     let small_reply = json!({"accepted": true});
 

@@ -519,7 +519,7 @@ pub enum RowLock {
     /// An exclusive lock the caller requires. An empty list locks the rows of
     /// every source; otherwise only the named source aliases are locked.
     /// Backends without row locks refuse the statement.
-    Required { of: Vec<Ident> },
+    Required { of: Vec<Ident>, nowait: bool },
 }
 
 #[derive(Debug)]
@@ -800,6 +800,9 @@ pub struct UpsertParts {
     pub condition: Option<Comparison>,
     pub returning: Vec<ReturnedColumn>,
     pub insert_generated_identity: bool,
+    /// Emit `ON CONFLICT (...) DO NOTHING` instead of a conflict update. The
+    /// conflict row is left untouched, so no update assignments are required.
+    pub do_nothing: bool,
 }
 
 #[derive(Debug)]
@@ -991,7 +994,7 @@ fn validate_select(parts: &SelectParts) -> Result<(), CompileError> {
     if parts.lock != RowLock::None && (grouped || parts.distinct) {
         return Err(invalid("row locking requires an ungrouped select"));
     }
-    if let RowLock::Required { of } = &parts.lock {
+    if let RowLock::Required { of, .. } = &parts.lock {
         validate_locked_sources(parts, of)?;
     }
     if parts.limit.is_some_and(|value| value < 0) || parts.offset.is_some_and(|value| value < 0) {
@@ -1152,9 +1155,17 @@ fn validate_insert_expression(
 }
 
 fn validate_upsert(parts: &UpsertParts) -> Result<(), CompileError> {
-    if parts.insert.is_empty() || parts.conflict.is_empty() || parts.update.is_empty() {
+    if parts.insert.is_empty() || parts.conflict.is_empty() {
         return Err(invalid(
-            "upsert requires insert values, a conflict target, and an update",
+            "upsert requires insert values and a conflict target",
+        ));
+    }
+    if !parts.do_nothing && parts.update.is_empty() {
+        return Err(invalid("upsert requires an update or do-nothing conflict"));
+    }
+    if parts.do_nothing && (!parts.update.is_empty() || parts.condition.is_some()) {
+        return Err(invalid(
+            "a do-nothing conflict takes no update assignments or condition",
         ));
     }
     for (assignments, inserting) in [(&parts.insert, true), (&parts.update, false)] {

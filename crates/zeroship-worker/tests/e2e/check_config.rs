@@ -141,9 +141,9 @@ fn workflow_host_dry_run(settings: &[&str]) -> Output {
 /// Every manager exchange is signed with this instance's enrolled key, so the
 /// origin is part of that credential's trust boundary; and the host runs
 /// creator code against the worker's own database and stages payloads in its
-/// own object store. A worker that bound its port and then registered capacity it
-/// could never serve would strand every placement the manager gave it, so each
-/// of these is a refusal, not a warning. `--check-config` reaches the same gate,
+/// own object store. A worker that bound its port and then claimed jobs it could
+/// never run would hold every one of them until its lease lapsed, so each of
+/// these is a refusal, not a warning. `--check-config` reaches the same gate,
 /// which is why the refusals are observable without binding anything.
 #[test]
 fn a_workflow_host_is_refused_without_a_usable_manager_origin_or_creator_resources() {
@@ -160,6 +160,21 @@ fn a_workflow_host_is_refused_without_a_usable_manager_origin_or_creator_resourc
         &workflow_host_dry_run(&["--workflow-manager-url", "http://workflow.example"]),
         2,
         "worker.workflow_manager_url",
+    );
+
+    // Every executing delivery holds its prepared app, so fewer prepared apps
+    // than slots is refused before anything else is checked.
+    assert_refusal(
+        &workflow_host_dry_run(&[
+            "--workflow-manager-url",
+            loopback,
+            "--workflow-prepared-apps",
+            "2",
+            "--workflow-slots",
+            "3",
+        ]),
+        2,
+        "worker.workflow_prepared_apps",
     );
 
     // A usable origin still needs both creator resources.
@@ -188,7 +203,7 @@ fn a_workflow_host_is_refused_without_a_usable_manager_origin_or_creator_resourc
         dsn_arg,
         "--storage-url",
         objects_arg,
-        "--workflow-capacity",
+        "--workflow-prepared-apps",
         "12",
         "--workflow-slots",
         "3",
@@ -205,7 +220,7 @@ fn a_workflow_host_is_refused_without_a_usable_manager_origin_or_creator_resourc
         Some(loopback)
     );
     assert_eq!(
-        host.get("workflow_capacity")
+        host.get("workflow_prepared_apps")
             .and_then(serde_json::Value::as_u64),
         Some(12)
     );
@@ -234,6 +249,35 @@ fn a_workflow_host_is_refused_without_a_usable_manager_origin_or_creator_resourc
     );
 }
 
+
+/// A stopping worker drains its workflow host, so a shutdown timeout shorter than
+/// one execution at the host's ceiling plus its settlement is refused at boot,
+/// and `--check-config` reaches the same gate. The controls are the default and a
+/// value above the requirement, both accepted.
+#[test]
+fn a_shutdown_timeout_shorter_than_the_workflow_drain_is_refused() {
+    assert_refusal(
+        &workflow_host_dry_run(&["--shutdown-timeout", "5"]),
+        2,
+        "worker.shutdown_timeout",
+    );
+
+    let default = workflow_host_dry_run(&[]);
+    assert_success(&default);
+    let default_secs = report(&default.stdout)
+        .get("shutdown_timeout_secs")
+        .and_then(serde_json::Value::as_u64)
+        .expect("the report carries the drain budget");
+
+    let longer = workflow_host_dry_run(&["--shutdown-timeout", &(default_secs + 30).to_string()]);
+    assert_success(&longer);
+    assert_eq!(
+        report(&longer.stdout)
+            .get("shutdown_timeout_secs")
+            .and_then(serde_json::Value::as_u64),
+        Some(default_secs + 30)
+    );
+}
 
 #[test]
 fn worker_rejects_shared_overlay_selectors() {
@@ -355,4 +399,99 @@ fn one_byte_of_real_material_is_accepted_on_a_floorless_credential() {
 
     assert_success(&output);
     assert!(!combined(&output).contains("REFUSES TO START"));
+}
+
+/// The grace a compose service gives its container on stop, and the worker
+/// drain timeout its command or environment sets, when either does.
+fn compose_worker(document: &str) -> Result<(std::time::Duration, Option<u64>), String> {
+    let parsed: serde_yaml::Value = serde_yaml::from_str(document).map_err(|e| e.to_string())?;
+    let worker = &parsed["services"]["worker"];
+    let grace = worker["stop_grace_period"]
+        .as_str()
+        .ok_or("the worker service must state stop_grace_period")?;
+    let grace = compose_duration(grace)?;
+    let from_env = worker["environment"]["ZEROSHIP_WORKER_SHUTDOWN_TIMEOUT"]
+        .as_str()
+        .map(|value| value.parse::<u64>().map_err(|e| e.to_string()))
+        .transpose()?;
+    let command = worker["command"].as_str().unwrap_or_default();
+    let from_command = command
+        .split_whitespace()
+        .skip_while(|word| *word != "--shutdown-timeout")
+        .nth(1)
+        .map(|value| value.parse::<u64>().map_err(|e| e.to_string()))
+        .transpose()?;
+    Ok((grace, from_command.or(from_env)))
+}
+
+/// A compose duration (`90s`, `1m30s`, `2m`), the units compose accepts for a
+/// stop grace.
+fn compose_duration(text: &str) -> Result<std::time::Duration, String> {
+    let mut total = 0_u64;
+    let mut digits = String::new();
+    for character in text.chars() {
+        if character.is_ascii_digit() {
+            digits.push(character);
+            continue;
+        }
+        let value: u64 = digits.parse().map_err(|_| format!("bad duration {text}"))?;
+        digits.clear();
+        total += match character {
+            'h' => value * 3600,
+            'm' => value * 60,
+            's' => value,
+            _ => return Err(format!("bad duration unit in {text}")),
+        };
+    }
+    if !digits.is_empty() || text.is_empty() {
+        return Err(format!("bad duration {text}"));
+    }
+    Ok(std::time::Duration::from_secs(total))
+}
+
+/// The termination grace the deployment gives a worker covers the drain the
+/// worker runs on a stop and the retirement call after it, as the worker binary
+/// itself states that requirement in its check-config report. The compose file
+/// is read structurally, and any drain timeout it sets on the worker is the one
+/// checked. The control: the same compose grace refused against a requirement
+/// one second longer.
+#[test]
+fn the_compose_stop_grace_covers_the_worker_drain_and_its_retirement() {
+    let compose = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../deploy/compose/docker-compose.yml"),
+    )
+    .expect("read the shipped compose file");
+    let (grace, drain) = compose_worker(&compose).unwrap();
+    let drain_arg = drain.map(|secs| secs.to_string());
+    let mut settings = Vec::new();
+    if let Some(secs) = drain_arg.as_deref() {
+        settings.extend(["--shutdown-timeout", secs]);
+    }
+    let checked = workflow_host_dry_run(&settings);
+    assert_success(&checked);
+    let required = std::time::Duration::from_secs(
+        report(&checked.stdout)
+            .get("termination_grace_secs")
+            .and_then(serde_json::Value::as_u64)
+            .expect("the report states the termination grace"),
+    );
+    assert!(
+        grace >= required,
+        "deploy/compose/docker-compose.yml gives the worker {grace:?} to stop, but its drain and \
+         retirement need {required:?}"
+    );
+    // The reader must see a drain the compose file sets, or an override would
+    // go unchecked; and a worker service with no stated grace is refused.
+    let overridden = |worker: &str| compose_worker(&format!("services:\n  worker:\n{worker}"));
+    assert_eq!(
+        overridden("    stop_grace_period: 1m30s\n    environment:\n      ZEROSHIP_WORKER_SHUTDOWN_TIMEOUT: \"80\"\n"),
+        Ok((std::time::Duration::from_secs(90), Some(80)))
+    );
+    assert_eq!(
+        overridden("    stop_grace_period: 2m\n    command: zeroship-worker --shutdown-timeout 70\n"),
+        Ok((std::time::Duration::from_secs(120), Some(70)))
+    );
+    assert!(overridden("    command: zeroship-worker\n").is_err());
+    assert!(compose_duration("45").is_err());
 }

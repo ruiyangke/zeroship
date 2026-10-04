@@ -4,33 +4,25 @@
 mod tests;
 
 use zeroship_workflow::WorkflowServiceError;
-use futures::{
-    future::{BoxFuture, Shared},
-    FutureExt,
-};
 use std::{
     collections::HashMap,
     sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock},
-    task::{Context, Wake, Waker},
     time::{Duration, Instant},
 };
 
 type Interrupt = Arc<dyn Fn() + Send + Sync>;
-type Cancellation = Shared<BoxFuture<'static, ()>>;
 
 /// Why an execution budget stopped authorizing work.
 ///
-/// The two conditions carry different authority. Expiry is a resource signal:
-/// this host ran out of local time, while the authority that granted the work
-/// still stands and the journal still fences every submission against the
-/// lease. Revocation withdraws that authority itself.
+/// Expiry is a resource signal: this host ran out of local time, while the
+/// delivery that granted the work still stands and the journal still fences
+/// every submission against its lease. A delivery whose renewal extends nothing
+/// is ended by the runner dropping the attempt, not by this budget.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BudgetEnd {
     /// The lease or execution deadline passed, or the host finished the
     /// execution itself.
     Expired,
-    /// The host authority that granted this execution was withdrawn.
-    Revoked,
 }
 impl From<BudgetEnd> for WorkflowServiceError {
     fn from(_: BudgetEnd) -> Self {
@@ -81,28 +73,6 @@ impl WakeSignal {
         }
     }
 }
-impl Wake for WakeSignal {
-    fn wake(self: Arc<Self>) {
-        self.notify();
-    }
-
-    fn wake_by_ref(self: &Arc<Self>) {
-        self.notify();
-    }
-}
-
-struct Cancelled {
-    interrupt: Option<Interrupt>,
-    cancellation: Option<Cancellation>,
-}
-impl Cancelled {
-    fn finish(self) {
-        drop(self.cancellation);
-        if let Some(interrupt) = self.interrupt {
-            interrupt();
-        }
-    }
-}
 
 struct Entry {
     deadline: Instant,
@@ -111,21 +81,16 @@ struct Entry {
     finished: bool,
     interrupt_registered: bool,
     interrupt: Option<Interrupt>,
-    cancellation_registered: bool,
-    cancellation: Option<Cancellation>,
 }
 impl Entry {
-    /// The first condition to end an execution names it; a later one cannot
-    /// relabel authority that was already withdrawn.
-    fn cancel(&mut self, end: BudgetEnd) -> Option<Cancelled> {
+    /// The first condition to end an execution names it, and hands back the
+    /// interrupt to run once the registry lock is released.
+    fn cancel(&mut self, end: BudgetEnd) -> Option<Interrupt> {
         if self.ended.is_some() {
             None
         } else {
             self.ended = Some(end);
-            Some(Cancelled {
-                interrupt: self.interrupt.take(),
-                cancellation: self.cancellation.take(),
-            })
+            self.interrupt.take()
         }
     }
 }
@@ -137,7 +102,7 @@ struct Registry {
 #[derive(Default)]
 struct Watchdog {
     registry: Mutex<Registry>,
-    signal: Arc<WakeSignal>,
+    signal: WakeSignal,
 }
 impl Watchdog {
     fn registry(&self) -> MutexGuard<'_, Registry> {
@@ -161,55 +126,27 @@ impl Watchdog {
     }
 
     fn run(&self) {
-        let waker = Waker::from(self.signal.clone());
         loop {
-            // Reset before observing state. Wakes during polling remain latched
-            // until wait checks the same signal mutex, so no readiness is lost.
+            // Reset before observing state. A notification while the registry is
+            // read stays latched until `wait` checks the same signal mutex, so no
+            // deadline change is lost.
             self.signal.reset();
             let mut registry = self.registry();
             let now = Instant::now();
             let mut interrupts = Vec::new();
-            let mut cancellations = Vec::new();
             let mut next: Option<Instant> = None;
-            for (id, entry) in registry.entries.iter_mut().filter(|(_, e)| e.ended.is_none()) {
+            for entry in registry.entries.values_mut().filter(|e| e.ended.is_none()) {
                 if entry.deadline <= now {
                     interrupts.extend(entry.cancel(BudgetEnd::Expired));
                 } else {
                     next = Some(next.map_or(entry.deadline, |n| n.min(entry.deadline)));
-                    if let Some(cancellation) = entry.cancellation.take() {
-                        cancellations.push((*id, cancellation));
-                    }
                 }
             }
             drop(registry);
-            // A cancellation future may wake immediately or inspect its budget.
-            // Neither polling nor dropping it may run under the registry lock.
-            for (id, mut cancellation) in cancellations {
-                let ready = cancellation
-                    .poll_unpin(&mut Context::from_waker(&waker))
-                    .is_ready();
-                let mut cancellation = Some(cancellation);
-                let cancelled = {
-                    let mut registry = self.registry();
-                    match registry.entries.get_mut(&id) {
-                        // A resolved host signal withdraws authority; it is not
-                        // this host running out of local time.
-                        Some(entry) if ready => entry.cancel(BudgetEnd::Revoked),
-                        Some(entry) if entry.ended.is_none() => {
-                            // Retain the polled Shared handle itself: dropping
-                            // a temporary clone would unregister its waker.
-                            entry.cancellation = cancellation.take();
-                            None
-                        }
-                        _ => None,
-                    }
-                };
-                drop(cancellation);
-                interrupts.extend(cancelled);
-            }
+            // An interrupt may inspect its budget, so none runs under the lock.
             if !interrupts.is_empty() {
                 for interrupt in interrupts {
-                    interrupt.finish();
+                    interrupt();
                 }
                 continue;
             }
@@ -260,7 +197,7 @@ impl std::fmt::Debug for ExecutionBudget {
 }
 impl ExecutionBudget {
     /// Reject work once the lease or execution deadline has expired, or once
-    /// the granting authority has been revoked.
+    /// the host has finished the execution.
     ///
     /// # Errors
     /// Names the condition that ended the budget.
@@ -270,23 +207,6 @@ impl ExecutionBudget {
             None if entry.deadline <= Instant::now() => Err(BudgetEnd::Expired),
             None => Ok(()),
         })
-    }
-
-    /// Authority to publish an outcome whose effects already reached the world.
-    ///
-    /// Expiry does not withdraw it. The frontier describes effects that have
-    /// already run, and the journal is the fence: a submission whose task is no
-    /// longer leased is refused there. Discarding the frontier instead makes the
-    /// task immediately reclaimable and runs those effects a second time.
-    /// Revocation does withdraw it, so a revoked execution publishes nothing.
-    ///
-    /// # Errors
-    /// Returns a timeout once the granting authority has been revoked.
-    pub fn check_authority(&self) -> Result<(), WorkflowServiceError> {
-        match self.check() {
-            Ok(()) | Err(BudgetEnd::Expired) => Ok(()),
-            Err(end @ BudgetEnd::Revoked) => Err(end.into()),
-        }
     }
 
     /// Install the executor's interrupt before entering app code. It runs on
@@ -319,7 +239,7 @@ impl ExecutionBudget {
             }
         })?;
         if let Some(cancelled) = cancelled {
-            cancelled.finish();
+            cancelled();
         }
         if fire {
             interrupt();
@@ -362,8 +282,6 @@ impl ExecutionGuard {
                     finished: false,
                     interrupt_registered: false,
                     interrupt: None,
-                    cancellation_registered: false,
-                    cancellation: None,
                 },
             );
             id
@@ -377,30 +295,6 @@ impl ExecutionGuard {
     #[must_use]
     pub fn budget(&self) -> ExecutionBudget {
         self.budget.clone()
-    }
-
-    /// Attach the captured host authority's cancellation signal before loading.
-    /// The signal must be nonblocking and independent of an async runtime; the
-    /// existing watchdog polls it even while creator code blocks its own thread.
-    ///
-    /// # Errors
-    /// Rejects replacement of an already installed cancellation source.
-    pub(super) fn cancel_on(&self, cancellation: Cancellation) -> Result<(), WorkflowServiceError> {
-        let mut cancellation = Some(cancellation);
-        self.budget.0.with_entry(|entry| {
-            if entry.cancellation_registered {
-                return Err(WorkflowServiceError::Conflict(
-                    "execution cancellation already installed".into(),
-                ));
-            }
-            entry.cancellation_registered = true;
-            if entry.ended.is_none() {
-                entry.cancellation = cancellation.take();
-            }
-            Ok(())
-        })?;
-        self.budget.0.watchdog.signal.notify();
-        Ok(())
     }
 
     pub(super) fn renew_lease(&self, deadline: Instant) -> Result<(), WorkflowServiceError> {
@@ -422,7 +316,7 @@ impl ExecutionGuard {
         });
         self.budget.0.watchdog.signal.notify();
         if let Some(interrupt) = interrupt {
-            interrupt.finish();
+            interrupt();
         }
         result
     }
@@ -434,7 +328,7 @@ impl ExecutionGuard {
         });
         self.budget.0.watchdog.signal.notify();
         if let Some(interrupt) = interrupt {
-            interrupt.finish();
+            interrupt();
         }
     }
 }

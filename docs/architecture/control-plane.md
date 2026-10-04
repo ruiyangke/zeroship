@@ -257,7 +257,10 @@ The workflow manager learns of an accepted deployment asynchronously.
 `publication::publisher` runs on the shared catalog, pages pending lifecycle
 intents, delivers each app's intents in revision order through the manager's
 signed schedule routes, and records only the manager's exact receipt in a
-fresh transaction. An app whose attempt fails waits out a retry delay that
+fresh transaction. Every register, activate and disable message names the app's
+frozen execution zone, read from `zeroship.apps.execution_zone_id`; the manager
+records it on the app's queue scope, and workers of that zone are the only ones
+whose claims reach the app's jobs. An app whose attempt fails waits out a retry delay that
 doubles to a cap and resets after a success, while other apps keep publishing.
 Archive and restore commit disable and activation intents through the same
 catalog, and the deployment collector keeps a pending activation's bundle

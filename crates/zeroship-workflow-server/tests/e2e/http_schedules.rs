@@ -134,6 +134,7 @@ impl Fixture {
 fn registration() -> RegisterSchedules {
     RegisterSchedules {
         app_id: AppId::mint(),
+        execution_zone_id: zeroship_core::ZoneId::default_zone(),
         deployment_id: DeploymentId::mint(),
         schedules: ["later", "earlier"]
             .into_iter()
@@ -154,6 +155,7 @@ fn registration() -> RegisterSchedules {
 fn activation(registration: &RegisterSchedules, revision: i64) -> ActivateSchedules {
     ActivateSchedules {
         app_id: registration.app_id.clone(),
+        execution_zone_id: zeroship_core::ZoneId::default_zone(),
         deployment_id: registration.deployment_id.clone(),
         revision: revision.try_into().unwrap(),
     }
@@ -256,6 +258,7 @@ async fn closed_requests(fixture: &Fixture) {
 async fn closed_disable_requests(fixture: &Fixture, registration: &RegisterSchedules) {
     let mut disable = json!(DisableSchedules {
         app_id: registration.app_id.clone(),
+        execution_zone_id: zeroship_core::ZoneId::default_zone(),
         revision: 1.try_into().unwrap(),
     });
     disable["workerId"] = json!("caller-selected");
@@ -372,6 +375,7 @@ async fn disable_before_first_activation(fixture: &Fixture) {
     let registration = registration();
     let command = DisableSchedules {
         app_id: registration.app_id.clone(),
+        execution_zone_id: zeroship_core::ZoneId::default_zone(),
         revision: 2.try_into().unwrap(),
     };
     assert_eq!(
@@ -460,6 +464,7 @@ async fn activation_lifecycle(fixture: &Fixture, registration: &RegisterSchedule
 async fn disable_active(fixture: &Fixture, registration: &RegisterSchedules) -> DisableSchedules {
     let disabled = DisableSchedules {
         app_id: registration.app_id.clone(),
+        execution_zone_id: zeroship_core::ZoneId::default_zone(),
         revision: 2.try_into().unwrap(),
     };
     assert_eq!(
@@ -501,6 +506,7 @@ async fn replace_and_replay(
 ) {
     let replacement = RegisterSchedules {
         app_id: registration.app_id.clone(),
+        execution_zone_id: zeroship_core::ZoneId::default_zone(),
         deployment_id: DeploymentId::mint(),
         schedules: vec![],
     };
@@ -534,6 +540,7 @@ async fn replace_and_replay(
             .client
             .disable_schedules(&DisableSchedules {
                 app_id: registration.app_id.clone(),
+                execution_zone_id: zeroship_core::ZoneId::default_zone(),
                 revision: 3.try_into().unwrap(),
             })
             .await,
@@ -559,6 +566,7 @@ async fn replace_and_replay(
     );
     let foreign = ActivateSchedules {
         app_id: AppId::mint(),
+        execution_zone_id: zeroship_core::ZoneId::default_zone(),
         ..command.clone()
     };
     assert_eq!(
@@ -621,16 +629,12 @@ async fn assert_removed(
         .platform
         .admin
         .query_one(
-            "SELECT (SELECT COUNT(*) FROM zeroship.worker_instances), \
-                (SELECT COUNT(*) FROM workflow_manager.workers), \
-                (SELECT COUNT(*) FROM workflow_manager.assignments)",
+            "SELECT COUNT(*) FROM zeroship.worker_instances",
             &[],
         )
         .await
         .unwrap();
-    for column in 0..3 {
-        assert_eq!(no_workers.get::<_, i64>(column), 0);
-    }
+    assert_eq!(no_workers.get::<_, i64>(0), 0);
 }
 
 #[ntex::test]

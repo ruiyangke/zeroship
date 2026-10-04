@@ -12,7 +12,9 @@ use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::{Runtime, RuntimeLimits};
 use zeroship_runtime::{EnvSnapshot, ModuleEntry, NetPolicy};
 use zeroship_storage::StorageBackendConfig;
-use zeroship_workflow_runner::ready::ReadyApps;
+use zeroship_workflow_runner::remote::RemoteWorkflows;
+
+use crate::residency::{AppResidency, Residency};
 
 #[cfg(test)]
 pub(crate) mod fixture;
@@ -32,6 +34,9 @@ struct IsolateEntry {
     /// borrow and then holds it across the isolate entry; cloning the compiled
     /// tables per request would put the whole resource map on the hot path.
     policy: Rc<CompiledManifest>,
+    /// The app's credentials stay supplied while this entry, or a dispatch
+    /// holding its runtime, exists.
+    hold: AppHold,
 }
 
 struct AppCache {
@@ -61,10 +66,11 @@ thread_local! {
     /// or `S3` (S3/R2 — inherently shared). When `None`, the `storage`
     /// namespace is absent.
     static STORAGE_BACKEND: RefCell<Option<StorageBackendConfig>> = const { RefCell::new(None) };
-    /// The app backends the process's workflow host has made ready. Every
-    /// isolate's `env.workflows` resolves its own app here on each call, so an
-    /// unknown or unready app is refused and nothing reaches Control.
-    static WORKFLOWS: RefCell<Option<ReadyApps>> = const { RefCell::new(None) };
+    /// The request path's backend registry. Every isolate's `env.workflows`
+    /// resolves its own app here on each call; the service admits each call by
+    /// the worker's verified zone, so an app this process never prepared is
+    /// served. Absent until a workflow manager is configured.
+    static WORKFLOWS: RefCell<Option<RemoteWorkflows>> = const { RefCell::new(None) };
     /// The PROCESS-WIDE usage meter, cloned into every ntex worker thread's
     /// thread-local on `init_cache`. Metering is INFRASTRUCTURE: there is no
     /// creator-facing `env.meter` namespace. Instead `create_plugins` binds
@@ -75,6 +81,62 @@ thread_local! {
     /// `record_request`. All of it lands in this single place that the one
     /// per-process usage-event outbox drains. `None` until `init_cache` runs.
     static METER: RefCell<Option<Arc<zeroship_metering::Meter>>> = const { RefCell::new(None) };
+    /// The PROCESS-WIDE registry of held apps, cloned into every thread on
+    /// `init_cache`. Every worker process installs one; a kernel without it
+    /// accounts for no app's credentials.
+    static RESIDENCY: RefCell<Option<AppResidency>> = const { RefCell::new(None) };
+}
+
+/// This thread's hold on one app's credentials.
+///
+/// Taken through [`hold`] BEFORE anything checks whether the app's project
+/// key, bindings or environment are supplied, and handed to [`load_app`], the
+/// only way an isolate enters the cache. An isolate entry and every dispatch
+/// holding its runtime carry a clone, so the app's credentials stay supplied
+/// until the last of them is gone.
+#[derive(Clone, Debug)]
+pub struct AppHold {
+    app: AppId,
+    /// Held for its drop, which may be the app's last. `None` on a thread
+    /// whose kernel installed no registry.
+    _residency: Option<Rc<Residency>>,
+}
+
+/// Hold `app` for a load, before its material is checked, fetched or supplied.
+#[must_use]
+pub fn hold(app: &AppId) -> AppHold {
+    AppHold {
+        app: app.clone(),
+        _residency: RESIDENCY.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .map(|registry| Rc::new(registry.reside(app.clone())))
+        }),
+    }
+}
+
+/// Hold `app` for a refresh of material something else supplied, or `None`
+/// when nothing holds it and its material was withdrawn.
+///
+/// A thread with no registry accounts for nothing, so every refresh proceeds.
+#[must_use]
+pub fn hold_if_held(app: &AppId) -> Option<AppHold> {
+    RESIDENCY.with(|slot| {
+        slot.borrow().as_ref().map_or_else(
+            || {
+                Some(AppHold {
+                    app: app.clone(),
+                    _residency: None,
+                })
+            },
+            |registry| {
+                registry.reside_held(app).map(|residency| AppHold {
+                    app: app.clone(),
+                    _residency: Some(Rc::new(residency)),
+                })
+            },
+        )
+    })
 }
 
 /// Per-thread runtime-kernel config the worker threads each install.
@@ -85,9 +147,10 @@ thread_local! {
 /// The real multi-node stack SHOULD set all of them so deployed apps get
 /// the complete `env.{db,kv,storage,auth}` kernel.
 pub struct KernelConfig {
-    /// Ready app backends published by the process's workflow host. With no
-    /// host the registry stays empty and every `env.workflows` call is refused.
-    pub workflows: ReadyApps,
+    /// The request path's backend registry, built by the process's workflow
+    /// host when a manager is configured. With no manager the `workflows`
+    /// namespace refuses every call as retryable.
+    pub workflows: Option<RemoteWorkflows>,
     /// The ONE process-wide `env.db` service, built in `main` before any
     /// worker thread exists. `None` when no database is configured, in which
     /// case the `db` namespace is simply absent.
@@ -99,6 +162,11 @@ pub struct KernelConfig {
     /// cheap so there is no "absent" tier — the namespace is registered
     /// unconditionally when present.
     pub meter: Arc<zeroship_metering::Meter>,
+    /// The process-wide registry of held apps, built in `main` over the
+    /// database service's key and binding stores and the shared environments.
+    /// `None` accounts for no app's credentials, which only fixtures measuring
+    /// something else choose.
+    pub residency: Option<AppResidency>,
 }
 
 impl std::fmt::Debug for KernelConfig {
@@ -107,6 +175,7 @@ impl std::fmt::Debug for KernelConfig {
             .field("db_configured", &self.db_service.is_some())
             .field("kv_configured", &self.kv_store.is_some())
             .field("storage_configured", &self.storage_backend.is_some())
+            .field("residency_accounted", &self.residency.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -128,8 +197,9 @@ pub fn init_cache(max_size: usize, kernel: KernelConfig) {
     if let Some(backend) = kernel.storage_backend {
         STORAGE_BACKEND.with(|s| *s.borrow_mut() = Some(backend));
     }
-    WORKFLOWS.with(|w| *w.borrow_mut() = Some(kernel.workflows));
+    WORKFLOWS.with(|w| *w.borrow_mut() = kernel.workflows);
     METER.with(|m| *m.borrow_mut() = Some(kernel.meter));
+    RESIDENCY.with(|slot| *slot.borrow_mut() = kernel.residency);
     // Every input `plugin_set` builds from was just replaced, so any cached
     // prototype set is now stale. Clearing here rather than trusting
     // "init_cache runs once" keeps the cache correct under repeated
@@ -253,9 +323,13 @@ fn create_plugins() -> Vec<Arc<dyn NativePlugin>> {
             }
         }
     }
-    if let Some(apps) = WORKFLOWS.with(|w| w.borrow().clone()) {
-        plugins.push(Arc::new(zeroship_workflow_v8::WorkflowBinding::ready(apps)));
-    }
+    // Every app gets the namespace. With no workflow manager configured it
+    // refuses every call as retryable, so creator code sees one
+    // `env.workflows` whatever this worker serves.
+    plugins.push(Arc::new(match WORKFLOWS.with(|w| w.borrow().clone()) {
+        Some(workflows) => zeroship_workflow_v8::WorkflowBinding::remote_workflows(workflows),
+        None => zeroship_workflow_v8::WorkflowBinding::unavailable(),
+    }));
     plugins.push(Arc::new(zeroship_runtime::auth::AuthPlugin));
     plugins
 }
@@ -334,17 +408,56 @@ pub fn record_stream_delta(app_id: &AppId, egress_bytes_delta: u64, stream_wall_
     });
 }
 
-/// Get or create a V8 runtime for an app. Returns None if the app isn't loaded.
-pub fn get_runtime(app_id: &AppId) -> Option<Runtime> {
+/// A cached isolate as a dispatch holds it: the runtime and its app's hold.
+///
+/// The cache can drop its entry while a request is still running on the
+/// runtime - a reconcile evicting a withdrawn deploy or a deleted app does -
+/// and the request keeps reading its app's encrypted data through the key the
+/// database service looks up on every call. Holding the app here, and not only
+/// in the cache map, is what keeps that key supplied until the request ends.
+pub struct HeldRuntime {
+    runtime: Runtime,
+    hold: AppHold,
+}
+
+impl std::fmt::Debug for HeldRuntime {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HeldRuntime")
+            .field("hold", &self.hold)
+            .finish_non_exhaustive()
+    }
+}
+
+impl HeldRuntime {
+    /// The app hold, for work that outlives the dispatch: a streamed body.
+    #[must_use]
+    pub fn hold(&self) -> AppHold {
+        self.hold.clone()
+    }
+}
+
+impl std::ops::Deref for HeldRuntime {
+    type Target = Runtime;
+
+    fn deref(&self) -> &Runtime {
+        &self.runtime
+    }
+}
+
+/// The cached runtime of an app, marked recently used. `None` when the app
+/// isn't loaded on this thread.
+#[must_use]
+pub fn get_runtime(app_id: &AppId) -> Option<HeldRuntime> {
     CACHE.with(|c| {
         let mut cache = c.borrow_mut();
         let cache = cache.as_mut()?;
-        if let Some(entry) = cache.isolates.get_mut(app_id) {
-            entry.last_used = std::time::Instant::now();
-            Some(entry.runtime.clone())
-        } else {
-            None
-        }
+        let entry = cache.isolates.get_mut(app_id)?;
+        entry.last_used = std::time::Instant::now();
+        Some(HeldRuntime {
+            runtime: entry.runtime.clone(),
+            hold: entry.hold.clone(),
+        })
     })
 }
 
@@ -461,9 +574,12 @@ async fn build_runtime(
 /// consulted per dispatch by `crate::policy::enforce`. Callers that hold no
 /// manifest pass `&Manifest::default()`, whose empty resource tree declares
 /// nothing and therefore refuses nothing.
+///
+/// `hold` is the caller's hold on the app, taken through [`hold`] before it
+/// checked or supplied the app's credentials; the entry keeps it.
 #[allow(clippy::too_many_arguments)]
 pub async fn load_app(
-    app_id: AppId,
+    hold: AppHold,
     modules: Vec<ModuleEntry>,
     app_limits: AppRuntimeLimits,
     app_net_policy: AppNetPolicy,
@@ -472,6 +588,7 @@ pub async fn load_app(
     manifest: &Manifest,
     env: &EnvSnapshot,
 ) -> Result<(), String> {
+    let app_id = hold.app.clone();
     let runtime = build_runtime(
         &app_id,
         modules,
@@ -511,6 +628,7 @@ pub async fn load_app(
                 last_used: std::time::Instant::now(),
                 app_id,
                 policy,
+                hold,
             },
         );
 
@@ -812,6 +930,7 @@ mod tests {
         IsolateEntry {
             runtime,
             last_used,
+            hold: hold(&app_id),
             app_id,
             // These fixtures exercise eviction and recency, never policy. An
             // empty resource tree declares nothing, so it cannot make an
@@ -889,11 +1008,12 @@ mod tests {
             init_cache(
                 4,
                 KernelConfig {
-                    workflows: ReadyApps::default(),
+                    workflows: None,
                     db_service: Some(service),
                     kv_store: None,
                     storage_backend: None,
                     meter: Arc::new(zeroship_metering::Meter::new()),
+                    residency: None,
                 },
             );
             let plugins = plugin_set();
@@ -1002,11 +1122,12 @@ mod tests {
         }
         let service = fixture::database_service("postgres://localhost/zs_unused_shared");
         let kernel = |service: Arc<zeroship_data_v8::service::DbService>| KernelConfig {
-            workflows: ReadyApps::default(),
+            workflows: None,
             db_service: Some(service),
             kv_store: None,
             storage_backend: None,
             meter: Arc::new(zeroship_metering::Meter::new()),
+            residency: None,
         };
 
         let one = Arc::clone(&service);
@@ -1058,11 +1179,12 @@ mod tests {
     fn plugin_set_is_shared_per_thread_and_invalidated_by_init_cache() {
         std::thread::spawn(|| {
             let kernel = || KernelConfig {
-                workflows: ReadyApps::default(),
+                workflows: None,
                 db_service: Some(fixture::database_service("postgres://localhost/zs_unused")),
                 kv_store: None,
                 storage_backend: None,
                 meter: Arc::new(zeroship_metering::Meter::new()),
+                residency: None,
             };
 
             init_cache(4, kernel());
@@ -1109,11 +1231,12 @@ mod tests {
     fn re_installing_the_kernel_without_a_database_clears_the_db_namespace() {
         std::thread::spawn(|| {
             let with_db = || KernelConfig {
-                workflows: ReadyApps::default(),
+                workflows: None,
                 db_service: Some(fixture::database_service("postgres://localhost/zs_unused_sticky")),
                 kv_store: None,
                 storage_backend: None,
                 meter: Arc::new(zeroship_metering::Meter::new()),
+                residency: None,
             };
 
             init_cache(4, with_db());
@@ -1153,11 +1276,12 @@ mod tests {
 
     /// Structural guard (no external services): when the kernel config carries
     /// a DB URL, a KV URL, and a storage root, the SAME `create_plugins` a
-    /// deployed app boots against installs all four
-    /// `env.{db,kv,storage,auth}` namespaces. This is the always-runnable
-    /// complement to the redis-gated faithful dispatch test in
-    /// `handler.rs` — it asserts the plugin VECTOR, the latter asserts the
-    /// JS namespaces resolve + round-trip end-to-end.
+    /// deployed app boots against installs the `env.{db,kv,storage,auth}`
+    /// namespaces, and a `workflows` namespace that refuses every call while no
+    /// manager is configured.
+    /// This is the always-runnable complement to the redis-gated faithful
+    /// dispatch test in `handler.rs` - it asserts the plugin VECTOR, the latter
+    /// asserts the JS namespaces resolve + round-trip end-to-end.
     ///
     /// Runs on a fresh thread so the kernel thread-locals don't leak into other
     /// tests sharing this thread.
@@ -1167,7 +1291,7 @@ mod tests {
             init_cache(
                 4,
                 KernelConfig {
-                    workflows: ReadyApps::default(),
+                    workflows: None,
                     db_service: Some(fixture::database_service("postgres://localhost/zs_unused")),
                     kv_store: Some(
                         zeroship_kv::KvStore::open(&zeroship_kv::KvConfig::Redis {
@@ -1179,6 +1303,7 @@ mod tests {
                         "/tmp/zs-cache-test-storage",
                     ))),
                     meter: Arc::new(zeroship_metering::Meter::new()),
+                    residency: None,
                 },
             );
             let plugins = create_plugins();
@@ -1186,8 +1311,8 @@ mod tests {
                 plugins.iter().map(|p| p.namespace().to_string()).collect();
             // Metering is infrastructure now: there is NO `meter` namespace.
             // The meter is bound INTO the db/kv/storage producers, so the
-            // creator surface is exactly these five namespaces.
-            for expected in ["db", "kv", "storage", "workflows", "auth"] {
+            // creator surface is these five namespaces.
+            for expected in ["db", "kv", "storage", "auth", "workflows"] {
                 assert!(
                     namespaces.iter().any(|n| n == expected),
                     "create_plugins must register the '{expected}' namespace when configured; got: {namespaces:?}"
@@ -1206,11 +1331,12 @@ mod tests {
     fn replacing_kernel_without_kv_removes_its_cached_binding() {
         std::thread::spawn(|| {
             let kernel = |kv_store| KernelConfig {
-                workflows: ReadyApps::default(),
+                workflows: None,
                 db_service: None,
                 kv_store,
                 storage_backend: None,
                 meter: Arc::new(zeroship_metering::Meter::new()),
+                residency: None,
             };
             let store = zeroship_kv::KvStore::open(&zeroship_kv::KvConfig::Redis {
                 redis: zeroship_kv::RedisConfig::new(zeroship_kv::Topology::Standalone {
@@ -1237,7 +1363,7 @@ mod tests {
             init_cache(
                 4,
                 KernelConfig {
-                    workflows: ReadyApps::default(),
+                    workflows: None,
                     db_service: None,
                     kv_store: None,
                     storage_backend: None,
@@ -1246,16 +1372,21 @@ mod tests {
                     // the producers rather than exposed as a namespace, so it
                     // adds NO entry to the plugin vector.
                     meter: Arc::new(zeroship_metering::Meter::new()),
+                    residency: None,
                 },
             );
             let plugins = create_plugins();
             let namespaces: Vec<String> =
                 plugins.iter().map(|p| p.namespace().to_string()).collect();
             let has = |n: &str| namespaces.iter().any(|x| x == n);
-            // auth/workflows are unconditional; kv/storage/db must NOT appear;
-            // and there is NO `meter` namespace (metering is infrastructure).
+            // auth is unconditional; workflows is present and refuses every
+            // call without a manager; kv/storage/db must NOT appear; and there
+            // is NO `meter` namespace (metering is infrastructure).
             assert!(has("auth"));
-            assert!(has("workflows"));
+            assert!(
+                has("workflows"),
+                "without a manager env.workflows is present and refuses every call"
+            );
             assert!(
                 !has("meter"),
                 "metering is infrastructure: no env.meter namespace"
@@ -1503,15 +1634,16 @@ mod tests {
                 init_cache(
                     4,
                     KernelConfig {
-                        workflows: ReadyApps::default(),
+                        workflows: None,
                         db_service: None,
                         kv_store: None,
                         storage_backend: None,
                         meter: Arc::new(zeroship_metering::Meter::new()),
+                        residency: None,
                     },
                 );
                 load_app(
-                    app_id.clone(),
+                    hold(&app_id),
                     crate::cache::test_modules(
                         br#"export default { fetch() { return new Response("ok"); } }"#,
                     ),
@@ -1566,11 +1698,12 @@ mod tests {
                 zeroship_runtime::init::init_v8();
                 let app_id = AppId::mint();
                 init_cache(4, KernelConfig {
-                    workflows: ReadyApps::default(),
+                    workflows: None,
                     db_service: None,
                     kv_store: None,
                     storage_backend: None,
                     meter: Arc::new(zeroship_metering::Meter::new()),
+                    residency: None,
                 });
                 let directory = tempfile::tempdir().unwrap();
                 let blobs: Arc<dyn BlobStore> = Arc::new(LocalDiskBlobStore::new(directory.path().into()).unwrap());
@@ -1601,7 +1734,7 @@ mod tests {
                     let executable = crate::executable::load_executable(&manifest, &blobs).await.unwrap();
                     assert_eq!(executable.modules[0].specifier, "app/z-entry.js");
                     assert_eq!(crate::executable::primary_schema_json(executable.descriptor.as_deref()), serde_json::from_str::<serde_json::Value>(descriptor).unwrap());
-                    load_app(app_id.clone(), executable.modules, AppRuntimeLimits::default(),
+                    load_app(hold(&app_id), executable.modules, AppRuntimeLimits::default(),
                         AppNetPolicy::default(), Some(deployment), executable.descriptor.as_deref(),
                         &manifest, &EnvSnapshot::empty()).await.unwrap();
                 }
@@ -1657,16 +1790,17 @@ mod tests {
                 init_cache(
                     4,
                     KernelConfig {
-                        workflows: ReadyApps::default(),
+                        workflows: None,
                         db_service: None,
                         kv_store: None,
                         storage_backend: None,
                         meter: Arc::new(zeroship_metering::Meter::new()),
+                        residency: None,
                     },
                 );
 
                 load_app(
-                    app_id.clone(),
+                    hold(&app_id),
                     crate::cache::test_modules(br#"export default { fetch() { return new Response("last-good"); } }"#),
                     AppRuntimeLimits::default(),
                     AppNetPolicy::default(),
@@ -1682,7 +1816,7 @@ mod tests {
 
                 let corrupt = corrupt_descriptor_document();
                 let err = load_app(
-                    app_id.clone(),
+                    hold(&app_id),
                     crate::cache::test_modules(br#"export default { fetch() { return new Response("bad-new"); } }"#),
                     AppRuntimeLimits::default(),
                     AppNetPolicy::default(),
@@ -1712,17 +1846,18 @@ mod tests {
             use futures::FutureExt;
             compio::runtime::Runtime::new().unwrap().block_on(async {
                 init_cache(4, KernelConfig {
-                    workflows: ReadyApps::default(),
+                    workflows: None,
                     db_service: None,
                     kv_store: None,
                     storage_backend: None,
                     meter: Arc::new(zeroship_metering::Meter::new()),
+                    residency: None,
                 });
                 let app_id = AppId::mint();
                 let manifest = Manifest::default();
                 let env = EnvSnapshot::empty();
                 let mut loading = Box::pin(load_app(
-                    app_id.clone(),
+                    hold(&app_id),
                     test_modules(br#"await new Promise(resolve => setTimeout(resolve, 10));
                         export default { fetch() { return new Response("ready"); } }"#),
                     AppRuntimeLimits::default(), AppNetPolicy::default(),
@@ -1734,7 +1869,7 @@ mod tests {
                 assert_eq!(fetch_body(&get_runtime(&app_id).unwrap()).await, (200, "ready".into()));
 
                 let mut reloading = Box::pin(load_app(
-                    app_id.clone(),
+                    hold(&app_id),
                     test_modules(br#"await new Promise(resolve => setTimeout(resolve, 10));
                         throw new Error("candidate startup rejected");"#),
                     AppRuntimeLimits::default(), AppNetPolicy::default(),
@@ -1760,17 +1895,18 @@ mod tests {
                 init_cache(
                     4,
                     KernelConfig {
-                        workflows: ReadyApps::default(),
+                        workflows: None,
                         db_service: None,
                         kv_store: None,
                         storage_backend: None,
                         meter: Arc::new(zeroship_metering::Meter::new()),
+                        residency: None,
                     },
                 );
 
                 let corrupt = corrupt_descriptor_document();
                 let err = load_app(
-                    app_id.clone(),
+                    hold(&app_id),
                     crate::cache::test_modules(br#"export default { fetch() { return new Response("bad-first"); } }"#),
                     AppRuntimeLimits::default(),
                     AppNetPolicy::default(),
@@ -1800,15 +1936,16 @@ mod tests {
                 init_cache(
                     4,
                     KernelConfig {
-                        workflows: ReadyApps::default(),
+                        workflows: None,
                         db_service: None,
                         kv_store: None,
                         storage_backend: None,
                         meter: Arc::new(zeroship_metering::Meter::new()),
+                        residency: None,
                     },
                 );
                 load_app(
-                    app_id.clone(),
+                    hold(&app_id),
                     crate::cache::test_modules(
                         br#"export default { fetch() { return new Response("ok"); } }"#,
                     ),

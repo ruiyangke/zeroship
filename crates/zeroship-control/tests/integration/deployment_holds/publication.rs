@@ -260,6 +260,7 @@ async fn lifecycle_intents_reach_the_manager_in_revision_order() {
                 serde_json::from_str::<DisableSchedules>(row.4.as_deref().unwrap()).unwrap(),
                 DisableSchedules {
                     app_id: app.clone(),
+                    execution_zone_id: zeroship_core::ZoneId::default_zone(),
                     revision: revision.try_into().unwrap(),
                 }
             ),
@@ -619,6 +620,7 @@ async fn a_manager_conflict_leaves_the_intent_pending() {
     direct
         .register_schedules(&RegisterSchedules {
             app_id: app.clone(),
+            execution_zone_id: zeroship_core::ZoneId::default_zone(),
             deployment_id: accepted.deploy_id.clone(),
             schedules: Vec::new(),
         })
@@ -627,6 +629,7 @@ async fn a_manager_conflict_leaves_the_intent_pending() {
     direct
         .disable_schedules(&DisableSchedules {
             app_id: app.clone(),
+            execution_zone_id: zeroship_core::ZoneId::default_zone(),
             revision: 7.try_into().unwrap(),
         })
         .await

@@ -1,5 +1,5 @@
 //! Native coordination over the service API. No database capability
-//! crosses this interface; assignment metadata does not authorize journal I/O.
+//! crosses this interface; enrolled worker identity authorizes zone-scoped I/O.
 #![allow(
     clippy::future_not_send,
     reason = "HTTP connections stay on their compio runtime"
@@ -9,26 +9,23 @@ mod app_facts;
 mod control;
 mod jobs;
 mod journal;
-mod policy;
 mod queue_holds;
 mod transport;
 
 pub use app_facts::ControlAppFacts;
 pub use control::ControlCoordinator;
-pub use jobs::{ClaimedJob, LeasedJob, RenewedJob};
+pub use jobs::{ClaimedJob, ClaimedJobBatch, LeasedJob, RenewedJob};
 pub use journal::{
-    ClaimedDelivery, JobJournal, JobReceiptQuery, ReleaseDelivery, RenewDelivery,
+    ClaimedDelivery, GiveBackReason, JobJournal, JobReceiptQuery, ReleaseDelivery, RenewDelivery,
     RenewedDelivery, SettleDelivery,
 };
-pub use policy::LeasedPolicy;
 pub use queue_holds::QueueDeploymentHolds;
 pub use transport::Transport;
 
 use std::{sync::Arc, time::Duration};
 use zeroship_core::workflow_coordination::{
-    AssignedScope, Assignment, DeliveredSignal, FailureCode, PayloadLocation, ReadStepOutput,
-    RegisterWorker, RegisteredWorker, ReleaseScope, RestartRun, RestartedRun, RunFailure, RunId,
-    RunScope, RunStatus, ScopePage, SignalRun, StartRun, StartedRun, StepOutputLocation,
+    DeliveredSignal, FailureCode, PayloadLocation, ReadStepOutput, RestartRun, RestartedRun,
+    RunFailure, RunId, RunScope, RunStatus, SignalRun, StartRun, StartedRun, StepOutputLocation,
     TransitionRun, TransitionedRun, WorkerId, AUDIENCE,
 };
 use zeroship_core::{
@@ -37,6 +34,7 @@ use zeroship_core::{
     service_identity::endpoints,
     service_peers::{service_issuer, ServiceAuth, WORKER_SERVICE_NAME},
     typed_id,
+    workflow_jobs::ClaimJobs,
     workflow_policy::{MAX_INPUT_BYTES_CEILING, MAX_JOURNAL_BYTES_CEILING},
 };
 
@@ -44,6 +42,9 @@ use zeroship_core::{
 /// peers this process may reach over plaintext HTTP.
 #[derive(Clone, Debug)]
 pub struct Options {
+    /// Bound on every exchange but a claim. A claim states its own wait in
+    /// [`ClaimJobs::wait_ms`], and its exchange is bounded by exactly that, so
+    /// the service's work for it and this side's wait end together.
     pub timeout: Duration,
     pub max_request_bytes: usize,
     /// Bound for a request whose body carries a JOURNAL quantity rather than a
@@ -61,16 +62,18 @@ pub struct Options {
 impl Default for Options {
     /// The byte bounds derive from the platform ceilings for the quantities
     /// this transport would carry: a request carries what `max_input_bytes`
-    /// governs, and a response carries what `max_journal_bytes` governs.
-    /// Deriving them is what stops this client refusing, on its own account,
-    /// something admission admitted. What a peer will accept is that peer's
-    /// own bound, declared where the peer configures its body limit.
+    /// governs, a settlement what `max_journal_bytes` governs, and the largest
+    /// response is a claim reply holding one maximal delivery,
+    /// [`ClaimJobs::MAX_REPLY_BYTES`]. Deriving them is what stops this client
+    /// refusing, on its own account, something admission admitted. What a
+    /// peer will accept is that peer's own bound, declared where the peer
+    /// configures its body limit.
     fn default() -> Self {
         Self {
             timeout: Duration::from_secs(5),
             max_request_bytes: MAX_INPUT_BYTES_CEILING,
             max_journal_request_bytes: MAX_JOURNAL_BYTES_CEILING,
-            max_response_bytes: MAX_JOURNAL_BYTES_CEILING,
+            max_response_bytes: ClaimJobs::MAX_REPLY_BYTES,
             plaintext_peers: PlaintextPeers::default(),
         }
     }
@@ -129,9 +132,18 @@ impl WorkerCoordinator {
     /// HTTP reaches a literal loopback address, or an origin the options named
     /// in `plaintext_peers`.
     ///
+    /// A worker reads claim replies, so its response bound must hold the
+    /// largest reply the claim contract lets the service send,
+    /// [`ClaimJobs::MAX_REPLY_BYTES`]; a smaller bound would refuse a full
+    /// batch and strand every lease in it.
+    ///
     /// # Errors
-    /// Rejects ambiguous endpoints, empty bounds and missing worker instance keys.
+    /// Rejects ambiguous endpoints, empty bounds, a response bound below the
+    /// claim reply bound and missing worker instance keys.
     pub fn new(url: &str, auth: Arc<ServiceAuth>, options: Options) -> Result<Self, Error> {
+        if options.max_response_bytes < ClaimJobs::MAX_REPLY_BYTES {
+            return Err(Error::InvalidConfig);
+        }
         let (issuer, key) = auth.signing_identity().ok_or(Error::Unauthenticated)?;
         let role = service_issuer(WORKER_SERVICE_NAME).map_err(|_| Error::InvalidConfig)?;
         if issuer.principal() != role.principal() {
@@ -161,74 +173,6 @@ impl WorkerCoordinator {
     #[must_use]
     pub fn signing_key_id(&self) -> &str {
         &self.signing_key_id
-    }
-
-    /// # Errors
-    /// Refuses failed exchanges and registration receipts for another identity.
-    pub async fn register(&self, request: &RegisterWorker) -> Result<RegisteredWorker, Error> {
-        let registered: RegisteredWorker = self
-            .transport
-            .post(endpoints::WORKFLOW_REGISTER, request)
-            .await?;
-        if registered.worker_id != self.worker_id
-            || registered.capacity != request.capacity
-            || registered.state != request.state
-        {
-            return Err(Error::InvalidResponse);
-        }
-        Ok(registered)
-    }
-
-    /// # Errors
-    /// Refuses failed exchanges, foreign workers and unordered/repeated page entries.
-    pub async fn assignments(&self, request: &ScopePage) -> Result<Vec<Assignment>, Error> {
-        let assignments: Vec<Assignment> = self
-            .transport
-            .post(endpoints::WORKFLOW_ASSIGNMENTS, request)
-            .await?;
-        let mut previous = request.after.as_ref();
-        for assignment in &assignments {
-            if assignment.worker_id != self.worker_id
-                || previous.is_some_and(|app| app.as_str() >= assignment.app_id.as_str())
-            {
-                return Err(Error::InvalidResponse);
-            }
-            previous = Some(&assignment.app_id);
-        }
-        Ok(assignments)
-    }
-
-    /// # Errors
-    /// Refuses failed exchanges and renewals that change the requested authority.
-    pub async fn renew(&self, request: &AssignedScope) -> Result<Assignment, Error> {
-        let assignment: Assignment = self
-            .transport
-            .post(endpoints::WORKFLOW_RENEW, request)
-            .await?;
-        if (
-            &assignment.worker_id,
-            &assignment.app_id,
-            assignment.revision,
-        ) != (
-            &self.worker_id,
-            &request.app_id,
-            request.assignment_revision,
-        ) {
-            return Err(Error::InvalidResponse);
-        }
-        Ok(assignment)
-    }
-
-    /// Give up one of this worker's placements. Release never discharges the
-    /// manager's recovery responsibility; a `refused` release tells the manager
-    /// never to offer the app to this worker instance again.
-    ///
-    /// # Errors
-    /// Refuses failed exchanges and stale or foreign placements.
-    pub async fn release(&self, request: &ReleaseScope) -> Result<(), Error> {
-        self.transport
-            .post(endpoints::WORKFLOW_RELEASE, request)
-            .await
     }
 
     /// Admit a run of one workflow from the value a creator supplied.

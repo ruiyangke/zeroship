@@ -16,6 +16,7 @@
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use zeroship_core::workflow_jobs::{Delivery, DeliveryLease, JobSpec};
+pub use zeroship_core::workflow_jobs::ClaimedDelivery;
 
 /// The journal payloads one implementation's merged exchanges carry.
 ///
@@ -41,21 +42,6 @@ pub trait JobJournal {
     /// than a half of any one exchange, which is why it has no envelope of its
     /// own beside the manager.
     type Receipt: DeserializeOwned;
-}
-
-/// A claimed delivery and, when the journal accepted the operation it names,
-/// what that acceptance answered.
-///
-/// The halves are NAMED rather than flattened; see
-/// `a_job_envelope_refuses_an_unnamed_field` for what that buys.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ClaimedDelivery<A> {
-    pub lease: DeliveryLease,
-    /// Absent for an operation the journal does not accept work for -- every
-    /// maintenance kind -- and present for the one that it does.
-    #[serde(default = "absent", skip_serializing_if = "Option::is_none")]
-    pub accepted: Option<A>,
 }
 
 /// A renewal request: the delivery whose queue lease is extended, and the
@@ -142,7 +128,6 @@ mod tests {
                 "availableAt": 1,
             },
             "workerId": WorkerId::mint().as_str(),
-            "assignmentRevision": 1,
             "attempt": 1,
             "deadline": 1,
         })
@@ -168,7 +153,7 @@ mod tests {
         serde_json::from_value::<RenewDelivery<Value>>(renewal.clone()).unwrap();
         assert!(serde_json::from_value::<RenewDelivery<Value>>(intruded(renewal)).is_err());
 
-        let claimed = json!({"lease": {"delivery": delivery(), "remainingMs": 1000}});
+        let claimed = json!({"lease": {"delivery": delivery(), "remainingMs": 1000, "attemptRemainingMs": 1000}});
         serde_json::from_value::<ClaimedDelivery<Value>>(claimed.clone()).unwrap();
         assert!(serde_json::from_value::<ClaimedDelivery<Value>>(intruded(claimed)).is_err());
 
@@ -207,19 +192,32 @@ mod tests {
     }
 }
 
-/// A release request: the delivery whose task is being handed back, and the
-/// task itself.
-///
-/// THE TASK IS NOT OPTIONAL HERE, unlike [`RenewDelivery`]'s. A release gives
-/// back creator work, and an operation with no journal task has none to give:
-/// every maintenance kind settles its delivery instead. So a body carrying no
-/// task is not a maintenance release, it is a malformed one, and the type says
-/// so rather than leaving the server to decide.
+/// A release request for creator work that stopped, or for an app that could
+/// not be prepared.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReleaseDelivery<C> {
     pub delivery: Delivery,
-    pub task: C,
+    pub task: Option<C>,
+    pub reason: GiveBackReason,
+}
+
+/// Why an executable delivery is returned without a settlement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GiveBackReason {
+    /// The holder could not prepare the app, so no attempt began. The row
+    /// waits out a back-off and counts no attempt.
+    PreparationFailed,
+    /// An attempt began and stopped without a receipt: it failed, was told to
+    /// stop, or its host drained. The row is claimable at once and the attempt
+    /// counts toward the delivery budget.
+    Interrupted,
+    /// The holder received the delivery and began nothing, through no fault of
+    /// the job: its journal task arrived with no time left, or the holder
+    /// stopped before starting it. The row is claimable at once and counts
+    /// nothing.
+    Unsent,
 }
 
 /// A request for the committed outcome of one logical job.

@@ -93,15 +93,14 @@ impl DeploymentHoldApi {
     /// The journal-scoped pair for a host whose authority is its own role.
     ///
     /// The HTTP boundary authenticates the workflow service before calling
-    /// this, and the journal a hold protects belongs to that service rather
-    /// than to a placement, so there is no assignment to verify and no worker
-    /// to name. The ledger refuses a deployment that is not the app's, a
+    /// this, and the journal a hold protects belongs to that service, so there
+    /// is no worker to name. The ledger refuses a deployment that is not the app's, a
     /// deployment whose reclamation has closed admission, a stale generation
     /// or transition, and unavailable storage.
     ///
     /// # Errors
-    /// Refuses a request naming a placement, foreign deployments, closed
-    /// admission, stale generations and unavailable storage.
+    /// Refuses an undeclared body field, foreign deployments, closed admission,
+    /// stale generations and unavailable storage.
     pub async fn acquire_asserted(
         &self,
         request: &HoldRequest,
@@ -110,8 +109,8 @@ impl DeploymentHoldApi {
     }
 
     /// # Errors
-    /// Refuses a request naming a placement, foreign deployments, stale
-    /// generations and unavailable storage.
+    /// Refuses an undeclared body field, foreign deployments, stale generations
+    /// and unavailable storage.
     pub async fn release_asserted(
         &self,
         request: &HoldRequest,
@@ -168,7 +167,7 @@ impl DeploymentHoldApi {
         .await
     }
 
-    /// Apply a hold whose caller was authenticated by role, with no placement
+    /// Apply a hold whose caller was authenticated by role, with no worker state
     /// read. The scope decides which holder the ledger acts as, and the host
     /// derives it from the endpoint and the verified role, never from the body.
     async fn change_unverified(

@@ -101,7 +101,7 @@ pub(crate) enum ReadLock {
     #[default]
     None,
     /// Exclusive locks on the rows of every source, or of the named aliases.
-    Update { of: Vec<String> },
+    Update { of: Vec<String>, nowait: bool },
 }
 
 pub(super) fn invalid(message: impl Into<String>) -> DbError {
@@ -543,7 +543,7 @@ fn row_lock(
     in_transaction: bool,
     registration: &crate::sql::registration::SqlRegistration,
 ) -> Result<crate::sql::statement::RowLock, DbError> {
-    let ReadLock::Update { of } = &input.lock else {
+    let ReadLock::Update { of, nowait } = &input.lock else {
         return Ok(crate::sql::statement::RowLock::None);
     };
     if !in_transaction {
@@ -582,7 +582,10 @@ fn row_lock(
     if !registration.support().row_locks {
         return Err(super::unsupported_backend_feature("row locks"));
     }
-    Ok(crate::sql::statement::RowLock::Required { of: targets })
+    Ok(crate::sql::statement::RowLock::Required {
+        of: targets,
+        nowait: *nowait,
+    })
 }
 
 pub(super) fn consume_budget(value: &Value, budget: &mut usize) -> Result<(), DbError> {

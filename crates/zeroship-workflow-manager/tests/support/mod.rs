@@ -3,7 +3,11 @@
     reason = "fixture connections stay on their compio runtime"
 )]
 
-use std::{future::Future, pin::Pin, rc::Rc};
+use std::{
+    future::{ready, Future},
+    pin::Pin,
+    rc::Rc,
+};
 use testcontainers::{
     core::{IntoContainerPort, WaitFor},
     runners::SyncRunner,
@@ -12,10 +16,12 @@ use testcontainers::{
 use zeroship_core::{
     app_id::AppId,
     schema_name::SchemaName,
+    workflow_coordination::WorkerId,
     workflow_deployments::{HoldGeneration, HoldReceipt, HoldScope, HoldState},
-    workflow_jobs::{Delivery, DeploymentId, JobOutcome, JobReceipt, JournalSettlement},
+    workflow_jobs::{
+        Delivery, DeploymentId, JobOutcome, JobReceipt, JournalSettlement, SettlementReceipt,
+    },
     workflow_policy::AppPolicy,
-    zone_id::ZoneId,
 };
 use zeroship_data_orm::{
     binding::DbBinding, encryption::ProjectKeySource, orm::Database, ConnectOptions,
@@ -24,15 +30,95 @@ use zeroship_workflow_manager::{
     capacity::LocalCapacity,
     coordinator::{self, Coordinator},
     driver::{self, Driver},
-    eligibility::{EligibilitySource, LocalEligibility},
     lifecycle::{AppLifecycle, Undeletable},
     retention::HoldClient,
-    Error, Queue,
+    Claimant, DeliveryGrant, Error, Queue,
 };
 
 pub mod deployments;
-pub mod placement;
+pub mod policies;
 pub mod retention;
+
+use policies::LocalPolicies;
+
+/// One worker acting on one app: the identity a direct queue call claims,
+/// renews and settles as.
+#[derive(Clone, Debug)]
+pub struct Owner {
+    pub app_id: AppId,
+    pub worker_id: WorkerId,
+}
+
+impl Owner {
+    #[must_use]
+    pub fn new(app_id: AppId, worker_id: WorkerId) -> Self {
+        Self { app_id, worker_id }
+    }
+}
+
+/// Direct queue calls a contract makes as one enrolled worker holding one app.
+///
+/// The manager's own claim path is `claim_in_zone`; these wrap the single-app
+/// authorized operations so a queue contract can drive one app without a zone
+/// page, always under the same worker it names.
+pub trait QueueCalls {
+    /// Claim one ready job of `owner`'s app.
+    ///
+    /// # Errors
+    /// Refuses invalid bounds and failed transactions.
+    async fn claim(&self, owner: &Owner) -> Result<Option<DeliveryGrant>, Error>;
+
+    /// Extend `owner`'s delivery lease.
+    ///
+    /// # Errors
+    /// Refuses a stale delivery and failed transactions.
+    async fn heartbeat(&self, owner: &Owner, delivery: &Delivery) -> Result<DeliveryGrant, Error>;
+
+    /// Settle a delivery `owner` holds with the journal's settlement.
+    ///
+    /// # Errors
+    /// Refuses a stale delivery and failed transactions.
+    async fn settle(
+        &self,
+        owner: &Owner,
+        settlement: &JournalSettlement,
+    ) -> Result<SettlementReceipt, Error>;
+}
+
+impl QueueCalls for Queue {
+    async fn claim(&self, owner: &Owner) -> Result<Option<DeliveryGrant>, Error> {
+        let worker = owner.worker_id.clone();
+        self.claim_authorized(
+            &owner.app_id,
+            &owner.worker_id,
+            Claimant::Worker,
+            Ok(AppPolicy::default().max_delivery_attempts),
+            |_| ready(Ok(worker.clone())),
+        )
+        .await
+    }
+
+    async fn heartbeat(&self, owner: &Owner, delivery: &Delivery) -> Result<DeliveryGrant, Error> {
+        let worker = owner.worker_id.clone();
+        self.heartbeat_authorized(&owner.worker_id, delivery, |_| ready(Ok(worker.clone())))
+            .await
+    }
+
+    async fn settle(
+        &self,
+        owner: &Owner,
+        settlement: &JournalSettlement,
+    ) -> Result<SettlementReceipt, Error> {
+        let worker = owner.worker_id.clone();
+        self.settle_authorized(
+            &owner.worker_id,
+            settlement,
+            |_| ready(Ok(worker.clone())),
+            |_| ready(Ok(worker.clone())),
+        )
+        .await
+    }
+}
 
 /// The settlement the journal decided for `delivery`'s logical job.
 ///
@@ -55,19 +141,13 @@ pub fn settlement_from(delivery: Delivery, outcome: JobOutcome) -> JournalSettle
     settlement(&delivery, outcome)
 }
 
-/// Trusted single-zone facts for contracts that do not exercise eligibility:
-/// every app and worker is in the seeded zone and active.
-pub fn local_eligibility() -> Rc<dyn EligibilitySource> {
-    Rc::new(LocalEligibility::new(ZoneId::default_zone()))
-}
-
-/// A coordinator over `queue` under trusted single-zone facts.
+/// A coordinator over `queue`.
 pub fn coordinator(queue: &Queue, options: coordinator::Options) -> Coordinator {
-    Coordinator::new(queue.clone(), options, local_eligibility()).unwrap()
+    Coordinator::new(queue.clone(), options).unwrap()
 }
 
-/// A driver whose placement lane runs under trusted single-zone facts and the
-/// local host's always-satisfied capacity. No app is ever deleted.
+/// A driver whose lanes run under trusted single-zone facts and the local
+/// host's always-satisfied capacity. No app is ever deleted.
 pub fn local_driver(queue: &Queue, options: driver::Options) -> Driver {
     driver_for(queue, options, Rc::new(Undeletable))
 }
@@ -91,6 +171,7 @@ pub fn try_driver(
         coordinator(queue, coordinator::Options::default()),
         options,
         lifecycle,
+        LocalPolicies::shared(),
         Rc::new(LocalCapacity),
     )
 }

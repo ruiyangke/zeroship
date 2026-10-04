@@ -100,9 +100,12 @@ impl Default for ConsumerConfig {
 pub struct ManagerConfig {
     /// Delivery lease; heartbeats renew it while a job executes.
     pub lease_ms: u64,
-    /// Lifetime of this process's registration and placement. The host
-    /// renews both well within it (`LocalConfig::renew_interval`).
-    pub placement_ttl_ms: u64,
+    /// How far heartbeats may extend one delivery attempt. At least
+    /// `lease_ms`: a cap below the lease would end every attempt before its
+    /// first renewal was due.
+    pub max_attempt_ms: u64,
+    /// Bound on one zone claim scan.
+    pub claim_budget_ms: u64,
     /// Delay between bounded calendar, recovery and hold maintenance passes.
     pub driver_interval_ms: u64,
     /// Bound on each maintenance lane's pass.
@@ -126,7 +129,8 @@ impl Default for ManagerConfig {
     fn default() -> Self {
         Self {
             lease_ms: 30_000,
-            placement_ttl_ms: 30_000,
+            max_attempt_ms: 300_000,
+            claim_budget_ms: 5_000,
             driver_interval_ms: 1_000,
             lane_timeout_ms: 10_000,
             hold_grace_ms: 60_000,
@@ -169,6 +173,8 @@ impl LocalConfig {
                 consumer.operation_timeout_ms,
                 consumer.retry_delay_ms,
                 manager.lease_ms,
+                manager.max_attempt_ms,
+                manager.claim_budget_ms,
                 manager.driver_interval_ms,
                 manager.lane_timeout_ms,
                 manager.recovery_interval_ms,
@@ -178,9 +184,12 @@ impl LocalConfig {
             // transaction that commits its dependency.
             || Duration::from_millis(manager.hold_grace_ms)
                 <= zeroship_workflow_manager::Options::default().transaction_timeout
-            // The renewal interval derived from the lifetime must be positive.
-            || self.renew_interval().is_zero()
             || manager::recovery_options(self.manager_options())
+                .validate()
+                .is_err()
+            // The queue the host opens refuses these at startup; refuse them
+            // here, where the configuration names them.
+            || manager::queue_options(self.manager_options())
                 .validate()
                 .is_err()
         {
@@ -198,9 +207,11 @@ impl LocalConfig {
         let consumer = self.consumer;
         ConsumerOptions {
             slots: consumer.slots,
-            max_scopes: 1,
             idle_poll: Duration::from_millis(consumer.idle_poll_ms),
             error_backoff: Duration::from_millis(consumer.error_backoff_ms),
+            // The local host stops when its developer does: running executions
+            // are cancelled at the stop and run again on the next start.
+            drain: Duration::ZERO,
             delivery: DeliveryOptions {
                 execution_timeout: Duration::from_millis(consumer.execution_timeout_ms),
                 operation_timeout: Duration::from_millis(consumer.operation_timeout_ms),
@@ -212,7 +223,8 @@ impl LocalConfig {
     const fn manager_options(&self) -> manager::ManagerOptions {
         manager::ManagerOptions {
             lease: Duration::from_millis(self.manager.lease_ms),
-            placement_ttl: Duration::from_millis(self.manager.placement_ttl_ms),
+            max_attempt: Duration::from_millis(self.manager.max_attempt_ms),
+            claim_budget: Duration::from_millis(self.manager.claim_budget_ms),
             recovery_interval: Duration::from_millis(self.manager.recovery_interval_ms),
             hold_grace: Duration::from_millis(self.manager.hold_grace_ms),
             lane_timeout: Duration::from_millis(self.manager.lane_timeout_ms),
@@ -222,10 +234,6 @@ impl LocalConfig {
             closing_backoff: Duration::from_millis(self.manager.closing_backoff_ms),
             closing_backoff_max: Duration::from_millis(self.manager.closing_backoff_max_ms),
         }
-    }
-
-    const fn renew_interval(&self) -> Duration {
-        Duration::from_millis(self.manager.placement_ttl_ms / 3)
     }
 
     /// A predecessor may hold the activation's delivery lease; its expiry,

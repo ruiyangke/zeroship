@@ -111,7 +111,7 @@ fn config_check_validates_toml_and_flags_without_opening_dependencies() {
         .env_clear()
         .args(["--check-config", "--config"])
         .arg(&config)
-        .args(["--assignment-ttl-ms", "0"])
+        .args(["--claim-budget-ms", "0"])
         .output()
         .unwrap();
     assert!(!invalid.status.success());
@@ -129,7 +129,13 @@ fn config_check_validates_toml_and_flags_without_opening_dependencies() {
             .unwrap();
         assert!(!invalid.status.success(), "accepted {flag}=0");
     }
-    for flag in ["--payload-url", "--max-running", "--lease-ms"] {
+    for flag in [
+        "--payload-url",
+        "--max-running",
+        "--lease-ms",
+        "--worker-ttl-ms",
+        "--assignment-ttl-ms",
+    ] {
         assert!(WorkflowSettingsSources::try_parse_from([
             "zeroship-workflow-server",
             flag,
@@ -458,4 +464,100 @@ fn the_maintenance_lane_is_on_by_default_and_an_overlay_can_stand_it_down() {
         "maybe"
     ])
     .is_err());
+}
+
+/// The delivery lease, the attempt cap over it, the claim budget and the static
+/// pool come from configuration, and an attempt cap shorter than the lease it
+/// spans is refused by the configuration check rather than at startup.
+///
+/// The well-formed overlay is the control for every refusal: each differs from
+/// it in one field. The cap equal to the lease is the boundary control for the
+/// cap below it, and the default lease answers for an overlay that names a cap
+/// alone. The process arm crosses the shared overlay schema, so the lease key is
+/// one a deployment can actually write.
+#[test]
+fn delivery_bounds_come_from_configuration_and_an_attempt_spans_its_lease() {
+    let valid = serde_json::json!({"workflow":{
+        "database_url":"postgres://unused@127.0.0.1:1/unreachable",
+        "service_peers_file":"unread-peers", "service_key_file":"unread-key",
+        "control_url":"https://control.example.test",
+        "storage_url":"unread-payload-objects",
+        "delivery_lease_ms":20_000,
+        "max_attempt_ms":60_000,
+        "claim_budget_ms":1_500,
+        "static_pool_slots":7,
+    }});
+    let resolve = |input: &serde_json::Value| {
+        let overlay: toml::Value = toml::from_str(&toml::to_string(input).unwrap()).unwrap();
+        let settings = WorkflowSettings::resolve_config(
+            WorkflowSettingsSources::try_parse_from(["zeroship-workflow-server", "--no-config"])
+                .unwrap(),
+            Some(&overlay),
+        )
+        .unwrap();
+        ServerOptions::resolve(&settings)
+    };
+    let options = resolve(&valid).unwrap();
+    assert_eq!(options.coordinator.lease, std::time::Duration::from_secs(20));
+    assert_eq!(
+        options.coordinator.max_attempt,
+        std::time::Duration::from_mins(1)
+    );
+    assert_eq!(
+        options.coordinator.claim_budget,
+        std::time::Duration::from_millis(1_500)
+    );
+    assert_eq!(options.static_pool_slots, 7);
+
+    let mut boundary = valid.clone();
+    boundary["workflow"]["max_attempt_ms"] = serde_json::json!(20_000);
+    resolve(&boundary).expect("an attempt cap equal to the lease spans one lease");
+    for (field, value) in [
+        ("max_attempt_ms", serde_json::json!(19_999)),
+        ("delivery_lease_ms", serde_json::json!(60_001)),
+        ("delivery_lease_ms", serde_json::json!(0)),
+        ("max_attempt_ms", serde_json::json!(0)),
+        ("claim_budget_ms", serde_json::json!(0)),
+        ("static_pool_slots", serde_json::json!(0)),
+    ] {
+        let mut invalid = valid.clone();
+        invalid["workflow"][field] = value.clone();
+        assert!(resolve(&invalid).is_err(), "accepted {field}={value}");
+    }
+
+    // A cap named alone answers to the default lease.
+    let mut defaulted = valid.clone();
+    let fields = defaulted["workflow"].as_object_mut().unwrap();
+    fields.remove("delivery_lease_ms");
+    let default_lease = zeroship_workflow_server::coordinator::Options::default().lease;
+    let default_lease_ms = u64::try_from(default_lease.as_millis()).unwrap();
+    fields.insert("max_attempt_ms".into(), serde_json::json!(default_lease_ms));
+    assert_eq!(resolve(&defaulted).unwrap().coordinator.lease, default_lease);
+    defaulted["workflow"]["max_attempt_ms"] = serde_json::json!(default_lease_ms - 1);
+    assert!(resolve(&defaulted).is_err(), "a cap under the default lease");
+
+    let dir = tempfile::tempdir().unwrap();
+    let check = |name: &str, input: &serde_json::Value| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, toml::to_string(input).unwrap()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        Command::new(env!("CARGO_BIN_EXE_zeroship-workflow-server"))
+            .env_clear()
+            .args(["--check-config", "--config"])
+            .arg(&path)
+            .output()
+            .unwrap()
+    };
+    let accepted = check("bounds-valid.toml", &valid);
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    let mut short = valid;
+    short["workflow"]["max_attempt_ms"] = serde_json::json!(19_999);
+    assert!(
+        !check("bounds-short.toml", &short).status.success(),
+        "the configuration check accepted an attempt cap shorter than the lease"
+    );
 }

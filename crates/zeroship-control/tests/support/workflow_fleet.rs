@@ -109,6 +109,11 @@ pub struct FleetOptions {
     /// Run a workflow manager, point Control's lifecycle publisher at it, and
     /// give the worker a workflow host registered with it.
     pub workflow_manager: bool,
+    /// Reserve a second worker that is NOT started at launch, and point the
+    /// gateway's route list only at it. A test starts it later, so a run can be
+    /// started through the first worker's dispatch frame and finished by a
+    /// worker the gateway routes to but that never ran the app.
+    pub deferred_second_worker: bool,
 }
 
 #[derive(Debug)]
@@ -122,6 +127,14 @@ pub struct Fleet {
     pub control_url: String,
     pub gateway_url: String,
     pub worker_url: String,
+    /// The port and URL of the deferred second worker, present only when
+    /// [`FleetOptions::deferred_second_worker`] asked for one. Started by
+    /// [`Fleet::start_second_worker`], not at launch.
+    second_worker_port: Option<u16>,
+    pub second_worker_url: Option<String>,
+    /// The CDC relay port and blob root every worker spawn reuses.
+    relay_port: u16,
+    blobs: String,
     /// Present only when [`FleetOptions::workflow_manager`] asked for one.
     pub manager_url: Option<String>,
     pub app_id: AppId,
@@ -145,6 +158,16 @@ impl Fleet {
     pub fn with_workflow_manager() -> Self {
         Self::with(FleetOptions {
             workflow_manager: true,
+            deferred_second_worker: false,
+        })
+    }
+
+    /// A workflow fleet with a second worker reserved but not started. The
+    /// gateway's route list names only the second worker.
+    pub fn with_deferred_second_worker() -> Self {
+        Self::with(FleetOptions {
+            workflow_manager: true,
+            deferred_second_worker: true,
         })
     }
 
@@ -182,6 +205,8 @@ impl Fleet {
             issuer.get_host().unwrap(),
             issuer.get_host_port_ipv4(80).unwrap()
         );
+        let worker_port = port();
+        let second_worker_port = options.deferred_second_worker.then(port);
         let mut fleet = Self {
             _issuer: issuer,
             issuer_url,
@@ -192,7 +217,12 @@ impl Fleet {
             database,
             control_url: format!("http://127.0.0.1:{}", port()),
             gateway_url: format!("http://127.0.0.1:{}", port()),
-            worker_url: format!("http://127.0.0.1:{}", port()),
+            worker_url: format!("http://127.0.0.1:{worker_port}"),
+            second_worker_port,
+            second_worker_url: second_worker_port
+                .map(|second| format!("http://127.0.0.1:{second}")),
+            relay_port: 0,
+            blobs: String::new(),
             manager_url: options
                 .workflow_manager
                 .then(|| format!("http://127.0.0.1:{}", port())),
@@ -248,6 +278,7 @@ impl Fleet {
         fleet.secret("relay-cert.pem", cert.cert.pem().as_bytes());
         fleet.secret("relay-key.pem", cert.signing_key.serialize_pem().as_bytes());
         let relay_port = port();
+        fleet.relay_port = relay_port;
         let relay_addr = format!("127.0.0.1:{relay_port}");
         release(relay_port);
         fleet.spawn(
@@ -285,17 +316,20 @@ impl Fleet {
             .port()
             .unwrap()
             .to_string();
-        let worker_port = url::Url::parse(&fleet.worker_url)
-            .unwrap()
-            .port()
-            .unwrap()
-            .to_string();
+        // The enrolment envelope bounds the ports a worker may advertise. With
+        // a deferred second worker both listening ports must be inside it.
+        let enrolment_ports = match fleet.second_worker_port {
+            Some(second) => format!("{}-{}", worker_port.min(second), worker_port.max(second)),
+            None => worker_port.to_string(),
+        };
+        let worker_port = worker_port.to_string();
         let gateway_port = url::Url::parse(&fleet.gateway_url)
             .unwrap()
             .port()
             .unwrap()
             .to_string();
         let blobs = fleet.blob_root.to_str().unwrap().to_owned();
+        fleet.blobs = blobs.clone();
         // The manager owns no creator database: it reads the platform metadata
         // under its own login and verifies enrolled instances from the same
         // registry Control writes at enrolment.
@@ -340,10 +374,7 @@ impl Fleet {
                 "ZEROSHIP_CONTROL_WORKER_ENROLMENT_NETWORKS",
                 "127.0.0.1/32".into(),
             ),
-            (
-                "ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS",
-                worker_port.clone(),
-            ),
+            ("ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS", enrolment_ports),
             (
                 "ZEROSHIP_CONTROL_JOIN_SIGNERS_FILE",
                 fleet.path("join-signers.json"),
@@ -380,55 +411,7 @@ impl Fleet {
         if let Some(manager_url) = fleet.manager_url.clone() {
             fleet.ready(manager_url).await;
         }
-        let mut worker_env = vec![
-            (
-                "ZEROSHIP_WORKER_DATABASE_URL",
-                fleet.creator_role_url("zeroship_worker"),
-            ),
-            (
-                "ZEROSHIP_WORKER_CDC_RELAY_URL",
-                format!("wss://localhost:{relay_port}/internal/v1/cdc/subscribe"),
-            ),
-            (
-                "ZEROSHIP_WORKER_CDC_RELAY_CA_FILE",
-                fleet.path("relay-cert.pem"),
-            ),
-            // Control mints this before it binds, and `fleet.ready` above
-            // waited for that bind, so the file is there by the time the
-            // worker reads it.
-            ("ZEROSHIP_WORKER_JOIN_TOKEN_FILE", fleet.path("join-token")),
-        ];
-        if let Some(manager_url) = fleet.manager_url.clone() {
-            // A workflow host stages payloads in the object store the workflow
-            // service also names, and runs creator code against the app
-            // database, so the worker needs both.
-            let payloads = fleet.payload_store();
-            worker_env.push(("ZEROSHIP_WORKER_WORKFLOW_MANAGER_URL", manager_url));
-            worker_env.push(("ZEROSHIP_WORKER_WORKFLOW_CAPACITY", "8".into()));
-            worker_env.push(("ZEROSHIP_WORKER_WORKFLOW_SLOTS", "2".into()));
-            worker_env.push((
-                "ZEROSHIP_WORKER_STORAGE_URL",
-                payloads.to_str().unwrap().to_owned(),
-            ));
-        }
-        release(worker_port.parse().expect("worker port"));
-        fleet.spawn(
-            "worker",
-            &binaries["zeroship-worker"],
-            &[
-                "--port".into(),
-                worker_port,
-                "--threads".into(),
-                "1".into(),
-                "--control-url".into(),
-                fleet.control_url.clone(),
-                "--blob-store".into(),
-                blobs.clone(),
-                "--poll-interval".into(),
-                "1".into(),
-            ],
-            &worker_env,
-        );
+        fleet.spawn_worker("worker", &worker_port);
         fleet.ready(fleet.worker_url.clone()).await;
         release(gateway_port.parse().expect("gateway port"));
         fleet.spawn(
@@ -440,8 +423,13 @@ impl Fleet {
                 gateway_port,
                 "--control-url".into(),
                 fleet.control_url.clone(),
+                // With a deferred second worker the gateway routes only to it,
+                // so reaching the first worker means its own dispatch frame.
                 "--worker-urls".into(),
-                fleet.worker_url.clone(),
+                fleet
+                    .second_worker_url
+                    .clone()
+                    .unwrap_or_else(|| fleet.worker_url.clone()),
                 "--blob-store".into(),
                 blobs.clone(),
                 "--poll-interval".into(),
@@ -633,6 +621,80 @@ impl Fleet {
         payloads
     }
 
+    /// Spawn a worker process listening on `worker_port`.
+    ///
+    /// The same process shape serves the first and the deferred second worker:
+    /// both read the SAME join-token file Control rotates, whose capped uses
+    /// cover both, and both poll Control for the app's version and env. The
+    /// port's reservation is held until this spawn, so the deferred second
+    /// worker's port stays out of a sibling's reach until it starts.
+    fn spawn_worker(&mut self, name: &str, worker_port: &str) {
+        let mut worker_env = vec![
+            (
+                "ZEROSHIP_WORKER_DATABASE_URL",
+                self.creator_role_url("zeroship_worker"),
+            ),
+            (
+                "ZEROSHIP_WORKER_CDC_RELAY_URL",
+                format!(
+                    "wss://localhost:{}/internal/v1/cdc/subscribe",
+                    self.relay_port
+                ),
+            ),
+            (
+                "ZEROSHIP_WORKER_CDC_RELAY_CA_FILE",
+                self.path("relay-cert.pem"),
+            ),
+            ("ZEROSHIP_WORKER_JOIN_TOKEN_FILE", self.path("join-token")),
+        ];
+        if let Some(manager_url) = self.manager_url.clone() {
+            // A workflow host stages payloads in the object store the workflow
+            // service also names, and runs creator code against the app
+            // database, so the worker needs both.
+            let payloads = self.payload_store();
+            worker_env.push(("ZEROSHIP_WORKER_WORKFLOW_MANAGER_URL", manager_url));
+            worker_env.push(("ZEROSHIP_WORKER_WORKFLOW_PREPARED_APPS", "8".into()));
+            worker_env.push(("ZEROSHIP_WORKER_WORKFLOW_SLOTS", "2".into()));
+            worker_env.push((
+                "ZEROSHIP_WORKER_STORAGE_URL",
+                payloads.to_str().unwrap().to_owned(),
+            ));
+        }
+        release(worker_port.parse().expect("worker port"));
+        self.spawn_as(
+            name,
+            "worker",
+            &binaries()["zeroship-worker"],
+            &[
+                "--port".into(),
+                worker_port.to_owned(),
+                "--threads".into(),
+                "1".into(),
+                "--control-url".into(),
+                self.control_url.clone(),
+                "--blob-store".into(),
+                self.blobs.clone(),
+                "--poll-interval".into(),
+                "1".into(),
+            ],
+            &worker_env,
+        );
+    }
+
+    /// Start the reserved second worker and wait for it to be ready.
+    pub async fn start_second_worker(&mut self) {
+        let port = self
+            .second_worker_port
+            .expect("the fleet reserved no deferred second worker")
+            .to_string();
+        self.spawn_worker("worker-2", &port);
+        let url = self
+            .second_worker_url
+            .clone()
+            .expect("the fleet reserved no deferred second worker");
+        self.ready(url).await;
+    }
+
     pub fn role_url(&self, role: &str) -> String {
         let mut url = url::Url::parse(&self.database.url()).unwrap();
         url.set_username(role).unwrap();
@@ -649,6 +711,24 @@ impl Fleet {
     }
 
     fn spawn(&mut self, name: &str, binary: &Path, args: &[String], env: &[(&str, String)]) {
+        self.spawn_as(name, name, binary, args, env);
+    }
+
+    /// As [`Self::spawn`], naming the service whose environment variables this
+    /// process reads when the process name is not the service name.
+    ///
+    /// A second worker is a distinct process (`worker-2`) serving the SAME
+    /// `zeroship-worker` service, so it reads `ZEROSHIP_WORKER_*`. Deriving the
+    /// prefix from the process name would ask it for `ZEROSHIP_WORKER-2_*`,
+    /// which it never reads.
+    fn spawn_as(
+        &mut self,
+        name: &str,
+        service: &str,
+        binary: &Path,
+        args: &[String],
+        env: &[(&str, String)],
+    ) {
         let log = File::create(self.logs.join(format!("{name}.log"))).unwrap();
         let mut cmd = Command::new(binary);
         cmd.args(args)
@@ -685,18 +765,18 @@ impl Fleet {
             .env("ZEROSHIP_ORIGIN_SCHEME", "http")
             .env("ZEROSHIP_AUTH_PLATFORM_ISSUER", &self.issuer_url)
             .env("ZEROSHIP_OBSERVABILITY_LOG_FORMAT", "json");
-        if name != "relay" {
+        if service != "relay" {
             // The worker holds no key of its own: it reads a join token, set
             // by its spawn, and draws its instance key in memory. Every other
             // service holds a role key of its own.
-            if name != "worker" {
+            if service != "worker" {
                 cmd.env(
-                    format!("ZEROSHIP_{}_SERVICE_KEY_FILE", name.to_uppercase()),
-                    self.path(&format!("{name}.pem")),
+                    format!("ZEROSHIP_{}_SERVICE_KEY_FILE", service.to_uppercase()),
+                    self.path(&format!("{service}.pem")),
                 );
             }
             cmd.env(
-                format!("ZEROSHIP_{}_SERVICE_PEERS_FILE", name.to_uppercase()),
+                format!("ZEROSHIP_{}_SERVICE_PEERS_FILE", service.to_uppercase()),
                 self.path("peers.json"),
             );
         }
@@ -711,20 +791,21 @@ impl Fleet {
     /// and a service that has not exited within the deadline is a failure
     /// rather than something to escalate past.
     pub fn terminate(&mut self, name: &str) -> std::process::ExitStatus {
-        let (_, child) = self
+        let index = self
             .children
-            .iter_mut()
-            .find(|(child_name, _)| child_name == name)
+            .iter()
+            .position(|(child_name, _)| child_name == name)
             .unwrap_or_else(|| panic!("no fleet service named {name}"));
+        let child = &mut self.children[index].1;
         let signalled = Command::new("kill")
             .args(["-TERM", &child.id().to_string()])
             .status()
             .expect("run kill -TERM");
         assert!(signalled.success(), "kill -TERM {name} failed: {signalled}");
         let deadline = Instant::now() + Duration::from_secs(60);
-        loop {
+        let status = loop {
             if let Some(status) = child.try_wait().expect("poll the terminating service") {
-                return status;
+                break status;
             }
             assert!(
                 Instant::now() < deadline,
@@ -732,7 +813,11 @@ impl Fleet {
                 self.logs.display()
             );
             std::thread::sleep(Duration::from_millis(100));
-        }
+        };
+        // A terminated service has left the fleet: `assert_alive`
+        // and `Drop` must not read its clean exit as a crash.
+        self.children.remove(index);
+        status
     }
 
     pub fn assert_alive(&mut self) {

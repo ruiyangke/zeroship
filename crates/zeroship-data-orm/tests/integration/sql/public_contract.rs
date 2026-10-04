@@ -153,6 +153,7 @@ fn compile_upsert(registration: &SqlRegistration, reverse: bool) -> CompiledQuer
                 condition: None,
                 returning: Vec::new(),
                 insert_generated_identity: false,
+                do_nothing: false,
             })
             .unwrap(),
         ))

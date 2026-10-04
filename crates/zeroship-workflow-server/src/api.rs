@@ -6,7 +6,6 @@
 
 mod jobs;
 mod runs;
-mod policy;
 mod schedules;
 
 use crate::{coordinator::Error, SharedState};
@@ -21,10 +20,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::time::Duration;
 use zeroship_core::{
     service_identity::endpoints,
-    workflow_coordination::{
-        AssignedScope, Failure, FailureCode, ManageRun, ManagementStatus, RegisterWorker,
-        ReleaseScope, ScopePage,
-    },
+    workflow_coordination::{Failure, FailureCode, ManageRun, ManagementStatus},
 };
 
 pub use jobs::SETTLE_BODY_BYTES;
@@ -68,7 +64,6 @@ pub fn configure(config: &mut web::ServiceConfig) {
 pub fn configure_with_limit(config: &mut web::ServiceConfig, limit: usize) {
     jobs::configure(config);
     runs::configure(config);
-    policy::configure(config);
     schedules::configure(config);
     config
         .state(web::types::JsonConfig::default().limit(limit))
@@ -80,21 +75,6 @@ pub fn configure_with_limit(config: &mut web::ServiceConfig, limit: usize) {
         .service(
             web::resource(endpoints::WORKFLOW_MANAGEMENT_STATUS.path_template())
                 .route(web::post().to(management_status)),
-        )
-        .service(
-            web::resource(endpoints::WORKFLOW_REGISTER.path_template())
-                .route(web::post().to(register)),
-        )
-        .service(
-            web::resource(endpoints::WORKFLOW_ASSIGNMENTS.path_template())
-                .route(web::post().to(assignments)),
-        )
-        .service(
-            web::resource(endpoints::WORKFLOW_RENEW.path_template()).route(web::post().to(renew)),
-        )
-        .service(
-            web::resource(endpoints::WORKFLOW_RELEASE.path_template())
-                .route(web::post().to(release)),
         )
         .service(web::resource("/{path:.*}").route(web::route().to(not_found)));
 }
@@ -214,114 +194,6 @@ async fn management_status(
                 .service
                 .manager
                 .management_receipt(&command.app_id, &command.request_id)
-                .await
-                .map_err(Error::from)
-        }
-        .await,
-    )
-}
-
-async fn register(
-    request: web::HttpRequest,
-    state: State<SharedState>,
-    body: web::types::Payload,
-) -> web::HttpResponse {
-    respond(
-        async {
-            let actor = compio::time::timeout(
-                Duration::from_secs(5),
-                state
-                    .auth
-                    .worker(authorization(&request), endpoints::WORKFLOW_REGISTER),
-            )
-            .await
-            .map_err(|_| Error::Unavailable)??;
-            let command: RegisterWorker = read_json(&request, body).await?;
-            state
-                .service
-                .manager
-                .register(actor.id(), &command)
-                .await
-                .map_err(Error::from)
-        }
-        .await,
-    )
-}
-
-async fn assignments(
-    request: web::HttpRequest,
-    state: State<SharedState>,
-    body: web::types::Payload,
-) -> web::HttpResponse {
-    respond(
-        async {
-            let actor = compio::time::timeout(
-                Duration::from_secs(5),
-                state
-                    .auth
-                    .worker(authorization(&request), endpoints::WORKFLOW_ASSIGNMENTS),
-            )
-            .await
-            .map_err(|_| Error::Unavailable)??;
-            let command: ScopePage = read_json(&request, body).await?;
-            state
-                .service
-                .manager
-                .assignments(actor.id(), command.after.as_ref())
-                .await
-                .map_err(Error::from)
-        }
-        .await,
-    )
-}
-
-async fn renew(
-    request: web::HttpRequest,
-    state: State<SharedState>,
-    body: web::types::Payload,
-) -> web::HttpResponse {
-    respond(
-        async {
-            let actor = compio::time::timeout(
-                Duration::from_secs(5),
-                state
-                    .auth
-                    .worker(authorization(&request), endpoints::WORKFLOW_RENEW),
-            )
-            .await
-            .map_err(|_| Error::Unavailable)??;
-            let command: AssignedScope = read_json(&request, body).await?;
-            state
-                .service
-                .manager
-                .renew(actor.id(), &command)
-                .await
-                .map_err(Error::from)
-        }
-        .await,
-    )
-}
-
-async fn release(
-    request: web::HttpRequest,
-    state: State<SharedState>,
-    body: web::types::Payload,
-) -> web::HttpResponse {
-    respond(
-        async {
-            let actor = compio::time::timeout(
-                Duration::from_secs(5),
-                state
-                    .auth
-                    .worker(authorization(&request), endpoints::WORKFLOW_RELEASE),
-            )
-            .await
-            .map_err(|_| Error::Unavailable)??;
-            let command: ReleaseScope = read_json(&request, body).await?;
-            state
-                .service
-                .manager
-                .release(actor.id(), &command)
                 .await
                 .map_err(Error::from)
         }

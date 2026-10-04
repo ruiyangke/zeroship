@@ -136,9 +136,9 @@ pub struct WorkerSettings {
     /// Exact `http://host[:port]` origins this process may reach in clear.
     ///
     /// Empty (the default) admits HTTPS and literal loopback alone. An entry
-    /// authorizes plaintext to that ORIGIN for every workflow client this
-    /// process builds - the manager client and the deployment-hold client
-    /// alike - and the service assertion each carries crosses the network
+    /// authorizes plaintext to that ORIGIN for the workflow manager client
+    /// this process builds, which every claim, delivery and run call crosses
+    /// on, and the service assertion each carries crosses the network
     /// readable; name only origins whose whole network path is trusted.
     #[arg(value_delimiter = ',')]
     #[config(shared = PLAINTEXT_PEERS, default = Vec::new())]
@@ -156,13 +156,16 @@ pub struct WorkerSettings {
     #[config(name = "worker.max_isolates", default = 200)]
     pub max_isolates: Operational<usize>,
 
-    /// Shutdown drain timeout in seconds.
+    /// Shutdown drain timeout in seconds: HTTP and the workflow host drain side
+    /// by side within it, from the stop signal.
     ///
-    /// Zero does NOT mean wait forever. ntex takes its ungraceful branch when the
-    /// timeout is zero and stops workers immediately, dropping in-flight requests,
-    /// so zero is the harshest setting rather than the most patient one. To wait a
-    /// long time, pass a long time.
-    #[config(name = "worker.shutdown_timeout", default = 30)]
+    /// At least `workflow_host::MIN_SHUTDOWN_TIMEOUT`, refused at boot below
+    /// it: a delivery claimed just before the stop has its app prepared, may
+    /// run to the workflow host's execution ceiling and must then be settled,
+    /// and what the host cannot finish is released before the drain ends. The
+    /// deployment's termination grace is stated from this value, so the
+    /// default meets the requirement.
+    #[config(name = "worker.shutdown_timeout", default = 60)]
     pub shutdown_timeout: Operational<u64>,
 
     /// Object-store location for the app `env.storage` namespace.
@@ -179,7 +182,7 @@ pub struct WorkerSettings {
     pub storage_url: Operational<String>,
 
     /// Origin of the workflow manager (`zeroship-workflow-server`) this
-    /// worker registers with and consumes delivered jobs from.
+    /// worker claims delivered jobs from.
     ///
     /// Empty (the default) runs no workflow host: every app's `env.workflows`
     /// call is refused as retryable, and nothing falls back to Control. When
@@ -191,9 +194,12 @@ pub struct WorkerSettings {
     #[config(name = "worker.workflow_manager_url", default = String::new())]
     pub workflow_manager_url: Operational<String>,
 
-    /// App placements this worker advertises to the workflow manager.
-    #[config(name = "worker.workflow_capacity", default = 64)]
-    pub workflow_capacity: Operational<usize>,
+    /// Claimed apps whose prepared creator resources this worker keeps, at
+    /// least `worker.workflow_slots` so every executing delivery's app fits.
+    /// An app that leaves this bound is prepared again when a job for it
+    /// next arrives.
+    #[config(name = "worker.workflow_prepared_apps", default = 64)]
+    pub workflow_prepared_apps: Operational<usize>,
 
     /// Delivered workflow jobs this worker executes at once.
     #[config(name = "worker.workflow_slots", default = 4)]

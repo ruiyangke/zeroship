@@ -1,9 +1,9 @@
 //! This service's own lane over the maintenance rows of the queue it owns.
 //!
 //! The rows it takes are every sweep `maintenance_job` dispatches. It does not
-//! take the operation that executes creator code: a placed worker takes that
-//! under its placement, and the claim predicate is what keeps the two hosts off
-//! each other's rows.
+//! take the operation that executes creator code: a worker of the app's zone
+//! takes that, and the claim predicate is what keeps the two hosts off each
+//! other's rows.
 //!
 //! The lane holds the payload store, so the sweeps that move creator bytes are
 //! its to run. `crate::payloads` is where this process binds that store, and
@@ -399,9 +399,8 @@ impl Deadline {
 ///
 /// `Queue::submit` asserts nothing of the kind, and is right not to: it is the
 /// manager-origin path, and a manager-origin caller has no identity to compare
-/// a job against. The worker path gets the same assertion from the placement it
-/// claims under. This seam has an app and no placement, so it is the only place
-/// the comparison can be made.
+/// a job against. No worker path publishes a job at all. This seam has an app,
+/// so it is the only place the comparison can be made.
 #[derive(Debug)]
 pub struct LanePublisher<'a> {
     queue: &'a Queue,

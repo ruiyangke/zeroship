@@ -47,7 +47,7 @@ impl AppDeployment {
     }
 
     /// The local platform metadata file: the normal deployment catalog and
-    /// the workflow manager's queue, placement, scheduling and recovery.
+    /// the workflow manager's queue, scheduling and recovery.
     pub fn platform(&self) -> &Path {
         &self.platform
     }

@@ -68,7 +68,7 @@ fn control(platform: &platform::Platform) -> PathBuf {
 /// service's own maintenance lane asserts.
 ///
 /// THERE IS NO WIRE CLAIM FOR A SWEEP. `WORKFLOW_JOB_CLAIM` claims as
-/// `Claimant::Placed` (`Coordinator::claim_job`), and that claimant admits
+/// `Claimant::Worker` (`Coordinator::claim_in_zone`), and that claimant admits
 /// `advance` alone, so reconciliation and collection are the lane's rows. The
 /// lane is driven here, rather than left running in the service, so that this
 /// case is the claimant of every page whose settlement it measures.
@@ -180,7 +180,12 @@ async fn setup(platform: &platform::Platform) -> (Queue, Recovery, JobSpec) {
     let recovery = Recovery::new(queue.clone(), RecoveryOptions::default()).unwrap();
     let app = AppId::mint();
     recovery
-        .ensure(&app, &DeploymentId::mint(), 1.try_into().unwrap())
+        .ensure(
+            &app,
+            &zeroship_core::ZoneId::default_zone(),
+            &DeploymentId::mint(),
+            1.try_into().unwrap(),
+        )
         .await
         .unwrap();
     let reconcile = recovery

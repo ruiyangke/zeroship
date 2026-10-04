@@ -5,6 +5,7 @@ use zeroship_core::{
     workflow_deployments::HoldScope,
     workflow_jobs::{DeploymentId, JobOperation},
     workflow_schedules::{ActivateSchedules, RegisterSchedules},
+    zone_id::ZoneId,
 };
 
 fn tables(path: &Path) -> Vec<String> {
@@ -64,8 +65,6 @@ async fn a_new_file_holds_the_catalog_and_manager_schema_and_reopens() {
         "schema_version",
         "queue_scopes",
         "jobs",
-        "workers",
-        "assignments",
         "schedule_activations",
         "recovery_duties",
     ] {
@@ -94,7 +93,7 @@ async fn a_new_file_holds_the_catalog_and_manager_schema_and_reopens() {
         .queue(Options::default())
         .await
         .unwrap()
-        .register_scope(&app)
+        .register_scope(&app, &ZoneId::default_zone())
         .await
         .unwrap();
     drop(platform);
@@ -189,6 +188,7 @@ async fn queue_holds_its_deployment_through_the_same_catalog() {
     scheduler
         .prepare(&RegisterSchedules {
             app_id: app.clone(),
+            execution_zone_id: ZoneId::default_zone(),
             deployment_id: deployment.clone(),
             schedules: vec![],
         })
@@ -197,6 +197,7 @@ async fn queue_holds_its_deployment_through_the_same_catalog() {
     let job = scheduler
         .activate(&ActivateSchedules {
             app_id: app.clone(),
+            execution_zone_id: ZoneId::default_zone(),
             deployment_id: deployment.clone(),
             revision: 1.try_into().unwrap(),
         })

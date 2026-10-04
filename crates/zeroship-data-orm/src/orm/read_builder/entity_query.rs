@@ -62,6 +62,7 @@ pub struct EntityQuery<E: Entity> {
     options: FindOptions,
     order: Vec<FieldOrder<E>>,
     lock: bool,
+    nowait: bool,
 }
 
 impl<E: Entity> EntityCollection<E> {
@@ -77,6 +78,7 @@ impl<E: Entity> EntityCollection<E> {
             options: FindOptions::default(),
             order: Vec::new(),
             lock: false,
+            nowait: false,
         }
     }
 
@@ -150,6 +152,19 @@ impl<E: Entity> EntityQuery<E> {
         Ok(self)
     }
 
+    /// Lock every returned row without waiting for a competing lock.
+    ///
+    /// # Errors
+    /// Applies the same transaction and backend requirements as
+    /// [`Self::for_update`]. PostgreSQL reports contention as
+    /// [`DbError::LockContention`].
+    pub fn for_update_nowait(mut self) -> Result<Self, DbError> {
+        super::require_lock_receiver(&self.entity.collection.database)?;
+        self.lock = true;
+        self.nowait = true;
+        Ok(self)
+    }
+
     pub(in crate::orm) const fn with_options(mut self, options: FindOptions) -> Self {
         self.options = options;
         self
@@ -161,7 +176,10 @@ impl<E: Entity> EntityQuery<E> {
         query.source.include_deleted = self.options.include_deleted;
         query.model_filter = Some(self.filter.into_predicate());
         if self.lock {
-            query.lock = read::ReadLock::Update { of: Vec::new() };
+            query.lock = read::ReadLock::Update {
+                of: Vec::new(),
+                nowait: self.nowait,
+            };
         }
         query.limit = self
             .options

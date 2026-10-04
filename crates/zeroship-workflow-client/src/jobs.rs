@@ -1,7 +1,7 @@
 use super::{
     journal::{
-        ClaimedDelivery, JobJournal, JobReceiptQuery, ReleaseDelivery, RenewDelivery,
-        RenewedDelivery, SettleDelivery,
+        JobJournal, JobReceiptQuery, ReleaseDelivery, RenewDelivery, RenewedDelivery,
+        SettleDelivery,
     },
     Error, WorkerCoordinator,
 };
@@ -10,11 +10,11 @@ use zeroship_core::{
     service_identity::endpoints,
     typed_id,
     workflow_coordination::{
-        AssignedScope, FailureCode, PayloadLocation, PayloadReservation, PinnedDeployment,
-        ReadTaskPayload, ReservePayload, ResolveTaskExecutable,
+        FailureCode, PayloadLocation, PayloadReservation, PinnedDeployment, ReadTaskPayload,
+        ReservePayload, ResolveTaskExecutable,
     },
     workflow_jobs::{
-        Delivery, DeliveryLease, JobLease, JobSpec, SettlementReceipt,
+        ClaimJobs, ClaimedJobs, Delivery, DeliveryLease, JobLease, JobSpec, SettlementReceipt,
     },
 };
 
@@ -24,6 +24,7 @@ use zeroship_core::{
 pub struct LeasedJob {
     delivery: Delivery,
     expires: Instant,
+    attempt_expires: Instant,
 }
 
 impl JobLease for LeasedJob {
@@ -33,6 +34,10 @@ impl JobLease for LeasedJob {
 
     fn remaining(&self) -> Option<Duration> {
         Self::remaining(self).ok()
+    }
+
+    fn attempt_remaining(&self) -> Option<Duration> {
+        Self::attempt_remaining(self).ok()
     }
 }
 
@@ -54,25 +59,39 @@ impl LeasedJob {
             .ok_or(Error::Timeout)
     }
 
+    /// Remaining authority for the whole attempt, across heartbeats.
+    pub fn attempt_remaining(&self) -> Result<Duration, Error> {
+        self.attempt_expires
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or(Error::Timeout)
+    }
+
     fn received(lease: DeliveryLease, request_started: Instant) -> Result<Self, Error> {
         // Manager database timestamps cannot express a larger grant. Validate
         // before conversion rather than accepting an effectively unbounded lease.
         i64::try_from(lease.remaining_ms.get()).map_err(|_| Error::InvalidResponse)?;
+        i64::try_from(lease.attempt_remaining_ms.get()).map_err(|_| Error::InvalidResponse)?;
         let expires = request_started
             .checked_add(Duration::from_millis(lease.remaining_ms.get()))
+            .ok_or(Error::InvalidResponse)?;
+        let attempt_expires = request_started
+            .checked_add(Duration::from_millis(lease.attempt_remaining_ms.get()))
             .ok_or(Error::InvalidResponse)?;
         let job = Self {
             delivery: lease.delivery,
             expires,
+            attempt_expires,
         };
         job.remaining()?;
+        job.attempt_remaining()?;
         Ok(job)
     }
 }
 
 impl WorkerCoordinator {
-    /// Claim an eligible job, capture its remaining delivery authority, and
-    /// take the journal acceptance that came with it.
+    /// Claim a batch of jobs across this worker's zone, capture each delivery's
+    /// remaining authority, and take the journal acceptance that came with it.
     ///
     /// ONE EXCHANGE, TWO HALVES. The acceptance is present exactly for the
     /// operation the journal accepts execution for, which this client decides
@@ -80,36 +99,62 @@ impl WorkerCoordinator {
     /// an acceptance beside a maintenance operation, or a missing one beside an
     /// advance, is a peer this contract does not describe.
     ///
+    /// THE EXCHANGE LASTS EXACTLY THE REQUEST'S WAIT. The service works for a
+    /// claim until a deadline it derives from `wait_ms` and replies inside it,
+    /// so this side waits `wait_ms` and not its generic exchange bound: giving
+    /// up earlier would strand every delivery the service committed.
+    ///
     /// # Errors
-    /// Refuses failed exchanges, substituted scope/worker/revision, a journal
-    /// half that does not belong to the operation claimed, and grants exhausted
-    /// by transport delay or outside the representable clock range.
-    pub async fn claim_job<J: JobJournal>(
+    /// Refuses failed exchanges, a reply holding more deliveries than were
+    /// asked for or a delivery to another worker, a journal half that does not
+    /// belong to the operation claimed, and grants outside the representable
+    /// clock range. A grant exhausted by transport delay is that delivery's
+    /// alone, reported in [`ClaimedJobBatch::lapsed`].
+    pub async fn claim_jobs<J: JobJournal>(
         &self,
-        scope: &AssignedScope,
-    ) -> Result<Option<ClaimedJob<J::Acceptance>>, Error> {
+        request: &ClaimJobs,
+    ) -> Result<ClaimedJobBatch<J::Acceptance>, Error> {
         let started = Instant::now();
-        let claimed: Option<ClaimedDelivery<J::Acceptance>> = self
+        let claimed: ClaimedJobs<J::Acceptance> = self
             .transport
-            .post(endpoints::WORKFLOW_JOB_CLAIM, scope)
+            .post_within(
+                endpoints::WORKFLOW_JOB_CLAIM,
+                request,
+                Duration::from_millis(request.wait_ms.get()),
+            )
             .await?;
-        claimed
-            .map(|claimed| {
-                let delivery = &claimed.lease.delivery;
-                if delivery.worker_id != self.worker_id
-                    || delivery.job.app_id != scope.app_id
-                    || delivery.assignment_revision != scope.assignment_revision
-                    || claimed.accepted.is_some() != delivery.job.operation.accepts_execution()
-                {
-                    return Err(Error::InvalidResponse);
-                }
-                Ok(ClaimedJob {
-                    lease: LeasedJob::received(claimed.lease, started)?,
+        if claimed.deliveries.len() > usize::try_from(request.max.get()).unwrap_or(usize::MAX) {
+            return Err(Error::InvalidResponse);
+        }
+        let mut deliveries = Vec::with_capacity(claimed.deliveries.len());
+        let mut lapsed = Vec::new();
+        for claimed in claimed.deliveries {
+            let delivery = &claimed.lease.delivery;
+            if delivery.worker_id != self.worker_id
+                || claimed.accepted.is_some() != delivery.job.operation.accepts_execution()
+            {
+                return Err(Error::InvalidResponse);
+            }
+            // A lease spent in transit is that delivery's loss alone: the
+            // others in the reply are live, and refusing the whole reply would
+            // strand every one of them.
+            let delivery = delivery.clone();
+            match LeasedJob::received(claimed.lease, started) {
+                Ok(lease) => deliveries.push(ClaimedJob {
+                    lease,
                     accepted: claimed.accepted,
                     started,
-                })
-            })
-            .transpose()
+                }),
+                Err(Error::Timeout) => lapsed.push(delivery),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(ClaimedJobBatch {
+            deliveries,
+            lapsed,
+            after: claimed.after,
+            lap_complete: claimed.lap_complete,
+        })
     }
 
     /// Renew a delivery, and the journal task held under it, while the caller's
@@ -153,7 +198,6 @@ impl WorkerCoordinator {
         let observed = &renewed.lease.delivery;
         if observed.job != job.delivery.job
             || observed.worker_id != job.delivery.worker_id
-            || observed.assignment_revision != job.delivery.assignment_revision
             || observed.attempt != job.delivery.attempt
             || renewed.renewal.is_some() != task.is_some()
         {
@@ -297,9 +341,11 @@ impl WorkerCoordinator {
     /// Hand a claimed journal task back without settling its delivery.
     ///
     /// A release gives up creator work this holder cannot finish. The delivery
-    /// stays unsettled on purpose: the journal reopens the run, `reclaim` expires
-    /// the released row, and the queue redelivers. So there is no receipt to
-    /// check and nothing to compare -- the reply is the acknowledgement.
+    /// stays unsettled on purpose: the journal reopens the run and the service
+    /// returns the queue row in the same request, as `reason` says - at once with
+    /// the attempt counted for an interrupted attempt, after a back-off for an
+    /// app that could not be prepared. So there is no receipt to check and
+    /// nothing to compare -- the reply is the acknowledgement.
     ///
     /// # Errors
     /// Refuses another worker's delivery, an expired grant and failed exchanges.
@@ -307,6 +353,7 @@ impl WorkerCoordinator {
         &self,
         job: &LeasedJob,
         task: &J::Claim,
+        reason: crate::GiveBackReason,
     ) -> Result<(), Error> {
         if job.delivery.worker_id != self.worker_id {
             return Err(denied());
@@ -317,7 +364,30 @@ impl WorkerCoordinator {
                 endpoints::WORKFLOW_JOB_RELEASE,
                 &ReleaseDelivery {
                     delivery: job.delivery.clone(),
-                    task,
+                    task: Some(task),
+                    reason,
+                },
+            )
+            .await
+    }
+
+    /// Return a delivery whose app could not be prepared before journal acceptance.
+    pub async fn give_back_job<J: JobJournal>(
+        &self,
+        job: &LeasedJob,
+        reason: crate::GiveBackReason,
+    ) -> Result<(), Error> {
+        if job.delivery.worker_id != self.worker_id {
+            return Err(denied());
+        }
+        job.remaining()?;
+        self.transport
+            .post_journal::<_, ()>(
+                endpoints::WORKFLOW_JOB_RELEASE,
+                &ReleaseDelivery::<J::Claim> {
+                    delivery: job.delivery.clone(),
+                    task: None,
+                    reason,
                 },
             )
             .await
@@ -410,6 +480,17 @@ pub struct ClaimedJob<A> {
     /// somewhere else than the lease would leave one half of a single grant
     /// outliving the other.
     pub started: Instant,
+}
+
+/// A validated zone claim with its continuation cursor.
+#[derive(Clone, Debug)]
+pub struct ClaimedJobBatch<A> {
+    pub deliveries: Vec<ClaimedJob<A>>,
+    /// Deliveries whose lease was spent by the time the reply arrived. Nothing
+    /// can renew or give them back; each lapses and is redelivered.
+    pub lapsed: Vec<Delivery>,
+    pub after: Option<zeroship_core::app_id::AppId>,
+    pub lap_complete: bool,
 }
 
 /// A renewed delivery and the journal renewal that rode with it.

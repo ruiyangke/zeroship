@@ -23,7 +23,7 @@ use zeroship_core::{app_id::AppId, typed_id, workflow_coordination::RunId};
 ///
 /// This is the ARRANGE step, never the thing under test: every call exercised
 /// against it acts on a run that already exists, so the paths under test are
-/// the request, the placement, the binding, the epoch and the journal read or
+/// the request, the zone, the binding, the epoch and the journal read or
 /// write, none of which this seeding touches. The writes a caller asserts go
 /// through the endpoint, because seeding around a write would prove nothing
 /// about the write.

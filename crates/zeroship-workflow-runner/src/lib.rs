@@ -11,17 +11,16 @@
 //! type does not compile, so those arrive as extension traits implemented
 //! here: the trait is local, which is what the orphan rule asks.
 //!
-//! The crate root owns execution slots and the delivered-job consumption loop;
-//! the modules beside it own assignment, delivery, publication and readiness.
+//! The crate root owns the executor seam; the modules beside it own the zone
+//! claimer and its slots, on-demand app preparation, delivery and the request
+//! path's backends.
 
-pub mod assignments;
+pub mod prepared;
 mod budget;
 pub mod consumer;
 pub mod delivery;
 pub mod host;
-pub mod journal_duties;
 pub mod publication;
-pub mod ready;
 pub mod remote;
 pub mod remote_tasks;
 pub use remote_tasks::RemoteTasks;

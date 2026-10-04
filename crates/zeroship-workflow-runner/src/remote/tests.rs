@@ -11,7 +11,7 @@
     reason = "the peer socket and its client stay on one compio runtime"
 )]
 
-use super::RemoteBackend;
+use super::{RemoteBackend, RemoteWorkflows};
 use crate::PayloadObjects;
 use compio::io::{AsyncRead, AsyncWriteExt};
 use serde_json::{json, Value};
@@ -24,7 +24,7 @@ use zeroship_core::{
     },
     service_peers::{ServiceAuth, ServiceKeyring},
     typed_id,
-    workflow_coordination::{AssignedScope, RunId, WorkerId, WorkflowOutputRef},
+    workflow_coordination::{RunId, WorkerId, WorkflowOutputRef},
 };
 use zeroship_workflow::{
     backend::WorkflowBackend,
@@ -77,6 +77,30 @@ async fn peer<T>(
     objects: PayloadObjects,
     call: impl AsyncFnOnce(RemoteBackend) -> T,
 ) -> (T, Option<Observed>) {
+    peer_with(
+        status,
+        reply,
+        objects,
+        |client, objects| RemoteBackend::new(client, app(), objects, READ_LIMIT).unwrap(),
+        call,
+    )
+    .await
+}
+
+/// As [`peer`], with the backend under test built by `backend`.
+///
+/// The request path's registry is what a worker that never prepared an app
+/// resolves, so a case builds its backend through `RemoteWorkflows::backend`.
+async fn peer_with<T, B>(
+    status: u16,
+    reply: &Value,
+    objects: PayloadObjects,
+    backend: B,
+    call: impl AsyncFnOnce(RemoteBackend) -> T,
+) -> (T, Option<Observed>)
+where
+    B: FnOnce(WorkerCoordinator, PayloadObjects) -> RemoteBackend,
+{
     let listener = compio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let client = WorkerCoordinator::new(
         &format!("http://{}", listener.local_addr().unwrap()),
@@ -84,11 +108,7 @@ async fn peer<T>(
         Options::default(),
     )
     .unwrap();
-    let scope = AssignedScope {
-        app_id: app(),
-        assignment_revision: 1.try_into().unwrap(),
-    };
-    let backend = RemoteBackend::new(client, scope, objects, READ_LIMIT).unwrap();
+    let backend = backend(client, objects);
     let body = serde_json::to_vec(reply).unwrap();
     let served = compio::runtime::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
@@ -419,4 +439,38 @@ async fn a_remote_refusal_keeps_its_code_and_a_broken_reply_does_not() {
         matches!(impostor, Err(WorkflowServiceError::Unavailable(_))),
         "{impostor:?}"
     );
+}
+
+/// A request-path backend reaches the service for an app this host never
+/// prepared.
+///
+/// [`RemoteWorkflows::backend`] composes a backend for ANY app from the
+/// enrolled client: there is no publication step to miss and no placement to
+/// hold. The one thing the call must carry is the app, which the service
+/// admits by the worker's verified zone.
+#[compio::test]
+async fn a_remote_workflows_backend_serves_an_app_this_host_never_prepared() {
+    let (objects, _dir) = PayloadObjects::temporary();
+    let run = RunId::mint();
+    let app = app();
+    let (started, observed) = peer_with(
+        200,
+        &json!({"id":run.as_str(),"state":"queued"}),
+        objects,
+        |client, objects| {
+            RemoteWorkflows::new(client, objects, READ_LIMIT)
+                .unwrap()
+                .backend(app.clone())
+        },
+        async |backend| {
+            backend
+                .start("orders".into(), json!({"order":7}), StartOptions::default())
+                .await
+        },
+    )
+    .await;
+    assert_eq!(started.unwrap().id, run.as_str());
+    let observed = observed.expect("the never-prepared app's call never reached the service");
+    assert_eq!(observed.path, "/v1/runs/start");
+    assert_eq!(observed.body["appId"], json!(app));
 }

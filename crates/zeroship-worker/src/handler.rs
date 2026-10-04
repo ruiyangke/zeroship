@@ -474,7 +474,7 @@ pub async fn dispatch(
         } => {
             crate::logs::append(&logs, &app_id, request_logs);
             record_stream_unary(&app_id, cpu_us, ingress_bytes, wall_start);
-            stream_response(status, &headers, body_reader, app_id)
+            stream_response(status, &headers, body_reader, app_id, runtime.hold())
         }
         FetchOutcome::WebSocketUpgrade { .. } => {
             // WS upgrades over the HTTP dispatch endpoint aren't supported —
@@ -503,7 +503,7 @@ pub async fn dispatch(
                 })) => {
                     crate::logs::append(&logs, &app_id, request_logs);
                     record_stream_unary(&app_id, cpu_us, ingress_bytes, wall_start);
-                    stream_response(status, &headers, body_reader, app_id)
+                    stream_response(status, &headers, body_reader, app_id, runtime.hold())
                 }
                 Some(Ok(SettledFetch::WebSocketUpgrade {
                     logs: request_logs, ..
@@ -569,11 +569,16 @@ fn make_http_response(status: u16, headers: Vec<(String, String)>, body: Vec<u8>
 /// processing fetch callbacks and feeding chunks into the StreamWriter.
 /// StreamWriter.push() wakes our drain task via the registered waker —
 /// no busy polling.
+///
+/// The body is still the request's after the dispatch returns, and the code
+/// producing it may read the app's encrypted data, so the drain task carries
+/// the dispatch's `hold` until the stream ends.
 fn stream_response(
     status: u16,
     headers: &[(String, String)],
     reader: StreamReader,
     app_id: AppId,
+    hold: cache::AppHold,
 ) -> HttpResponse {
     let status_code =
         ntex::http::StatusCode::from_u16(status).unwrap_or(ntex::http::StatusCode::OK);
@@ -597,6 +602,7 @@ fn stream_response(
     // (`record_stream_unary`) and are NOT touched here — a stream is one
     // request.
     compio::runtime::spawn(async move {
+        let _held = hold;
         let stream_start = std::time::Instant::now();
         // Running deltas SINCE the last recorded flush.
         let mut bytes_since_flush: u64 = 0;
@@ -725,6 +731,13 @@ async fn load_on_demand(
     envs: &SharedEnvs,
     app_id: &AppId,
 ) -> Result<(), String> {
+    // FIRST, before anything below asks whether the app's key or bindings are
+    // already supplied: those checks let this load skip a fetch because another
+    // holder supplied them, and only a hold taken before the check keeps that
+    // holder's last drop from withdrawing them in between. A load that fails
+    // drops it, which withdraws the material only when nothing else holds the
+    // app.
+    let hold = cache::hold(app_id);
     let app_version =
         crate::sync::fetch_app_version(&config.control_url, &config.service_auth, app_id).await?;
 
@@ -761,7 +774,7 @@ async fn load_on_demand(
     let env_entry = crate::sync::get_env(envs, app_id)
         .ok_or_else(|| "env cache missing after env insert".to_string())?;
     cache::load_app(
-        app_id.clone(),
+        hold,
         executable.modules,
         app_version.runtime.clone(),
         app_version.net_policy.clone(),
@@ -771,10 +784,7 @@ async fn load_on_demand(
         &env_entry.snapshot,
     )
     .await
-    .map_err(|e| {
-        crate::sync::remove_env(envs, app_id);
-        format!("failed to load bundle: {e}")
-    })?;
+    .map_err(|e| format!("failed to load bundle: {e}"))?;
     // Record what this isolate was loaded against so the reconcile loop
     // can detect future swaps: the deploy_hash (the canonical manifest
     // hash, NOT the per-blob bundle hash) and the env version the env we

@@ -1,18 +1,10 @@
 use crate::support::platform;
-use std::rc::Rc;
 use zeroship_core::{
     service_assertion::{ServiceAssertionMinter, ServiceIssuer, ServiceSigningKey},
     typed_id,
     workflow_coordination::{WorkerId, AUDIENCE},
     ZoneId,
 };
-use zeroship_workflow_manager::eligibility::{EligibilitySource, LocalEligibility};
-
-/// Trusted single-zone facts for contracts that do not exercise eligibility:
-/// every app and worker is in the seeded zone and active.
-pub fn trusted() -> Rc<dyn EligibilitySource> {
-    Rc::new(LocalEligibility::new(ZoneId::default_zone()))
-}
 
 /// Declare an operator zone and a join signer trusted to mint for it, the way
 /// `db/migrations-ts/20260914000400_execution_zones_and_join_signers.ts` and

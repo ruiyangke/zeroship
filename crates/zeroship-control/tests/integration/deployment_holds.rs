@@ -352,19 +352,12 @@ impl Fixture {
                 peers.trust_signing_key(issuer, key.key_id(), key).unwrap();
                 let service = Coordinator::connect(
                     &url,
-                    CoordinatorOptions {
-                        worker_ttl: Duration::from_secs(120),
-                        assignment_ttl: Duration::from_secs(120),
-                        ..CoordinatorOptions::default()
-                    },
+                    CoordinatorOptions::default(),
                     Rc::new(zeroship_workflow_manager::retention::CatalogClient::new(
                         zeroship_workflow_manager::deployments::DeploymentHolds::new(
                             database(&catalog_url).await,
                         )
                         .unwrap(),
-                    )),
-                    Rc::new(zeroship_workflow_manager::eligibility::LocalEligibility::new(
-                        zeroship_core::ZoneId::default_zone(),
                     )),
                 )
                 .await

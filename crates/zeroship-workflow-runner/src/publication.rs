@@ -5,14 +5,11 @@
     reason = "the transport runs on the host's compio thread"
 )]
 
-use crate::delivery::{Claimed, Completed, JobTransport, Renewed};
+use crate::delivery::{Claimed, ClaimedBatch, Completed, JobTransport, Renewed, Unstarted};
 use zeroship_workflow::{
     service::delivery::DeliveredTask, WorkflowExecution, WorkflowServiceError,
 };
-use zeroship_core::{
-    workflow_coordination::AssignedScope,
-    workflow_jobs::SettlementReceipt,
-};
+use zeroship_core::workflow_jobs::{ClaimJobs, SettlementReceipt};
 use zeroship_workflow_client::{LeasedJob, WorkerCoordinator};
 
 /// A host that holds no journal has no outbox of its own, so nothing here
@@ -25,20 +22,11 @@ pub(crate) struct HostTransport {
 impl JobTransport for HostTransport {
     type Lease = LeasedJob;
     type Journal = ();
-    fn scope(
-        &self,
-        _journal: &Self::Journal,
-        _authority: &zeroship_workflow::service::PolicyAuthority,
-    ) -> Result<Self::Journal, WorkflowServiceError> {
-        Ok(())
-    }
-
     async fn claim(
         &self,
-        journal: &Self::Journal,
-        scope: &AssignedScope,
-    ) -> Result<Option<Claimed<LeasedJob>>, WorkflowServiceError> {
-        JobTransport::claim(&self.client, journal, scope).await
+        request: &ClaimJobs,
+    ) -> Result<ClaimedBatch<LeasedJob>, WorkflowServiceError> {
+        JobTransport::claim(&self.client, request).await
     }
 
     async fn heartbeat(
@@ -65,6 +53,14 @@ impl JobTransport for HostTransport {
         task: &DeliveredTask,
     ) -> Result<(), WorkflowServiceError> {
         JobTransport::release(&self.client, journal, lease, task).await
+    }
+
+    async fn give_back(
+        &self,
+        claimed: &Claimed<LeasedJob>,
+        why: Unstarted,
+    ) -> Result<(), WorkflowServiceError> {
+        JobTransport::give_back(&self.client, claimed, why).await
     }
 
     async fn receipt(

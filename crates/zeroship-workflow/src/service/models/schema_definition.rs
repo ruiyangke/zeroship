@@ -368,7 +368,6 @@ zeroship_data_orm::orm::schema! {
             frontier_revision: BigInt,
             job_id: Nullable<Text>,
             delivery_attempt: Nullable<BigInt>,
-            assignment_revision: Nullable<BigInt>,
             created_at: BigInt,
             finished_at: Nullable<BigInt>,
             #[orm(default = 1)]

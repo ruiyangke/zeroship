@@ -2,24 +2,6 @@
 
 zeroship_data_orm::orm::schema! {
     pub schema {
-        assignments {
-            #[orm(primary_key)]
-            id: Text,
-            app_id: Text,
-            worker_id: Text,
-            revision: BigInt,
-            expires_at: BigInt,
-            released: Boolean,
-            refused: Boolean,
-        }
-
-        capacity_demands {
-            #[orm(primary_key)]
-            id: Text,
-            execution_zone_id: Text,
-            recorded_at: BigInt,
-        }
-
         capacity_targets {
             #[orm(primary_key)]
             id: Text,
@@ -30,7 +12,15 @@ zeroship_data_orm::orm::schema! {
             #[orm(default = "steady")]
             state: Text,
             refusal: Nullable<Text>,
-            observed: Nullable<BigInt>,
+            #[orm(default = 0)]
+            backlog_depth: BigInt,
+            oldest_available_at: Nullable<BigInt>,
+            #[orm(default = 0)]
+            exhausted_jobs: BigInt,
+            #[orm(default = 0)]
+            backed_off_jobs: BigInt,
+            #[orm(default = 0)]
+            withheld_jobs: BigInt,
             #[orm(default = 0)]
             attempt: BigInt,
             attempt_deadline: Nullable<BigInt>,
@@ -75,8 +65,11 @@ zeroship_data_orm::orm::schema! {
             execution_attempts: BigInt,
             executed_attempt: Nullable<BigInt>,
             worker_id: Nullable<Text>,
-            assignment_revision: Nullable<BigInt>,
             lease_deadline: Nullable<BigInt>,
+            leased_at: Nullable<BigInt>,
+            deferred_until: Nullable<BigInt>,
+            #[orm(default = 0)]
+            deferrals: BigInt,
             outcome: Nullable<Text>,
             settlement_digest: Nullable<Text>,
             created_at: BigInt,
@@ -106,22 +99,10 @@ zeroship_data_orm::orm::schema! {
             settled_revision: BigInt,
         }
 
-        placement_receipts {
-            #[orm(primary_key)]
-            id: Text,
-            app_id: Text,
-            request_id: Text,
-            operation: Text,
-            worker_id: Text,
-            expected_revision: Nullable<BigInt>,
-            reason: Nullable<Text>,
-            result_revision: BigInt,
-            result_expires_at: BigInt,
-        }
-
         queue_scopes {
             #[orm(primary_key)]
             id: Text,
+            execution_zone_id: Text,
             #[orm(default = 0)]
             lock_version: BigInt,
             #[orm(default = 0)]
@@ -216,20 +197,6 @@ zeroship_data_orm::orm::schema! {
             #[orm(primary_key)]
             id: Text,
             fingerprint: Text,
-        }
-
-        workers {
-            #[orm(primary_key)]
-            id: Text,
-            #[orm(default = 1)]
-            capacity: BigInt,
-            #[orm(default = "ready")]
-            state: Text,
-            #[orm(default = 0)]
-            expires_at: BigInt,
-            #[orm(default = 0)]
-            lock_version: BigInt,
-            execution_zone_id: Nullable<Text>,
         }
 
     }

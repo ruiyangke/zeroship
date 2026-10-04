@@ -235,6 +235,7 @@ async fn activate(
     scheduler
         .prepare(&RegisterSchedules {
             app_id: app.clone(),
+                execution_zone_id: zeroship_core::ZoneId::default_zone(),
             deployment_id: deployment.clone(),
             schedules: definitions,
         })
@@ -243,6 +244,7 @@ async fn activate(
     scheduler
         .activate(&ActivateSchedules {
             app_id: app.clone(),
+                execution_zone_id: zeroship_core::ZoneId::default_zone(),
             deployment_id: deployment,
             revision: 1.try_into().unwrap(),
         })
@@ -267,7 +269,7 @@ async fn activate(
 async fn obligation(fixture: &Fixture, queue: &Queue, app: &AppId) {
     Recovery::new(queue.clone(), options(1).recovery)
         .unwrap()
-        .ensure(app, &DeploymentId::mint(), 1.try_into().unwrap())
+        .ensure(app, &zeroship_core::ZoneId::default_zone(), &DeploymentId::mint(), 1.try_into().unwrap())
         .await
         .unwrap();
     patch(
@@ -303,8 +305,6 @@ async fn no_workers(fixture: &Fixture) {
     assert!(second.collection.failures.is_empty());
     assert!(first.collection.completed + second.collection.completed > 0);
     assert_eq!(jobs.len(), 4);
-    assert!(rows(fixture, "workers", value!({})).await.is_empty());
-    assert!(rows(fixture, "assignments", value!({})).await.is_empty());
     let operations: Vec<_> = jobs
         .iter()
         .map(|row| {
@@ -359,7 +359,7 @@ async fn finite_sweeps(fixture: &Fixture) {
     database
         .collection("queue_scopes")
         .unwrap()
-        .insert(value!({"id":"!malformed"}))
+        .insert(value!({"id":"!malformed","execution_zone_id":"!malformed"}))
         .await
         .unwrap();
     database
@@ -609,7 +609,7 @@ async fn pending(
     app: &AppId,
     marker: &str,
 ) -> Published {
-    queue.register_scope(app).await.unwrap();
+    queue.register_scope(app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     let deployment = catalog.publish(app, marker, &[]).await;
     client.lose_acquire.set(true);
     assert_eq!(
@@ -841,8 +841,6 @@ async fn independent_duties(fixture: &Fixture) {
         zeroship_core::workflow_jobs::JobOperation::Collect {}
     ));
     assert_eq!(collect.deployment_id(), None);
-    assert!(rows(fixture, "workers", value!({})).await.is_empty());
-    assert!(rows(fixture, "assignments", value!({})).await.is_empty());
     assert!(rows(fixture, "deployment_holds", value!({}))
         .await
         .is_empty());

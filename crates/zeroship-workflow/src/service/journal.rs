@@ -558,7 +558,9 @@ pub(crate) async fn append(
             if step.state != "running" {
                 return invalid("child acceptance requires a pending checkpoint");
             }
-            let accepted = child(tx, app, run, policy, &step, now).await?;
+            // Boxed: a child acceptance creates a whole run, generation and
+            // continuation, a future far larger than this loop's own state.
+            let accepted = Box::pin(child(tx, app, run, policy, &step, now)).await?;
             step.child_run_id = Some(accepted.run_id);
             Some(accepted.id)
         } else {

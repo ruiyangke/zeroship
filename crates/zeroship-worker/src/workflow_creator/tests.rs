@@ -5,80 +5,128 @@ use std::{
     cell::{Cell, RefCell},
     time::Duration,
 };
-use zeroship_workflow_runner::ExecutionGuard;
+use zeroship_workflow_runner::{
+    prepared::{PreparedApps, PreparedOptions},
+    ExecutionGuard,
+};
 
 use zeroship_workflow_fixtures::deployment as deployment_fixture;
 
 mod fixture;
-use fixture::{execute, install, Fixture};
+use fixture::{execute, Fixture};
 
+/// An app the provider does not authorize is refused there, and nothing about
+/// it reaches creator code: no context is resolved and no executor is built.
+///
+/// The control is the fixture's own app through the same factory, which does
+/// resolve a context; without it a factory that refused every app would pass.
 #[compio::test]
-async fn unknown_assignment_and_wrong_policy_are_refused_before_creator_io() {
+async fn an_app_the_provider_refuses_is_refused_before_creator_io() {
     let fixture = Fixture::new().await;
     let factory = fixture.factory();
-    let unknown = AssignedScope {
-        app_id: AppId::mint(),
-        assignment_revision: fixture.scope.assignment_revision,
-    };
+    let unknown = AppId::mint();
     assert!(matches!(
-        factory.open(&unknown, &fixture.policy, fixture.ingress()).await,
-        Err(WorkflowServiceError::PermissionDenied)
-    ));
-    assert!(fixture.provider.calls().is_empty());
-    let foreign_registry = Arc::new(HostPolicies::default());
-    let foreign_policy = install(&foreign_registry, fixture.scope.app_id.clone());
-    assert!(matches!(
-        factory.open(&fixture.scope, &foreign_policy, fixture.ingress()).await,
-        Err(WorkflowServiceError::PermissionDenied)
-    ));
-    assert!(fixture.provider.calls().is_empty());
-    let unknown_policy = install(&fixture.policies, unknown.app_id.clone());
-    assert!(matches!(
-        factory.open(&unknown, &unknown_policy, fixture.ingress()).await,
+        factory.open(&unknown).await,
         Err(WorkflowServiceError::PermissionDenied)
     ));
     assert_eq!(fixture.provider.calls(), vec![unknown]);
     assert_eq!(fixture.contexts.calls.get(), 0);
+
+    factory
+        .open(&fixture.app)
+        .await
+        .expect("the provider's own app is prepared");
+    assert_eq!(fixture.contexts.calls.get(), 1);
 }
 
 #[compio::test]
-async fn initial_context_must_name_the_assigned_app() {
+async fn initial_context_must_name_the_claimed_app() {
     let fixture = Fixture::new().await;
     fixture.contexts.current.borrow_mut().app = AppId::mint();
     assert!(matches!(
-        fixture
-            .factory()
-            .open(&fixture.scope, &fixture.policy, fixture.ingress())
-            .await,
+        fixture.factory().open(&fixture.app).await,
         Err(WorkflowServiceError::PermissionDenied)
     ));
     assert_eq!(fixture.contexts.calls.get(), 1);
 }
 
+/// The prepared app holds the residency its resources were resolved under, and
+/// releases it when it is dropped.
+///
+/// That residency is what keeps the app's key, bindings and environment
+/// supplied while an execution runs from the prepared app, so a factory that
+/// built the runtime under any other guard would leave them withdrawable
+/// mid-execution.
 #[compio::test]
-async fn policy_replacement_cancels_pending_resource_resolution_without_creator_io() {
-
+async fn the_prepared_app_holds_the_residency_its_resources_were_resolved_under() {
     let fixture = Fixture::new().await;
-    let factory = fixture.factory();
+    let resolved = fixture.provider.resources().residency;
+    let before = Rc::strong_count(&resolved);
+    let runtime = fixture
+        .factory()
+        .open(&fixture.app)
+        .await
+        .expect("the provider's own app is prepared");
+    assert!(
+        Rc::ptr_eq(&runtime.residency, &resolved),
+        "the prepared app holds the provider's residency, not one of its own"
+    );
+    assert_eq!(Rc::strong_count(&resolved), before + 1);
+    drop(runtime);
+    assert_eq!(
+        Rc::strong_count(&resolved),
+        before,
+        "dropping the prepared app releases its hold"
+    );
+}
+
+/// A preparation is bounded by the delivery that asked for it, and a bound
+/// that runs out drops the pending resolution rather than finishing it later.
+///
+/// The provider is held open by a gate nothing releases, so the delivery's
+/// remaining lease is the only thing that can end the wait. The control is the
+/// same preparation with the gate released inside the bound.
+#[compio::test]
+async fn a_preparation_past_its_delivery_bound_drops_the_pending_resolution() {
+    let fixture = Fixture::new().await;
+    let prepared = PreparedApps::new(
+        fixture.factory(),
+        Rc::new(|_: &AppId| true),
+        PreparedOptions {
+            capacity: 1,
+            operation_timeout: Duration::from_mins(10),
+        },
+    )
+    .unwrap();
     let (observed, release) = fixture.provider.gate();
-    let mut opening = Box::pin(factory.open(&fixture.scope, &fixture.policy, fixture.ingress()));
+    let mut preparing = Box::pin(prepared.get_or_prepare(&fixture.app, Duration::from_millis(50)));
     assert!(matches!(
-        futures::future::select(observed, opening.as_mut()).await,
+        futures::future::select(observed, preparing.as_mut()).await,
         Either::Left((Ok(()), _))
     ));
-    let replacement = install(&fixture.policies, fixture.scope.app_id.clone());
-    assert!(matches!(
-        opening.await,
-        Err(WorkflowServiceError::Unavailable(_))
-    ));
+    // The cache's own bound is far longer, so only the delivery's can end
+    // the wait inside this window.
+    let outcome = compio::time::timeout(Duration::from_secs(5), preparing)
+        .await
+        .expect("the delivery's bound ends the preparation, not the cache's");
+    assert!(matches!(outcome, Err(WorkflowServiceError::Timeout)));
     assert!(fixture.provider.dropped());
     assert!(
         release.send(()).is_err(),
-        "replacement must drop the pending provider future"
+        "the bound must drop the pending provider future"
     );
-    assert!(fixture.policy.begin_refresh().is_err());
-    assert!(replacement.begin_refresh().is_ok());
     assert_eq!(fixture.contexts.calls.get(), 0);
+
+    // THE CONTROL: released inside the bound, the same preparation completes.
+    let (observed, release) = fixture.provider.gate();
+    let mut preparing = Box::pin(prepared.get_or_prepare(&fixture.app, Duration::from_secs(5)));
+    assert!(matches!(
+        futures::future::select(observed, preparing.as_mut()).await,
+        Either::Left((Ok(()), _))
+    ));
+    release.send(()).expect("the pending resolution is still waiting");
+    preparing.await.expect("a resolution inside its bound prepares the app");
+    assert_eq!(fixture.contexts.calls.get(), 1);
 }
 
 /// The severed assembly runs creator code: the factory's loader resolves the
@@ -118,10 +166,9 @@ async fn factory_executes_a_pinned_frontier_from_a_crossed_resolution() {
         .await;
     let runtime = fixture
         .factory_through(peer.client.clone())
-        .open(&fixture.scope, &fixture.policy, fixture.ingress())
+        .open(&fixture.app)
         .await
         .unwrap();
-    assert_eq!(runtime.backend.scope(), &fixture.scope);
     let assignment = fixture.assignment(&deploy_hash);
     let execution = execute(&runtime, &assignment).await.unwrap();
     assert_eq!(
@@ -135,7 +182,7 @@ async fn factory_executes_a_pinned_frontier_from_a_crossed_resolution() {
         format!("{outcomes}").contains("creator-owned-input"),
         "{outcomes}"
     );
-    assert_eq!(fixture.provider.calls(), vec![fixture.scope.clone()]);
+    assert_eq!(fixture.provider.calls(), vec![fixture.app.clone()]);
     assert!(
         fixture.contexts.calls.get() > 1,
         "task loads resolve current runtime metadata again"
@@ -177,7 +224,7 @@ async fn dynamic_context_cannot_move_an_installed_creator_to_another_app() {
         .await;
     let runtime = fixture
         .factory_through(peer.client.clone())
-        .open(&fixture.scope, &fixture.policy, fixture.ingress())
+        .open(&fixture.app)
         .await
         .unwrap();
     let assignment = fixture.assignment(&deploy_hash);

@@ -36,6 +36,13 @@ pub fn run() -> Result<()> {
         )?;
     }
     checked(
+        Command::new("node").current_dir(root()).args([
+            "--test",
+            "crates/zeroship-workflow-manager/schema/generate.test.mjs",
+        ]),
+        "workflow manager schema compiler contracts",
+    )?;
+    checked(
         cargo().args([
             "test",
             "--manifest-path",

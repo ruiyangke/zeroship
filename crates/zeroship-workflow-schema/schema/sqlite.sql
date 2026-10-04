@@ -256,4 +256,8 @@ ALTER TABLE "__zeroship_workflow_generations" DROP COLUMN "output";
 
 
 ALTER TABLE "__zeroship_workflow_generations" DROP COLUMN "input";
-INSERT INTO "main".__zeroship_workflow_schema_version (id, version, fingerprint) VALUES ('workflow', 6, 'bd2dcb4e2fd5bd046a1ac5954ddc9a0ae741bca43b5a93196008a881512bcd86');
+
+
+
+ALTER TABLE "__zeroship_workflow_tasks" DROP COLUMN "assignment_revision";
+INSERT INTO "main".__zeroship_workflow_schema_version (id, version, fingerprint) VALUES ('workflow', 7, 'b83f04d43e573de03bfbf2eb436a4d0c40cd58d202b00f99ccf874ef0791c831');

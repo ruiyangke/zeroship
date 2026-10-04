@@ -1,16 +1,15 @@
 //! The worker's workflow host: one `WorkerHost` on a dedicated compio thread.
 //!
-//! The host owns this process's enrolled instance identity towards the
-//! workflow manager, its advertised capacity and its assignment registry. It
-//! registers, polls and renews placements, prepares each assigned app from
-//! resources this worker is independently authorized to use, and consumes
-//! delivered jobs. HTTP runtime threads never construct workflow authority:
-//! they resolve the fixed backends the host publishes in [`ReadyApps`], and an
-//! app that is unknown or not ready here is refused as retryable.
+//! The host pulls claimable jobs from this worker's execution zone under the
+//! process's enrolled instance identity, prepares each claimed app on demand
+//! from resources this worker is independently authorized to use, and runs
+//! the deliveries in its execution slots. HTTP runtime threads never construct
+//! workflow authority: they resolve a backend from the [`RemoteWorkflows`] the
+//! host builds for every app the worker's zone may act for, and the service
+//! admits each call by the zone frozen on the authenticating instance.
 //!
-//! One host per process, never one per HTTP thread: independent hosts under
-//! the same enrolled identity would each advertise the capacity and retire
-//! each other's policy generations.
+//! One host per process, never one per HTTP thread: the slot count is this
+//! process's, and independent hosts would each claim a full batch for it.
 
 #![expect(
     clippy::future_not_send,
@@ -39,41 +38,102 @@ use std::{
 };
 use zeroship_bundle::BlobStore;
 use zeroship_core::{
-    app_id::AppId, config::PlaintextPeers,
-    service_peers::ServiceAuth, workflow_coordination::AssignedScope,
+    app_id::AppId, config::PlaintextPeers, service_peers::ServiceAuth,
 };
 use zeroship_data_v8::service::DbService;
 use zeroship_runtime::NativePlugin;
 use zeroship_storage::{StorageBackendConfig, StorageStore};
-use zeroship_workflow::{service::HostPolicies, WorkflowServiceError};
+use zeroship_workflow::WorkflowServiceError;
 use zeroship_workflow_client::{Options as ClientOptions, Transport, WorkerCoordinator};
 use zeroship_workflow_runner::{
-    assignments::AssignmentOptions,
     consumer::ConsumerOptions,
     delivery::DeliveryOptions,
     host::{HostOptions, WorkerHost},
-    ready::ReadyApps,
+    prepared::{AppFeed, PreparedOptions},
+    remote::RemoteWorkflows,
     PayloadObjects, TaskPayloadLimits,
 };
 
-/// Bound on one delivered job's execution.
-const EXECUTION_TIMEOUT: Duration = Duration::from_secs(30);
-/// Bound on each claim, renewal, settlement, publication and journal finalization.
+/// This host's ceiling on one delivered job's execution.
+///
+/// Not the definition of an attempt's length: the manager's attempt cap is,
+/// and every delivery carries what remains of it and of its lease. Delivery
+/// cuts an execution at the earliest of the three, so a manager configured
+/// with a shorter attempt is obeyed and this ceiling only stops one longer
+/// than this host will run.
+const EXECUTION_CEILING: Duration = Duration::from_secs(30);
+/// Bound on each claim, renewal, settlement, give-back and journal finalization.
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
+/// Bound on preparing one claimed app: its metadata, environment and creator
+/// runtime, before its delivery can run.
+const PREPARATION_TIMEOUT: Duration = Duration::from_secs(10);
 /// Delay between settlement retries after an uncertain reply.
 const RETRY_DELAY: Duration = Duration::from_millis(200);
-/// Delay before an app with no claimable work is claimed again.
+/// Delay before claiming again after a claim that walked the whole zone and
+/// found nothing claimable.
 const IDLE_POLL: Duration = Duration::from_millis(500);
 /// Delay before claiming again after a failed claim or delivery.
 const ERROR_BACKOFF: Duration = Duration::from_secs(1);
-/// Delay between registration renewals; well inside the manager's worker lifetime.
-const REGISTRATION_INTERVAL: Duration = Duration::from_secs(5);
-/// Delay between placement scans; bounds how soon a new assignment is prepared.
-const ASSIGNMENT_INTERVAL: Duration = Duration::from_secs(1);
-/// Delay between policy lease renewals of prepared assignments.
-const POLICY_INTERVAL: Duration = Duration::from_secs(5);
 /// Bound on an app's retained source when loading its executable.
 const MAX_SOURCE_BYTES: u64 = zeroship_bundle::MAX_DECOMPRESSED_BYTES;
+
+/// What the grace must hold for a delivery claimed just before the stop: its
+/// app's preparation, its execution to this host's ceiling and its settlement.
+const DELIVERY_GRACE: Duration = PREPARATION_TIMEOUT
+    .saturating_add(EXECUTION_CEILING)
+    .saturating_add(OPERATION_TIMEOUT);
+
+/// What a claim the stop finds pending takes to end: it waits one operation
+/// bound for its reply and is cut one operation bound after that, and the
+/// deliveries the reply brings go back side by side inside a third.
+const CLAIM_TAIL: Duration = OPERATION_TIMEOUT.saturating_mul(3);
+
+/// The longer of two bounds, in a constant.
+const fn longer(left: Duration, right: Duration) -> Duration {
+    if left.as_nanos() >= right.as_nanos() {
+        left
+    } else {
+        right
+    }
+}
+
+/// The shortest drain a stopping worker may be given.
+///
+/// Its first part is the grace the host's running deliveries get, counted from
+/// the stop: a delivery claimed just before the stop has its app prepared, runs
+/// to this host's execution ceiling and is then settled. A claim the stop finds
+/// pending runs on to its reply beside that grace and gives back what it
+/// delivers, so the grace holds that tail too. The last operation bound is for
+/// what the grace could not finish: it is cancelled when the grace runs out
+/// and released within it. A drain cut shorter leaves a delivery leased until
+/// its lease lapses and runs it again elsewhere; the deployment's termination
+/// grace is stated from `worker.shutdown_timeout`, so the requirement is
+/// enforced there.
+pub const MIN_SHUTDOWN_TIMEOUT: Duration =
+    longer(DELIVERY_GRACE, CLAIM_TAIL).saturating_add(OPERATION_TIMEOUT);
+
+/// Refuse a `worker.shutdown_timeout` shorter than [`MIN_SHUTDOWN_TIMEOUT`].
+///
+/// # Errors
+/// Names the setting and the bounds the requirement is made of.
+pub fn validate_shutdown_timeout(secs: u64) -> Result<u64, String> {
+    if Duration::from_secs(secs) < MIN_SHUTDOWN_TIMEOUT {
+        return Err(format!(
+            "worker.shutdown_timeout must be at least {}s: a stopping worker lets a delivered \
+             workflow execution prepare its app within {}s, run to its {}s ceiling and settle \
+             within {}s, and alongside it lets a claim pending at the stop reply and give back \
+             what it brought within {}s, then releases within another {}s whatever is still \
+             running",
+            MIN_SHUTDOWN_TIMEOUT.as_secs(),
+            PREPARATION_TIMEOUT.as_secs(),
+            EXECUTION_CEILING.as_secs(),
+            OPERATION_TIMEOUT.as_secs(),
+            CLAIM_TAIL.as_secs(),
+            OPERATION_TIMEOUT.as_secs(),
+        ));
+    }
+    Ok(secs)
+}
 
 /// The workflow host settings resolved from the worker's configuration.
 #[derive(Debug, Clone)]
@@ -81,12 +141,14 @@ pub struct WorkflowHostConfig {
     /// Manager origin; HTTPS, or HTTP to a literal loopback address or to an
     /// origin named in [`Self::plaintext_peers`].
     pub manager_url: String,
-    /// App placements advertised to the manager.
-    pub capacity: usize,
+    /// Apps whose prepared resources may remain resident.
+    pub prepared_apps: usize,
     /// Delivered jobs executing at once.
     pub slots: usize,
     /// Origins this process may reach over plaintext HTTP. Empty by default.
     pub plaintext_peers: PlaintextPeers,
+    /// `worker.shutdown_timeout`: the whole drain a stop allows the host.
+    pub shutdown_timeout: Duration,
 }
 
 impl WorkflowHostConfig {
@@ -101,11 +163,15 @@ impl WorkflowHostConfig {
              or credentials"
                 .to_owned()
         })?;
-        if self.capacity == 0 || u32::try_from(self.capacity).is_err() {
-            return Err("worker.workflow_capacity must be a positive placement count".into());
-        }
         if self.slots == 0 {
             return Err("worker.workflow_slots must be positive".into());
+        }
+        if self.prepared_apps < self.slots {
+            return Err(
+                "worker.workflow_prepared_apps must be at least worker.workflow_slots, so \
+                 every executing delivery's app stays prepared"
+                    .into(),
+            );
         }
         Ok(())
     }
@@ -114,28 +180,27 @@ impl WorkflowHostConfig {
         HostOptions {
             consumer: ConsumerOptions {
                 slots: self.slots,
-                max_scopes: self.capacity,
                 idle_poll: IDLE_POLL,
                 error_backoff: ERROR_BACKOFF,
+                // The drain's last operation bound releases what the grace
+                // could not finish, so the grace ends that much earlier.
+                drain: self.shutdown_timeout.saturating_sub(OPERATION_TIMEOUT),
                 delivery: DeliveryOptions {
-                    execution_timeout: EXECUTION_TIMEOUT,
+                    execution_timeout: EXECUTION_CEILING,
                     operation_timeout: OPERATION_TIMEOUT,
                     retry_delay: RETRY_DELAY,
                 },
             },
-            assignments: AssignmentOptions {
-                max_scopes: self.capacity,
-                operation_timeout: OPERATION_TIMEOUT,
+            prepared: PreparedOptions {
+                capacity: self.prepared_apps,
+                operation_timeout: PREPARATION_TIMEOUT,
             },
-            registration_interval: REGISTRATION_INTERVAL,
-            assignment_interval: ASSIGNMENT_INTERVAL,
-            policy_interval: POLICY_INTERVAL,
         }
     }
 
-    /// The exchange bounds and plaintext allowance every client this host
-    /// builds is bound by - the manager client and, per assignment, the
-    /// deployment-hold client towards Control.
+    /// The exchange bounds and plaintext allowance of the manager client, the
+    /// one client this host builds: claims, deliveries, task payloads and the
+    /// request path's run calls all cross on it.
     fn client_options(&self) -> ClientOptions {
         ClientOptions {
             plaintext_peers: self.plaintext_peers.clone(),
@@ -145,7 +210,7 @@ impl WorkflowHostConfig {
 }
 
 /// Process resources the host composes creator execution from. Every one of
-/// them is already the worker's own: nothing here arrives with a placement.
+/// them is already the worker's own: nothing here arrives with a claimed job.
 #[allow(missing_debug_implementations)]
 pub struct HostResources {
     /// The enrolled instance identity every manager and Control call uses.
@@ -163,6 +228,10 @@ pub struct HostResources {
     pub versions: SharedVersions,
     /// App environments shared with every HTTP thread.
     pub envs: SharedEnvs,
+    /// The process-wide registry of held apps. Each prepared app holds its
+    /// app here, so its key, bindings and environment outlive every execution
+    /// running from it and nothing longer.
+    pub residency: crate::residency::AppResidency,
 }
 
 type Exit = Shared<LocalBoxFuture<'static, Result<(), String>>>;
@@ -178,23 +247,60 @@ pub struct WorkflowHost {
 }
 
 impl WorkflowHost {
-    /// Start the host thread. It registers with the manager on its own; a
-    /// manager that is not yet reachable is retried rather than fatal.
+    /// Start the host thread. It claims from the manager on its own; a claim
+    /// against a manager that is not yet reachable is retried rather than
+    /// fatal.
+    ///
+    /// The enrolled client and the request path's backend registry are built
+    /// HERE, on the calling thread, and the registry is returned so HTTP
+    /// threads can serve `env.workflows` before the host has claimed anything.
     ///
     /// # Errors
-    /// Reports a thread or runtime that could not be created.
+    /// Reports an unusable manager origin, storage, thread or runtime.
     pub fn start(
         config: WorkflowHostConfig,
         resources: HostResources,
-        ready: ReadyApps,
-    ) -> Result<Self, String> {
+    ) -> Result<(Self, RemoteWorkflows), String> {
         config.validate()?;
+        let client = WorkerCoordinator::new(
+            &config.manager_url,
+            resources.service_auth.clone(),
+            config.client_options(),
+        )
+        .map_err(|error| format!("workflow manager client: {error}"))?;
+        let objects = PayloadObjects::open(
+            StorageStore::open(&resources.storage)
+                .map_err(|error| format!("workflow payload storage: {error}"))?,
+        )
+        .map_err(|error| format!("workflow payload storage: {error}"))?;
+        let workflows = RemoteWorkflows::new(
+            client.clone(),
+            objects,
+            TaskPayloadLimits::default().max_payload_bytes,
+        )
+        .map_err(|error| format!("workflow remote registry: {error}"))?;
+        let host_workflows = workflows.clone();
+        let host =
+            Self::spawn(move |stopped| run(config, resources, client, host_workflows, stopped))?;
+        Ok((host, workflows))
+    }
+
+    /// Run `body` on a host thread of its own, under its own compio runtime.
+    ///
+    /// `body` is handed the stop request, which resolves when [`Self::stop`]
+    /// is called or the host is dropped, and the host's exit is `body`'s
+    /// result.
+    pub(crate) fn spawn<B, F>(body: B) -> Result<Self, String>
+    where
+        B: FnOnce(oneshot::Receiver<()>) -> F + Send + 'static,
+        F: std::future::Future<Output = Result<(), String>> + 'static,
+    {
         let (stop, stopped) = oneshot::channel::<()>();
         let (finished, exit) = oneshot::channel::<Result<(), String>>();
         let thread = zeroship_workflow_runner::host::thread()
             .spawn(move || {
                 let result = match compio::runtime::Runtime::new() {
-                    Ok(runtime) => runtime.block_on(run(config, resources, ready, stopped)),
+                    Ok(runtime) => runtime.block_on(body(stopped)),
                     Err(error) => Err(format!("workflow host runtime: {error}")),
                 };
                 let _ = finished.send(result);
@@ -214,7 +320,7 @@ impl WorkflowHost {
     }
 
     /// Resolves with the reason if the host stops without being asked to.
-    /// Pending forever once [`Self::shutdown`] has begun.
+    /// Pending forever once [`Self::stop`] has been called.
     pub fn failure(&self) -> impl std::future::Future<Output = String> + 'static {
         let exit = self.exit.clone();
         let stopping = self.stopping.clone();
@@ -230,20 +336,36 @@ impl WorkflowHost {
         }
     }
 
-    /// Stop the host: its assignment bindings close, withdrawing every
-    /// published backend and revoking their policy generations; the manager
-    /// is told this worker is draining while delivered executions join; then
-    /// the thread is joined. Call after HTTP has drained and before the
-    /// instance retires.
-    ///
-    /// # Errors
-    /// Reports a host that failed while running or draining.
-    pub async fn shutdown(mut self) -> Result<(), String> {
+    /// Stop claiming, now. Deliveries already running carry on to their
+    /// settlement; [`Self::shutdown`] is what waits for them. Idempotent.
+    pub fn stop(&mut self) {
         self.stopping.store(true, Ordering::Release);
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
         }
-        let result = self.exit.clone().await;
+    }
+
+    /// Stop the host and wait at most `budget` for its running executions to
+    /// finish and settle and its thread to end.
+    ///
+    /// A host still running at the budget is left to the process's exit rather
+    /// than joined: its unfinished deliveries stay leased until their leases
+    /// lapse and run again elsewhere, and joining it would hold the drain past
+    /// the bound the deployment's termination grace is stated from.
+    ///
+    /// # Errors
+    /// Reports a host that failed while running or draining, and one that did
+    /// not drain within `budget`.
+    pub async fn shutdown(mut self, budget: Duration) -> Result<(), String> {
+        self.stop();
+        let Ok(result) = compio::time::timeout(budget, self.exit.clone()).await else {
+            drop(self.thread.take());
+            return Err(format!(
+                "the workflow host did not drain within {}s; its unfinished deliveries \
+                 return to the queue when their leases lapse",
+                budget.as_secs()
+            ));
+        };
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -253,47 +375,83 @@ impl WorkflowHost {
 
 impl Drop for WorkflowHost {
     fn drop(&mut self) {
-        self.stopping.store(true, Ordering::Release);
-        if let Some(stop) = self.stop.take() {
-            let _ = stop.send(());
-        }
+        self.stop();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
     }
 }
 
+/// Drain a stopping worker: its HTTP server and its workflow host, side by
+/// side.
+///
+/// `stop` is the process's stop signal. When it arrives the host stops
+/// claiming at once and its running executions finish and settle while `http`,
+/// the server's own drain, completes. ntex bounds the HTTP drain by
+/// `worker.shutdown_timeout` and `budget`, that same setting, bounds the
+/// host's, so both end within one `shutdown_timeout` of the signal. A server
+/// that stops without the signal, as when it is told to after the host failed,
+/// drains first and the host after it. The instance retires once this
+/// returns.
+pub async fn drain<H: std::future::Future>(
+    stop: impl std::future::Future<Output = ()>,
+    http: H,
+    host: Option<WorkflowHost>,
+    budget: Duration,
+) -> (H::Output, Result<(), String>) {
+    let http = std::pin::pin!(http);
+    let stop = std::pin::pin!(stop);
+    match futures::future::select(stop, http).await {
+        futures::future::Either::Left(((), http)) => {
+            futures::future::join(http, shutdown(host, budget)).await
+        }
+        futures::future::Either::Right((served, _)) => (served, shutdown(host, budget).await),
+    }
+}
+
+async fn shutdown(host: Option<WorkflowHost>, budget: Duration) -> Result<(), String> {
+    match host {
+        Some(host) => host.shutdown(budget).await,
+        None => Ok(()),
+    }
+}
+
 async fn run(
     config: WorkflowHostConfig,
     resources: HostResources,
-    ready: ReadyApps,
+    client: WorkerCoordinator,
+    workflows: RemoteWorkflows,
     stopped: oneshot::Receiver<()>,
 ) -> Result<(), String> {
-    let client = WorkerCoordinator::new(
-        &config.manager_url,
-        resources.service_auth.clone(),
-        config.client_options(),
-    )
-    .map_err(|error| format!("workflow manager client: {error}"))?;
     let worker = client.worker_id().clone();
-    let policies = Arc::new(HostPolicies::default());
+    // The version feed decides which prepared apps stay cached: Control lists
+    // every live app, so one it omits is deleted. Before the first poll
+    // answers, nothing is known to be gone.
+    let versions = resources.versions.clone();
+    let feed: AppFeed = Rc::new(move |app: &AppId| {
+        versions.read().ok().is_none_or(|versions| {
+            versions
+                .as_ref()
+                .is_none_or(|versions| versions.contains_key(app))
+        })
+    });
     let provider = ProductionResources::open(resources)?;
-    // The SAME enrolled client the host coordinates through. Every creator call
-    // and every task payload operation crosses on it, so a placement is served
-    // by the identity its requests are signed with.
+    // The SAME enrolled client the host claims through. Every creator call and
+    // every task payload operation crosses on it, so a claimed job is served by
+    // the identity its requests are signed with.
     let factory = WorkflowCreatorFactory::new(
         provider,
-        policies.clone(),
         client.clone(),
+        workflows,
         TaskPayloadLimits::default(),
         OPERATION_TIMEOUT,
     )
     .map_err(|error| format!("workflow creator factory: {error}"))?;
-    let mut host = WorkerHost::new(client, policies, factory, ready, config.host_options())
+    let mut host = WorkerHost::new(client, factory, feed, config.host_options())
         .map_err(|error| format!("workflow host: {error}"))?;
     tracing::info!(
         worker = worker.as_str(),
-        capacity = config.capacity,
+        prepared_apps = config.prepared_apps,
         slots = config.slots,
         "workflow host started"
     );
@@ -305,10 +463,10 @@ async fn run(
 
 /// Creator resources from the worker's own trusted app metadata.
 ///
-/// The assignment names an app; it cannot select a login, schema, object
-/// store or artifact source. Control, answering this enrolled instance,
-/// confirms the app and supplies its environment and data key; the database,
-/// storage and artifacts are the ones this worker serves every request with.
+/// A claimed job names an app; it cannot select a login, schema, object store
+/// or artifact source. Control, answering this enrolled instance, confirms the
+/// app and supplies its environment and data key; the database, storage and
+/// artifacts are the ones this worker serves every request with.
 struct ProductionResources {
     control_url: String,
     service_auth: Arc<ServiceAuth>,
@@ -317,6 +475,7 @@ struct ProductionResources {
     blob_store: Arc<dyn BlobStore>,
     envs: SharedEnvs,
     contexts: Rc<SharedContexts>,
+    residency: crate::residency::AppResidency,
 }
 
 impl ProductionResources {
@@ -348,6 +507,7 @@ impl ProductionResources {
                 peers,
                 meter: resources.meter,
             }),
+            residency: resources.residency,
         })
     }
 }
@@ -355,9 +515,14 @@ impl ProductionResources {
 impl WorkflowResourceProvider for ProductionResources {
     async fn resolve(
         &self,
-        scope: &AssignedScope,
+        app: &AppId,
     ) -> Result<WorkflowResources, WorkflowServiceError> {
-        let app = &scope.app_id;
+        // FIRST, before the environment version and `is_bound` checks below:
+        // they let this preparation skip a fetch because another holder
+        // supplied the material, and only a residency taken before them keeps
+        // that holder's last drop from withdrawing it in between. The prepared
+        // app keeps it, and so does every execution holding that app.
+        let residency = Rc::new(self.residency.reside(app.clone()));
         // Control authorizes this instance to read the app; an app it does
         // not serve to this worker is never prepared.
         let info = sync::fetch_app_version(&self.control_url, &self.service_auth, app)
@@ -393,6 +558,7 @@ impl WorkflowResourceProvider for ProductionResources {
             max_source_bytes: usize::try_from(MAX_SOURCE_BYTES)
                 .map_err(|_| unavailable("app source budget is not representable"))?,
             contexts: self.contexts.clone(),
+            residency,
         })
     }
 }

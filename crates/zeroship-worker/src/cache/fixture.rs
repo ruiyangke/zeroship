@@ -9,11 +9,12 @@ impl Kernel {
         Self::install(
             10,
             KernelConfig {
-                workflows: ReadyApps::default(),
+                workflows: None,
                 db_service: Some(database_service(url)),
                 kv_store: None,
                 storage_backend: None,
                 meter,
+                residency: None,
             },
         )
     }
@@ -61,6 +62,7 @@ impl Drop for Kernel {
         STORAGE_BACKEND.with(|slot| slot.borrow_mut().take());
         WORKFLOWS.with(|slot| slot.borrow_mut().take());
         METER.with(|slot| slot.borrow_mut().take());
+        RESIDENCY.with(|slot| slot.borrow_mut().take());
         LOADED_META.with(|slot| slot.borrow_mut().clear());
     }
 }

@@ -9,10 +9,11 @@ use ntex::{
 use serde::Serialize;
 use std::time::Duration;
 use zeroship_core::{
+    app_id::AppId,
     service_identity::{endpoints, ServiceEndpoint},
     workflow_coordination::{
-        AssignedScope, ReadStepOutput, RestartRun, RunFailure, RunScope, SignalRun, StartRun,
-        StepOutputLocation, TransitionRun, VerifyAssignment,
+        ReadStepOutput, RestartRun, RunFailure, RunScope, SignalRun, StartRun, StepOutputLocation,
+        TransitionRun,
     },
     workflow_policy::MAX_INPUT_BYTES_CEILING,
 };
@@ -72,16 +73,25 @@ pub fn configure(config: &mut web::ServiceConfig) {
 
 /// Resolve the app this call may act for, and bind it to the journal.
 ///
-/// THE WORKER IS NEVER READ FROM THE BODY. It is the instance whose key
-/// verified the request, substituted into the selector in place of anything a
-/// body could claim, exactly as the manager's own placement lookup does. The
-/// body names an app and a placement revision; whether this worker holds that
-/// placement is the manager's answer, not the caller's assertion.
+/// THE ZONE IS NEVER READ FROM THE BODY. It is the zone frozen on the instance
+/// row whose key verified the request. The body names only an app; whether
+/// this worker may act for it is the service's answer, not the caller's
+/// assertion.
+///
+/// THE QUEUE FENCES BEFORE ANYTHING IS OBSERVED. Observing an app reads
+/// Control and writes this service's policy ledger, and Control answers an
+/// unknown app differently from a known one, so a caller who could make this
+/// service observe any id it named would learn which ids exist in other zones
+/// and leave a ledger row for each. The app must first hold a queue scope in
+/// the caller's zone - this queue's own frozen copy of the app's zone - and an
+/// app with none, unknown or foreign, is refused `PermissionDenied` with
+/// nothing read from Control and nothing written. Only then is the app
+/// observed, and the observation refuses a deleted app to every zone.
 async fn bind(
     request: &web::HttpRequest,
     state: &SharedState,
     endpoint: ServiceEndpoint,
-    scope: &AssignedScope,
+    app: &AppId,
 ) -> Result<AppWorkflows, RunFailure> {
     let actor = compio::time::timeout(
         Duration::from_secs(5),
@@ -93,20 +103,26 @@ async fn bind(
     state
         .service
         .manager
-        .verify_assignment(&VerifyAssignment {
-            app_id: scope.app_id.clone(),
-            worker_id: actor.id().clone(),
-            assignment_revision: scope.assignment_revision,
-        })
+        .queue()
+        .require_scope_in_zone(app, actor.zone())
         .await
         .map_err(|error| refused(Error::from(error)))?;
     let source = state
         .policy_source
         .as_ref()
         .ok_or(RunFailure::Unavailable {})?;
+    // The observation is taken once for the zone decision and reused by the
+    // journal binding below; `ControlPolicies` caches it, so this is the same
+    // observation `RunService::app` installs.
+    source
+        .observe(app)
+        .await
+        .map_err(|error| refused(Error::from(error)))?
+        .admits_zone(actor.zone())
+        .map_err(|error| refused(Error::from(error)))?;
     state
         .runs
-        .app(source.as_ref(), &scope.app_id)
+        .app(source.as_ref(), app)
         .await
         .map_err(|error| refusal(&error))
 }
@@ -214,7 +230,7 @@ async fn start(
                 &request,
                 &state,
                 endpoints::WORKFLOW_RUN_START,
-                &command.scope,
+                &command.app_id,
             )
             .await?;
             let staged = stage_start_input(
@@ -253,7 +269,7 @@ async fn status(
                 &request,
                 &state,
                 endpoints::WORKFLOW_RUN_STATUS,
-                &command.scope,
+                &command.app_id,
             )
             .await?;
             api.status(command.run_id.as_str())
@@ -276,7 +292,7 @@ async fn signal(
                 &request,
                 &state,
                 endpoints::WORKFLOW_RUN_SIGNAL,
-                &command.scope,
+                &command.app_id,
             )
             .await?;
             api.signal(&command.request_id, command.run_id.as_str(), command.options)
@@ -299,7 +315,7 @@ async fn transition(
                 &request,
                 &state,
                 endpoints::WORKFLOW_RUN_TRANSITION,
-                &command.scope,
+                &command.app_id,
             )
             .await?;
             api.transition(
@@ -326,7 +342,7 @@ async fn restart(
                 &request,
                 &state,
                 endpoints::WORKFLOW_RUN_RESTART,
-                &command.scope,
+                &command.app_id,
             )
             .await?;
             api.restart(&command.request_id, command.run_id.as_str(), command.options)
@@ -357,7 +373,7 @@ async fn step_output(
                 &request,
                 &state,
                 endpoints::WORKFLOW_RUN_STEP_OUTPUT,
-                &command.scope,
+                &command.app_id,
             )
             .await?;
             let located = api
@@ -395,7 +411,7 @@ async fn output(
                 &request,
                 &state,
                 endpoints::WORKFLOW_RUN_OUTPUT,
-                &command.scope,
+                &command.app_id,
             )
             .await?;
             api.read_output(command.run_id.as_str(), LocatePayload)

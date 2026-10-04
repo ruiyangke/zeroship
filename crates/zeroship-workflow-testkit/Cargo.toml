@@ -2,7 +2,7 @@
 name = "zeroship-workflow-testkit"
 version = "0.1.0"
 edition = "2021"
-description = "Dev-only workflow fixtures: the platform database, journal seeding, placement and the manager queue"
+description = "Dev-only workflow fixtures: the platform database, journal seeding, queue scopes and the manager queue"
 publish = false
 
 # A workspace member so its own tests run in the ordinary workspace suite and

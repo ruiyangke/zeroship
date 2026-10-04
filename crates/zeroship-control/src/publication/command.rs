@@ -172,9 +172,15 @@ impl VerifiedDeployment {
 
     /// The exact preparation request the publisher sends for this deployment.
     #[must_use]
-    pub fn registration(&self, app: &AppId, deployment: &DeploymentId) -> RegisterSchedules {
+    pub fn registration(
+        &self,
+        app: &AppId,
+        zone: &zeroship_core::ZoneId,
+        deployment: &DeploymentId,
+    ) -> RegisterSchedules {
         RegisterSchedules {
             app_id: app.clone(),
+            execution_zone_id: zone.clone(),
             deployment_id: deployment.clone(),
             schedules: self.schedules.clone(),
         }

@@ -1,6 +1,7 @@
 use super::*;
 use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use futures::future::LocalBoxFuture;
+use futures::{future::LocalBoxFuture, FutureExt};
+use std::sync::Arc;
 use zeroship_core::{
     service_assertion::{
         InMemoryReplayStore, ServiceAssertionVerifier, ServiceIssuer, ServiceSigningKey,
@@ -8,13 +9,16 @@ use zeroship_core::{
     },
     service_identity::{endpoints, verify_service_call, ServiceEndpoint},
     service_peers::{ServiceAuth, ServiceKeyring},
-    workflow_coordination::{RegisteredWorker, ScopePage, WorkerId, AUDIENCE},
+    workflow_coordination::{RunId, WorkerId, AUDIENCE},
+    workflow_jobs::{ClaimJobs, Delivery, DeploymentId, JobId, JobOperation, JobSpec},
 };
+use zeroship_workflow::service::{delivery::AcceptedJob, TaskAssignment};
 use zeroship_workflow_client::Options;
 
 pub(super) struct Fixture {
     auth: Arc<ServiceAuth>,
-    pub policies: Arc<HostPolicies>,
+    /// Apps the host's factory was asked to open.
+    pub opened: Rc<Cell<usize>>,
     pub worker: WorkerId,
     pub calls: Rc<RefCell<Vec<Call>>>,
     pub client_options: Options,
@@ -38,70 +42,129 @@ impl Fixture {
                 .unwrap(),
                 Arc::new(TransportAssertionVerifier::new(ServiceTrustBundle::new())),
             )),
-            policies: Arc::new(HostPolicies::default()),
+            opened: Rc::new(Cell::new(0)),
             worker,
             calls: Rc::new(RefCell::new(Vec::new())),
             client_options: Options::default(),
         }
     }
 
-    pub fn registration(&self, request: &RegisterWorker) -> Reply {
-        Reply::ok(json!(RegisteredWorker {
-            worker_id: self.worker.clone(),
-            capacity: request.capacity,
-            state: request.state,
-            expires_at: 0.try_into().unwrap(),
-        }))
-    }
-
     pub fn host(
         &self,
         client: WorkerCoordinator,
         options: HostOptions,
-    ) -> WorkerHost<UnexpectedCreator> {
-        WorkerHost::new(
-            client,
-            self.policies.clone(),
-            UnexpectedCreator,
-            ReadyApps::default(),
-            options,
-        )
-        .unwrap()
+    ) -> WorkerHost<Unpreparable> {
+        self.try_host(client, options).unwrap()
     }
 
-    pub fn registrations(&self) -> Vec<RegisterWorker> {
+    pub fn try_host(
+        &self,
+        client: WorkerCoordinator,
+        options: HostOptions,
+    ) -> Result<WorkerHost<Unpreparable>, WorkflowServiceError> {
+        WorkerHost::new(
+            client,
+            Unpreparable {
+                opened: self.opened.clone(),
+            },
+            Rc::new(|_: &AppId| true),
+            options,
+        )
+    }
+
+    pub fn claims(&self) -> Vec<ClaimJobs> {
         self.calls
             .borrow()
             .iter()
             .filter_map(|call| match call {
-                Call::Register(request) => Some(request.clone()),
-                Call::Assignments(_) => None,
+                Call::Claim(request) => Some(request.clone()),
+                Call::Release(_) => None,
             })
             .collect()
     }
+
+    pub fn releases(&self) -> Vec<Value> {
+        self.calls
+            .borrow()
+            .iter()
+            .filter_map(|call| match call {
+                Call::Release(body) => Some(body.clone()),
+                Call::Claim(_) => None,
+            })
+            .collect()
+    }
+
+    /// An advance delivery to this worker for `app`, with the journal
+    /// acceptance the same reply carries, as the claim route answers one.
+    pub fn delivery(&self, app: &AppId) -> (Delivery, TaskAssignment, Value) {
+        let delivery = Delivery {
+            job: JobSpec {
+                id: JobId::mint(),
+                app_id: app.clone(),
+                operation: JobOperation::Advance {
+                    deployment_id: DeploymentId::mint(),
+                    run_id: RunId::mint(),
+                    generation: 1,
+                    revision: 1.try_into().unwrap(),
+                },
+                available_at: 0.try_into().unwrap(),
+            },
+            worker_id: self.worker.clone(),
+            attempt: 1.try_into().unwrap(),
+            deadline: 1.try_into().unwrap(),
+        };
+        let assignment: TaskAssignment = serde_json::from_value(json!({
+            "id": "task_delivered", "token": "0".repeat(64), "generation": 1, "epoch": 1,
+            "deadline": 0, "leaseMs": 30_000,
+            "invocation": {
+                "appId": app.as_str(), "deployId": "dep_delivered", "deployHash": "a".repeat(64),
+                "runId": "run_delivered", "generation": 1, "workflowName": "Example",
+                "phase": "running",
+                "trigger": {"input": null, "startedAt": "2026-09-30T00:00:00Z",
+                    "runId": "run_delivered", "workflowName": "Example"},
+                "journal": [],
+            },
+        }))
+        .unwrap();
+        let accepted = serde_json::to_value(AcceptedJob::Execute {
+            assignment: Box::new(assignment.clone()),
+            remaining_ms: 30_000.try_into().unwrap(),
+        })
+        .unwrap();
+        let body = json!({
+            "lease": {"delivery": delivery, "remainingMs": 30_000, "attemptRemainingMs": 60_000},
+            "accepted": accepted,
+        });
+        (delivery, assignment, body)
+    }
+}
+
+/// A claim reply holding `deliveries`, past every app it visited.
+pub(super) fn batch(deliveries: &[Value], lap_complete: bool) -> Reply {
+    Reply::ok(json!({"deliveries": deliveries, "after": null, "lapComplete": lap_complete}))
 }
 
 #[derive(Debug, Clone)]
 pub(super) enum Call {
-    Register(RegisterWorker),
-    Assignments(ScopePage),
+    Claim(ClaimJobs),
+    Release(Value),
 }
 
 impl Call {
     fn endpoint(&self) -> ServiceEndpoint {
         match self {
-            Self::Register(_) => endpoints::WORKFLOW_REGISTER,
-            Self::Assignments(_) => endpoints::WORKFLOW_ASSIGNMENTS,
+            Self::Claim(_) => endpoints::WORKFLOW_JOB_CLAIM,
+            Self::Release(_) => endpoints::WORKFLOW_JOB_RELEASE,
         }
     }
 
     fn parse(path: &str, body: Value) -> Self {
-        if path == endpoints::WORKFLOW_REGISTER.path_template() {
-            Self::Register(serde_json::from_value(body).unwrap())
-        } else if path == endpoints::WORKFLOW_ASSIGNMENTS.path_template() {
-            Self::Assignments(serde_json::from_value(body).unwrap())
+        if path == endpoints::WORKFLOW_JOB_CLAIM.path_template() {
+            Self::Claim(serde_json::from_value(body).unwrap())
+        } else if path == endpoints::WORKFLOW_JOB_RELEASE.path_template() {
+            Self::Release(body)
         } else {
-            panic!("unexpected worker metadata operation: {path}")
+            panic!("unexpected worker operation: {path}")
         }
     }
 }
@@ -119,16 +182,6 @@ impl Reply {
         Self {
             status: 200,
             body,
-            gate: None,
-            abandoned: false,
-            sent: None,
-        }
-    }
-
-    pub fn failure(status: u16, code: &str) -> Self {
-        Self {
-            status,
-            body: json!({"code":code}),
             gate: None,
             abandoned: false,
             sent: None,
@@ -318,19 +371,23 @@ async fn request(stream: &mut compio::net::TcpStream) -> Option<Request> {
     }
 }
 
-pub(super) struct UnexpectedCreator;
+/// A factory that refuses every app, counting what it was asked to open.
+pub(super) struct Unpreparable {
+    opened: Rc<Cell<usize>>,
+}
 
-impl CreatorFactory for UnexpectedCreator {
+impl CreatorFactory for Unpreparable {
     /// `WorkerHost` pairs a factory with the crossed transport, so this is the
     /// only shape it accepts.
     type Journal = ();
 
-    async fn open(
-        &self,
-        _: &AssignedScope,
-        _: &PolicyBinding,
-        _: Rc<dyn zeroship_workflow::service::IngressEpochs>,
-    ) -> Result<CreatorRuntime<()>, WorkflowServiceError> {
-        panic!("empty placement fixture cannot authorize creator setup")
+    fn open<'a>(
+        &'a self,
+        _: &'a AppId,
+    ) -> LocalBoxFuture<'a, Result<CreatorRuntime<()>, WorkflowServiceError>> {
+        self.opened.set(self.opened.get() + 1);
+        Box::pin(std::future::ready(Err(WorkflowServiceError::Unavailable(
+            "this fixture prepares no app".into(),
+        ))))
     }
 }

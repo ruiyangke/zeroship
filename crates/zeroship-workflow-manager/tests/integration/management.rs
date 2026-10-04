@@ -4,6 +4,7 @@
 )]
 
 use crate::support;
+use crate::support::QueueCalls;
 use crate::support::deployments as deployment_support;
 
 use futures::channel::oneshot;
@@ -13,13 +14,13 @@ use std::{
     future::ready,
     rc::Rc,
 };
-use crate::support::{Backend, Fixture};
+use crate::support::{Backend, Fixture, Owner};
 use zeroship_core::{
     app_id::AppId,
     service_peers::{service_issuer, CONTROL_SERVICE_NAME},
     typed_id,
     workflow_coordination::{
-        Assignment, ManageRun, ManagementOperation, ManagementOutcome, RestartDeploy,
+        ManageRun, ManagementOperation, ManagementOutcome, RestartDeploy,
         RestartDeployment, RestartOptions, RunId, RunOperation, WorkerId,
     },
     workflow_deployments::HoldGeneration,
@@ -152,6 +153,12 @@ impl Host {
         &self,
         request: &ManageRun,
     ) -> Result<zeroship_core::workflow_coordination::ManagementReceipt, Error> {
+        self.queue
+            .register_scope(
+                &request.app_id,
+                &zeroship_core::ZoneId::default_zone(),
+            )
+            .await?;
         self.coordinator
             .manage(&service_issuer(CONTROL_SERVICE_NAME).unwrap(), request)
             .await
@@ -193,29 +200,25 @@ fn latest(app: &AppId, run: &RunId, deployment: &RestartDeployment) -> ManageRun
         ..command(app, run, RunOperation::Pause)
     }
 }
-fn assignment(app: &AppId) -> Assignment {
-    Assignment {
-        app_id: app.clone(),
-        worker_id: WorkerId::mint(),
-        revision: 1.try_into().unwrap(),
-        expires_at: i64::MAX.try_into().unwrap(),
-    }
+fn assignment(app: &AppId) -> Owner {
+    Owner::new(app.clone(), WorkerId::mint())
 }
 /// Take the next sweep off the app's queue. A management command is a sweep, so
 /// the claimant is the lane of the process that owns the journal; these
-/// contracts run no placement lane, so the authority it asserts is stated here
-/// the way `assignment` states a placement, and the settlement paths below
+/// contracts run no service, so the authority it asserts is stated here the
+/// way `assignment` states a worker's, and the settlement paths below
 /// compare against the same identity.
 async fn claim_sweep(
     host: &Host,
-    authority: &Assignment,
+    authority: &Owner,
 ) -> Result<Option<zeroship_workflow_manager::DeliveryGrant>, Error> {
     host.queue
         .claim_authorized(
-            &authority.into(),
+            &authority.app_id,
+            &authority.worker_id,
             Claimant::Maintenance,
             Ok(support::delivery_ceiling()),
-            |_| ready(Ok(authority.clone())),
+            |_| ready(Ok(authority.worker_id.clone())),
         )
         .await
 }
@@ -275,15 +278,15 @@ async fn patch(database: &Database, table: &str, id: &str, changes: Value) {
 }
 /// Neither claimant has a deliverable row: the lane's next command waits on an
 /// unsettled earlier one, and the barrier holds every advance back from the
-/// placed worker.
-async fn nothing_deliverable(host: &Host, authority: &Assignment) {
+/// app's workers.
+async fn nothing_deliverable(host: &Host, authority: &Owner) {
     assert!(
         claim_sweep(host, authority).await.unwrap().is_none(),
         "the lane has no sweep to take"
     );
     assert!(
         host.queue.claim(authority).await.unwrap().is_none(),
-        "a placed worker has no creator work to take"
+        "a worker has no creator work to take"
     );
 }
 async fn snapshot(host: &Host) -> BTreeMap<&'static str, Vec<Value>> {
@@ -301,7 +304,7 @@ async fn snapshot(host: &Host) -> BTreeMap<&'static str, Vec<Value>> {
 }
 async fn settle(
     host: &Host,
-    authority: &Assignment,
+    authority: &Owner,
     expected: &JobSpec,
     outcome: ManagementOutcome,
 ) -> JournalSettlement {

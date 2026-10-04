@@ -5,9 +5,10 @@ use super::*;
 fn config(manager_url: &str) -> WorkflowHostConfig {
     WorkflowHostConfig {
         manager_url: manager_url.to_owned(),
-        capacity: 8,
+        prepared_apps: 8,
         slots: 2,
         plaintext_peers: PlaintextPeers::default(),
+        shutdown_timeout: MIN_SHUTDOWN_TIMEOUT,
     }
 }
 
@@ -48,11 +49,6 @@ fn a_manager_origin_is_https_or_plain_http_to_a_literal_loopback_address_by_defa
 
 // The one-variable control at the worker's own configuration surface: ONE
 // settings value naming one origin, and two manager URLs judged by it.
-//
-// The list also reaches the deployment-hold client this host builds per
-// assignment, which `client_options` is what ties together; that client is
-// constructed against Control's origin rather than the manager's, so it is not
-// reachable from this pure check.
 #[test]
 fn a_named_plaintext_peer_is_a_usable_manager_origin_and_an_unnamed_one_is_not() {
     let named: PlaintextPeers = std::iter::once("http://workflow:9093")
@@ -80,24 +76,21 @@ fn a_named_plaintext_peer_is_a_usable_manager_origin_and_an_unnamed_one_is_not()
     assert!(config("http://workflow:9093").validate().is_err());
 }
 
-// Capacity is advertised to the manager as the placements this worker will
-// accept, and slots bound concurrent execution. Neither has a meaningful zero,
-// and capacity crosses the wire as a u32.
+// Slots bound concurrent execution, and every executing delivery holds its
+// prepared app, so a prepared-app bound below the slot count could only evict
+// an app a running execution still holds. Neither bound has a meaningful zero.
 #[test]
-fn capacity_and_slots_must_be_positive_and_capacity_must_cross_the_wire() {
-    let mut zero_capacity = config("https://workflow.example");
-    zero_capacity.capacity = 0;
-    assert!(zero_capacity
+fn prepared_apps_must_cover_the_slots_and_slots_must_be_positive() {
+    let mut fewer = config("https://workflow.example");
+    fewer.slots = 3;
+    fewer.prepared_apps = 2;
+    let error = fewer
         .validate()
-        .expect_err("zero capacity is refused")
-        .contains("worker.workflow_capacity"));
-
-    let mut unrepresentable = config("https://workflow.example");
-    unrepresentable.capacity = usize::MAX;
-    assert!(unrepresentable
-        .validate()
-        .expect_err("capacity beyond the wire type is refused")
-        .contains("worker.workflow_capacity"));
+        .expect_err("fewer prepared apps than slots is refused");
+    assert!(
+        error.contains("worker.workflow_prepared_apps"),
+        "the refusal names the setting: {error}"
+    );
 
     let mut zero_slots = config("https://workflow.example");
     zero_slots.slots = 0;
@@ -106,36 +99,88 @@ fn capacity_and_slots_must_be_positive_and_capacity_must_cross_the_wire() {
         .expect_err("zero slots is refused")
         .contains("worker.workflow_slots"));
 
-    // The control: the same settings with positive bounds are accepted.
-    config("https://workflow.example")
+    // The control: one prepared app per slot is exactly enough.
+    let mut equal = config("https://workflow.example");
+    equal.slots = 3;
+    equal.prepared_apps = 3;
+    equal
         .validate()
-        .expect("positive bounds run a host");
+        .expect("as many prepared apps as slots runs a host");
 }
 
-// The manager counts placements; the consumer counts executing jobs. Neither
-// bound may silently become the other, and the assignment registry must never
-// admit more apps than the consumer can hold scopes for.
+// The prepared-app cache counts apps; the consumer counts executing jobs.
+// Neither bound may silently become the other.
 #[test]
-fn the_host_options_carry_capacity_to_placements_and_slots_to_execution() {
+fn the_host_options_carry_prepared_apps_to_the_cache_and_slots_to_execution() {
     let mut settings = config("https://workflow.example");
-    settings.capacity = 12;
+    settings.prepared_apps = 12;
     settings.slots = 3;
     let options = settings.host_options();
-    assert_eq!(options.assignments.max_scopes, 12);
-    assert_eq!(options.consumer.max_scopes, 12);
+    assert_eq!(options.prepared.capacity, 12);
     assert_eq!(options.consumer.slots, 3);
-    assert!(!options.assignments.operation_timeout.is_zero());
-    assert!(!options.registration_interval.is_zero());
-    assert!(!options.assignment_interval.is_zero());
-    assert!(!options.policy_interval.is_zero());
+    assert!(!options.prepared.operation_timeout.is_zero());
+    assert!(!options.consumer.delivery.operation_timeout.is_zero());
 }
 
-// With no host running - the default deployment - the registry every request
-// isolate resolves through is empty, so `env.workflows` refuses rather than
-// reaching any other backend.
+// The host's running deliveries get the drain minus the bound that releases
+// what they could not finish, and at the shortest drain that grace still holds
+// a delivery claimed just before the stop through its app's preparation, its
+// execution and its settlement, each at the bound the host itself runs it under.
+// It also holds the claim a stop can find pending, which runs beside it: the
+// claim's wait and the bound after it, then the give-back of what it delivers.
 #[test]
-fn an_app_with_no_running_host_is_never_ready() {
-    let apps = ReadyApps::default();
-    assert!(!apps.is_ready(&AppId::mint()));
+fn the_running_deliveries_grace_is_the_drain_less_its_release() {
+    let mut settings = config("https://workflow.example");
+    let longer = MIN_SHUTDOWN_TIMEOUT + Duration::from_secs(25);
+    settings.shutdown_timeout = longer;
+    assert_eq!(
+        settings.host_options().consumer.drain,
+        longer.checked_sub(OPERATION_TIMEOUT).unwrap()
+    );
+
+    settings.shutdown_timeout = MIN_SHUTDOWN_TIMEOUT;
+    let options = settings.host_options();
+    let grace = options.consumer.drain;
+    assert_eq!(grace, MIN_SHUTDOWN_TIMEOUT.checked_sub(OPERATION_TIMEOUT).unwrap());
+    let delivery = options.consumer.delivery;
+    let one_delivery =
+        options.prepared.operation_timeout + delivery.execution_timeout + delivery.operation_timeout;
+    assert!(
+        grace >= one_delivery,
+        "a grace of {grace:?} cuts off a delivery that needs {one_delivery:?}"
+    );
+    // The consumer states the operation bound as its claim's wait, cuts the
+    // claim one operation bound after it, and bounds each give-back by one.
+    let claim_tail = delivery.operation_timeout * 3;
+    assert!(
+        grace >= claim_tail,
+        "a grace of {grace:?} ends before a claim pending at the stop, which needs \
+         {claim_tail:?}"
+    );
 }
 
+mod drain;
+mod residency;
+
+// A stopping worker lets a delivery it claimed just before the stop run to the
+// execution ceiling and then settles it, so a shorter drain would cut that
+// delivery off and leave it leased until its lease lapses.
+#[test]
+fn a_shutdown_timeout_must_cover_one_execution_at_the_ceiling_and_its_settlement() {
+    let minimum = MIN_SHUTDOWN_TIMEOUT.as_secs();
+    assert!(
+        MIN_SHUTDOWN_TIMEOUT > EXECUTION_CEILING,
+        "the premise: the requirement includes the settlement after the execution"
+    );
+    for short in [0, minimum - 1] {
+        let error = validate_shutdown_timeout(short)
+            .expect_err("a drain shorter than one execution and its settlement is refused");
+        assert!(
+            error.contains("worker.shutdown_timeout"),
+            "the refusal names the setting: {error}"
+        );
+    }
+    // The control: exactly the requirement, and anything above it, is accepted.
+    assert_eq!(validate_shutdown_timeout(minimum), Ok(minimum));
+    assert_eq!(validate_shutdown_timeout(minimum + 1), Ok(minimum + 1));
+}

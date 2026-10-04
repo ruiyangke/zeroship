@@ -93,6 +93,14 @@ const JOIN_TIMEOUT: Duration = Duration::from_secs(10);
 /// a drained worker past the point where it gets killed anyway.
 const RETIREMENT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The termination grace a worker needs from its orchestrator: `drain_secs` of
+/// shutdown drain, then one retirement call within [`RETIREMENT_TIMEOUT`].
+/// Shorter, and the orchestrator kills the worker mid-drain or before it retires
+/// its instance, leaving the row `active` and its deliveries to lapse.
+pub(crate) fn termination_grace(drain_secs: u64) -> Duration {
+    Duration::from_secs(drain_secs).saturating_add(RETIREMENT_TIMEOUT)
+}
+
 /// How long one renewal call may take.
 ///
 /// Bounded well inside the renewal interval, so a control plane that hangs
@@ -412,12 +420,21 @@ async fn post_signed(
         .map_err(|error| format!("invalid control URL {url}: {error}"))?
         .header("authorization", authorization)
         .map_err(|error| format!("invalid auth header: {error}"))?;
-    let response = compio::time::timeout(timeout, builder.send())
+    // ONE bound over the whole exchange, body included: a control plane that
+    // answers the head and then stalls the body would otherwise hold the call,
+    // and the retirement inside it, past the bound the caller was promised.
+    let exchange = async {
+        let response = builder
+            .send()
+            .await
+            .map_err(|error| format!("{path} transport: {error}"))?;
+        let status = response.status().as_u16();
+        let body = response.bytes().await.unwrap_or_default();
+        Ok::<_, String>((status, body))
+    };
+    let (status, body) = compio::time::timeout(timeout, exchange)
         .await
-        .map_err(|_| format!("control did not answer {path} within {}s", timeout.as_secs()))?
-        .map_err(|error| format!("{path} transport: {error}"))?;
-    let status = response.status().as_u16();
-    let body = response.bytes().await.unwrap_or_default();
+        .map_err(|_| format!("control did not answer {path} within {}s", timeout.as_secs()))??;
     let snippet: String = String::from_utf8_lossy(&body).chars().take(400).collect();
     Ok((status, snippet))
 }
@@ -1138,6 +1155,64 @@ mod tests {
         );
         let message = outcome.expect_err("a 401 is not a retirement");
         assert!(message.contains("HTTP 401"), "{message}");
+    }
+
+    /// The retirement's bound covers the whole exchange: a control plane that
+    /// answers the head and then never sends the body it announced still
+    /// releases the worker within [`RETIREMENT_TIMEOUT`].
+    ///
+    /// The retirement runs after the drain, inside the termination grace the
+    /// deployment states as `worker.shutdown_timeout` plus this bound, so a
+    /// read the bound did not cover would let the orchestrator kill the worker
+    /// before it reported its own exit.
+    #[compio::test]
+    async fn a_retirement_whose_answer_stalls_mid_body_is_bounded() {
+        use compio::io::{AsyncRead as _, AsyncWriteExt as _};
+
+        let (auth, _gateway, _public) =
+            identity_for(&zeroship_core::typed_id::new_worker_instance_id());
+        let listener = compio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind a stand-in control plane");
+        let url = format!("http://{}", listener.local_addr().expect("local address"));
+        let stalling = async move {
+            let (mut stream, _) = listener.accept().await.expect("accept the retirement");
+            let mut head = Vec::new();
+            while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                let compio::BufResult(read, buf) = stream.read(vec![0_u8; 1024]).await;
+                let read = read.expect("read the request head");
+                assert!(read > 0, "the client closed before finishing its request head");
+                head.extend_from_slice(&buf[..read]);
+            }
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-length: 16\r\n\r\n".to_vec(),
+                )
+                .await
+                .0
+                .expect("answer the head");
+            // Hold the connection open with the announced body never sent.
+            std::future::pending::<()>().await;
+            drop(stream);
+        };
+
+        let started = std::time::Instant::now();
+        let outcome = compio::time::timeout(
+            RETIREMENT_TIMEOUT * 3,
+            futures::future::select(Box::pin(stalling), Box::pin(retire(&auth, &url))),
+        )
+        .await
+        .expect("the retirement returns within its own bound");
+        let futures::future::Either::Right((outcome, _)) = outcome else {
+            panic!("the stand-in control plane never finishes");
+        };
+        let message = outcome.expect_err("an answer whose body never arrives is not a retirement");
+        assert!(message.contains("did not answer"), "{message}");
+        assert!(
+            started.elapsed() < RETIREMENT_TIMEOUT * 2,
+            "the bound held: {:?}",
+            started.elapsed()
+        );
     }
 
     /// A renewal carries the INSTANCE's assertion, to the renewal route, and

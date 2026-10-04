@@ -69,6 +69,7 @@ async fn dispatch_resolves_full_kernel_kv_storage_db_auth() {
             ),
             storage_backend: Some(StorageBackendConfig::Local(storage_root.path().to_owned())),
             meter: std::sync::Arc::new(zeroship_metering::Meter::new()),
+            residency: None,
         },
     );
     let app_id = worker.app_id.clone();

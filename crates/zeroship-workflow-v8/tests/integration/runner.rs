@@ -389,7 +389,7 @@ async fn native_runner_hydrates_continuation_input_before_entering_v8() {
     let outcome = std::cell::RefCell::new(None);
     let within = compio::time::timeout(
         Duration::from_secs(20),
-        consumer.run_until(async {
+        beside(&mut consumer, async {
             let mut watched = run.clone();
             loop {
                 manager.publish(&fixture.app).await;
@@ -461,7 +461,7 @@ async fn payload_bounded_consumer(
 ) -> (
     Fixture,
     Rc<Manager>,
-    zeroship_workflow_runner::consumer::JobConsumer<Manager>,
+    Consumer,
 ) {
     let fixture =
         Fixture::new("throw new Error('must not evaluate'); export class Example {}").await;
@@ -666,8 +666,8 @@ async fn output_upload_retry_preserves_the_callback_and_stops_background_app_wor
         .unwrap();
     let manager = Manager::new(&fixture).await;
     // The payload seam must answer for the worker that holds the claim, which on
-    // this path is the one the manager placed rather than a name of the test's
-    // own choosing.
+    // this path is the one the manager delivered to rather than a name of the
+    // test's own choosing.
     let tasks = Rc::new(fixture.app.tasks(
         WorkerIdentity::new(manager.worker.as_str().to_owned()).unwrap(),
         fixture.objects.clone(),
@@ -887,6 +887,11 @@ async fn a_step_output_inside_the_inline_budget_never_reaches_the_catch() {
     );
 }
 
+/// The host operation bound every consumer here runs under: each claim,
+/// renewal, settlement and preparation is real queue or journal I/O, and this is
+/// a bound that I/O cannot plausibly miss.
+const HOST_OPERATION_BOUND: Duration = Duration::from_secs(2);
+
 /// How long a deadline test gives the host before its watchdog must fire.
 ///
 /// The bound races ISOLATE STARTUP, not the burn loop: if it expires before the
@@ -1002,6 +1007,28 @@ async fn confirmed_lease_bounds_synchronous_execution_before_its_timeout() {
     .await;
 }
 
+/// Run `consumer` until `drive` finishes, polling the two side by side.
+///
+/// `drive` stands in for the workflow service: it publishes the journal's
+/// pending jobs and reads run state, so it runs BESIDE the consumer, as the
+/// service runs beside a worker. Passed as the consumer's shutdown future it
+/// would be polled only between deliveries, and a publication suspended inside
+/// its own journal transaction would hold the journal while the delivery waits
+/// on it. When `drive` finishes the consumer is told to stop, and it drains
+/// before this returns.
+async fn beside<T>(consumer: &mut Consumer, drive: impl std::future::Future<Output = T>) -> T {
+    let (stop, stopped) = futures::channel::oneshot::channel::<()>();
+    let consume = consumer.run_until(async {
+        let _ = stopped.await;
+    });
+    let drive = async {
+        let output = drive.await;
+        let _ = stop.send(());
+        output
+    };
+    futures::future::join(consume, drive).await.1
+}
+
 /// Drive the app's frontier the way the worker does, and answer with what the
 /// journal says.
 ///
@@ -1015,7 +1042,7 @@ async fn confirmed_lease_bounds_synchronous_execution_before_its_timeout() {
 async fn advance_until_suspended(
     fixture: &Fixture,
     manager: &Rc<Manager>,
-    consumer: &mut zeroship_workflow_runner::consumer::JobConsumer<Manager>,
+    consumer: &mut Consumer,
     run: &str,
     bound: Duration,
 ) -> RunStatus {
@@ -1033,7 +1060,7 @@ async fn advance_until_suspended(
 async fn advance_until(
     fixture: &Fixture,
     manager: &Rc<Manager>,
-    consumer: &mut zeroship_workflow_runner::consumer::JobConsumer<Manager>,
+    consumer: &mut Consumer,
     run: &str,
     bound: Duration,
     done: impl Fn(&RunStatus) -> bool,
@@ -1052,7 +1079,7 @@ async fn advance_until(
 async fn drive_until(
     fixture: &Fixture,
     manager: &Rc<Manager>,
-    consumer: &mut zeroship_workflow_runner::consumer::JobConsumer<Manager>,
+    consumer: &mut Consumer,
     run: &str,
     bound: Duration,
     done: impl Fn(&RunStatus) -> bool,
@@ -1060,7 +1087,7 @@ async fn drive_until(
     let settled = std::cell::RefCell::new(None);
     let _ = compio::time::timeout(
         bound,
-        consumer.run_until(async {
+        beside(consumer, async {
             loop {
                 manager.publish(&fixture.app).await;
                 let status = fixture.app.status(run).await.unwrap();
@@ -1087,12 +1114,12 @@ async fn drive_until(
 async fn drive_until_disposed(
     fixture: &Fixture,
     manager: &Rc<Manager>,
-    consumer: &mut zeroship_workflow_runner::consumer::JobConsumer<Manager>,
+    consumer: &mut Consumer,
     bound: Duration,
 ) -> bool {
     compio::time::timeout(
         bound,
-        consumer.run_until(async {
+        beside(consumer, async {
             loop {
                 manager.publish(&fixture.app).await;
                 let released = {
@@ -1119,12 +1146,12 @@ async fn drive_until_disposed(
 async fn drive_until_built(
     fixture: &Fixture,
     manager: &Rc<Manager>,
-    consumer: &mut zeroship_workflow_runner::consumer::JobConsumer<Manager>,
+    consumer: &mut Consumer,
     bound: Duration,
 ) -> bool {
     compio::time::timeout(
         bound,
-        consumer.run_until(async {
+        beside(consumer, async {
             loop {
                 manager.publish(&fixture.app).await;
                 if !fixture.loader.probes.borrow().is_empty() {
@@ -1149,12 +1176,12 @@ async fn drive_until_built(
 async fn drive_until_attempted(
     fixture: &Fixture,
     manager: &Rc<Manager>,
-    consumer: &mut zeroship_workflow_runner::consumer::JobConsumer<Manager>,
+    consumer: &mut Consumer,
     bound: Duration,
 ) -> bool {
     compio::time::timeout(
         bound,
-        consumer.run_until(async {
+        beside(consumer, async {
             loop {
                 manager.publish(&fixture.app).await;
                 if manager.released.get() > 0 {
@@ -1177,12 +1204,12 @@ async fn drive_until_attempted(
 async fn drive_for(
     fixture: &Fixture,
     manager: &Rc<Manager>,
-    consumer: &mut zeroship_workflow_runner::consumer::JobConsumer<Manager>,
+    consumer: &mut Consumer,
     window: Duration,
 ) {
     let _ = compio::time::timeout(
         window,
-        consumer.run_until(async {
+        beside(consumer, async {
             loop {
                 manager.publish(&fixture.app).await;
                 compio::time::sleep(Duration::from_millis(5)).await;
@@ -1274,10 +1301,10 @@ async fn replay_loads_retained_dependencies_after_redeploy_and_host_restart() {
         descriptor: None,
     }
     };
-    // One manager for the whole case, across the host restart. Its worker
-    // registration and app assignment live in the platform store, which the
-    // rebuilt service reopens, so registering again would place a second worker
-    // against an app already assigned to the first.
+    // One manager for the whole case, across the host restart: the app's queue
+    // scope and its jobs live in the platform store, which the rebuilt service
+    // reopens, and each consumer built from the fixture accepts its claims into
+    // the journal the fixture holds at that moment.
     let manager = Manager::new(&fixture).await;
     let mut consumer = manager.consumer(&fixture, 1);
     let mut old_run = None;
@@ -1447,15 +1474,63 @@ async fn an_available_executable_constructs_an_app_isolate() {
     );
 }
 
-/// A native manager queue delivering to one trusted worker, as the CLI host
-/// composes it over the fixture's local platform file.
+/// A native manager queue delivering one app's jobs to one trusted worker of
+/// the default zone, as the CLI host composes it over the fixture's local
+/// platform file: the worker pulls from its zone, and the app's policy comes
+/// from the host's own configuration.
 struct Manager {
     coordinator: zeroship_workflow_manager::coordinator::Coordinator,
     worker: zeroship_core::workflow_coordination::WorkerId,
-    scope: zeroship_core::workflow_coordination::AssignedScope,
+    /// The one app this manager's worker is handed jobs for.
+    app: AppId,
+    policies: zeroship_workflow_manager::local::ConfiguredPolicies,
+    /// The journal this host holds, which every claim is accepted into. The
+    /// latest consumer built from the fixture names it, so a host restart that
+    /// reopens the journal is followed by the claims after it.
+    journal: RefCell<AppWorkflows>,
     /// How many delivery attempts this transport has concluded by handing the
     /// claim back, so a case can wait for an attempt rather than sample a window.
     released: Cell<usize>,
+}
+
+/// The consumer every case drives: the fixture's manager, preparing the one app
+/// it serves from the fixture's own journal and executor.
+type Consumer = zeroship_workflow_runner::consumer::JobConsumer<Manager, FixtureCreator>;
+
+/// The creator factory of a host holding one app's journal in process. It
+/// prepares that app and refuses any other.
+struct FixtureCreator {
+    journal: AppWorkflows,
+    executor: Rc<V8TaskExecutor>,
+}
+
+impl zeroship_workflow_runner::prepared::CreatorFactory for FixtureCreator {
+    type Journal = AppWorkflows;
+
+    fn open<'a>(
+        &'a self,
+        app: &'a AppId,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        zeroship_workflow_runner::prepared::CreatorRuntime<AppWorkflows>,
+                        WorkflowServiceError,
+                    >,
+                > + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            if app != self.journal.app_id() {
+                return Err(WorkflowServiceError::PermissionDenied);
+            }
+            Ok(zeroship_workflow_runner::prepared::CreatorRuntime {
+                app: self.journal.clone(),
+                executor: self.executor.clone(),
+                residency: Rc::new(()),
+            })
+        })
+    }
 }
 
 impl Manager {
@@ -1470,58 +1545,42 @@ impl Manager {
     /// for a redelivery has to outlast it, and the default puts it half a minute
     /// out.
     async fn with_delivery_lease(fixture: &Fixture, lease: Duration) -> Rc<Self> {
-        use zeroship_core::workflow_coordination::{
-            AssignedScope, RegisterWorker, WorkerId, WorkerState,
-        };
-        use zeroship_workflow_manager::coordinator::{Coordinator, Options, Placed};
-        let queue = fixture
-            .deployments
-            .platform
-            .queue(zeroship_workflow_manager::Options {
+        Self::with_queue(
+            fixture,
+            zeroship_workflow_manager::Options {
                 lease,
                 ..zeroship_workflow_manager::Options::default()
-            })
-            .await
-            .unwrap();
-        let coordinator = Coordinator::new(
-            queue,
-            Options::default(),
-            std::rc::Rc::new(zeroship_workflow_manager::eligibility::LocalEligibility::new(
-                zeroship_core::ZoneId::default_zone(),
-            )),
-        )
-        .unwrap();
-        let worker = WorkerId::mint();
-        coordinator
-            .register(
-                &worker,
-                &RegisterWorker {
-                    capacity: 1.try_into().unwrap(),
-                    state: WorkerState::Ready,
-                },
-            )
-            .await
-            .unwrap();
-        let Placed::Assigned(assignment) = coordinator.place(fixture.app.app_id()).await.unwrap()
-        else {
-            panic!("the one registered worker is eligible and idle");
-        };
-        Rc::new(Self {
-            coordinator,
-            worker,
-            scope: AssignedScope {
-                app_id: assignment.app_id,
-                assignment_revision: assignment.revision,
             },
+        )
+        .await
+    }
+
+    /// The same manager over a queue configured as `options` says.
+    async fn with_queue(
+        fixture: &Fixture,
+        options: zeroship_workflow_manager::Options,
+    ) -> Rc<Self> {
+        use zeroship_workflow_manager::coordinator::{Coordinator, Options};
+        let queue = fixture.deployments.platform.queue(options).await.unwrap();
+        queue
+            .register_scope(fixture.app.app_id(), &zeroship_core::ZoneId::default_zone())
+            .await
+            .unwrap();
+        Rc::new(Self {
+            coordinator: Coordinator::new(queue, Options::default()).unwrap(),
+            worker: zeroship_core::workflow_coordination::WorkerId::mint(),
+            policies: zeroship_workflow_manager::local::ConfiguredPolicies::new(
+                fixture.app.app_id().clone(),
+                AppPolicy::default(),
+            )
+            .unwrap(),
+            app: fixture.app.app_id().clone(),
+            journal: RefCell::new(fixture.app.clone()),
             released: Cell::new(0),
         })
     }
 
-    fn consumer(
-        self: &Rc<Self>,
-        fixture: &Fixture,
-        slots: usize,
-    ) -> zeroship_workflow_runner::consumer::JobConsumer<Self> {
+    fn consumer(self: &Rc<Self>, fixture: &Fixture, slots: usize) -> Consumer {
         self.consumer_with_limits(fixture, slots, TaskPayloadLimits::default())
     }
     /// The same consumer under explicit payload bounds, for the cases that
@@ -1531,7 +1590,7 @@ impl Manager {
         fixture: &Fixture,
         slots: usize,
         limits: TaskPayloadLimits,
-    ) -> zeroship_workflow_runner::consumer::JobConsumer<Self> {
+    ) -> Consumer {
         let tasks = Rc::new(
             fixture
                 .app
@@ -1548,14 +1607,15 @@ impl Manager {
     /// The same consumer under an explicit execution bound, for the cases that
     /// assert what the host does to a job that outlives it.
     ///
-    /// Delivery bounds an execution by the EARLIER of this and the confirmed
-    /// lease's deadline, so a case can name which of the two it is about.
+    /// Delivery bounds an execution by the EARLIEST of this, the delivery's own
+    /// lease and attempt remainders, and the confirmed lease's deadline, so a
+    /// case can name which of them it is about.
     fn consumer_bounding_execution(
         self: &Rc<Self>,
         fixture: &Fixture,
         slots: usize,
         execution_timeout: Duration,
-    ) -> zeroship_workflow_runner::consumer::JobConsumer<Self> {
+    ) -> Consumer {
         let tasks = Rc::new(
             fixture
                 .app
@@ -1577,7 +1637,7 @@ impl Manager {
         fixture: &Fixture,
         slots: usize,
         executor: Rc<V8TaskExecutor>,
-    ) -> zeroship_workflow_runner::consumer::JobConsumer<Self> {
+    ) -> Consumer {
         self.consumer_over(fixture, slots, executor, Duration::from_secs(10))
     }
     fn consumer_over(
@@ -1586,45 +1646,58 @@ impl Manager {
         slots: usize,
         executor: Rc<V8TaskExecutor>,
         execution_timeout: Duration,
-    ) -> zeroship_workflow_runner::consumer::JobConsumer<Self> {
+    ) -> Consumer {
         use zeroship_workflow_runner::{
-            consumer::{ConsumerOptions, ConsumerScope, JobConsumer},
+            consumer::{ConsumerOptions, JobConsumer},
             delivery::DeliveryOptions,
+            prepared::{PreparedApps, PreparedOptions},
         };
-        let consumer = JobConsumer::new(
+        let operation_timeout = HOST_OPERATION_BOUND;
+        self.journal.replace(fixture.app.clone());
+        let prepared = PreparedApps::new(
+            FixtureCreator {
+                journal: fixture.app.clone(),
+                executor,
+            },
+            // Every app is listed: the version feed is not what these cases measure.
+            Rc::new(|_: &AppId| true),
+            PreparedOptions {
+                capacity: 1,
+                operation_timeout,
+            },
+        )
+        .unwrap();
+        JobConsumer::new(
             self.clone(),
             self.worker.clone(),
+            Rc::new(prepared),
             ConsumerOptions {
                 slots,
-                max_scopes: 1,
                 idle_poll: Duration::from_millis(5),
                 error_backoff: Duration::from_millis(10),
+                // A stop cancels what is running: each case's drive ends when its
+                // subject has been observed, and what is left is not part of it.
+                drain: Duration::ZERO,
                 delivery: DeliveryOptions {
                     execution_timeout,
-                    operation_timeout: Duration::from_secs(2),
+                    operation_timeout,
                     retry_delay: Duration::from_millis(5),
                 },
             },
         )
-        .unwrap();
-        consumer
-            .bindings()
-            .replace(vec![ConsumerScope::new(
-                fixture.app.clone(),
-                fixture.app.binding().clone(),
-                self.scope.clone(),
-                executor,
-            )
-            .unwrap()])
-            .unwrap();
-        consumer
+        .unwrap()
+    }
+
+    /// The journal this host holds now.
+    fn journal(&self) -> AppWorkflows {
+        self.journal.borrow().clone()
     }
 
     /// Stand in for the host's immediate publication after creator commits.
     async fn publish(&self, app: &AppWorkflows) {
         for job in app.pending_jobs(None, 64).await.unwrap() {
-            app.publish_job(&job.id, self).await.unwrap();
-        }
+                app.publish_job(&job.id, self).await.unwrap();
+            }
     }
 
     /// Run every maintenance row the app's queue holds, as the workflow
@@ -1660,6 +1733,20 @@ impl Manager {
                 .unwrap();
         }
     }
+
+    /// Return a claimed row to the queue, deferred as `defer` says.
+    async fn give_back_as(
+        &self,
+        lease: &zeroship_workflow_manager::DeliveryGrant,
+        defer: zeroship_workflow_manager::GiveBack,
+    ) -> Result<(), WorkflowServiceError> {
+        self.coordinator
+            .give_back_job(&self.worker, lease.delivery(), defer, || async {
+                Ok(self.worker.clone())
+            })
+            .await
+            .map_err(manager_error)
+    }
 }
 
 fn manager_error(error: zeroship_workflow_manager::Error) -> WorkflowServiceError {
@@ -1667,6 +1754,68 @@ fn manager_error(error: zeroship_workflow_manager::Error) -> WorkflowServiceErro
 }
 
 impl zeroship_workflow_runner::delivery::JobTransport for Manager {
+    type Lease = zeroship_workflow_manager::DeliveryGrant;
+    /// This host holds the journal, so a claim is accepted here rather than
+    /// server-side.
+    type Journal = AppWorkflows;
+
+    /// Claimed from the worker's zone and accepted into the journal this host
+    /// holds; a deferred acceptance gives its row straight back, as the service
+    /// does for a claim that crossed to it.
+    async fn claim(
+        &self,
+        request: &zeroship_core::workflow_jobs::ClaimJobs,
+    ) -> Result<zeroship_workflow_runner::delivery::ClaimedBatch<Self::Lease>, WorkflowServiceError>
+    {
+        use zeroship_workflow::service::delivery::{DeferredReason, JobAcceptance};
+        use zeroship_workflow_manager::GiveBack;
+        let zone = zeroship_core::ZoneId::default_zone();
+        let claim = zeroship_workflow_manager::coordinator::ZoneClaim {
+            worker: &self.worker,
+            zone: &zone,
+            request,
+            deadline: self
+                .coordinator
+                .claim_deadline(std::time::Instant::now(), request)
+                .map_err(manager_error)?,
+        };
+        let (batch, _) = self
+            .coordinator
+            .claim_in_zone(
+                &claim,
+                &self.policies,
+                || async { Ok(self.worker.clone()) },
+                |_| std::future::ready(zeroship_workflow_manager::coordinator::Admission::Deliver(())),
+            )
+            .await
+            .map_err(manager_error)?;
+        let mut deliveries = Vec::with_capacity(batch.grants.len());
+        for (lease, ()) in batch.grants {
+            let accepted = if lease.delivery().job.operation.accepts_execution() {
+                Some(self.journal().accept_job(&lease).await?)
+            } else {
+                None
+            };
+            if let Some(JobAcceptance::Deferred { reason }) = &accepted {
+                let defer = match reason {
+                    DeferredReason::NotDue { until } => GiveBack::Exact(until.get()),
+                    DeferredReason::PolicyOff | DeferredReason::AtCap => {
+                        GiveBack::After(Duration::from_millis(100))
+                    }
+                    DeferredReason::DeploymentUnavailable => GiveBack::Backoff,
+                };
+                self.give_back_as(&lease, defer).await?;
+                continue;
+            }
+                deliveries.push(zeroship_workflow_runner::delivery::Claimed { lease, accepted });
+        }
+        Ok(zeroship_workflow_runner::delivery::ClaimedBatch {
+            deliveries,
+            after: batch.after,
+            lap_complete: batch.lap_complete,
+        })
+    }
+
     /// Asked of the journal this host holds, the way the crossed transport asks
     /// the service that holds it.
     async fn release(
@@ -1679,6 +1828,26 @@ impl zeroship_workflow_runner::delivery::JobTransport for Manager {
         self.released.set(self.released.get() + 1);
         released
     }
+
+    async fn give_back(
+        &self,
+        claimed: &zeroship_workflow_runner::delivery::Claimed<Self::Lease>,
+        why: zeroship_workflow_runner::delivery::Unstarted,
+    ) -> Result<(), WorkflowServiceError> {
+        if let Some(task) = claimed.task() {
+            self.journal().release_job(task, &claimed.lease).await?;
+        }
+        let defer = match why {
+            zeroship_workflow_runner::delivery::Unstarted::Unprepared => {
+                zeroship_workflow_manager::GiveBack::Backoff
+            }
+            zeroship_workflow_runner::delivery::Unstarted::Stopped => {
+                zeroship_workflow_manager::GiveBack::Unsent
+            }
+        };
+        self.give_back_as(&claimed.lease, defer).await
+    }
+
     async fn receipt(
         &self,
         journal: &Self::Journal,
@@ -1686,42 +1855,10 @@ impl zeroship_workflow_runner::delivery::JobTransport for Manager {
     ) -> Result<Option<zeroship_workflow::service::delivery::JobReceipt>, WorkflowServiceError> {
         journal.job_receipt(job).await
     }
-    type Lease = zeroship_workflow_manager::DeliveryGrant;
-    /// This host holds the journal, so an attempt is scoped here rather than
-    /// server-side.
-    type Journal = zeroship_workflow::service::AppWorkflows;
-    fn scope(
-        &self,
-        journal: &Self::Journal,
-        authority: &zeroship_workflow::service::PolicyAuthority,
-    ) -> Result<Self::Journal, WorkflowServiceError> {
-        zeroship_workflow_runner::delivery::scope_journal(journal, authority)
-    }
-
-    async fn claim(
-        &self,
-        journal: &zeroship_workflow::service::AppWorkflows,
-        scope: &zeroship_core::workflow_coordination::AssignedScope,
-    ) -> Result<Option<zeroship_workflow_runner::delivery::Claimed<Self::Lease>>, WorkflowServiceError> {
-        let granted = self
-            .coordinator
-            .claim_job(&self.worker, scope, Ok(AppPolicy::default().max_delivery_attempts), || async { Ok(self.worker.clone()) })
-            .await
-            .map_err(manager_error)?;
-        let Some(lease) = granted else {
-            return Ok(None);
-        };
-        let accepted = if lease.delivery().job.operation.accepts_execution() {
-            Some(journal.accept_job(&lease).await?)
-        } else {
-            None
-        };
-        Ok(Some(zeroship_workflow_runner::delivery::Claimed { lease, accepted }))
-    }
 
     async fn heartbeat(
         &self,
-        journal: &zeroship_workflow::service::AppWorkflows,
+        journal: &AppWorkflows,
         lease: &Self::Lease,
         task: &zeroship_workflow::service::delivery::DeliveredTask,
     ) -> Result<zeroship_workflow_runner::delivery::Renewed<Self::Lease>, WorkflowServiceError> {
@@ -1738,7 +1875,7 @@ impl zeroship_workflow_runner::delivery::JobTransport for Manager {
 
     async fn settle(
         &self,
-        journal: &zeroship_workflow::service::AppWorkflows,
+        journal: &AppWorkflows,
         lease: &Self::Lease,
     ) -> Result<zeroship_core::workflow_jobs::SettlementReceipt, WorkflowServiceError> {
         let settlement =
@@ -1753,7 +1890,7 @@ impl zeroship_workflow_runner::delivery::JobTransport for Manager {
 
     async fn complete(
         &self,
-        journal: &zeroship_workflow::service::AppWorkflows,
+        journal: &AppWorkflows,
         lease: &Self::Lease,
         task: &zeroship_workflow::service::delivery::DeliveredTask,
         execution: zeroship_workflow::WorkflowExecution,
@@ -1774,7 +1911,7 @@ impl zeroship_workflow_runner::delivery::JobTransport for Manager {
 
 impl zeroship_workflow::service::publication::JobPublisher for Manager {
     fn app_id(&self) -> &AppId {
-        &self.scope.app_id
+        &self.app
     }
 
     async fn submit(
@@ -1812,7 +1949,7 @@ async fn delivered_jobs_resume_v8_without_a_request_isolate() {
     let mut consumer = manager.consumer(&fixture, 1);
     compio::time::timeout(
         Duration::from_secs(10),
-        consumer.run_until(async {
+        beside(&mut consumer, async {
             while fixture.app.status(&run.id).await.unwrap().state != RunState::Waiting {
                 manager.publish(&fixture.app).await;
                 compio::time::sleep(Duration::from_millis(5)).await;
@@ -1877,7 +2014,7 @@ async fn consumer_shutdown_disposes_every_concurrent_v8_isolate() {
     let mut consumer = manager.consumer(&fixture, runs.len());
     compio::time::timeout(
         Duration::from_secs(10),
-        consumer.run_until(async {
+        beside(&mut consumer, async {
             while fixture.loader.markers.0.lock().unwrap().len() < runs.len() {
                 compio::time::sleep(Duration::from_millis(5)).await;
             }
@@ -2071,6 +2208,81 @@ async fn a_step_timeout_over_the_execution_bound_never_fires() {
     assert_eq!(
         settled, None,
         "the host's bound cut the job, so nothing may settle the run"
+    );
+}
+
+/// A step that never settles, so only a bound the host does not choose can end
+/// its attempt inside a short window.
+const HELD_STEP: &str = r"
+    import { env } from 'zeroship';
+    export class Example {
+        async run(_trigger, step) {
+            return await step.run('hold', async () => {
+                env.probe.mark('entered');
+                await new Promise(() => {});
+            });
+        }
+    }
+";
+
+/// Drive one held attempt under a manager capping attempts at `max_attempt`,
+/// on a host whose own execution ceiling is far longer, and answer whether the
+/// attempt's isolate was disposed inside `window`.
+///
+/// The host keeps renewing the delivery lease, so the lease alone never ends the
+/// attempt; the manager's cap is the only bound that can. Each renewal is real
+/// queue and journal I/O that waits a third of the lease before it asks, so a
+/// lease of three host operation bounds leaves every renewal that whole bound to
+/// answer in, and a slow renewal is not what ends the control's attempt. A cap
+/// shorter than that lease bounds the lease, as the manager requires.
+async fn held_attempt_cut_within(max_attempt: Duration, window: Duration) -> bool {
+    let fixture = Box::pin(Fixture::with_limits(HELD_STEP, None, AppPolicy::default())).await;
+    fixture
+        .app
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let manager = Manager::with_queue(
+        &fixture,
+        zeroship_workflow_manager::Options {
+            lease: max_attempt.min(HOST_OPERATION_BOUND * 3),
+            max_attempt,
+            ..zeroship_workflow_manager::Options::default()
+        },
+    )
+    .await;
+    let mut consumer = manager.consumer_bounding_execution(&fixture, 1, Duration::from_mins(10));
+    let cut = Box::pin(drive_until_disposed(&fixture, &manager, &mut consumer, window)).await;
+    assert_eq!(
+        fixture.loader.markers.0.lock().unwrap().first().map(String::as_str),
+        Some("entered"),
+        "the attempt reached the held step, so a disposal is a cut and not a refusal"
+    );
+    cut
+}
+
+/// An execution is cut at the attempt bound the manager delivers, under a host
+/// ceiling far longer than it: the manager's attempt cap, not the host, defines
+/// how long one attempt may run, and the host's own bound is only a ceiling. The
+/// host ends the execution one operation bound before the cap, the settlement
+/// it reserves inside the attempt, so the short cap here leaves room for both:
+/// it is that operation bound and two more for building the isolate and
+/// reaching the held step. The window covers the cap and two more operation
+/// bounds, for the release and the claim before the attempt began.
+///
+/// The control is the same held attempt under the default cap, still running
+/// at the end of the same window.
+#[compio::test]
+async fn an_execution_is_cut_at_the_delivered_attempt_bound_under_a_longer_host_ceiling() {
+    let cap = HOST_OPERATION_BOUND * 3;
+    let window = cap + HOST_OPERATION_BOUND * 2;
+    assert!(
+        Box::pin(held_attempt_cut_within(cap, window)).await,
+        "the manager's attempt cap must cut the held attempt and dispose its isolate"
+    );
+    assert!(
+        !Box::pin(held_attempt_cut_within(Duration::from_mins(5), window)).await,
+        "under the default cap the renewed attempt keeps running through the window"
     );
 }
 
@@ -2790,7 +3002,7 @@ async fn settle_with_child_bound(
     let settled = RefCell::new(None);
     let _ = compio::time::timeout(
         Duration::from_mins(1),
-        consumer.run_until(async {
+        beside(&mut consumer, async {
             loop {
                 manager.publish(&fixture.app).await;
                 manager.maintain(&fixture).await;

@@ -1,8 +1,8 @@
 //! Platform metadata retaining normal app deployments for customer workers.
 //!
 //! The host supplies an authorized platform database and holder scope. The
-//! workflow journal and payloads are never read here. Hold generations survive
-//! placement expiry and fence retries from an earlier acquisition.
+//! workflow journal and payloads are never read here. Hold generations fence
+//! retries from an earlier acquisition.
 
 #![expect(
     clippy::future_not_send,
@@ -103,13 +103,11 @@ impl DeploymentHolds {
         deployment: &str,
         generation: HoldGeneration,
     ) -> Result<HoldReceipt, Error> {
-        self.change(scope, deployment, generation, HoldState::Held, || async {
-            Ok(())
-        })
-        .await
+        self.change(scope, deployment, generation, HoldState::Held)
+            .await
     }
 
-    /// Release only after the worker has durably closed admission and checked
+    /// Release only after the holder has durably closed admission and checked
     /// its own replay dependencies. Released rows remain as retry tombstones.
     ///
     /// # Errors
@@ -121,60 +119,8 @@ impl DeploymentHolds {
         deployment: &str,
         generation: HoldGeneration,
     ) -> Result<HoldReceipt, Error> {
-        self.change(
-            scope,
-            deployment,
-            generation,
-            HoldState::Released,
-            || async { Ok(()) },
-        )
-        .await
-    }
-
-    /// Recheck remote placement after locking and before committing the hold.
-    /// The host authenticates the caller before using this operation.
-    ///
-    /// # Errors
-    /// Refuses stale holds, failed authority checks and catalog failures. Failed
-    /// revalidation rolls back the hold mutation with the enclosing transaction.
-    pub async fn acquire_authorized<F, Fut>(
-        &self,
-        scope: &HoldScope,
-        deployment: &str,
-        generation: HoldGeneration,
-        authorize: F,
-    ) -> Result<HoldReceipt, Error>
-    where
-        F: FnMut() -> Fut,
-        Fut: std::future::Future<Output = Result<(), Error>>,
-    {
-        self.change(scope, deployment, generation, HoldState::Held, authorize)
+        self.change(scope, deployment, generation, HoldState::Released)
             .await
-    }
-
-    /// Release with the same placement revalidation as acquisition.
-    ///
-    /// # Errors
-    /// Refuses stale generations, failed authority checks and storage failures.
-    pub async fn release_authorized<F, Fut>(
-        &self,
-        scope: &HoldScope,
-        deployment: &str,
-        generation: HoldGeneration,
-        authorize: F,
-    ) -> Result<HoldReceipt, Error>
-    where
-        F: FnMut() -> Fut,
-        Fut: std::future::Future<Output = Result<(), Error>>,
-    {
-        self.change(
-            scope,
-            deployment,
-            generation,
-            HoldState::Released,
-            authorize,
-        )
-        .await
     }
 
     /// The manifest this app's deployment was accepted under.
@@ -222,21 +168,15 @@ impl DeploymentHolds {
         })
     }
 
-    async fn change<F, Fut>(
+    async fn change(
         &self,
         scope: &HoldScope,
         deployment: &str,
         generation: HoldGeneration,
         desired: HoldState,
-        mut authorize: F,
-    ) -> Result<HoldReceipt, Error>
-    where
-        F: FnMut() -> Fut,
-        Fut: std::future::Future<Output = Result<(), Error>>,
-    {
+    ) -> Result<HoldReceipt, Error> {
         transact(&self.database, |tx| async move {
             let deploy = lock_deployment(&tx, scope.app(), deployment).await?;
-            authorize().await?;
             let app = scope.app().as_str();
             let filter =
                 value!({"app_id":app, "deploy_id":deployment, "holder_id":scope.holder().to_owned()});
@@ -296,7 +236,6 @@ impl DeploymentHolds {
                     ))
                 }
             }
-            authorize().await?;
             Ok(HoldReceipt {
                 app_id: scope.app().clone(),
                 deploy_id: deployment.into(),

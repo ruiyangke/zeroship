@@ -7,7 +7,7 @@ use zeroship_workflow_manager::deployments::{self, DeploymentHolds};
 async fn queue_holds_work_without_workers_and_cannot_release_journal_holds() {
     let fixture = Fixture::new().await;
     let (app, deployment, hash) = fixture.deployment("queue-retention").await;
-    // No coordinator is listening: queue authority must not depend on placement.
+    // No coordinator is listening: queue authority reads no worker state.
     let control_server = fixture.control().await;
     let client = QueueDeploymentHolds::new(
         &origin(&control_server),
@@ -219,7 +219,6 @@ async fn queue_hold_http_authenticates_before_decoding_and_closes_scope() {
     ] {
         for (field, value) in [
             ("holderId", json!(HoldScope::for_app(app.clone()).holder())),
-            ("assignmentRevision", json!(1)),
             ("workerId", json!(worker)),
             ("generation", json!(0)),
             ("deployId", json!("dep_invalid")),

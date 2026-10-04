@@ -131,7 +131,6 @@ pub struct TaskRecord {
     pub frontier_revision: i64,
     pub job_id: Option<String>,
     pub delivery_attempt: Option<i64>,
-    pub assignment_revision: Option<i64>,
 }
 
 #[derive(FromRow)]

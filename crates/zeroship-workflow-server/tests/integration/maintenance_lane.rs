@@ -1,9 +1,9 @@
 //! The service's maintenance lane, end to end against its own journal and the
 //! queue it owns.
 //!
-//! Nothing here places the app on a worker. That is the point: the lane asserts
-//! its own authority, so a claim that succeeds without any `assignments` row is
-//! what the authority seam decided.
+//! No worker instance exists here. That is the point: the lane asserts its own
+//! authority, so a claim that succeeds with no worker enrolled is what the
+//! authority seam decided.
 #![expect(
     clippy::future_not_send,
     reason = "journal and queue fixtures stay on their compio runtime"
@@ -45,7 +45,7 @@ use zeroship_workflow_manager::{
     Error as ManagerError, Queue,
 };
 use zeroship_workflow_server::{
-    coordinator::{connect_eligibility, Coordinator, Options},
+    coordinator::{Coordinator, Options},
     payloads::ServicePayloads,
     runs::RunService,
     server::drive,
@@ -88,11 +88,7 @@ impl PolicySource for Source {
                 .cloned()
                 .ok_or(ManagerError::Denied)
         })
-    }
-    fn revalidate(&self, observation: &PolicyObservation) -> Result<Instant, ManagerError> {
-        Ok(observation.expires_at())
-    }
-}
+    }}
 
 struct Fixture {
     platform: platform::Platform,
@@ -131,19 +127,10 @@ impl Fixture {
         // The lane's turns enumerate every claimable app in the queue, a
     // queue-global subject, so this case gets a database no other case shares.
     let platform = platform::Platform::fresh_database().await;
-        let eligibility = Rc::new(
-            connect_eligibility(&platform.runtime_url, Options::default())
+        let service =
+            Coordinator::connect(&platform.runtime_url, Options::default(), holds::client())
                 .await
-                .unwrap(),
-        );
-        let service = Coordinator::connect(
-            &platform.runtime_url,
-            Options::default(),
-            holds::client(),
-            eligibility,
-        )
-        .await
-        .unwrap();
+                .unwrap();
         let queue = service.manager.queue().clone();
         let runs = Rc::new(
             RunService::connect(
@@ -185,7 +172,10 @@ impl Fixture {
     /// to bind its journal under.
     async fn admit(&self, app: &AppId) {
         self.platform.seed_app(app).await;
-        self.queue.register_scope(app).await.unwrap();
+        self.queue
+            .register_scope(app, &zeroship_core::ZoneId::default_zone())
+            .await
+            .unwrap();
         self.policies.grant(app);
     }
 
@@ -286,26 +276,17 @@ impl Fixture {
         objects
     }
 
-    /// The manager driver this process composes beside the lane.
+    /// The manager driver this process composes beside the lane, reading the
+    /// same policy source.
     fn driver(&self) -> Driver {
         Driver::new(
             self.service.manager.clone(),
             DriverOptions::default(),
             Rc::new(Undeletable),
-            Rc::new(StaticPool),
+            Rc::clone(&self.policies) as Rc<dyn PolicySource>,
+            Rc::new(StaticPool { pool_slots: 1024 }),
         )
         .unwrap()
-    }
-
-    /// Placements recorded for any app. The lane asserts its own authority, so
-    /// this stays empty however long the drive path runs.
-    async fn placements(&self) -> i64 {
-        self.platform
-            .admin
-            .query_one("SELECT COUNT(*) FROM workflow_manager.assignments", &[])
-            .await
-            .unwrap()
-            .get(0)
     }
 
     async fn row(&self, job: &JobId) -> (String, Option<String>, Option<String>) {
@@ -340,7 +321,10 @@ impl Fixture {
     async fn neighbour(&self) -> AppId {
         let app = AppId::mint();
         self.platform.seed_app(&app).await;
-        self.queue.register_scope(&app).await.unwrap();
+        self.queue
+            .register_scope(&app, &zeroship_core::ZoneId::default_zone())
+            .await
+            .unwrap();
         app
     }
 }
@@ -407,7 +391,7 @@ async fn publication_refuses_a_job_belonging_to_another_app() {
     );
 }
 
-/// The lane claims a maintenance row without a placement, runs it against the
+/// The lane claims a maintenance row with no worker enrolled, runs it against the
 /// service's own journal and records what it committed.
 ///
 /// The creator row submitted first is the control for the claim: it sits ahead
@@ -527,6 +511,7 @@ async fn the_lane_activates_an_app_its_journal_has_never_seen() {
     scheduler
         .prepare(&RegisterSchedules {
             app_id: app.clone(),
+            execution_zone_id: zeroship_core::ZoneId::default_zone(),
             deployment_id: deployment.clone(),
             schedules: Vec::new(),
         })
@@ -535,6 +520,7 @@ async fn the_lane_activates_an_app_its_journal_has_never_seen() {
     let activation = scheduler
         .activate(&ActivateSchedules {
             app_id: app.clone(),
+            execution_zone_id: zeroship_core::ZoneId::default_zone(),
             deployment_id: deployment,
             revision: 1.try_into().unwrap(),
         })
@@ -664,7 +650,7 @@ async fn until<T>(description: &str, mut probe: impl std::ops::AsyncFnMut() -> O
 }
 
 /// The running service settles a due maintenance row on its own, and no worker
-/// is ever placed for it.
+/// ever claims it.
 ///
 /// This drives `drive`, the cadence the process itself runs, rather than calling
 /// the lane: what it binds is that the drive path REACHES the lane. The manager
@@ -675,14 +661,13 @@ async fn until<T>(description: &str, mut probe: impl std::ops::AsyncFnMut() -> O
 /// claim: it sits ahead in the dispatch order and stays `ready`, so what the
 /// drive path swept was chosen rather than whatever came first.
 #[compio::test]
-async fn the_drive_path_settles_a_due_maintenance_row_without_a_placement() {
+async fn the_drive_path_settles_a_due_maintenance_row_with_no_worker_enrolled() {
     let fixture = Box::pin(Fixture::new()).await;
     let creator = creator_work(&fixture.app);
     let maintenance = sweep(&fixture.app);
     fixture.queue.submit(&creator).await.unwrap();
     fixture.queue.submit(&maintenance).await.unwrap();
     assert_eq!(fixture.row(&maintenance.id).await.0, "ready");
-    assert_eq!(fixture.placements().await, 0);
 
     let sweeps = fixture.sweeps(LaneOptions {
         page_limit: 8,
@@ -724,11 +709,6 @@ async fn the_drive_path_settles_a_due_maintenance_row_without_a_placement() {
         fixture.row(&creator.id).await.0,
         "ready",
         "creator work stays for the claimant that runs it"
-    );
-    assert_eq!(
-        fixture.placements().await,
-        0,
-        "the lane asserts its own authority, so nothing may have placed a worker"
     );
 }
 

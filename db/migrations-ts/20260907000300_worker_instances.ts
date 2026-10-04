@@ -80,8 +80,8 @@ import { grant, now, raw, t, table } from "@zeroship/migrate";
 // `ring_key` is ordered by `zeroship_core::worker_ring::vnode_position`, whose
 // per-app eligible-set caller is not built yet. The join columns declared above
 // carry their own readers: control's join functions read
-// `join_signer_id`/`join_token_id`, and workflow placement reads
-// `execution_zone_id`/`expires_at`.
+// `join_signer_id`/`join_token_id`, and the workflow service authorizes an
+// instance by `execution_zone_id`/`expires_at`.
 //
 // NO DELETE GRANT, ON PURPOSE. `gone` is the terminal state, so an instance ends
 // by being marked, not by being erased -- erasing it would take the attribution
@@ -163,9 +163,9 @@ export default {
     // `purge_worker_join_signer` is the other writer, and it only marks rows
     // `gone`. Readers are column-scoped:
     // `zeroship_cdc` verifies enrolled worker identity (granted below), and
-    // `zeroship_workflow` reads identity and placement facts (granted in
+    // `zeroship_workflow` reads identity, zone and lease (granted in
     // 20260911000050_workflow_platform_grants.ts and
-    // 20260914000600_placement_eligibility.ts). The gateway does not read this
+    // 20260914000600_app_execution_zones.ts). The gateway does not read this
     // table: the per-app eligible set it would consume is not built yet.
     //
     // WHY THERE IS NO REVOKE. `zeroship_worker` is denied by PostgreSQL's

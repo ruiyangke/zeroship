@@ -557,6 +557,12 @@ pub enum Operation {
         document: Value,
         conflict_fields: Value,
     },
+    /// Insert a document, leaving an existing row at the conflict target
+    /// untouched (`ON CONFLICT (...) DO NOTHING`).
+    InsertOnConflict {
+        document: Value,
+        conflict_fields: Value,
+    },
     Count {
         filter: Value,
         options: Value,
@@ -594,7 +600,8 @@ impl Operation {
             | Self::Delete { .. }
             | Self::Purge { .. }
             | Self::Restore { .. }
-            | Self::Upsert { .. } => true,
+            | Self::Upsert { .. }
+            | Self::InsertOnConflict { .. } => true,
             Self::Read(_)
             | Self::Find { .. }
             | Self::Count { .. }
@@ -642,6 +649,10 @@ enum Plan {
         many: bool,
     },
     Upsert {
+        document: Value,
+        conflict_fields: Value,
+    },
+    InsertOnConflict {
         document: Value,
         conflict_fields: Value,
     },
@@ -765,6 +776,13 @@ impl PreparedOperation {
                 document,
                 conflict_fields,
             } => Plan::Upsert {
+                document,
+                conflict_fields,
+            },
+            Operation::InsertOnConflict {
+                document,
+                conflict_fields,
+            } => Plan::InsertOnConflict {
                 document,
                 conflict_fields,
             },
@@ -971,6 +989,19 @@ impl PreparedOperation {
                 document,
                 conflict_fields,
             } => Box::pin(crud::run_upsert(
+                binding,
+                collection,
+                route,
+                document,
+                conflict_fields,
+                actor_id,
+            ))
+            .await?
+            .into(),
+            Plan::InsertOnConflict {
+                document,
+                conflict_fields,
+            } => Box::pin(crud::run_insert_on_conflict(
                 binding,
                 collection,
                 route,

@@ -19,7 +19,7 @@ pub use lifecycle::{
 
 use crate::app_id::AppId;
 use serde::{Deserialize, Serialize};
-use std::num::{NonZeroI64, NonZeroU32};
+use std::num::NonZeroI64;
 
 pub const AUDIENCE: &str = "spiffe://zeroship.ai/svc/workflow";
 
@@ -55,14 +55,6 @@ where
     T: Deserialize<'de>,
 {
     Option::deserialize(deserializer)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ScopePage {
-    /// The last app the previous page returned, null to scan from the first.
-    #[serde(deserialize_with = "nullable")]
-    pub after: Option<AppId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,90 +113,6 @@ impl From<UnixMillis> for i64 {
     fn from(value: UnixMillis) -> Self {
         value.get()
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkerState {
-    Ready,
-    Draining,
-}
-
-/// The registry obtains worker identity from its authenticated service call.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RegisterWorker {
-    /// Concurrent app placements; execution slot capacity stays worker-local.
-    pub capacity: NonZeroU32,
-    pub state: WorkerState,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RegisteredWorker {
-    pub worker_id: WorkerId,
-    pub capacity: NonZeroU32,
-    pub state: WorkerState,
-    pub expires_at: UnixMillis,
-}
-
-/// Placement authority is independent of a customer journal's run/task lease.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Assignment {
-    pub app_id: AppId,
-    pub worker_id: WorkerId,
-    pub revision: Revision,
-    pub expires_at: UnixMillis,
-}
-
-/// A worker may renew only its current, unexpired placement.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AssignedScope {
-    pub app_id: AppId,
-    pub assignment_revision: Revision,
-}
-
-/// Select a worker's current app authority without carrying or renewing its lease.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct VerifyAssignment {
-    pub app_id: AppId,
-    pub worker_id: WorkerId,
-    pub assignment_revision: Revision,
-}
-
-impl From<&Assignment> for VerifyAssignment {
-    fn from(assignment: &Assignment) -> Self {
-        Self {
-            app_id: assignment.app_id.clone(),
-            worker_id: assignment.worker_id.clone(),
-            assignment_revision: assignment.revision,
-        }
-    }
-}
-
-/// A worker gives up one of its own placements. Releasing never discharges
-/// the manager's recovery responsibility for the app.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ReleaseScope {
-    pub request_id: RequestId,
-    pub app_id: AppId,
-    pub assignment_revision: Revision,
-    pub reason: ReleaseReason,
-}
-
-/// Why a worker released a placement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReleaseReason {
-    /// The worker no longer serves the app, for example while draining.
-    Relinquished,
-    /// The worker's resource provider permanently denies this app. The manager
-    /// does not offer the app to this worker instance again.
-    Refused,
 }
 
 /// The deployment a latest restart replays against, named by the authority for
@@ -303,13 +211,13 @@ pub struct ManagementReceipt {
 
 /// Selects one run of one app for a creator-facing call.
 ///
-/// The worker is absent on purpose. Placement authority is `(app, worker)`, and
-/// the worker half comes from the credential that verified the request, so a
-/// body cannot name a placement its caller does not hold.
+/// The worker is absent on purpose. The credential that verified the request
+/// supplies the worker's zone, which the service compares against the app's
+/// frozen zone; a body cannot name a zone its caller does not hold.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunScope {
-    pub scope: AssignedScope,
+    pub app_id: AppId,
     pub run_id: RunId,
 }
 
@@ -330,7 +238,7 @@ pub struct RunScope {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StartRun {
     pub request_id: RequestId,
-    pub scope: AssignedScope,
+    pub app_id: AppId,
     pub workflow_name: String,
     #[serde(default)]
     pub input: serde_json::Value,
@@ -345,7 +253,7 @@ pub struct StartRun {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReadStepOutput {
-    pub scope: AssignedScope,
+    pub app_id: AppId,
     pub run_id: RunId,
     pub name: String,
     pub occurrence: u32,
@@ -361,7 +269,7 @@ pub struct ReadStepOutput {
 /// and the authority is the task credential, which that journal minted and holds
 /// only a hash of. A caller naming another app's journal reaches one where its
 /// own task and token do not exist, so the selector cannot widen what it may
-/// read -- unlike a placement, which names an app the caller asserts it holds.
+/// read.
 ///
 /// `token` IS A STRING because the token's type belongs to the journal crate,
 /// which this one cannot name. The wire bytes are the same either way: that type
@@ -472,7 +380,7 @@ pub enum PayloadReservation {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SignalRun {
     pub request_id: RequestId,
-    pub scope: AssignedScope,
+    pub app_id: AppId,
     pub run_id: RunId,
     pub options: SignalOptions,
 }
@@ -482,7 +390,7 @@ pub struct SignalRun {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TransitionRun {
     pub request_id: RequestId,
-    pub scope: AssignedScope,
+    pub app_id: AppId,
     pub run_id: RunId,
     pub operation: RunOperation,
 }
@@ -492,7 +400,7 @@ pub struct TransitionRun {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RestartRun {
     pub request_id: RequestId,
-    pub scope: AssignedScope,
+    pub app_id: AppId,
     pub run_id: RunId,
     pub options: RestartOptions,
 }

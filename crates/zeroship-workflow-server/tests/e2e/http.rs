@@ -4,7 +4,7 @@
     reason = "native HTTP clients run on the ntex compio test runtime"
 )]
 
-use crate::support::{holds, platform, policy as policy_fixture, provision, server_process};
+use crate::support::{holds, platform, provision, server_process};
 
 use compio::io::{AsyncRead, AsyncWriteExt};
 use ntex::{client::Client, http::StatusCode};
@@ -26,7 +26,8 @@ use zeroship_core::{
         WorkerId, AUDIENCE,
     },
     workflow_jobs::{
-        Delivery, JobOperation, JobOutcome, JobReceipt, JournalSettlement, ManagementCommand,
+        ClaimJobs, Delivery, JobOperation, JobOutcome, JobReceipt, JournalSettlement,
+        ManagementCommand,
     },
     workflow_policy::AppPolicy,
 };
@@ -41,6 +42,16 @@ fn decided(delivery: Delivery, outcome: JobOutcome) -> JournalSettlement {
         &delivery,
     )
     .unwrap()
+}
+
+/// One zone claim for at most one delivery, from no cursor.
+const fn claim_one() -> ClaimJobs {
+    ClaimJobs {
+        max: std::num::NonZeroU32::MIN,
+        wait_ms: std::num::NonZeroU64::new(5_000).unwrap(),
+        after: None,
+        exclude: Vec::new(),
+    }
 }
 
 /// The queue the spawned services own, opened a second time in this process so a
@@ -64,25 +75,18 @@ async fn queue(url: &str) -> Queue {
 /// service's own maintenance lane asserts.
 ///
 /// THERE IS NO WIRE CLAIM FOR A SWEEP. `WORKFLOW_JOB_CLAIM` claims as
-/// `Claimant::Placed` (`Coordinator::claim_job`), and that claimant admits
-/// `advance` alone, so a management row is the lane's, and so is its settlement:
-/// an outcome reaches the queue from the journal that applied the command, never
-/// from the worker a lease names.
+/// `Claimant::Worker`, and that claimant admits `advance` alone, so a management
+/// row is the lane's, and so is its settlement: an outcome reaches the queue from
+/// the journal that applied the command, never from the worker a lease names.
 ///
 /// A case that shows the worker refused at the settle route builds its lane with
-/// the placed worker's own id, so the request is refused by the route rather
-/// than by this client's own identity check. Its asserted revision is `1`, which
-/// is the revision `seed_placement` records.
-async fn sweep(
-    queue: &Queue,
-    lane: &MaintenanceAuthority,
-    scope: &zeroship_core::workflow_coordination::AssignedScope,
-) -> Delivery {
+/// the worker's own id, so the request is refused by the route rather than by
+/// this client's own identity check.
+async fn sweep(queue: &Queue, lane: &MaintenanceAuthority, app: &AppId) -> Delivery {
     let delivery = claimed_sweep(queue, lane)
         .await
         .expect("the queue holds a sweep for the lane to claim");
-    assert_eq!(delivery.job.app_id, scope.app_id);
-    assert_eq!(delivery.assignment_revision, scope.assignment_revision);
+    assert_eq!(&delivery.job.app_id, app);
     delivery
 }
 
@@ -103,21 +107,26 @@ fn assertion(issuer: &ServiceIssuer, key: &ServiceSigningKey) -> String {
     )
 }
 
+/// Enroll an instance in the deployment's one zone under the fixture's join
+/// signer, holding `public` as its key.
+async fn enroll(fixture: &platform::Platform, worker: &WorkerId, ring: u8, public: &[u8]) {
+    fixture.admin.execute("INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,join_signer_id,join_token_id,execution_zone_id,expires_at) VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4,'tok_testfixturedefault',$5,now() + interval '1 hour')",
+        &[&worker.as_str(), &vec![ring], &public.to_vec(), &platform::DEFAULT_JOIN_SIGNER_ID, &platform::DEFAULT_ZONE_ID]).await.unwrap();
+}
+
 #[ntex::test]
 async fn native_worker_client_uses_the_authenticated_coordinator_api() {
-    use std::{num::NonZeroU32, sync::Arc};
+    use std::sync::Arc;
     use zeroship_core::{
         service_assertion::{ServiceTrustBundle, TransportAssertionVerifier},
         service_peers::{ServiceAuth, ServiceKeyring},
-        workflow_coordination::{
-            AssignedScope, FailureCode, RegisterWorker, ReleaseReason, ReleaseScope, ScopePage,
-            WorkerState,
-        },
+        workflow_coordination::FailureCode,
     };
     use zeroship_workflow_client::{Error, Options, WorkerCoordinator};
 
-    // The spawned process composes the manager driver and sweep lane, which
-    // enumerate the whole queue, so this case gets a database of its own.
+    // The spawned process composes the manager driver, which enumerates the
+    // whole queue, and a zone claim pages the whole zone, so this case gets a
+    // database of its own.
     let fixture = platform::Platform::fresh_database().await;
     let control = service_issuer(CONTROL_SERVICE_NAME).unwrap();
     let control_key = ServiceSigningKey::generate();
@@ -131,10 +140,10 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
     );
     let http = Client::new().await;
     // No sweep lane on this host. The subject is the native client's own use of
-    // the authenticated protocol, and it asserts what the queue offers a placed
-    // worker -- including that a leased sweep is redelivered to nobody. The lane
-    // claims under an authority no placement expiry fences, so a running one
-    // would answer those reads instead of the client.
+    // the authenticated protocol, and it asserts what the queue offers a worker
+    // -- including that a leased sweep is redelivered to nobody. The lane claims
+    // under an authority of its own, so a running one would answer those reads
+    // instead of the client.
     let mut server = server_process::ServerProcess::without_maintenance_sweeps(
         &fixture,
         &peers,
@@ -160,92 +169,29 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
     // The client receives only an endpoint and the joined host's signer.
     let client = WorkerCoordinator::new(&server.url, auth, Options::default()).unwrap();
     assert_eq!(client.worker_id(), &worker);
-    let registration = RegisterWorker {
-        capacity: NonZeroU32::new(3).unwrap(),
-        state: WorkerState::Ready,
-    };
-    assert_eq!(
-        client.register(&registration).await.unwrap_err(),
-        Error::Refused(FailureCode::Unauthenticated)
-    );
-    fixture.admin.execute("INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,join_signer_id,join_token_id,execution_zone_id,expires_at) VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4,'tok_testfixturedefault','ezn_default000000000000000000',now() + interval '1 hour')",
-        &[&worker.as_str(), &vec![7u8], &public, &platform::DEFAULT_JOIN_SIGNER_ID]).await.unwrap();
-    client.register(&registration).await.unwrap();
-    // Independent requests must mint fresh assertions despite sharing a signer.
-    client.register(&registration).await.unwrap();
-    assert!(client
-        .assignments(&ScopePage { after: None })
-        .await
-        .unwrap()
-        .is_empty());
-
-    let mut apps = [AppId::mint(), AppId::mint()];
-    apps.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-    for app in &apps {
-        fixture.seed_app(app).await;
-    }
-    for app in &apps {
-        fixture
-            .seed_placement(app, &worker, Duration::from_secs(30))
-            .await;
-    }
-    let assignments = client
-        .assignments(&ScopePage { after: None })
-        .await
-        .unwrap();
-    assert_eq!(
-        assignments.iter().map(|a| &a.app_id).collect::<Vec<_>>(),
-        apps.iter().collect::<Vec<_>>()
-    );
-    let page = client
-        .assignments(&ScopePage {
-            after: Some(apps[0].clone()),
-        })
-        .await
-        .unwrap();
-    assert_eq!(page.len(), 1);
-    assert_eq!(page[0], assignments[1]);
-    let scope = AssignedScope {
-        app_id: apps[0].clone(),
-        assignment_revision: assignments[0].revision,
-    };
-    client.renew(&scope).await.unwrap();
-    verify_native_policy_source(&fixture, &client, &scope).await;
-    fixture
-        .admin
-        .batch_execute("REVOKE UPDATE ON workflow_manager.assignments FROM zeroship_workflow")
-        .await
-        .unwrap();
-    let refused = client.renew(&scope).await;
-    fixture
-        .admin
-        .batch_execute("GRANT UPDATE ON workflow_manager.assignments TO zeroship_workflow")
-        .await
-        .unwrap();
-    assert_eq!(refused, Err(Error::Refused(FailureCode::Unavailable)));
-    let restored = client.renew(&scope).await.unwrap();
-    assert_eq!(restored.app_id, scope.app_id);
-    assert_eq!(restored.worker_id, worker);
-    assert_eq!(restored.revision, scope.assignment_revision);
-    // A worker claiming for an app it holds no placement on is denied, not told
-    // the service is unavailable. `claim` in
-    // `crates/zeroship-workflow-server/src/api/jobs.rs` hands `claim_job` an
-    // unresolved ceiling so authorization settles first; an `Unavailable` here
-    // would tell the worker to retry a scope it can never hold.
     assert_eq!(
         client
-            .claim_job::<AppJournal>(&AssignedScope {
-                app_id: AppId::mint(),
-                assignment_revision: scope.assignment_revision
-            })
+            .claim_jobs::<AppJournal>(&claim_one())
             .await
             .unwrap_err(),
-        Error::Refused(FailureCode::Denied)
+        Error::Refused(FailureCode::Unauthenticated)
     );
+    enroll(&fixture, &worker, 7, &public).await;
+    // Independent requests must mint fresh assertions despite sharing a signer.
+    for _ in 0..2 {
+        let batch = client.claim_jobs::<AppJournal>(&claim_one()).await.unwrap();
+        assert!(batch.deliveries.is_empty());
+        assert!(batch.lap_complete, "an empty zone is one complete lap");
+    }
 
+    let app = AppId::mint();
+    // The app with its plan policy published, the way a deployment provisions
+    // it: the settle route reaches the journal under the app's observed policy.
+    provision::provision(&fixture, &app, &AppPolicy::default()).await;
+    fixture.seed_scope(&app, platform::DEFAULT_ZONE_ID).await;
     let command = ManageRun {
         request_id: RequestId::mint(),
-        app_id: scope.app_id.clone(),
+        app_id: app.clone(),
         run_id: RunId::mint(),
         command: ManagementOperation::Transition {
             operation: RunOperation::Cancel,
@@ -262,8 +208,8 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
     assert_eq!(status, StatusCode::OK);
     server.restart(&http).await;
     let queue = queue(&fixture.runtime_url).await;
-    let lane = MaintenanceAuthority::new(scope.app_id.clone(), worker.clone());
-    let delivery = sweep(&queue, &lane, &scope).await;
+    let lane = MaintenanceAuthority::new(app.clone(), worker.clone());
+    let delivery = sweep(&queue, &lane, &app).await;
     assert_eq!(
         delivery.job.operation,
         JobOperation::Management {
@@ -277,7 +223,12 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
     );
     // The client claims creator work, and this queue holds none. The leased
     // sweep is not redelivered to the lane that holds it either.
-    assert!(client.claim_job::<AppJournal>(&scope).await.unwrap().is_none());
+    assert!(client
+        .claim_jobs::<AppJournal>(&claim_one())
+        .await
+        .unwrap()
+        .deliveries
+        .is_empty());
     assert!(claimed_sweep(&queue, &lane).await.is_none());
     // The worker the sweep was leased to cannot settle it: nothing has applied
     // the command, so the journal holds no receipt to settle it from, and the
@@ -294,20 +245,25 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
     );
     let receipt = lane.settle(&queue, &settlement).await.unwrap();
     assert_eq!(lane.settle(&queue, &settlement).await.unwrap(), receipt);
-    assert!(client.claim_job::<AppJournal>(&scope).await.unwrap().is_none());
+    assert!(client
+        .claim_jobs::<AppJournal>(&claim_one())
+        .await
+        .unwrap()
+        .deliveries
+        .is_empty());
     let (status, receipt) = post(
         &http,
         &server.url,
         endpoints::WORKFLOW_MANAGEMENT_STATUS.path_template(),
         &assertion(&control, &control_key),
-        &json!({"appId":scope.app_id,"requestId":command.request_id}),
+        &json!({"appId":app,"requestId":command.request_id}),
     )
     .await;
     assert_eq!(
         (status, receipt),
         (
             StatusCode::OK,
-            json!({"appId":scope.app_id,"requestId":command.request_id,"outcome":{"kind":"not_found"}})
+            json!({"appId":app,"requestId":command.request_id,"outcome":{"kind":"not_found"}})
         )
     );
     let changed = decided(
@@ -328,69 +284,9 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
         &client,
         &control,
         &control_key,
-        &scope,
+        &app,
     )
     .await;
-
-    // Release carries no wake hint and needs no responsible peer: the manager
-    // keeps recovery responsibility for the app.
-    let release = ReleaseScope {
-        request_id: RequestId::mint(),
-        app_id: scope.app_id.clone(),
-        assignment_revision: scope.assignment_revision,
-        reason: ReleaseReason::Relinquished,
-    };
-    client.release(&release).await.unwrap();
-    client.release(&release).await.unwrap();
-    assert_eq!(
-        client
-            .release(&ReleaseScope {
-                reason: ReleaseReason::Refused,
-                ..release.clone()
-            })
-            .await
-            .unwrap_err(),
-        Error::Refused(FailureCode::Conflict)
-    );
-    assert_eq!(
-        client.renew(&scope).await.unwrap_err(),
-        Error::Refused(FailureCode::Denied)
-    );
-    assert_eq!(
-        client
-            .assignments(&ScopePage { after: None })
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
-    // Another enrolled instance of the same zone can take the released app.
-    let backup = WorkerId::mint();
-    let key = ServiceSigningKey::generate();
-    fixture.admin.execute("INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,join_signer_id,join_token_id,execution_zone_id,expires_at) VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4,'tok_testfixturedefault','ezn_default000000000000000000',now() + interval '1 hour')",
-        &[&backup.as_str(), &vec![8u8], &key.verifying_key_bytes().to_vec(), &platform::DEFAULT_JOIN_SIGNER_ID]).await.unwrap();
-    let issuer = ServiceIssuer::parse(&format!(
-        "spiffe://zeroship.ai/svc/worker/{}",
-        backup.as_str()
-    ))
-    .unwrap();
-    let keyring = ServiceKeyring::from_parts(issuer, key, ServiceTrustBundle::new()).unwrap();
-    let auth = Arc::new(ServiceAuth::new(
-        keyring,
-        Arc::new(TransportAssertionVerifier::new(ServiceTrustBundle::new())),
-    ));
-    let backup_client = WorkerCoordinator::new(&server.url, auth, Options::default()).unwrap();
-    backup_client.register(&registration).await.unwrap();
-    fixture
-        .seed_placement(&scope.app_id, &backup, Duration::from_secs(30))
-        .await;
-    client
-        .register(&RegisterWorker {
-            state: WorkerState::Draining,
-            ..registration
-        })
-        .await
-        .unwrap();
 
     fixture
         .admin
@@ -402,7 +298,7 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
         .unwrap();
     assert_eq!(
         client
-            .assignments(&ScopePage { after: None })
+            .claim_jobs::<AppJournal>(&claim_one())
             .await
             .unwrap_err(),
         Error::Refused(FailureCode::Unauthenticated)
@@ -412,26 +308,23 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
 /// An instance whose Control lease has run out stops authenticating, and the
 /// readiness probe covers the column that decides it.
 ///
-/// `assignments` is the endpoint under test because the registry key lookup is
-/// its only possible refusal: `api.rs::assignments` authenticates and then
-/// lists, reading no zone, app or eligibility row on the way. `register`
-/// refuses a lapsed instance through placement eligibility whatever the
-/// registry reads, so a refusal there would say nothing about this query.
+/// A claim over an empty zone is the call under test because the registry key
+/// lookup is its only possible refusal: the claim authenticates and then pages
+/// its zone, which holds nothing here, so it reads no app on the way.
 ///
 /// Two variables, each moved alone and each with its control. The lease is
-/// moved with Control's own column while `status` stays `active` and the
-/// registration and assignment rows stay live, so restoring it must bring the
-/// same placements back. The grant is then revoked on the lease column alone:
-/// `WorkflowAuth::ready` projects exactly what `active_instance` reads, so a
-/// revoked column grant must fail readiness rather than pass it and refuse
-/// every authenticated worker afterwards.
+/// moved with Control's own column while `status` stays `active`, so restoring
+/// it must bring the same answer back. The grant is then revoked on the lease
+/// column alone: `WorkflowAuth::ready` projects exactly what `active_instance`
+/// reads, so a revoked column grant must fail readiness rather than pass it and
+/// refuse every authenticated worker afterwards.
 #[ntex::test]
 async fn a_lapsed_instance_lease_refuses_a_worker_and_is_covered_by_readiness() {
-    use std::{num::NonZeroU32, sync::Arc};
+    use std::sync::Arc;
     use zeroship_core::{
         service_assertion::{ServiceTrustBundle, TransportAssertionVerifier},
         service_peers::{ServiceAuth, ServiceKeyring},
-        workflow_coordination::{FailureCode, RegisterWorker, ScopePage, WorkerState},
+        workflow_coordination::FailureCode,
     };
     use zeroship_workflow_client::{Error, Options, WorkerCoordinator};
 
@@ -472,29 +365,12 @@ async fn a_lapsed_instance_lease_refuses_a_worker_and_is_covered_by_readiness() 
         Arc::new(TransportAssertionVerifier::new(ServiceTrustBundle::new())),
     ));
     let client = WorkerCoordinator::new(&server.url, auth, Options::default()).unwrap();
-    fixture.admin.execute("INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,join_signer_id,join_token_id,execution_zone_id,expires_at) VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4,'tok_testfixturedefault','ezn_default000000000000000000',now() + interval '1 hour')",
-        &[&worker.as_str(), &vec![9u8], &public, &platform::DEFAULT_JOIN_SIGNER_ID]).await.unwrap();
-    client
-        .register(&RegisterWorker {
-            capacity: NonZeroU32::new(1).unwrap(),
-            state: WorkerState::Ready,
-        })
-        .await
-        .unwrap();
-    let app = AppId::mint();
-    fixture.seed_app(&app).await;
-    fixture
-        .seed_placement(&app, &worker, Duration::from_secs(30))
-        .await;
-    let held = client.assignments(&ScopePage { after: None }).await.unwrap();
-    assert_eq!(
-        held.iter().map(|a| &a.app_id).collect::<Vec<_>>(),
-        vec![&app],
-        "a live instance holds the seeded placement"
-    );
+    enroll(&fixture, &worker, 9, &public).await;
+    let held = client.claim_jobs::<AppJournal>(&claim_one()).await.unwrap();
+    assert!(held.deliveries.is_empty(), "the zone holds no work");
 
     // THE VARIABLE: the lease runs out. Nothing else about the row changes -
-    // it is still `active`, still registered, still holding the assignment.
+    // it is still `active` and still in its zone.
     assert_eq!(
         fixture
             .admin
@@ -509,14 +385,14 @@ async fn a_lapsed_instance_lease_refuses_a_worker_and_is_covered_by_readiness() 
     );
     assert_eq!(
         client
-            .assignments(&ScopePage { after: None })
+            .claim_jobs::<AppJournal>(&claim_one())
             .await
             .unwrap_err(),
         Error::Refused(FailureCode::Unauthenticated),
         "a lapsed instance must not authenticate"
     );
 
-    // THE CONTROL, one renewal apart: the same rows answer the same call.
+    // THE CONTROL, one renewal apart: the same row answers the same call.
     assert_eq!(
         fixture
             .admin
@@ -529,10 +405,10 @@ async fn a_lapsed_instance_lease_refuses_a_worker_and_is_covered_by_readiness() 
             .unwrap(),
         1
     );
-    assert_eq!(
-        client.assignments(&ScopePage { after: None }).await.unwrap(),
-        held,
-        "renewing the lease restores the placements the refusal hid"
+    let restored = client.claim_jobs::<AppJournal>(&claim_one()).await.unwrap();
+    assert!(
+        restored.deliveries.is_empty() && restored.lap_complete,
+        "renewing the lease restores the answer the refusal hid"
     );
 
     // THE SECOND VARIABLE: the grant on the lease column alone.
@@ -566,6 +442,7 @@ async fn a_lapsed_instance_lease_refuses_a_worker_and_is_covered_by_readiness() 
         StatusCode::OK
     );
 }
+
 async fn verify_latest_management(
     fixture: &platform::Platform,
     http: &Client,
@@ -573,7 +450,7 @@ async fn verify_latest_management(
     client: &zeroship_workflow_client::WorkerCoordinator,
     control: &ServiceIssuer,
     key: &ServiceSigningKey,
-    scope: &zeroship_core::workflow_coordination::AssignedScope,
+    app: &AppId,
 ) {
     use zeroship_core::{
         workflow_coordination::{RestartDeploy, RestartDeployment, RestartOptions},
@@ -583,11 +460,11 @@ async fn verify_latest_management(
     let hash = "a".repeat(64);
     fixture.admin.execute(
         "INSERT INTO zeroship.app_deploys(id,app_id,deploy_hash,manifest_json) VALUES($1,$2,$3,'{}')",
-        &[&deployment.as_str(), &scope.app_id.as_str(), &hash],
+        &[&deployment.as_str(), &app.as_str(), &hash],
     ).await.unwrap();
     let command = ManageRun {
         request_id: RequestId::mint(),
-        app_id: scope.app_id.clone(),
+        app_id: app.clone(),
         run_id: RunId::mint(),
         command: ManagementOperation::Restart {
             options: RestartOptions {
@@ -634,8 +511,8 @@ async fn verify_latest_management(
     // Management is a sweep: the lane claims it and settles it in process, as the
     // service's own lane does.
     let queue = queue(&fixture.runtime_url).await;
-    let lane = MaintenanceAuthority::new(scope.app_id.clone(), client.worker_id().clone());
-    let delivery = sweep(&queue, &lane, scope).await;
+    let lane = MaintenanceAuthority::new(app.clone(), client.worker_id().clone());
+    let delivery = sweep(&queue, &lane, app).await;
     assert_eq!(
         delivery.job.operation,
         JobOperation::Management {
@@ -658,35 +535,6 @@ async fn verify_latest_management(
     )
     .await
     .unwrap();
-}
-
-async fn verify_native_policy_source(
-    fixture: &platform::Platform,
-    client: &zeroship_workflow_client::WorkerCoordinator,
-    scope: &zeroship_core::workflow_coordination::AssignedScope,
-) {
-    use std::time::Instant;
-    assert!(matches!(
-        client.policy_lease(&plain_request(scope)).await,
-        Err(zeroship_workflow_client::Error::Refused(
-            zeroship_core::workflow_coordination::FailureCode::Unavailable
-        ))
-    ));
-    let plan = policy_fixture::seed_app(fixture, &scope.app_id).await;
-    let operator = policy_fixture::operator(fixture).await;
-    let plans = policy_fixture::plan_admin(fixture).await;
-    let policy = AppPolicy {
-        admission: false,
-        ..AppPolicy::default()
-    };
-    plans.set_plan_policy(&plan, &policy).await.unwrap();
-    operator.set_rollout(policy_fixture::rollout()).await.unwrap();
-    let leased = client.policy_lease(&plain_request(scope)).await.unwrap();
-    assert_eq!(leased.policy(), &policy);
-    assert_eq!(leased.app_id(), &scope.app_id);
-    assert_eq!(leased.worker_id(), client.worker_id());
-    assert_eq!(leased.signing_key_id(), client.signing_key_id());
-    assert!(leased.expires_at() > Instant::now());
 }
 
 async fn post(
@@ -762,10 +610,6 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
     for endpoint in [
         endpoints::WORKFLOW_MANAGE,
         endpoints::WORKFLOW_MANAGEMENT_STATUS,
-        endpoints::WORKFLOW_REGISTER,
-        endpoints::WORKFLOW_ASSIGNMENTS,
-        endpoints::WORKFLOW_RENEW,
-        endpoints::WORKFLOW_RELEASE,
         endpoints::WORKFLOW_JOB_CLAIM,
         endpoints::WORKFLOW_JOB_SETTLE,
     ] {
@@ -779,29 +623,28 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
         worker.as_str()
     ))
     .unwrap();
-    let registration = json!({"capacity":4,"state":"ready"});
-    let register = endpoints::WORKFLOW_REGISTER.path_template();
+    let claim = serde_json::to_value(claim_one()).unwrap();
+    let claim_path = endpoints::WORKFLOW_JOB_CLAIM.path_template();
     assert_eq!(
         post(
             &client,
             &first.url,
-            register,
+            claim_path,
             &assertion(&worker_issuer, &worker_key),
-            &registration
+            &claim
         )
         .await
         .0,
         StatusCode::UNAUTHORIZED
     );
-    fixture.admin.execute("INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,join_signer_id,join_token_id,execution_zone_id,expires_at) VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4,'tok_testfixturedefault','ezn_default000000000000000000',now() + interval '1 hour')",
-        &[&worker.as_str(),&vec![1u8],&worker_key.verifying_key_bytes().to_vec(),&platform::DEFAULT_JOIN_SIGNER_ID]).await.unwrap();
+    enroll(&fixture, &worker, 1, &worker_key.verifying_key_bytes()).await;
     assert_eq!(
         post(
             &client,
             &first.url,
-            register,
+            claim_path,
             &assertion(&worker_issuer, &control_key),
-            &registration
+            &claim
         )
         .await
         .0,
@@ -811,31 +654,32 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
         post(
             &client,
             &first.url,
-            register,
+            claim_path,
             &assertion(&control, &control_key),
-            &registration
+            &claim
         )
         .await
         .0,
         StatusCode::UNAUTHORIZED
     );
     let token = assertion(&worker_issuer, &worker_key);
-    let (status, registered) = post(&client, &first.url, register, &token, &registration).await;
+    let (status, claimed) = post(&client, &first.url, claim_path, &token, &claim).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(registered["workerId"], json!(worker));
+    assert_eq!(claimed["deliveries"], json!([]));
+    // One assertion is one request, whichever replica it is presented to.
     assert_eq!(
-        post(&client, &second.url, register, &token, &registration)
+        post(&client, &second.url, claim_path, &token, &claim)
             .await
             .0,
         StatusCode::UNAUTHORIZED
     );
-    let mut injected = registration.clone();
+    let mut injected = claim.clone();
     injected["workerId"] = json!(WorkerId::mint());
     assert_eq!(
         post(
             &client,
             &first.url,
-            register,
+            claim_path,
             &assertion(&worker_issuer, &worker_key),
             &injected
         )
@@ -845,44 +689,25 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
 
     let app = AppId::mint();
     provision::provision(&fixture, &app, &AppPolicy::default()).await;
-    let assignment = fixture
-        .seed_placement(&app, &worker, Duration::from_secs(30))
-        .await;
-    let scope = json!({"appId":app,"assignmentRevision":assignment.revision});
-    assert_eq!(
-        post(
-            &client,
-            &second.url,
-            endpoints::WORKFLOW_RENEW.path_template(),
-            &assertion(&worker_issuer, &worker_key),
-            &scope
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-    let foreign = json!({"appId":AppId::mint(),"assignmentRevision":assignment.revision});
-    // Same contract as the earlier claim_job case in this file, over HTTP: a
-    // foreign scope is 403, never 503.
-    assert_eq!(
-        post(
-            &client,
-            &first.url,
-            endpoints::WORKFLOW_JOB_CLAIM.path_template(),
-            &assertion(&worker_issuer, &worker_key),
-            &foreign
-        )
-        .await,
-        (StatusCode::FORBIDDEN, json!({"code":"denied"}))
-    );
+    fixture.seed_scope(&app, platform::DEFAULT_ZONE_ID).await;
+    let (status, claimed) = post(
+        &client,
+        &second.url,
+        claim_path,
+        &assertion(&worker_issuer, &worker_key),
+        &claim,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(claimed["deliveries"], json!([]));
     for field in ["input", "history", "databaseUrl", "payloadUrl", "taskToken"] {
-        let mut injected = scope.clone();
+        let mut injected = claim.clone();
         injected[field] = json!("private-customer-data");
         assert_eq!(
             post(
                 &client,
                 &first.url,
-                endpoints::WORKFLOW_RENEW.path_template(),
+                claim_path,
                 &assertion(&worker_issuer, &worker_key),
                 &injected
             )
@@ -891,12 +716,13 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
             StatusCode::BAD_REQUEST
         );
     }
-    let oversized = json!({"capacity":1,"state":"ready","input":"x".repeat(2048)});
+    let mut oversized = claim.clone();
+    oversized["input"] = json!("x".repeat(2048));
     assert_eq!(
         post(
             &client,
             &first.url,
-            register,
+            claim_path,
             &assertion(&worker_issuer, &worker_key),
             &oversized
         )
@@ -930,26 +756,21 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
     );
     first.restart(&client).await;
     // Management is a sweep, so the lane claims it; the wire claim offers this
-    // placed worker nothing. What the replicas are measured on starts at the
-    // settle route below, which either of them serves for the same delivery.
-    assert_eq!(
-        post(
-            &client,
-            &first.url,
-            endpoints::WORKFLOW_JOB_CLAIM.path_template(),
-            &assertion(&worker_issuer, &worker_key),
-            &scope,
-        )
-        .await,
-        (StatusCode::OK, Value::Null)
-    );
-    let assigned = zeroship_core::workflow_coordination::AssignedScope {
-        app_id: app.clone(),
-        assignment_revision: assignment.revision,
-    };
+    // worker nothing. What the replicas are measured on starts at the settle
+    // route below, which either of them serves for the same delivery.
+    let (status, claimed) = post(
+        &client,
+        &first.url,
+        claim_path,
+        &assertion(&worker_issuer, &worker_key),
+        &claim,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(claimed["deliveries"], json!([]));
     let queue = queue(&fixture.runtime_url).await;
     let lane = MaintenanceAuthority::new(app.clone(), worker.clone());
-    let delivery = sweep(&queue, &lane, &assigned).await;
+    let delivery = sweep(&queue, &lane, &app).await;
     assert_eq!(
         delivery.job.operation,
         JobOperation::Management {
@@ -1043,54 +864,27 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
         .await,
         (StatusCode::OK, management_receipt)
     );
-    for path in ["/v1/management/poll", "/v1/management/acknowledge"] {
+    // No route registers a worker, lists, renews or releases a placement, leases
+    // a policy, polls or acknowledges management, or publishes a wake hint: an
+    // authenticated worker reaches none of them.
+    for path in [
+        "/v1/workers/register",
+        "/v1/assignments/list",
+        "/v1/assignments/renew",
+        "/v1/assignments/release",
+        "/v1/policy/lease",
+        "/v1/management/poll",
+        "/v1/management/acknowledge",
+        "/v1/wake-hints/publish",
+    ] {
         let response = client
             .post(format!("{}{path}", first.url))
             .header("authorization", assertion(&worker_issuer, &worker_key))
-            .send_json(&scope)
+            .send_json(&json!({"appId":app}))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
     }
-    // The wake-hint route is gone, and a release carries a closed reason
-    // instead of a hint; the last owner may release.
-    assert_eq!(
-        post(
-            &client,
-            &first.url,
-            "/v1/wake-hints/publish",
-            &assertion(&worker_issuer, &worker_key),
-            &json!({"appId":app,"assignmentRevision":assignment.revision,"revision":1})
-        )
-        .await
-        .0,
-        StatusCode::NOT_FOUND
-    );
-    let hinted = json!({"appId":app,"requestId":RequestId::mint(),"assignmentRevision":assignment.revision,"wakeRevision":1});
-    assert_eq!(
-        post(
-            &client,
-            &first.url,
-            endpoints::WORKFLOW_RELEASE.path_template(),
-            &assertion(&worker_issuer, &worker_key),
-            &hinted
-        )
-        .await,
-        (StatusCode::BAD_REQUEST, json!({"code":"invalid"}))
-    );
-    let release = json!({"appId":app,"requestId":RequestId::mint(),"assignmentRevision":assignment.revision,"reason":"relinquished"});
-    assert_eq!(
-        post(
-            &client,
-            &first.url,
-            endpoints::WORKFLOW_RELEASE.path_template(),
-            &assertion(&worker_issuer, &worker_key),
-            &release
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
     for path in [
         "/v1/tasks/poll".into(),
         format!("/v1/apps/{}/workflows/Example/runs", app.as_str()),
@@ -1121,9 +915,9 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
         post(
             &client,
             &second.url,
-            register,
+            claim_path,
             &assertion(&worker_issuer, &worker_key),
-            &registration
+            &claim
         )
         .await
         .0,
@@ -1148,14 +942,4 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
         .0,
         StatusCode::OK
     );
-}
-
-fn plain_request(
-    scope: &zeroship_core::workflow_coordination::AssignedScope,
-) -> zeroship_core::workflow_policy::PolicyLeaseRequest {
-    zeroship_core::workflow_policy::PolicyLeaseRequest {
-        scope: scope.clone(),
-        establish: None,
-        ingress_used: false,
-    }
 }

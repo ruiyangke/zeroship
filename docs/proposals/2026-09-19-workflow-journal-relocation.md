@@ -4,7 +4,7 @@
 `db/migrations-ts/20260919000000_workflow_journal.ts` installs the journal into
 `workflow_manager` and grants it to the role already serving that schema, and
 `journal_is_installed_and_served_by_one_role` in
-`crates/zeroship-workflow-server/tests/platform_schema.rs` holds that posture. The service links
+`crates/zeroship-workflow-server/tests/integration/platform_schema.rs` holds that posture. The service links
 the engine and answers every creator-facing run call over its own journal, establishing its own
 ingress epoch: `configure` in `crates/zeroship-workflow-server/src/api/runs.rs` serves `start`,
 `status`, `signal`, `transition`, `restart`, `step_output` and `output`. `restart` needs one row
@@ -34,10 +34,10 @@ have landed, and the second is nearly done. The two tables the service owns have
 `workflow_manager`, which deletes a cross-database write rather than transporting it, and the
 policy inputs now arrive over `POST /v1/app-facts` rather than a binding on Control's schema.
 The transport fence that blocked reaching Control is decided and built - plaintext now reaches
-only peers an operator named. Two reaches into `zeroship` remain: placement eligibility in
-`crates/zeroship-workflow-server/src/coordinator.rs`, which stays deliberately because its two
-reads exist so they can disagree, and the worker registry lookup that authenticates every
-call, which is deferred by decision.
+only peers an operator named. One reach into `zeroship` remains: the worker registry lookup that
+authenticates every call, `active_instance` in `crates/zeroship-workflow-server/src/auth.rs`,
+which also yields the instance's frozen execution zone the claim and run paths authorize by. It
+is deferred by decision.
 
 The journal is installed into the workflow service's own schema, and storage and the durable
 fold live in that service while execution stays in the worker.
@@ -68,9 +68,9 @@ creator-facing run calls are answered from. Customer workers own execution; this
 journal those runs are recorded in."
 
 **The worker holds no journal.** `WorkflowCreatorFactory` in
-`crates/zeroship-worker/src/workflow_creator.rs` opens a placement with no journal handle - its
-`Journal` type is `()` - and gives the app's isolates a `RemoteBackend`, so every creator call is an
-authenticated request answered from the service's journal.
+`crates/zeroship-worker/src/workflow_creator.rs` prepares a claimed app with no journal handle -
+its `Journal` type is `()` - and gives the app's isolates a `RemoteBackend`, so every creator call
+is an authenticated request answered from the service's journal.
 
 **One journal serves every app.**
 `crates/zeroship-workflow-schema/src/lib.rs`, under a heading called "The schema is not an app":
@@ -89,7 +89,7 @@ all keyed with an `app_id` column. Read that list as a sample and not as the set
 **Provisioning is a platform migration.** There is no per-schema installer and no journal endpoint.
 On PostgreSQL the migration above is the only shipped path that creates journal tables, and
 `journal_is_installed_and_served_by_one_role` in
-`crates/zeroship-workflow-server/tests/platform_schema.rs` holds the posture it leaves. The SQLite
+`crates/zeroship-workflow-server/tests/integration/platform_schema.rs` holds the posture it leaves. The SQLite
 dev tier installs its local journal through `initialize_local` in
 `crates/zeroship-workflow/src/service/schema.rs`, from the same versioned series.
 
@@ -115,7 +115,7 @@ record to commit atomically.
 
 ## Four defects of a journal in a creator schema
 
-These are why the journal is not kept beside creator data. Each is a property of that placement,
+These are why the journal is not kept beside creator data. Each is a property of that location,
 so the journal being in `workflow_manager` is what answers each of them, rather than a guard.
 
 **1. A creator could drop the platform's journal.** A creator schema is owned by its database's
@@ -145,16 +145,13 @@ schema to derive.
 
 ## The design
 
-**Execution stays in the worker. Orchestration and storage move to the service.**
+**Execution stays in the worker. Orchestration and storage live in the service.**
 
 ```
-  TODAY
-    worker   V8 task executor + durable fold + journal store (SQL, creator schema)
-    service  metadata coordination, placement, journal provisioning
-
-  TARGET
     worker   V8 task executor + WorkflowBackend RPC client (creator seam)
+             + a zone claim for advance jobs
     service  durable fold + journal store (SQL, workflow_manager) + coordination
+             + the maintenance lane that claims every other kind
 ```
 
 The seam already exists and is narrow. `WorkflowBackend` is the whole creator-facing surface,
@@ -171,7 +168,7 @@ Not at service boot. The service has no installer - `run` in
 forbidden the DDL it would need: `Coordinator::verify` in
 `crates/zeroship-workflow-server/src/coordinator.rs` refuses to start when
 `has_schema_privilege(current_user,'workflow_manager','CREATE')` is true, and
-`crates/zeroship-workflow-server/tests/platform_schema.rs` asserts that granting CREATE makes
+`crates/zeroship-workflow-server/tests/integration/platform_schema.rs` asserts that granting CREATE makes
 `verify` fail. Installing at boot would mean deleting a shipped security contract. A platform
 migration is also the route `workflow_manager` itself arrives by, in
 `db/migrations-ts/20260911000000_workflow_coordination.ts`; the journal joins it there.
@@ -288,9 +285,9 @@ backend is narrow, so the whole engine moves server-side and the wire carries `s
 Say plainly that those are the creator-facing surface and not the whole wire. A worker also has to
 be given work and report it, and that path is not a trait at all. `DeliverySlot` in
 `crates/zeroship-workflow-runner/src/delivery.rs` is what production runs, and its claim,
-heartbeat and completion reach the coordinator rather than a journal the host holds: those methods
-call `claim_job`, `heartbeat_job` and `complete_job` on the client, and the `&AppWorkflows` each
-one still takes is unused, with the comment at the claim giving the reason - a host that reaches
+heartbeat and completion reach the coordinator rather than a journal the host holds: the remote
+`JobTransport` calls `claim_jobs`, `heartbeat_job` and `settle_execution` on `WorkerCoordinator`,
+and declares its `Journal` type as `()` - the journal is at the far end, and a host that reaches
 the manager over HTTP holds no credential to it. `AppJournal` appears there as the type supplying
 the port's associated types, not as a journal the worker opens. What answers those calls lives in
 `crates/zeroship-workflow/src/service/delivery.rs` behind the routes in
@@ -298,10 +295,8 @@ the port's associated types, not as a journal the worker opens. What answers tho
 `crates/zeroship-cli/src/workflow/manager.rs` still calls them directly because locally it IS the
 service.
 
-There is a `TaskTransport` trait beside `DeliverySlot`, but its only consumer, `RunnerSlot`,
-appears solely in tests - do not plan against it, and do not read `WorkerTasks` implementing it as
-evidence that the protocol is already abstracted. `WorkerTasks` is production, in its other role
-as `TaskPayloads`.
+`DeliverySlot` over `JobTransport` is the one job path; there is no second dispatch trait to plan
+against. `WorkerTasks` is production in its role as `TaskPayloads`.
 
 Those three calls are the half carrying the durability properties, which is why they crossed ahead
 of the severance: `renewal` in `crates/zeroship-workflow-manager/src/queue.rs` is what advances the
@@ -372,10 +367,10 @@ heartbeat has to be settled by whoever writes the server side in any case.
 looks narrow - `WorkflowBackend` has seven methods and the factory in
 `crates/zeroship-workflow-v8/src/lib.rs` takes a third arm cleanly - but those seven divide
 into wiring, a service capability, one blocked on the payload seam, and two whose `Vec<u8>`
-shape may be wrong for a remote seam at all; step 5 counts them. And the execution seam is not
-`TaskTransport`: the type that dispatches through it is built only by tests, so a remote
-implementation of it would serve nobody. Step 4 names what actually crosses, which is the three
-journal calls beside the manager calls the worker already makes. Steps 1 to 3 are preparation,
+shape may be wrong for a remote seam at all; step 5 counts them. And the execution seam is
+`JobTransport` (`crates/zeroship-workflow-runner/src/delivery.rs`), not the creator seam. Step 4
+names what actually crosses, which is the three journal calls beside the manager calls the
+worker already makes. Steps 1 to 3 are preparation,
 and steps 4 and 5 land together at the cutover.
 
 The machinery to carry it exists. The worker already reaches the manager over HTTPS through
@@ -385,7 +380,7 @@ protocol. This extends a working client rather than inventing one.
 1. **DONE. The journal installs into `workflow_manager` as a platform migration.** Nothing in
    production reads it yet. `db/migrations-ts/20260919000000_workflow_journal.ts` installs it, and
    `journal_is_installed_and_served_by_one_role`
-   (`crates/zeroship-workflow-server/tests/platform_schema.rs`) binds the installation and the
+   (`crates/zeroship-workflow-server/tests/integration/platform_schema.rs`) binds the installation and the
    stamp together - it asserts the stamp is "a single row" and that `zeroship_workflow` holds the
    four DML privileges and nothing else, no TRUNCATE, REFERENCES, TRIGGER or DDL. Its own doc
    records what that no longer catches: the service login and the journal's grantee are now one
@@ -421,18 +416,22 @@ protocol. This extends a working client rather than inventing one.
    envelope and the client methods are in; `RunService` in
    `crates/zeroship-workflow-server/src/runs.rs` binds an app per request from the server's own
    policy registry, and `bind` in `crates/zeroship-workflow-server/src/api/runs.rs` takes the
-   worker from the credential that verified the call rather than from the body, so a request
-   cannot name a placement its caller does not hold.
-   `status_answers_from_the_service_journal` in
-   `crates/zeroship-workflow-server/tests/http_runs.rs` reads a run's state back through the
-   endpoint and compares it against the row, and
+   worker and its zone from the credential that verified the call rather than from the body.
+   The body names only an app: `PolicyObservation::admits_zone`
+   (`crates/zeroship-workflow-manager/src/policy.rs`) serves it only to a worker of the app's
+   frozen execution zone and refuses a deleted app to every worker, from the same observation the
+   journal is then bound under. `a_worker_that_never_claimed_the_app_serves_its_zones_apps`,
+   `a_run_call_from_another_zone_is_refused` and `a_deleted_app_is_refused_to_every_worker` in
+   `crates/zeroship-workflow-server/tests/integration/http_runs.rs` pin each arm of that rule.
+   `status_answers_from_the_service_journal` in the same file reads a run's state back through
+   the endpoint and compares it against the row, and
    `a_signal_served_over_the_wire_is_in_the_journal` does the same for a write.
 
    **The ingress epoch is established, and survives the reinstall.** `RunService::app`
    reinstalls the policy snapshot on every request and `PolicySnapshot::lease` starts every
    snapshot without an epoch, so the epoch is carried forward at that call site rather than
-   inside `install`: a `None` arriving on a manager lease is the manager saying no
-   responsibility is open, and the two install paths must not be unified.
+   inside `install`: a policy observation says nothing about recovery responsibility, so its
+   silence about the epoch is not an answer to carry into the binding.
    `an_established_epoch_survives_the_next_requests_policy_reinstall` binds the carry-forward by
    abandoning the recovery scope, so a second served request can only have been served on the
    epoch the first one established, and closes that epoch in a third arm as its control.
@@ -452,7 +451,7 @@ protocol. This extends a working client rather than inventing one.
    `HoldScope::for_app`, and nothing else: the `deploys` row it also reads is one the fixture
    already seeded.
    `restart_is_served_only_with_the_journals_deployment_hold`
-   (`crates/zeroship-workflow-server/tests/http_runs.rs`) pins it as a pair whose arms differ in
+   (`crates/zeroship-workflow-server/tests/integration/http_runs.rs`) pins it as a pair whose arms differ in
    that row alone - served with the hold, `Unavailable` without it - beside the two that always
    served and a `status` control that needs neither.
 
@@ -479,11 +478,11 @@ protocol. This extends a working client rather than inventing one.
    needs an `AppDeployments`, which this service now installs without an artifact store. So the
    capability is here and the claimant is not: `activate` and `management` would write these rows,
    and the lane that claims them is built and unstarted. That is why
-   `crates/zeroship-workflow-server/tests/http_runs.rs` seeds by raw SQL, and it stays a
+   `crates/zeroship-workflow-server/tests/integration/http_runs.rs` seeds by raw SQL, and it stays a
    sequencing constraint on steps 4 and 5 rather than a gap in this step.
 
 4. **DONE. The three direct calls cross, merged into the claims that already crossed.** One
-   exchange now carries both halves: the assignment rides the claim reply, one renewal carries both
+   exchange now carries both halves: the journal's acceptance rides the claim reply, one renewal carries both
    leases, the frontier rides the settlement. The journal arrives as an argument, so the remote
    transport sends one request and the in-process one runs both halves locally.
    `JobJournal` (`crates/zeroship-workflow-client/src/journal.rs`) is the port, with four
@@ -499,17 +498,16 @@ protocol. This extends a working client rather than inventing one.
    `deny_unknown_fields`, so the envelopes NAME each half rather than staying byte-compatible with
    the single-half bodies; that strictness is what caught a stale reader loudly instead of
    silently mis-decoding.
-   It was not "add a remote `TaskTransport`". `WorkerTasks` implements that trait in production,
-   but the type that dispatches through it, `RunnerSlot`
-   (`crates/zeroship-workflow-runner/src/lib.rs`), is constructed only by tests; the production job
-   path is `DeliverySlot` over `JobTransport`
-   (`crates/zeroship-workflow-runner/src/delivery.rs`). Building against `TaskTransport` would
-   have shipped a remote implementation of something the worker never calls.
+   The production job path is `DeliverySlot` over `JobTransport`
+   (`crates/zeroship-workflow-runner/src/delivery.rs`), so that is the port the remote transport
+   implements.
 
    What crosses is `AppWorkflows::accept_job`, `AppWorkflows::heartbeat_job` and
-   `AppWorkflows::complete_job`, all in `crates/zeroship-workflow/src/service/delivery.rs`, each
-   with exactly one production call site in `crates/zeroship-workflow-runner/src/delivery.rs`.
-   Merge them into the manager calls beside them - the assignment rides the claim reply, one
+   `AppWorkflows::complete_job`, all in `crates/zeroship-workflow/src/service/delivery.rs`, which
+   the service calls from its job routes (`crates/zeroship-workflow-server/src/api/jobs.rs`) and
+   the local host's `LocalTransport` (`crates/zeroship-cli/src/workflow/manager.rs`) calls in
+   process.
+   Merge them into the manager calls beside them - the journal's acceptance rides the claim reply, one
    renewal carries both leases, the frontier rides the settlement. **No new endpoint is needed:**
    `WORKFLOW_JOB_CLAIM`, `WORKFLOW_JOB_HEARTBEAT` and `WORKFLOW_JOB_SETTLE` already exist in
    `crates/zeroship-core/src/service_identity.rs` with their `svc/worker` grants, `DeliveryGrant`
@@ -518,24 +516,16 @@ protocol. This extends a working client rather than inventing one.
    round-trip count, is why merging beats bolting on separate endpoints: the merged handler is
    the smaller one.
 
-   **Only the heartbeat sits immediately beside its neighbour.** `renew` calls
-   `JobTransport::heartbeat` and `AppWorkflows::heartbeat_job` in one bounded block. The claim
-   does not: `DeliverySlot::run` dispatches `Activate`, `Reconcile`, `Cron`, `Management`,
-   `ReleaseHold`, `Collect`, `Close`, `Fanout` and `Propagate` before `accept_job`, which is the
-   fall-through for `Advance` alone, so a merged claim reply carries an assignment for one
-   operation kind among ten. `Queue::claim_authorized` does not filter by operation - the
-   restriction is on the publish side, in `worker_operation`
-   (`crates/zeroship-workflow-manager/src/coordinator/jobs.rs`) - so all ten really are
-   deliverable. And completion is a pipeline rather than a pair: `complete_job` runs in
-   `execute`, and `acknowledge` settles the receipt it returned.
-
-   **Take the heartbeat first; its server half waits.** Production journals per app
-   into the creator's own schema - `app_schema` in
-   `crates/zeroship-worker/src/workflow_host.rs`, which composes
-   `app_derivation::schema_name(app)` - while `RunService` holds one platform
-   `workflow_manager` schema, so a merged server handler would have no rows to touch. The
-   client, wire and DTO halves land green; leave
-   `crates/zeroship-workflow-server/src/api/jobs.rs` alone until the cutover animates it.
+   **Each merged call carries both halves in one exchange.** `renew`
+   (`crates/zeroship-workflow-runner/src/delivery.rs`) sends one `JobTransport::heartbeat` for
+   the queue lease and the journal task together. The claim is the zone claim: the service
+   accepts each claimed grant into its journal (`accept` in
+   `crates/zeroship-workflow-server/src/api/jobs.rs`) before it builds the reply, so a claim
+   reply carries an acceptance exactly for `advance`, the one kind `Claimant::Worker` admits
+   (`Claimant::admits` in `crates/zeroship-workflow-manager/src/models.rs`); every other kind
+   is the maintenance lane's. Completion is `JobTransport::complete`, which commits the execution
+   and settles the delivery in one request, and `acknowledge` settles a receipt the journal
+   already held.
 
    **Do not add a test module to `service/delivery.rs` to reach `TaskRenewal`.** Its fields are
    private, and that guard holds by ABSENCE: the file declares no `#[cfg(test)]` and no
@@ -680,16 +670,14 @@ protocol. This extends a working client rather than inventing one.
    `InputStager`, and `ServicePayloads`
    (`crates/zeroship-workflow-server/src/payloads.rs`) supplies one.
    `the_activation_sweep_records_controls_asserted_registration`
-   (`crates/zeroship-control/tests/deployment_holds/journal.rs`) binds that pairing end to end on
+   (`crates/zeroship-control/tests/integration/deployment_holds/journal_holds.rs`) binds that pairing end to end on
    this exact shape, against a real Control endpoint, with a `holds_only` arm that must refuse.
 
-   So what is missing is a claimant rather than a capability: the lane that would run those sweeps
-   is built and unstarted, and the worker's `AppWorkflows`
-   (`crates/zeroship-worker/src/workflow_creator.rs`) opens over the CREATOR database, so its rows
-   land in the creator journal. The table therefore stays empty here, and
+   So what was missing was a claimant rather than a capability, and the service's maintenance lane
+   is that claimant: it runs those sweeps, and no worker opens a journal at all.
    `__zeroship_workflow_run_deploy` is an `ON DELETE RESTRICT` foreign key, so the journal cannot
    hold a run until something writes a deploy. That is why
-   `crates/zeroship-workflow-server/tests/http_runs.rs` seeds by raw SQL.
+   `crates/zeroship-workflow-server/tests/integration/http_runs.rs` seeds by raw SQL.
 
    **And the hold `restart` waits on belongs to this service now too.** The journal holder is
    `HoldScope::for_app`, while the server's `ControlHolds` takes `QueueDeploymentHolds`, whose
@@ -831,17 +819,17 @@ protocol. This extends a working client rather than inventing one.
    records why it took the shape it did. This is the
    flag day, and step 4's server half is inside it rather than before it.
 
-   **An HTTP `WorkflowBackend`, which is not the easy half.** Only `AppBackend`
-   (`crates/zeroship-workflow/src/service/backend.rs`) and `ReadyBackend`
-   (`crates/zeroship-workflow-runner/src/ready.rs`) implement that trait, and the factory in
-   `crates/zeroship-workflow-v8/src/lib.rs` takes a third arm cleanly. Counting methods says
+   **An HTTP `WorkflowBackend`, which is not the easy half.** `AppBackend`
+   (`crates/zeroship-workflow/src/service/backend.rs`) and `RemoteBackend`
+   (`crates/zeroship-workflow-runner/src/remote.rs`) implement that trait, and the factory in
+   `crates/zeroship-workflow-v8/src/lib.rs` resolves each arm to it. Counting methods says
    mechanical; counting decisions says otherwise, and the seven do not divide evenly.
 
    **Three were wiring, and they now have a caller.**
    `WorkerCoordinator::run_status`, `signal_run` and `transition_run` in
    `crates/zeroship-workflow-client/src/lib.rs` are written and their endpoints are served, and
    `the_client_and_the_service_agree_on_every_run_call`
-   (`crates/zeroship-workflow-server/tests/run_wire_pair.rs`) drives each of the three against its
+   (`crates/zeroship-workflow-server/tests/e2e/run_wire_pair.rs`) drives each of the three against its
    served route, so the two halves are bound to each other. `RemoteBackend`
    (`crates/zeroship-workflow-runner/src/remote.rs`) calls them: it implements `WorkflowBackend` over
    a `WorkerCoordinator`, and the V8 factory in `crates/zeroship-workflow-v8/src/lib.rs` selects it
@@ -877,7 +865,7 @@ protocol. This extends a working client rather than inventing one.
    inside `options`; `a_remote_start_refuses_a_creator_supplied_payload_descriptor`
    (`crates/zeroship-workflow-runner/src/remote/tests.rs`) additionally asserts the peer saw no
    request at all; and `start_stages_the_creator_value_and_refuses_a_named_payload_object`
-   (`crates/zeroship-workflow-server/tests/http_runs.rs`) answers 400 at the real endpoint with the
+   (`crates/zeroship-workflow-server/tests/integration/http_runs.rs`) answers 400 at the real endpoint with the
    run count unchanged, against a served control whose staged digest is compared to the body's own
    value.
 
@@ -982,7 +970,7 @@ protocol. This extends a working client rather than inventing one.
 
    - The run endpoints' two halves are bound to each other.
      `the_client_and_the_service_agree_on_every_run_call`
-     (`crates/zeroship-workflow-server/tests/run_wire_pair.rs`) drives the real
+     (`crates/zeroship-workflow-server/tests/e2e/run_wire_pair.rs`) drives the real
      `WorkerCoordinator` against the real server binary. Field spelling cannot drift, because
      both sides import the same types from `zeroship-core`, so what it binds is which endpoint
      the client posts to, which struct it posts there, and its own post-validation.
@@ -1012,15 +1000,15 @@ protocol. This extends a working client rather than inventing one.
    and `submission_and_settlement_receipts_cannot_substitute_metadata` and
    `a_settlement_reply_in_a_family_the_operation_refuses_is_invalid` substitute each in turn
    against a fake peer. The CLI's `LocalTransport` never reaches that
-   check and cannot disagree either: `queue.rs` builds three of the receipt's fields from the
-   request and the fourth, `app_id`, from the assignment, which `delivery_selector` selected BY
-   `delivery.job.app_id`.
+   check and cannot disagree either: `settle_authorized` in
+   `crates/zeroship-workflow-manager/src/queue.rs` builds every field of the receipt from the
+   delivery it settles and the outcome the journal decided.
 
    And one worry does NOT apply, written down so nobody builds for it. The `Heartbeat` reply
    (`crates/zeroship-workflow/src/service/types.rs`) carries no task identity at all, and
-   `renew` feeds its `lease_ms` straight into a lease window. That would matter if
-   `TaskTransport` became the wire - but it has no production dispatcher, and step 4 concludes a
-   remote implementation of it would serve nobody. The reply that does cross carries `delivery`.
+   `renew` feeds its `lease_ms` straight into a lease window. That would matter if that reply
+   crossed a wire, and it does not: the reply that crosses is the merged renewal, which carries
+   `delivery`.
 
    One preparatory piece remains and it is contingent: bind what a prefetch would remove, a read
    driven after the lease is lost while an isolate is live. The outage test fakes an unavailable
@@ -1155,24 +1143,23 @@ protocol. This extends a working client rather than inventing one.
      `crates/zeroship-cli/src/workflow.rs` and the push inside
      `crates/zeroship-workflow-v8/src/loader.rs`, because `AppRuntimeLoader` is constructed only by
      `crates/zeroship-cli/src/workflow/host.rs` - the dev tier, which holds its journal because
-     locally it is the service. `WorkflowBinding::ready`, whose one production caller is
-     `crates/zeroship-worker/src/cache.rs`, is a different arm and is not part of this. Verify the
-     claim rather than trusting it: list the callers of each `WorkflowBinding` constructor.
+     locally it is the service. `WorkflowBinding::remote_workflows`, whose one production caller
+     is `crates/zeroship-worker/src/cache.rs`, is the request path's arm and is not part of this.
+     Verify the claim rather than trusting it: list the callers of each `WorkflowBinding`
+     constructor.
 
      **And it moves where creator latency comes from, which is worth saying because a later
-     bisect will not find it in the diff.** `CreatorRuntime.backend` cannot stay an `AppBackend`,
-     since one is only obtainable from `AppWorkflows::into_backend`, so `ReadyApps` holds a
-     `RemoteBackend` instead. That means every `env.workflows` call from the REQUEST path crosses
-     HTTP after the severance, not only the calls made from a workflow isolate. Nothing about the
-     design intends otherwise - the worker holds no journal, so there is no local backend for
-     either path - but before the severance the request path was in-process and afterwards it is
-     not, and that is the kind of change someone chasing a latency regression should be able to
-     find by reading rather than by measuring.
-     `ReadyApps::retire` also loses its key, because a `RemoteBackend` deliberately holds no
-     `PolicyBinding`. Key it on `AssignedScope`: within one `Entry` at most one backend is ever
-     published, an `Entry` is removed only when the scan reports a different `assignment_revision`,
-     and two backends for one app never share a revision - so the revision is exactly as
-     discriminating as the binding was on this path, rather than approximately so.
+     bisect will not find it in the diff.** The worker holds no `AppBackend`, since one is only
+     obtainable from `AppWorkflows::into_backend`, so every backend it hands an isolate is a
+     `RemoteBackend`. That means every `env.workflows` call from the REQUEST path crosses HTTP, not
+     only the calls made from a workflow isolate: the worker holds no journal, so there is no local
+     backend for either path, and someone chasing a latency regression should be able to find that
+     by reading rather than by measuring. The request path needs no preparation and no registry.
+     `RemoteWorkflows` (`crates/zeroship-workflow-runner/src/remote.rs`) holds the enrolled
+     `WorkerCoordinator`, the payload object store and the read limit, and answers
+     `backend(app)` for any app; the binding selects it by the runtime's own trusted app identity,
+     and the service admits each call by the worker's verified zone. A worker that never claimed a
+     job for an app serves that app's first `env.workflows.start` with one authenticated call.
 
      **The switch is small; getting the slot able to make it was not, and that part is worth
      recording because nothing above predicts it.** `DeliverySlot` is handed an `&AppWorkflows`
@@ -1183,20 +1170,20 @@ protocol. This extends a working client rather than inventing one.
      `JobTransport::Journal`, `AppWorkflows` for an in-process transport and `()` for a crossed
      one, with the unit type meaning the journal is at the far end rather than absent - and supply
      it on demand rather than receiving it. Two shapes reach that, and a fact about the journal
-     decides between them rather than the churn either costs. **The journal is per-PLACEMENT.** One
-     in-process transport serves several apps - a consumer test drives three, including a foreign one
-     it must never claim - and today the per-app journal comes from the placement by construction,
-     because `ConsumerScope` carries it. So thread the associated type through `ConsumerScope` and
-     its holders, accepting that `ConsumerBindings` gains a type parameter and that
-     `crates/zeroship-workflow-runner/src/assignments.rs` and
-     `crates/zeroship-cli/src/workflow/host.rs` take it bare today and so acquire one.
-     The alternative, the transport answering `journal(&scope)`, looks cheaper and is not: with
+     decides between them rather than the churn either costs. **The journal is per-APP.** One
+     in-process transport can serve several apps, and the per-app journal comes from the prepared
+     app by construction: `Prepared` (`crates/zeroship-workflow-runner/src/prepared.rs`) keeps the
+     app's journal, executor and residency as one object, and the associated type is threaded
+     through `CreatorFactory::Journal`, `PreparedApps` and `JobConsumer`, whose factory must
+     declare the same `Journal` its transport does. `crates/zeroship-cli/src/workflow/host.rs`
+     supplies `AppWorkflows` for its one app, and the worker's factory supplies `()`.
+     The alternative, the transport answering a journal by app, looks cheaper and is not: with
      several apps per transport it is not an accessor but an app-keyed lookup, duplicated per
      implementor, and a lookup that returns another app's journal returns a perfectly legal
      `AppWorkflows` that nothing at the use site can distinguish. That is a tenant-boundary failure
      whose wrong form is legal where it is used, and the journal's only separation is its `app_id`
      columns. A type parameter is a maintenance cost; that is a defect. Keeping the journal and the
-     placement as one object is what buys the absence of it.
+     app as one prepared object is what buys the absence of it.
      Either way the authority scoping belongs in ONE place: an unscoped journal takes a different
      policy snapshot's `lease_ms` for the attempt, which is a behaviour change rather than a failure.
 
@@ -1296,152 +1283,71 @@ protocol. This extends a working client rather than inventing one.
      should not restore it by adding a field.
      One arm sits outside this fence on purpose: a settlement replayed against an already-completed
      task returns the stored receipt before any re-validation, because there is nothing left to
-     commit, and `delivery_and_receipts_remain_scoped_across_process_restart_and_placement_expiry`
-     (`crates/zeroship-workflow-server/tests/http_jobs.rs`) asserts exactly that idempotence. Demanding evidence there would fail a replay that must succeed.
+     commit, and `delivery_and_receipts_remain_scoped_across_process_restart`
+     (`crates/zeroship-workflow-server/tests/e2e/http_jobs.rs`) asserts exactly that idempotence. Demanding evidence there would fail a replay that must succeed.
 
 
-   **And the lane cannot start before the worker narrows, which folds two bullets into one.** The
-   contention between two claimants is safe at the mechanism - `lock_scope` serializes and one wins
-   - but it is not safe against the contracts already written. `crates/zeroship-workflow-server/tests/http.rs`
-   claims a `management` row over HTTP as `client.claim_job(&scope).await.unwrap().unwrap()`
-   immediately after `server.restart`, then asserts WHICH operation it got. A lane admitting that
-   same kind makes the assertion a race: driven, it answers `Refused(Unavailable)` at one site and
-   a null lease at another, because the lane took the row.
-   `crates/zeroship-workflow-server/tests/driver.rs` survives only because its app is absent from
-   `zeroship.apps`, so the policy read fails and the lane never claims - an accident of the
-   fixture, not a property. The radius is wider than the two observed failures:
-   `crates/zeroship-workflow-server/tests/http_jobs.rs` provisions a policy and claims fanout,
-   propagation, management and activate rows the same way, and cargo stopped before reaching it.
+   **Two claimants share one app's queue, and each has its own authority.** `Claimant`
+   (`crates/zeroship-workflow-manager/src/models.rs`) has two values, and `Claimant::admits`
+   pairs each `Work` class with exactly one of them: `Worker` takes `advance`, the creator code,
+   and `Maintenance` takes every sweep. A worker's authority is the execution zone frozen on its
+   verified instance row: `Coordinator::claim_in_zone`
+   (`crates/zeroship-workflow-manager/src/coordinator/jobs.rs`) pages only that zone's apps, and
+   `Queue::claim_authorized` (`crates/zeroship-workflow-manager/src/queue.rs`) rechecks the
+   worker's enrolled key after taking the app's scope and again before commit. The maintenance
+   lane's authority is the process itself: `MaintenanceAuthority`
+   (`crates/zeroship-workflow-manager/src/maintenance.rs`) carries the identity `sweep_lane`
+   (`crates/zeroship-workflow-server/src/server.rs`) mints once at startup, and its authorizer
+   answers that identity without I/O, because the lane runs inside the process that owns the
+   queue and the journal. That makes the lane the same kind of claimant as the driver's lanes,
+   which already act on an app with no worker in sight: the recovery lane inserts jobs directly,
+   `self.queue.insert(&tx, &spec, now)` (`crates/zeroship-workflow-manager/src/recovery.rs`), and
+   `Queue::submit` takes no authorizer at all. They are deconflicted by the per-app lock and by
+   each operation's own compare-and-swap, not by a record of which process may touch an app.
 
-   **The radius reached further still, into the RUNNER, and that part is an open regression rather
-   than a design consequence.** `crates/zeroship-workflow-runner/src/delivery/tests/consumer.rs`
-   claims journal-only kinds the same way, as `.claim(...).await.unwrap().unwrap()`, and the inner
-   `unwrap` now takes a `None` because the claim legitimately returns no job. Seven of its tests
-   fail that way - three claiming `close`, and one each for `collect`, `fanout`, `propagate` and
-   `reconcile`. They are deterministic refusals, not the load-induced timing failure that also
-   lives in that module.
-   **Do not read them as inherited.** That module passes whole on main and fails on the branch, so
-   a baseline taken at a commit after the narrowing makes them look pre-existing - and they were
-   carried under that word for a while. Re-measure rather than trusting this paragraph:
-   `cargo test -p zeroship-workflow-runner --lib -- delivery::tests::consumer` against main and
-   against the branch, and compare which names fail. The whole binary reconciles too: main's
-   declared set passes entire, and the branch's failures are all inside that one module rather than
-   spread, so the radius is the module and not the crate.
-   The repair is the one that already worked for the server's contracts: claim in process through a
-   `MaintenanceAuthority` with the fixture's own worker id, which settles because `settle`
-   authorizes against `settlement.delivery.worker_id` rather than being claimant-scoped. Not by
-   widening `admits`, not by relaxing `Claimant::Placed.denied()`, and not by letting an assertion
-   accept `None` - which would leave the test asserting nothing about delivery.
-   Making those deterministic wants either `Claimant::Placed` narrowed so a worker stops taking
-   journal-only kinds, or those claim contracts rewritten to drop exclusivity. So the lane's start
-   and the worker's narrowing are one change, and that change is the flag. The consequence to
-   accept: the service's journal stays empty until then, so the intermediate verification this
-   order hoped for - filling `deploys` before the bullets below - is not available before the flag
-   either. The lane is built and bound here, its page bound and deadline taken from
-   `workflow.batch_limit` and `workflow.driver_lane_timeout_ms`, and nothing starts it:
-   `crates/zeroship-workflow-server/tests/maintenance_lane.rs` drives it directly rather than
-   through the process cadence, so the replacement is bound before it becomes the fallback and the
-   flag decides only when it takes over. What the flag still owes is the start itself and the one
-   case that belongs with it, which branch `workflow-sweep-lane-start` holds rather than this tree:
-   `the_drive_path_settles_a_due_maintenance_row_without_a_placement` binds that the cadence
-   REACHES the lane, and it reads `drive`
-   (`crates/zeroship-workflow-server/src/server.rs`), which is private here, so it cannot land
-   before the cadence it binds.
-   Step 6 follows once that is green.
+   **Neither claimant can take the other's rows, and that is a property of the query rather than
+   of timing.** The kinds a claimant refuses are excluded from candidate selection (see "And it is
+   in the query, not an arm at the claim site"), so a contract that asks for a sweep through a
+   worker's claim gets no row at all rather than losing a race to the lane. Contracts that drive a
+   sweep claim it in process through a `MaintenanceAuthority`, which settles because the delivery
+   it settles names the authority's own identity; widening `admits`, or letting an assertion
+   accept an empty claim, would leave such a test asserting nothing about delivery.
+   `crates/zeroship-workflow-server/tests/integration/maintenance_lane.rs` drives the lane
+   directly, and `the_drive_path_settles_a_due_maintenance_row_with_no_worker_enrolled` in the
+   same file binds that the process cadence reaches it.
 
-   **And the order needs a second claimant, which nothing will issue.** From the sweeps moving
-   until the flag, the service claims them from its own journal while the worker still claims
-   `Advance` for creator code. That is two claimant identities on one app, and the bar is narrower
-   than it looks. The `assignments` domain key is `["app_id", "worker_id"]`
-   (`crates/zeroship-workflow-manager/schema/schema.ts`), so a second row per app is
-   representable. `bound` (`crates/zeroship-workflow-manager/src/coordinator/placement.rs`) checks
-   revision, release and expiry and never the worker's state, so it admits any recorded placement.
-   And two live placements on one app already occur on purpose, because a draining registration
-   keeps what it holds - "the placements it still holds stay valid until the worker finishes or
-   releases them" (`crates/zeroship-workflow-manager/src/capacity.rs`). What refuses a second one
-   is `admit`'s liveness filter, `if self.has_owner(&tx, app, true)`, together with `candidates`
-   reading only ready workers. That is an issuing policy, not a shape.
-
-   **Which moves the question from exclusivity to authority.** A claimant that never asks for a
-   placement is refused by none of that. `Queue::claim_authorized`
-   (`crates/zeroship-workflow-manager/src/queue.rs`) is public behind a public
-   `Coordinator::queue`, takes its authorizer as a callback, and itself checks only that the
-   returned assignment is self-consistent and unexpired; `Queue::claim` already supplies a passing
-   one and has no production caller. The lease such a caller grants itself is still capped by
-   `Queue::deadline` at the manager's configured lease rather than by its own number. So the
-   service can claim in process without a placement today, with no change to the queue at all.
-   Whether it SHOULD is the question, and the objection to answer is this: the one in-process
-   host that exists registers as a worker and places the app on it, omitting "only enrollment and
-   network transport" (`crates/zeroship-cli/src/workflow/manager.rs`). Read that way, being
-   trusted and in process buys the omission of enrollment and never of placement, and the other
-   arm makes the service the first claimant whose authority is asserted rather than recorded, in
-   the one table an operator reads to answer which process is executing an app.
-
-   **And the ways around deciding it are each worse.** Issuing the service a placement means
-   widening a lane whose own header reads "Placement admits an app onto a worker only within
-   Control's zone and enrollment eligibility. Spare capacity is never authority"
-   (`crates/zeroship-workflow-manager/src/coordinator/placement.rs`), and admission reads a zone
-   match, a live instance, a ready registration and spare capacity - none of which a non-worker
-   claimant has for `eligible` to evaluate. Landing the sweeps and the flag together does not
-   collapse two bullets but the whole list, because the sweeps are what write the first `deploys`
-   row and every bullet below them needs one to verify against. And having the service claim
-   everything and hand execution outward is barred twice: `TaskTransport`'s only dispatcher is
-   `RunnerSlot`, which no production code constructs, and
+   **And the service cannot hand execution outward.**
    `workflow_process_dependencies_follow_crate_ownership` (`xtask/tests/workflow/mod.rs`)
-   forbids these processes the runner outright -
-   `!["zeroship-workflow-runner", "zeroship-storage"].contains(&dependency)` - so the service
-   cannot host a dispatcher at all. What is left is the authority question, and it wants an
-   answer rather than a route around it.
+   forbids the server the runner outright - `dependency != "zeroship-workflow-runner"` - and
+   the manager the runner and payload storage both, so the service cannot host a dispatcher at
+   all. Creator code runs only where a worker's zone claim delivers
+   it.
 
-   **And the service is already a claimant of this kind, which answers it.** Placement authorizes
-   a REMOTE identity to execute creator code for one app, and it is read at ingress - by `bind`
-   (`crates/zeroship-workflow-server/src/api/runs.rs`) and by `delivery_authority`
-   (`crates/zeroship-workflow-manager/src/coordinator/jobs.rs`) - for a caller whose own assertion
-   cannot be taken. The service is neither remote nor an executor of creator code, and it already
-   operates this queue without a placement at a wider scope than a claim: the recovery lane
-   inserts jobs directly, `self.queue.insert(&tx, &spec, now)`
-   (`crates/zeroship-workflow-manager/src/recovery.rs`); `Queue::submit`
-   (`crates/zeroship-workflow-manager/src/queue.rs`) takes no authorizer at all, unlike its
-   `submit_authorized` sibling; and the placement lane writes `assignments` itself. No lane in
-   `crates/zeroship-workflow-manager/src/driver.rs` takes an instance lease or holds an election.
-   They are deconflicted by the per-app lock and by each operation's own compare-and-swap. A lane
-   that leases a maintenance job is the same kind of thing as the lanes already there.
-
-   **Which dissolves the objection rather than accepting it.** `assignments` does not answer what
-   is touching an app, and is not meant to: the recovery, retention and closing lanes all act on
-   an app without ever appearing in it. It answers which worker may execute creator code there. A
-   sweep lane belongs in it no more than the recovery lane does. The CLI points the same way
-   instead of against - it registers and places itself because it IS the worker for its one app,
-   running creator code, which is precisely the case a placement is for. The sweeps are the case
-   it is not for.
-
-   **And that arm removes the call that builds the backend.** Reaching the
-   service over HTTP is not only a missing implementation. `AppWorkflows::into_backend`
-   (`crates/zeroship-workflow/src/service/backend.rs`) is what produces the backend today, and it
+   **And that arm removes the call that builds the backend.** `AppWorkflows::into_backend`
+   (`crates/zeroship-workflow/src/service/backend.rs`) produces an in-process backend, and it
    takes the journal in order to refuse a mismatch - `if !self.binding.belongs_to(&journal.policies)`
    - which `into_backend_refuses_a_journal_from_another_policy_registry`
    (`crates/zeroship-workflow/src/service/tests/backend_journal.rs`) binds, with a control
    differing only in the registry. A worker holding no journal has no `WorkflowService` to pass,
-   so that refusal loses its input rather than its implementation, and the pairing it enforces has
-   to be re-established across the wire or dropped on purpose. `CreatorRuntime`
-   (`crates/zeroship-workflow-runner/src/assignments.rs`) states the same requirement in prose:
-   the backend "must come from `app` itself, so it carries the same policy generation."
+   so it builds no such backend: the pairing that refusal enforces is the service's, which binds
+   the app's policy into its own registry on every call (`RunService::app` in
+   `crates/zeroship-workflow-server/src/runs.rs`). `RemoteBackend` carries only the app every
+   call acts for, and the service admits that app by the worker's verified zone.
 
-   The V8 factory is ready for that arm even so. `SharedWorkflowBackend` is
-   `Arc<dyn WorkflowBackend>` (`crates/zeroship-workflow/src/backend.rs`) and the factory in
-   `crates/zeroship-workflow-v8/src/lib.rs` already resolves each arm to it. What is concrete
-   sits above it: `CreatorRuntime` carries `app: AppWorkflows` and `backend: AppBackend`, and
-   `WorkflowBinding::service` takes an `AppBackend` by value. The arm also has to pick a side of
-   an asymmetry - `bind_runtime_descriptor` checks the runtime's app identity against
-   `backend.app_id()` for the service arm and lets the ready arm through, because that one
-   selects its backend by the runtime's own identity.
+   The V8 factory resolves every arm to one type. `SharedWorkflowBackend` is
+   `Arc<dyn WorkflowBackend>` (`crates/zeroship-workflow/src/backend.rs`) and
+   `WorkflowBackendFactory` in `crates/zeroship-workflow-v8/src/lib.rs` has a `Service` arm over an
+   `AppBackend`, a `Remote` arm over one app's `RemoteBackend` and a `RemoteWorkflows` arm for the
+   request path. `bind_runtime_descriptor` checks the runtime's app identity against
+   `backend.app_id()` for the two app-scoped arms and lets the request-path arm through, because
+   that one selects its backend by the runtime's own identity.
 
    **Where each step's detail lives**, by heading rather than by position, since positions move.
    The sweeps: "And the first piece is not the loop", "And all nine move, because the host that owns
    the journal owns the store", "Both belong where the journal is, and their shapes say why",
    "And the lane has a seat on neither half
    of the service", and for the claim set "And do not reach for the classification that already
-   exists", "A second claimant blocks rather than skipping", "And it is in the query, not an arm
+   exists", "A contended app is skipped, never waited for", "And it is in the query, not an arm
    at the claim site" and "And `candidate` has a second caller, which decides something else".
    The grant: "What that source reaches, and what it does not" and "And the hold `restart` waits
    on belongs to this service now too". The registration: "And the fork resolves toward the
@@ -1452,11 +1358,10 @@ protocol. This extends a working client rather than inventing one.
    half of that is answerable as a description", "And the clock ceiling has a second copy", "And
    only one of the journal's two sites can reach that diagnosis under an attempt", "One guard has
    no merged equivalent", and "And the merged reply has one validated half and one unvalidated
-   one". The flag: "Then the worker stops holding a journal", "And the order needs a second
-   claimant, which nothing will issue", "Which moves the question from exclusivity to authority",
-   "And the ways around deciding it are each worse", "And the service is already a claimant of
-   this kind, which answers it", "Which dissolves the objection rather than accepting it" and
-   "And that arm removes the call that builds the backend".
+   one". The flag: "Then the worker stops holding a journal", "Two claimants share one app's
+   queue, and each has its own authority", "Neither claimant can take the other's rows", "And
+   the service cannot hand execution outward" and "And that arm removes the call that builds the
+   backend".
 
    **And the first piece is not the loop.** The sweeps split by what they need. `close_job`,
    `fanout_job`, `propagation_job` and `reconcile_job`'s publications phase need nothing but a
@@ -1512,21 +1417,24 @@ protocol. This extends a working client rather than inventing one.
    local commit rather than a protocol - which is the whole reason no byte-crossing item appears in
    this list.
 
-   **A second claimant blocks rather than skipping, which is what puts authority first.** Two
-   claimants on one app are representable and this order needs them; what they are not is free.
-   The ORM offers no `SKIP LOCKED`, by decision, because "skipping locked rows would silently omit
-   them" (`docs/architecture/data-orm.md`), so a competing lock waits under
-   `budgets::DB_LOCK_TIMEOUT_MS` and surfaces as `lock_not_available`. Claimants serialize on the
-   per-app `queue_scopes` row through `lock_scope`
+   **A contended app is skipped, never waited for.** Every claimant serializes on the per-app
+   `queue_scopes` row, and a claim takes it differently from everything else. Heartbeat, settle,
+   give-back and publication take the row through `lock_scope`
    (`crates/zeroship-workflow-manager/src/queue.rs`), an update-as-lock requiring
-   `Output::Count(1)` that answers `Error::Denied` otherwise. So two lanes polling one app contend
-   on every claim, heartbeat, settle and publish rather than dividing the work between them, and
-   the filter below separates only the byte movers, NOT the journal-only kinds: both claimants
-   admit those seven, so both want the same rows and one is refused. How the lane authorizes itself was
-   settled first, because the filter presumes that answer - see "And the order needs a second
-   claimant, which nothing will issue", and `MaintenanceAuthority::asserted`
-   (`crates/zeroship-workflow-manager/src/maintenance.rs`), which is the only place that states
-   it and says so.
+   `Output::Count(1)` that answers `Error::Denied` otherwise, and wait for it under
+   `budgets::DB_LOCK_TIMEOUT_MS`. A claim on PostgreSQL takes it through
+   `lock_scope_for_claim` in the same file, `SELECT ... FOR UPDATE NOWAIT` by the ORM's
+   `for_update_nowait`, so a row another session holds refuses at once as
+   `DbError::LockContention`; the manager reports that as `Error::Contended`, and
+   `Coordinator::claim_in_zone` records the app as skipped and moves to the next app inside the
+   same batch. `a_claim_passes_an_app_whose_scope_is_locked`
+   (`crates/zeroship-workflow-server/tests/integration/http_claims.rs`) holds the scope row in an
+   open transaction for the whole claim. The ORM still offers no `SKIP LOCKED`, because
+   "skipping locked rows would silently omit them" (`docs/architecture/data-orm.md`): `NOWAIT`
+   refuses rather than omits, so the caller knows which app it did not get. SQLite has no row
+   locks and a database-wide write lock, so its claim keeps `lock_scope`. Because each claimant
+   refuses the other's kinds in the query below, the two never want the same row; what they share
+   is the scope row's lock.
 
    **And it is in the query, not an arm at the claim site.** `candidate`
    (`crates/zeroship-workflow-manager/src/scheduling.rs`) answers `Result<Option<String>, Error>`
@@ -1539,10 +1447,11 @@ protocol. This extends a working client rather than inventing one.
    `crates/zeroship-workflow-manager/src/models.rs` emits both `operation_kind`'s total match and
    the `OPERATIONS` table the predicate reads, from the same arms, so a `JobOperation` variant
    added without a `Work` class leaves that match non-exhaustive at the invocation - the string
-   and the classification cannot drift because they are the same line. `Claimant::Placed` denies
-   nothing, and an empty `NotIn` collapses to an always-true clause naming the field
-   (`crates/zeroship-data-orm/src/orm/read_builder/predicates.rs`), so the worker's claim is
-   unchanged. `sqlite_refused_kind_at_the_head_does_not_hide_the_rows_behind_it` and its postgres
+   and the classification cannot drift because they are the same line. Every claimant refuses
+   some kind, because each `Work` class admits exactly one claimant: `Claimant::Worker.denied()`
+   is every sweep and `Claimant::Maintenance.denied()` is `advance`. A claimant that refused
+   nothing would still be safe to express, because an empty `NotIn` collapses to an always-true
+   clause naming the field (`crates/zeroship-data-orm/src/orm/read_builder/predicates.rs`). `sqlite_refused_kind_at_the_head_does_not_hide_the_rows_behind_it` and its postgres
    twin (`crates/zeroship-workflow-manager/tests/integration/queue.rs`) put a refused kind at the head with an
    admitted row behind it and assert the row behind is what answers; the control differs only in
    the claimant, and a third arm settles the admitted row so the restricted claimant answers
@@ -1552,12 +1461,15 @@ protocol. This extends a working client rather than inventing one.
    (`crates/zeroship-workflow-manager/tests/integration/management/barriers.rs`) and by nothing else, so an
    edit to either spelling has one test standing behind it.
 
-   **And `candidate` has a second caller, which decides something else.** `Capacity::visit`
-   (`crates/zeroship-workflow-manager/src/capacity.rs`) asks it whether an app has claimable
-   work, passing no ceiling on purpose: "an app is due while any row remains claimable, and the
-   claim transaction decides deliverability." Narrow the claim without narrowing this and an app
-   whose queue holds only service-claimable jobs still reads as due, takes a worker placement,
-   and records demand for work that worker cannot claim.
+   **And `candidate` has a second caller, which decides something else.** The capacity lane
+   counts each app's backlog with `scheduling::backlog`
+   (`crates/zeroship-workflow-manager/src/scheduling.rs`), which runs `candidate`'s own query -
+   the shared `candidates` builder, under `Claimant::Worker` and the app's delivery ceiling - as
+   a count. So demand and claimability cannot disagree: a row the worker's claim refuses, a sweep,
+   an exhausted row, a row behind a management barrier or one inside a give-back back-off, is
+   never counted as demand for execution slots. `Capacity::visit`
+   (`crates/zeroship-workflow-manager/src/capacity.rs`) records the rows that cannot deliver
+   now beside that demand instead.
 
    **Both belong where the journal is, and their shapes say why.** `PayloadDeleter`
    (`crates/zeroship-workflow/src/service/payloads.rs`) is one method, `delete(app, id)` - ids only,
@@ -1573,14 +1485,12 @@ protocol. This extends a working client rather than inventing one.
    (`crates/zeroship-workflow-server/src/payloads.rs`) implements both, and the engine still links no
    storage: they arrive as arguments.
 
-   **And do not reach for the classification that already exists; it splits on a different
-   axis.** `worker_operation` (`crates/zeroship-workflow-manager/src/coordinator/jobs.rs`)
-   admits `Advance`, `Fanout` and `Propagate` and denies the other seven, but it is a PUBLISH
-   restriction - which operations a worker may submit - not a claim filter. Its comment gives
-   the reason: "A worker that could publish a release would be asking itself to give code back,
-   so retention stays the manager's decision." So it divides by who MINTS a job, and `Fanout`
-   and `Propagate` are worker-published maintenance rather than creator work. A claim filter
-   built from it would hand the service three of the nine and withhold six.
+   **And do not reach for a publication rule; it splits on a different axis.** Who MINTS a job
+   is not who runs it. `Queue::submit` refuses `Management` and `Close` because only the
+   manager's own operations mint those, while `Fanout` and `Propagate` are minted by creator
+   transitions through the journal's publication intents. No worker publishes anything: the
+   service drains committed intents itself. A claim filter built from minting would put sweeps on
+   the creator side of the line.
 
    The set the service wants is the one `maintenance_job` already enumerates: every variant but
    `Advance`. That is a total match over ten, so the two sets cannot drift apart silently - a
@@ -1757,13 +1667,13 @@ part that dates, not the verdict.
 
    **Where the sign flips.** `TaskAssignment` in
    `crates/zeroship-workflow/src/service/types.rs` carries the whole replay journal on every
-   dispatch, so a run's bytes grow with the square of its steps. That cost is real today as
-   serialization rather than as transfer: `V8Execution` in
+   dispatch, so a run's bytes grow with the square of its steps. That cost is paid as
+   serialization and as transfer: `V8Execution` in
    `crates/zeroship-workflow-v8/src/executor.rs` encodes the invocation once per dispatch, and
-   no journal crosses the client transport at all - `zeroship-workflow-client` does not depend
-   on `zeroship-workflow`, and the `Assignment` it exchanges in
-   `crates/zeroship-core/src/workflow_coordination.rs` carries no journal. Two confusably named
-   types in two crates: read any claim about "the assignment" against which one it means.
+   the claim reply carries the journal's acceptance, `AcceptedJob::Execute`
+   (`crates/zeroship-workflow/src/service/delivery.rs`), with the `TaskAssignment` whole inside
+   it. `zeroship-workflow-client` still does not depend on `zeroship-workflow`: it carries that
+   half as an opaque serde type behind its `JobJournal` port.
 
    **The bounds describing this crossing answer to one authority.** Neither the policy bound nor
    the transport bound is authoritative over the other. The ceiling constants in
@@ -1782,12 +1692,14 @@ part that dates, not the verdict.
    that defaults to that constant. Only the first describes the input quantity. The other two
    are the global body cap `configure_with_limit` installs on the `ServiceConfig` state, which
    covers every endpoint on that server and buffers rather than streams, so raising it to admit
-   a journal would widen the per-request buffer on `healthz`, `verify_assignment`, `manage` and
-   `renew` alike. It stays its own bound. An endpoint that comes to carry a journal takes a
+   a journal would widen the per-request buffer on `healthz`, `manage` and every job route
+   alike. It stays its own bound. An endpoint that comes to carry a journal takes a
    named per-resource bound derived from the ceiling instead, the shape
    `crates/zeroship-migrate-server/src/api.rs` and
-   `crates/zeroship-control/src/deployment_hold_api.rs` already use. No endpoint carries one
-   today, so none has one.
+   `crates/zeroship-control/src/deployment_hold_api.rs` already use. The settlement is the job
+   route that carries one: `SETTLE_BODY_BYTES` in
+   `crates/zeroship-workflow-server/src/api/jobs.rs` is the journal ceiling plus a bounded
+   envelope, installed on that resource alone.
 
    The paired quantities are not like for like, which is why the ceiling bounds each of them
    rather than equating two measurements. The policy bounds count stored `StepCheckpoint` JSON,
@@ -1831,15 +1743,20 @@ part that dates, not the verdict.
    `LocalConfig::validate` in `crates/zeroship-cli/src/workflow.rs`, which is where `[payloads]`
    is configured. Either refusal alone catches one direction and leaves the other open.
 
-   **The conflict this closes is prospective rather than live.** Nothing of this crosses that
-   transport today. `zeroship-workflow-client` does not depend on `zeroship-workflow`, and the
-   `Assignment` it exchanges in `crates/zeroship-core/src/workflow_coordination.rs` carries an
-   app, a worker, a revision and an expiry. That is also why a ceiling is the authority rather
-   than either measurement: the pairs Open 1 names are not like for like, and neither is this
-   one. The policy bounds count stored `StepCheckpoint` JSON while the client bounds count a
-   single HTTP message, and `replay` in `crates/zeroship-workflow/src/service/journal.rs`
-   narrows `StepCheckpoint` to `JournalStep` and drops retrying rows, so a policy bound is an
-   upper bound on wire bytes rather than a measure of them.
+   **The claim reply is bounded by one maximal delivery.** The claim reply carries
+   `AcceptedJob::Execute`, a whole `TaskAssignment`, for each advance it delivers, so its
+   size grows with the replay journals and inline trigger inputs of its deliveries.
+   `ClaimJobs::MAX_REPLY_BYTES` (`crates/zeroship-core/src/workflow_jobs.rs`) is the journal
+   ceiling plus the input ceiling plus a delivery envelope: room for one delivery at its largest.
+   Both ends read it. The client's default `max_response_bytes` is that bound, and
+   `ReplyRoom` in `crates/zeroship-workflow-server/src/api/jobs.rs` always sends the first
+   delivery, then stops adding deliveries before the next would pass the bound and gives that
+   one back unsent. A ceiling is the authority rather than either measurement: the pairs
+   Open 1 names are not like for like, and neither is this one. The policy bounds count stored
+   `StepCheckpoint` JSON while the client bounds count a single HTTP message, and `replay` in
+   `crates/zeroship-workflow/src/service/journal.rs` narrows `StepCheckpoint` to `JournalStep`
+   and drops retrying rows, so a policy bound is an upper bound on wire bytes rather than a
+   measure of them.
 
    **What this does not cover.** A ceiling serves a pair that measures the same bytes.
    `TaskPayloadLimits::max_inline_bytes` and `AppPolicy::max_input_bytes` do not: an inline
@@ -1880,25 +1797,26 @@ part that dates, not the verdict.
    reads the control plane over the same DSN.** `workflow.database_url` names one store and
    PostgreSQL does not query across databases, so every control read the service makes has to
    be severed before that setting can point anywhere else. `Coordinator::verify` in
-   `crates/zeroship-workflow-server/src/coordinator.rs` refuses first, and refuses at startup
-   rather than at first use: its probe is a single statement whose `workflow_manager` tables
-   are followed by
+   `crates/zeroship-workflow-server/src/coordinator.rs` probes `workflow_manager` tables alone.
+   The one control read left is authentication's, and its readiness probe refuses at startup
+   rather than at first use: `PostgresWorkerRegistry::ready` in
+   `crates/zeroship-workflow-server/src/auth.rs` issues
 
-       SELECT id,execution_zone_id,deleted_at FROM zeroship.apps LIMIT 0;
+       SELECT id,status,public_key,execution_zone_id,expires_at FROM zeroship.worker_instances LIMIT 0
 
-   which is the whole of what the workflow role is granted on `zeroship.apps` - placement's
-   columns and the key it filters on. It is NOT the whole of its reach into `zeroship`:
-   `worker_instances` carries `(id,status,public_key)` from one grant file and
-   `(execution_zone_id,expires_at)` from another. The deployment catalog is out of reach: the
-   grants that fed the deleted pointer read are dropped, and
-   `deployment_catalog_is_out_of_reach` in
-   `crates/zeroship-workflow-server/tests/platform_schema.rs` asserts `42501` on
-   `zeroship.app_deploys` and on `apps.deploy_hash`, with the placement columns as its control.
+   which is the whole of the workflow role's reach into `zeroship`: `(id,status,public_key)`
+   from one grant file and `(execution_zone_id,expires_at)` from another. It holds nothing on
+   `zeroship.apps`, which `apps_are_out_of_reach` in
+   `crates/zeroship-workflow-server/tests/integration/platform_schema.rs` reads from the
+   catalog's own privilege functions. The deployment catalog is out of reach too:
+   `deployment_catalog_is_out_of_reach` in the same file asserts `42501` on
+   `zeroship.app_deploys` and on `apps.deploy_hash`, with the instance columns authentication
+   reads as its control.
 
-   The crossing recurs on the request path and inside the manager. `active_key` in
+   The crossing recurs on the request path and inside the manager. `active_instance` in
    `crates/zeroship-workflow-server/src/auth.rs` answers every worker-authenticated call from
-   `SELECT public_key FROM zeroship.worker_instances WHERE id=$1 AND status='active' AND
-   expires_at > now()`, and `crates/zeroship-workflow-manager/src/policy/control/models.rs`
+   `SELECT public_key,execution_zone_id FROM zeroship.worker_instances WHERE id=$1 AND
+   status='active' AND expires_at > now()`, and `crates/zeroship-workflow-manager/src/policy/control/models.rs`
    declares `plans` under the administrative credential `PlanPolicyStore` takes, beside the
    publication tables this service owns. The highest-frequency crossing is in
    another schema entirely and a search for `zeroship.` cannot find it:
@@ -1924,9 +1842,10 @@ part that dates, not the verdict.
    **The move made one thing depend on topology that nothing enforces.** The ledger's revision
    has to be monotonic PER APP, and it now lives in a store the deployment chooses, so the
    property holds only while an app is served by exactly one workflow store. Zone-local
-   topology plus the zone match in `crates/zeroship-workflow-manager/src/coordinator/placement.rs`
-   - `current.active && current.zone == facts.zone` - makes that true today, but neither states
-   it as an invariant about STORES, and nothing refuses a second store for one app. Two stores
+   topology plus the zone rule, `PolicyObservation::admits_zone` in
+   `crates/zeroship-workflow-manager/src/policy.rs`, which serves an app only to workers of its
+   own frozen zone, makes that true today, but neither states it as an invariant about STORES,
+   and nothing refuses a second store for one app. Two stores
    serving one app would not error; the revisions would simply stop ordering the inputs they
    were computed from.
 
@@ -1941,13 +1860,13 @@ part that dates, not the verdict.
    "workflow's DDL, control writes", which is the same table Plan step 3 records `restart` as
    unable to resolve.
 
-   Some is Control's authority read on a path that is ALREADY eventual.
-   `crates/zeroship-workflow-manager/src/eligibility.rs` says so itself - "THIS IS A LIVENESS
-   HINT, NOT AN AUTHORIZATION FENCE" - and policy already runs through a cache with a
-   source-supplied validity. These need a reachable source of truth and a bounded staleness the
-   tree already has machinery for, not a synchronous read. Note that several of them are read
-   INSIDE open queue transactions, so turning them into network calls would hold locks across a
-   round trip, which Open 4's zone-local decision makes worse rather than better.
+   Some is Control's authority read on a path that is ALREADY eventual. Policy, an app's frozen
+   zone and its deletion marker arrive together in one cached observation with a
+   source-supplied validity, and every caller reads it OUTSIDE its queue transaction: the zone
+   claim observes an app before it takes the app's scope, and the capacity visit observes each
+   app before its count. That is the shape these reads need - a reachable source of truth and a
+   bounded staleness - rather than a synchronous read held inside a lock across a round trip,
+   which Open 4's zone-local decision would make worse rather than better.
 
    **Whatever answers those reads owes a monotonic-read guarantee, and one database currently
    gives it away.** `publish` in `crates/zeroship-workflow-manager/src/policy/control/store.rs`
@@ -1970,34 +1889,27 @@ part that dates, not the verdict.
 
    **Two of those three now cross `svc/workflow` instead of a binding.** `CONTROL_APP_FACTS`
    (`POST /v1/app-facts`, declared in `crates/zeroship-core/src/service_identity.rs`) answers
-   the policy inputs and the closing lane's deletion check for a page of apps, gated on the
-   `svc/workflow` issuer the way `DeploymentHoldApi` is.
-   `crates/zeroship-workflow-server/src/server.rs` binds no `zeroship` schema: neither
-   `connect_lifecycle` nor the policy inputs binding exists there, and the grant is narrower to
-   match:
-   `db/migrations-ts/20260911000050_workflow_platform_grants.ts` drops `zeroship.plans` entirely
-   and narrows `apps` to `(id)`. The operator writers moved to a separate
+   the policy inputs, each app's frozen execution zone and the closing lane's deletion check for a
+   page of apps, gated on the `svc/workflow` issuer the way `DeploymentHoldApi` is.
+   `crates/zeroship-workflow-server/src/server.rs` binds no `zeroship` schema, and the grant
+   matches: `db/migrations-ts/20260911000050_workflow_platform_grants.ts` grants nothing on
+   `zeroship.plans` or on `zeroship.apps`. The operator writers moved to a separate
    `PlanPolicyStore` with no production constructor, so the serving path carries no
    administrative credential for an operation it never performs.
 
-   **Placement eligibility deliberately did NOT move, and the reason is a trap worth naming.**
-   Its two reads sit inside one transaction precisely so they can DISAGREE:
-   `crates/zeroship-workflow-manager/src/coordinator/placement.rs` reads again before commit
-   because "a revocation committed between the two reads refuses this placement". Serving both
-   from a cache makes the second read return the first one's value - the fence keeps compiling,
-   keeps passing its tests, and stops fencing. It moves only when that fence is replaced by
-   something cacheable, not when a cache is put behind it.
-
-   **Only one of the two columns it reads is fence-relevant, which is where a replacement would
-   aim.** `apps.execution_zone_id` cannot change:
-   `db/migrations-ts/20260914000600_placement_eligibility.ts` installs a BEFORE UPDATE
-   trigger, `apps_frozen_execution_zone`, raising `check_violation`
-   with "an app's execution zone is fixed when the app is created". A value the database refuses
-   to move is one a cache can never hold staler than the truth. So the double read exists for
-   `deleted_at` alone, and a design that carries the frozen zone while leaving deletion a live
-   read would keep the fence the second read provides. That is a redesign rather than this
-   patch, and it does not remove the binding - deletion still needs a reader - but it names
-   which column the work is actually about.
+   **The zone could move into a cached observation because the database refuses to move it.**
+   `apps.execution_zone_id` cannot change:
+   `db/migrations-ts/20260914000600_app_execution_zones.ts` installs a BEFORE UPDATE trigger,
+   `apps_frozen_execution_zone`, which raises `check_violation` with "an app's execution zone
+   is fixed when the app is created". A value the database refuses to move is one a cache can
+   never hold staler than the truth, so `AppSourceFacts`
+   (`crates/zeroship-core/src/workflow_app_facts.rs`) carries it beside the policy inputs, the
+   queue scope records its own copy when Control's first lifecycle message names it, and neither
+   copy needs re-reading before a commit. Deletion is the one fact here that moves, and it moves
+   once: `PolicyObservation` carries it from the same source read, so a deleted app is refused
+   to run calls and passed by claims within one observation's validity, and the closing lane's
+   abandonment settles its unsettled creator jobs `Rejected` (`Recovery::abandon` in
+   `crates/zeroship-workflow-manager/src/recovery.rs`).
 
    **The monotonic-read bracket is answered rather than assumed.** Control's response carries a
    `SourceWatermark` taken in the SAME statement as the facts, so it is at least the position of
@@ -2022,9 +1934,10 @@ part that dates, not the verdict.
    against the enrolment registry. A role is long-lived and there
    are a handful, so a static `service-peers.json` carries its key. A worker instance mints its
    own keypair at startup and there are as many as you run, so a static file cannot: the
-   registry is the dynamic half of the same scheme, and `active_key` is the read into it. That
+   registry is the dynamic half of the same scheme, and `active_instance` is the read into it. That
    one query also answers liveness, since `status` and `expires_at` decide whether the instance
-   is still enrolled, which is why it does not unpick into a pure identity lookup.
+   is still enrolled, and it yields the instance's frozen execution zone, which is what the claim
+   and run paths authorize by - so it does not unpick into a pure identity lookup.
 
    Severing it is therefore a trust-model decision rather than a plumbing one, which is why it
    is deferred rather than improvised. The shape that reuses what exists rather than adding a
@@ -2043,13 +1956,12 @@ part that dates, not the verdict.
    **And it is the load-bearing one, not a peer of the others.** `zeroship.worker_instances` is
    what keeps the Control database binding alive: `PostgresWorkerRegistry` in
    `crates/zeroship-workflow-server/src/auth.rs` reads it twice - the readiness probe and
-   `active_key` - and `ControlEligibility` in
-   `crates/zeroship-workflow-manager/src/eligibility.rs` projects its worker half for placement.
-   Moving the `apps` reads thins the seam without cutting it, because that table outlives them.
-   The order is therefore the rest first, and authentication when its design lands.
+   `active_instance` - and nothing else in the service reads Control's tables. Moving the `apps`
+   reads thinned the seam without cutting it, because that table outlives them. The order is
+   therefore the rest first, and authentication when its design lands.
 
    **DECIDED: defer the severing; the registry read stays.** A comprehensive credential design
-   comes later, so `active_key` keeps reading `zeroship.worker_instances` and the service keeps
+   comes later, so `active_instance` keeps reading `zeroship.worker_instances` and the service keeps
    its binding on Control's database for that one read. Nothing about the check relaxes - the
    lease predicate added with the fence still refuses a lapsed instance. What this defers is the
    SEVERING, not the verification. Open 3's own goal
@@ -2060,17 +1972,14 @@ part that dates, not the verdict.
    authority to keep a deployment alive for the runs a journal holds, and that authority has
    moved. The hold is `HoldScope::for_app`.
    `crates/zeroship-core/src/service_identity.rs` grants the journal pair to `svc/workflow`
-   beside the queue-scoped one, and `svc/worker` keeps it for the journals it still holds.
-   `RemoteDeploymentHolds::asserted`
+   beside the queue-scoped one, and `svc/worker` holds neither pair: a worker holds no journal,
+   so it has no hold to decide. `RemoteDeploymentHolds::asserted`
    (`crates/zeroship-workflow/src/deployment_holds/remote.rs`) signs as the workflow role and
    refuses an instance credential of it, exactly as the queue pair does. Control classifies the
-   caller before any body is decoded: `hold_caller`
-   (`crates/zeroship-control/src/deployment_hold_api.rs`) admits the worker principal with an
-   enrolled instance, or the workflow role by full issuer equality, and refuses everything else.
-   The placed arm still verifies its placement. The asserted arm names none, and is refused if it
-   tries: `HoldRequest::assignment_revision` is optional on the wire, and its presence is compared
-   against the principal the host authenticated rather than trusted from the body, so a worker
-   that omits it and a service that supplies it are both refused.
+   caller before any body is decoded: `asserted_caller`
+   (`crates/zeroship-control/src/deployment_hold_api.rs`) admits the workflow role by full issuer
+   equality and refuses everything else, an instance credential included. The request names no
+   worker and carries no authority field.
 
    So what `restart` lacks is a `deploys` row rather than the credential to create one, and that
    waits on the sweeps that write it.
@@ -2080,8 +1989,8 @@ part that dates, not the verdict.
    worker - "Queue ownership is stable across manager replicas and has no worker lease" - and
    acts on `HoldScope::for_queue`. A journal hold is `for_app`: `require_journal_hold`
    (`crates/zeroship-workflow/src/service/control/restart.rs`) reaches `admission_generation`
-   under that scope. A different scope is a different hold, so the widening was the only route
-   open, and what it removed was the placement check rather than a spelling.
+   under that scope. A different scope is a different hold, so granting the journal pair to the
+   service was the only route open.
 
    **And the journal already names the holder, which is why this follows the journal.** The row
    `acquire_deployment_hold_checked` writes
@@ -2111,14 +2020,13 @@ part that dates, not the verdict.
    `SELECT` on the Control tables its coordinator and policy reads project, and DML on the
    shared assertion replay store - and `20260911000000_workflow_coordination.ts` keeps the
    schema, its roles and its own grants. **Two files grant that reach, not one:**
-   `db/migrations-ts/20260914000600_placement_eligibility.ts` also grants
-   `SELECT (execution_zone_id,deleted_at)` on `zeroship.apps` and
+   `db/migrations-ts/20260914000600_app_execution_zones.ts` also grants
    `SELECT (execution_zone_id,expires_at)` on `zeroship.worker_instances`. Editing only the
-   first leaves the eligibility reads working and nothing fails, so a change meant to remove a
+   first leaves the zone and lease reads working and nothing fails, so a change meant to remove a
    crossing would leave it in place.
 
    What still crosses is the roles, which are cluster-scoped rather than
-   database-scoped. `20260914000600_placement_eligibility.ts` is a control migration granting
+   database-scoped. `20260914000600_app_execution_zones.ts` is a control migration granting
    to `zeroship_workflow`, so the control corpus needs that role to exist; and the revokes in
    `20260911000000_workflow_coordination.ts` name `zeroship_control`, `zeroship_worker`,
    `zeroship_gateway` and `zeroship_app`, which a separate cluster would not have. `Op::Revoke`
@@ -2178,8 +2086,9 @@ part that dates, not the verdict.
    Since the `[workflow]` section owns its `database_url`, a store per zone is a deployment
    topology and reaches the same corpus question Open 3 names, so the two settle together.
    `the_two_zones_run_a_workflow_without_reaching_each_other` in
-   `crates/zeroship-control/tests/workflow_private_zones_e2e.rs` holds zone isolation for the
-   creator-schema placement this replaces; a relocated journal needs its own. The numbers Open 1
+   `crates/zeroship-control/tests/workflow_private_zones_e2e.rs` holds zone isolation with the
+   journal in the platform zone: its first arm resolves `__zeroship_workflow_runs` from the
+   platform connection and refuses the creator database's tables from it. The numbers Open 1
    rests on come from `crates/zeroship-workflow-client/tests/integration/round_trip_cost.rs`, so a decision
    that the service may sit further away is one to re-measure there rather than re-argue here.
 
@@ -2190,7 +2099,7 @@ part that dates, not the verdict.
 6. **ANSWERED - the worker holds no fold, and one credential does not move with the journal.**
 
    **The worker holds no store.** `WorkflowCreatorFactory::open` in
-   `crates/zeroship-worker/src/workflow_creator.rs` opens a placement with no journal handle - its
+   `crates/zeroship-worker/src/workflow_creator.rs` prepares a claimed app with no journal handle - its
    `Journal` type is `()` - and builds a `RemoteBackend`, so every creator call is an
    authenticated request answered from the service's journal. The ORM handle for every row of the
    journal is held by the service, which opens it through `HostStorage::open`
@@ -2240,10 +2149,10 @@ part that dates, not the verdict.
    `deleting` and commits, calls `deleter.delete` with no transaction open, then opens a fresh
    transaction to settle. The two stores are deliberately not in one operation, and the module
    header gives the reason: "an upload already dispatched by a dead writer may still arrive".
-   Its scheduling half already crosses, too - `worker_operation`
-   (`crates/zeroship-workflow-manager/src/coordinator/jobs.rs`) and `worker_publication`
-   (`crates/zeroship-workflow-client/src/jobs.rs`) both refuse a worker-published
-   `JobOperation::Collect`, so the manager already owns when collection runs.
+   Its scheduling half belongs to the manager as well: a `Collect` job is published only by the
+   recovery duty (`recovery::Recovery` in `crates/zeroship-workflow-manager/src/recovery.rs`),
+   no worker publishes anything, and `Claimant::Maintenance` is the only claimant that takes it,
+   so the manager owns when collection runs.
 
    Other operations couple the stores harder. `cron_job`
    (`crates/zeroship-workflow/src/service/cron.rs`) takes an `InputStager`, a writer rather
@@ -2278,7 +2187,7 @@ part that dates, not the verdict.
 
 7. **ANSWERED - no, and the assertion is not narrowed.** Creator payload does not live in the
    platform's coordination schema. `metadata_schema_has_no_customer_authority_and_ids_are_bytewise`
-   in `crates/zeroship-workflow-server/tests/coordinator.rs` stands as written: no column of
+   in `crates/zeroship-workflow-server/tests/integration/coordinator.rs` stands as written: no column of
    `workflow_manager` is json, jsonb or bytea, or named `input`, `output`, `history`,
    `payload_url`, `database_url` or `task_token`.
 
@@ -2353,7 +2262,7 @@ part that dates, not the verdict.
    `zeroship_workflow_manager::deployments::POSTGRES_SCHEMA`, and the journal is in neither, so
    that assertion reads a schema the journal never reached.
    `journal_payload_columns_are_a_closed_set` in
-   `crates/zeroship-workflow-server/tests/platform_schema.rs` runs the same predicate against the
+   `crates/zeroship-workflow-server/tests/integration/platform_schema.rs` runs the same predicate against the
    schema the migration corpus installs, as a closed set: a payload-shaped column appearing
    anywhere in `workflow_manager` fails there, and emptying the set it names is what this
    decision looks like from the gate. Plan step 2 waits on that set being empty: a reader in
@@ -2452,8 +2361,8 @@ part that dates, not the verdict.
    workflow-v8 crates and not in control, and control receives only the identity projection
    `manager_schedules` in `crates/zeroship-workflow/src/service/bundle.rs`.
 
-9. **ANSWERED - yes, and no crossing is needed to do it.** A schedule fires for an app no worker is
-   placed on, because the lane claims the firing. Blob storage keeps large objects out of the
+9. **ANSWERED - yes, and no crossing is needed to do it.** A schedule fires for an app no worker
+   has claimed anything for, because the lane claims the firing. Blob storage keeps large objects out of the
    database, so the process that owns the journal owns the store: `ServicePayloads`
    (`crates/zeroship-workflow-server/src/payloads.rs`) binds `Namespace::platform` and supplies the
    writer and the deleter as arguments, and `MaintenanceLane::sweep` passes them into
@@ -2462,9 +2371,9 @@ part that dates, not the verdict.
    has no subject: there is no boundary between the journal and the store behind it. The transport a
    yes would have required is not built and is not needed; `crates/zeroship-core/src/service_identity.rs`
    still names no payload endpoint and does not need to.
-   What this removes is the coupling the relocation exists to break. A firing no longer waits on
-   `place` answering `Placed::Unplaced(zone)`, because it never asks for a placement: platform
-   maintenance stopped depending on creator-side execution capacity.
+   What this removes is the coupling the relocation exists to break. A firing waits on no worker:
+   the maintenance lane claims it inside the service, so platform maintenance does not depend on
+   creator-side execution capacity.
    One invariant arrives with it, and nothing checks it at runtime: `workflow.storage_url` and
    `worker.storage_url` must name the same backend, because a cron-started run's input is staged by
    the service and read back by the worker while the run executes. Step 5 removes the question by
@@ -2474,21 +2383,19 @@ part that dates, not the verdict.
 
 ## Do-not notes
 
-- **Do not narrow a claimant without giving EVERY host the claimant it loses.** Narrowing
-  `Claimant::Placed` off the sweeps silently broke the local dev host, which is not the worker:
-  `zeroship-cli` hosts the whole platform in one process and claimed everything through
-  `Claimant::Placed`, so after the narrowing nothing could claim any sweep there. The visible
-  symptom was not "schedules stop firing" - it was `zeroship serve` failing to start at all, because
-  `activate` is a sweep and `crates/zeroship-cli/src/workflow.rs` waits on its receipt before it
-  will serve. The fix is a lane of its own: `LocalManager::maintenance` and the `sweep` loop in
+- **Do not narrow a claimant without giving EVERY host the claimant it loses.** `Claimant::Worker`
+  takes `advance` alone, so every host that must run a sweep needs a `Claimant::Maintenance` lane
+  of its own. The local dev host is one: `zeroship-cli` hosts the whole platform in one process,
+  and `activate` is a sweep `crates/zeroship-cli/src/workflow.rs` waits on before it serves, so a
+  host with no maintenance lane does not fail visibly at the queue - `zeroship serve` simply never
+  starts. Its lane is `LocalManager::maintenance` and the `sweep` loop in
   `crates/zeroship-cli/src/workflow/host.rs`, claiming through `MaintenanceAuthority` against the
   journal it already holds - locally it IS the service, so it is entitled to.
   Reusing `MaintenanceLane` there is not possible rather than merely unwise: that type wants its
   queue and journal on ONE runtime, and in the CLI the queue lives on the manager thread while the
   journal lives on the host thread, both `Rc`-bound. And routing sweeps through `DeliverySlot`
   instead would re-derive "is this maintenance?" from `JobOperation` - a second, non-compiler-checked
-  copy of the `Work` table - and settle through a path that verifies the PLACEMENT revision, which a
-  maintenance grant does not carry.
+  copy of the `Work` table - and put sweeps on the path built for a worker's creator execution.
   The general rule: `Claimant` is a property of a HOST, and the set of hosts is larger than the set
   of crates the relocation touches. Enumerate them before narrowing, and remember a host that
   refuses every kind fails silently - nothing errors, work simply stops.
@@ -2539,7 +2446,7 @@ part that dates, not the verdict.
   engine requires of any host - it links no storage itself. Store-holding therefore separates
   nothing, and the only axis left is journal work against creator code. `Work`
   (`crates/zeroship-workflow-manager/src/models.rs`) is `Maintenance | Creator`;
-  `Claimant::Placed.denied()` is the nine sweeps and `Claimant::Maintenance.denied()` is
+  `Claimant::Worker.denied()` is every sweep and `Claimant::Maintenance.denied()` is
   `["advance"]`, asserted as whole sets in `crates/zeroship-workflow-manager/tests/integration/queue.rs` so a
   kind classified as neither, or a tenth operation added without a class, fails there rather than
   landing on whichever host asked first.

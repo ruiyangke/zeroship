@@ -7,6 +7,7 @@
 )]
 
 use crate::support;
+use crate::support::QueueCalls;
 use crate::support::retention as catalog_support;
 
 use catalog_support::{Catalog, Published};
@@ -18,10 +19,10 @@ use std::{
     rc::Rc,
     time::Duration,
 };
-use crate::support::{Backend, Fixture};
+use crate::support::{Backend, Fixture, Owner};
 use zeroship_core::{
     app_id::AppId,
-    workflow_coordination::{Assignment, RunId, WorkerId},
+    workflow_coordination::{RunId, WorkerId},
     workflow_deployments::{HoldGeneration, HoldScope},
     workflow_jobs::{DeploymentId, JobId, JobOperation, JobOutcome, JobSpec},
     workflow_schedules::{
@@ -134,6 +135,7 @@ fn daily() -> ScheduleDescriptor {
 fn activation(app: &AppId, deployment: &Published, revision: i64) -> ActivateSchedules {
     ActivateSchedules {
         app_id: app.clone(),
+                execution_zone_id: zeroship_core::ZoneId::default_zone(),
         deployment_id: deployment.id.clone(),
         revision: revision.try_into().unwrap(),
     }
@@ -149,6 +151,7 @@ async fn activate(
     scheduler
         .prepare(&RegisterSchedules {
             app_id: app.clone(),
+                execution_zone_id: zeroship_core::ZoneId::default_zone(),
             deployment_id: deployment.id.clone(),
             schedules: calendar,
         })
@@ -180,19 +183,14 @@ fn lane(app: &AppId) -> MaintenanceAuthority {
     MaintenanceAuthority::new(app.clone(), WorkerId::mint())
 }
 
-/// A placement over the app, for the creator work no lane may take. These
+/// A worker of the app's zone, for the creator work no lane may take. These
 /// contracts run no coordinator, so the authority is stated rather than read.
-fn placement(app: &AppId) -> Assignment {
-    Assignment {
-        app_id: app.clone(),
-        worker_id: WorkerId::mint(),
-        revision: 1.try_into().unwrap(),
-        expires_at: i64::MAX.try_into().unwrap(),
-    }
+fn worker(app: &AppId) -> Owner {
+    Owner::new(app.clone(), WorkerId::mint())
 }
 
 /// Settle one deliverable job of `app`, asking both of the queue's claimants:
-/// the lane takes the sweeps and a placed worker takes creator work, and one
+/// the lane takes the sweeps and a worker takes creator work, and one
 /// hold can be pinned by either. `outcome` answers the job that was delivered.
 /// Answers the job it settled, and `None` once neither claimant has one.
 async fn settle_next(
@@ -215,12 +213,12 @@ async fn settle_next(
         .unwrap();
         return Some(job);
     }
-    let placed = placement(app);
-    let grant = queue.claim(&placed).await.unwrap()?;
+    let worker = worker(app);
+    let grant = queue.claim(&worker).await.unwrap()?;
     let job = grant.delivery().job.clone();
     queue
         .settle(
-            &placed,
+            &worker,
             &support::settlement_from(grant.delivery().clone(), outcome(&job)),
         )
         .await
@@ -486,6 +484,7 @@ async fn release_policy(fixture: &Fixture) {
     scheduler
         .disable(&DisableSchedules {
             app_id: app.clone(),
+                execution_zone_id: zeroship_core::ZoneId::default_zone(),
             revision: 3.try_into().unwrap(),
         })
         .await
@@ -681,7 +680,7 @@ async fn stale_candidates(fixture: &Fixture) {
     let queue = queue(fixture, hook.clone()).await;
     let peer = self::queue(fixture, catalog.client()).await;
     let app = AppId::mint();
-    queue.register_scope(&app).await.unwrap();
+    queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     let mut published = Vec::new();
     for marker in ["one", "two", "three", "four"] {
         let deployment = catalog.publish(&app, marker, &[]).await;
@@ -712,6 +711,7 @@ async fn stale_candidates(fixture: &Fixture) {
             scheduler
                 .prepare(&RegisterSchedules {
                     app_id: app.clone(),
+                execution_zone_id: zeroship_core::ZoneId::default_zone(),
                     deployment_id: selected.clone(),
                     schedules: vec![],
                 })
@@ -720,6 +720,7 @@ async fn stale_candidates(fixture: &Fixture) {
             scheduler
                 .activate(&ActivateSchedules {
                     app_id: app.clone(),
+                execution_zone_id: zeroship_core::ZoneId::default_zone(),
                     deployment_id: selected,
                     revision: 1.try_into().unwrap(),
                 })
@@ -762,7 +763,7 @@ async fn unconfirmed_time(fixture: &Fixture) {
     let catalog = Catalog::new(fixture).await;
     let queue = queue(fixture, catalog.client()).await;
     let app = AppId::mint();
-    queue.register_scope(&app).await.unwrap();
+    queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     let deployment = catalog.publish(&app, "damaged", &[]).await;
     queue.ensure_deployment(&app, &deployment.id).await.unwrap();
     let id = intent(fixture, &app, &deployment).await["id"]

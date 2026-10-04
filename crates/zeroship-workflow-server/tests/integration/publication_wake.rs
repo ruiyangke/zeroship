@@ -156,7 +156,7 @@ async fn a_settle_publishes_its_successor_before_reconciliation() {
     // publish the successor is the completion's own.
     let accepting = fixture.plain_api().await;
     let JobAcceptance::Execute(task) = accepting.accept_job(&grant).await.unwrap() else {
-        panic!("a placed worker must be handed the runnable advance's task");
+        panic!("the claiming worker must be handed the runnable advance's task");
     };
     let execution = WorkflowExecution::from_runtime_value(serde_json::json!({"outcomes": [{
         "kind": "Sleep", "ordinal": 0, "name": "delay", "nameOccurrence": 0, "wakeAt": "2s"
@@ -242,14 +242,7 @@ impl zeroship_workflow_manager::policy::PolicySource for Refusing {
         Result<zeroship_workflow_manager::policy::PolicyObservation, zeroship_workflow_manager::Error>,
     > {
         Box::pin(async move { Err(zeroship_workflow_manager::Error::Denied) })
-    }
-    fn revalidate(
-        &self,
-        _: &zeroship_workflow_manager::policy::PolicyObservation,
-    ) -> Result<std::time::Instant, zeroship_workflow_manager::Error> {
-        Err(zeroship_workflow_manager::Error::Denied)
-    }
-}
+    }}
 
 /// An app the policy source refuses loses its wake, so a deleted app leaves no
 /// per-thread map entry and no drain task behind.
@@ -389,20 +382,43 @@ impl Fixture {
         assert_eq!(updated, 1, "no seeded run to set a frontier on");
     }
 
-    /// Claim the app's next placed creator job, the manager half the wire
-    /// claim serves.
+    /// Claim the app's next creator job as the fixture's enrolled instance, the
+    /// zone claim the wire claim serves.
     async fn claim(&self) -> zeroship_workflow_manager::DeliveryGrant {
-        let worker = self.worker.clone();
-        self.state
-            .service
-            .manager
-            .claim_job(&self.worker, &self.scope, Ok(i64::MAX), || {
-                let worker = worker.clone();
-                async move { Ok(worker) }
-            })
+        let worker = self.enrolled.instance.clone();
+        let request = zeroship_core::workflow_jobs::ClaimJobs {
+            max: std::num::NonZeroU32::MIN,
+            wait_ms: std::num::NonZeroU64::new(5_000).unwrap(),
+            after: None,
+            exclude: Vec::new(),
+        };
+        let manager = &self.state.service.manager;
+        let claim = zeroship_workflow_manager::coordinator::ZoneClaim {
+            worker: &worker,
+            zone: &self.zone,
+            request: &request,
+            deadline: manager
+                .claim_deadline(std::time::Instant::now(), &request)
+                .unwrap(),
+        };
+        let (batch, _) = manager
+            .claim_in_zone(
+                &claim,
+                self.source(),
+                || {
+                    let worker = worker.clone();
+                    async move { Ok(worker) }
+                },
+                |_| async { zeroship_workflow_manager::coordinator::Admission::Deliver(()) },
+            )
             .await
-            .unwrap()
-            .expect("a placed worker claims the app's ready creator job")
+            .unwrap();
+        batch
+            .grants
+            .into_iter()
+            .next()
+            .map(|(grant, ())| grant)
+            .expect("a worker of the app's zone claims its ready creator job")
     }
 
     async fn now_millis(&self) -> i64 {
@@ -415,13 +431,13 @@ impl Fixture {
     }
 }
 
-/// Claim the app's next placed creator job and accept it, returning the task
+/// Claim the app's next creator job and accept it, returning the task
 /// and the grant that authorizes completing it.
 async fn claim_and_accept(fixture: &Fixture) -> (Box<DeliveredTask>, DeliveryGrant) {
     let grant = fixture.claim().await;
     let accepting = fixture.plain_api().await;
     let JobAcceptance::Execute(task) = accepting.accept_job(&grant).await.unwrap() else {
-        panic!("a placed worker must be handed the runnable advance's task");
+        panic!("the claiming worker must be handed the runnable advance's task");
     };
     (task, grant)
 }

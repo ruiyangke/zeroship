@@ -87,12 +87,12 @@
   {
     "file": "20260911000000_workflow_coordination.ts",
     "name": "workflow_coordination",
-    "opCount": 83
+    "opCount": 70
   },
   {
     "file": "20260911000050_workflow_platform_grants.ts",
     "name": "workflow_platform_grants",
-    "opCount": 4
+    "opCount": 3
   },
   {
     "file": "20260911000060_workflow_policy_tables.ts",
@@ -130,8 +130,8 @@
     "opCount": 29
   },
   {
-    "file": "20260914000600_placement_eligibility.ts",
-    "name": "placement_eligibility",
+    "file": "20260914000600_app_execution_zones.ts",
+    "name": "app_execution_zones",
     "opCount": 5
   },
   {

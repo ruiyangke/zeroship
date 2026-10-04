@@ -12,132 +12,104 @@ use ntex::{
     web::{self, test},
 };
 use std::{
-    num::NonZeroU32,
+    cell::RefCell,
     rc::Rc,
     sync::Arc,
     time::{Duration, Instant},
 };
 use zeroship_core::{
     app_id::AppId,
-    service_assertion::{
-        InMemoryReplayStore, ServiceAssertionMinter, ServiceAssertionVerifier, ServiceIssuer,
-        ServiceSigningKey, ServiceTrustBundle,
-    },
+    service_assertion::{InMemoryReplayStore, ServiceAssertionVerifier, ServiceTrustBundle},
     service_identity::endpoints,
     workflow_coordination::{
-        AssignedScope, DeliveredSignal, PayloadLocation, ReadStepOutput, RegisterWorker, RequestId,
-        RestartOptions, RestartRun, RestartedRun, RunFailure, RunId, RunOperation, RunScope,
-        RunState, RunStatus, SignalOptions, SignalRun, StartedRun, TransitionRun, WorkerId,
-        WorkerState, AUDIENCE,
+        DeliveredSignal, PayloadLocation, ReadStepOutput, RequestId, RestartOptions, RestartRun,
+        RestartedRun, RunFailure, RunId, RunOperation, RunScope, RunState, RunStatus, SignalOptions,
+        SignalRun, StartedRun, TransitionRun,
     },
     workflow_jobs::DeploymentId,
     workflow_policy::AppPolicy,
 };
 use zeroship_storage::StorageBackendConfig;
 use zeroship_workflow_manager::{
-    coordinator::Placed,
     policy::{PolicyObservation, PolicySource},
     recovery::{Options as RecoveryOptions, ScopeState},
     Error as NativeError,
 };
 use zeroship_workflow_server::{
     auth::{PostgresWorkerRegistry, WorkflowAuth},
-    coordinator::{connect_eligibility, Coordinator, Options},
+    coordinator::{Coordinator, Options},
     payloads::ServicePayloads,
     runs::RunService,
     SharedState, WorkflowHttpState,
 };
 
-/// One observation, so binding installs a real lease rather than a stub.
+/// The observation this fixture's policy source answers.
+///
+/// Behind a `RefCell` so a case can replace it with a deleted app's
+/// observation; the service installs policy from whatever the source answers on
+/// each call.
 #[derive(Debug)]
-struct Source(PolicyObservation);
+struct Source(RefCell<PolicyObservation>);
 impl PolicySource for Source {
     fn observe<'a>(
         &'a self,
         app: &'a AppId,
     ) -> LocalBoxFuture<'a, Result<PolicyObservation, NativeError>> {
         Box::pin(async move {
-            if self.0.app_id() == app {
-                Ok(self.0.clone())
+            let observation = self.0.borrow().clone();
+            if observation.app_id() == app {
+                Ok(observation)
             } else {
                 Err(NativeError::Denied)
             }
         })
-    }
-    fn revalidate(&self, observation: &PolicyObservation) -> Result<Instant, NativeError> {
-        Ok(observation.expires_at())
-    }
-}
+    }}
 
 pub(crate) struct Fixture {
     pub(crate) platform: platform::Platform,
     pub(crate) state: SharedState,
-    pub(crate) scope: AssignedScope,
-    pub(crate) issuer: ServiceIssuer,
-    pub(crate) key: ServiceSigningKey,
+    pub(crate) enrolled: zone::Enrolled,
+    /// The zone this case alone declares, which its app and its instance share.
+    pub(crate) zone: zeroship_core::ZoneId,
+    source: Rc<Source>,
     pub(crate) app: AppId,
-    pub(crate) worker: WorkerId,
 }
 
 impl Fixture {
     pub(crate) async fn new() -> Self {
-        // The case declares an operator zone and places an app in it, so it
-        // works in a clone no sibling observes: placement considers every
-        // eligible worker in the app's zone, and the zone is deployment-global.
+        // The case declares an operator zone and enrols an instance in it that
+        // never ran the app. A declared zone is deployment-global, so the case
+        // works in a clone no sibling observes. Run calls are authorised by the
+        // zone, so the fixture is itself the "a worker that never ran the app is
+        // served" case.
         let platform = platform::Platform::fresh_database().await;
         let (zone, signer) = zone::declare_zone(&platform).await;
-        let worker = WorkerId::mint();
-        let key = ServiceSigningKey::generate();
-        let issuer = ServiceIssuer::parse(&format!(
-            "spiffe://zeroship.ai/svc/worker/{}",
-            worker.as_str()
-        ))
-        .unwrap();
-        platform.admin.execute("INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,join_signer_id,join_token_id,execution_zone_id,expires_at) VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4,'tok_testfixturedefault',$5,now() + interval '1 hour')", &[&worker.as_str(), &vec![1_u8], &key.verifying_key_bytes().to_vec(), &signer, &zone.as_str()]).await.unwrap();
+        let enrolled = zone::Enrolled::join(&platform, &signer, zone.as_str()).await;
 
-        let eligibility = Rc::new(
-            connect_eligibility(&platform.runtime_url, Options::default())
+        let service =
+            Coordinator::connect(&platform.runtime_url, Options::default(), holds::client())
                 .await
-                .unwrap(),
-        );
-        let service = Coordinator::connect(
-            &platform.runtime_url,
-            Options::default(),
-            holds::client(),
-            eligibility,
-        )
-        .await
-        .unwrap();
-        service
-            .manager
-            .register(
-                &worker,
-                &RegisterWorker {
-                    capacity: NonZeroU32::new(1).unwrap(),
-                    state: WorkerState::Ready,
-                },
-            )
-            .await
-            .unwrap();
+                .unwrap();
         let app = AppId::mint();
         platform.seed_app_in(&app, Some(zone.as_str())).await;
-        let Placed::Assigned(assignment) = service.manager.place(&app).await.unwrap() else {
-            panic!("the app has one eligible worker");
-        };
+        // The queue scope Control's lifecycle publication creates, which is
+        // what admits a run call for the app before anything observes it.
+        platform.seed_scope(&app, zone.as_str()).await;
 
-        let mut peers = ServiceTrustBundle::new();
-        peers
-            .trust(&issuer, key.key_id(), key.verifying_key_bytes())
-            .unwrap();
+        // The worker's key is read from its own instance row, so the peer
+        // bundle here is unused by `WorkflowAuth::worker`.
         let replay = Arc::new(InMemoryReplayStore::default());
         let auth = Arc::new(WorkflowAuth::new(
-            Arc::new(ServiceAssertionVerifier::new(peers, replay.clone())),
+            Arc::new(ServiceAssertionVerifier::new(
+                ServiceTrustBundle::new(),
+                replay.clone(),
+            )),
             Arc::new(PostgresWorkerRegistry::new(Arc::new(
                 platform::connect(&platform.runtime_url).await,
             ))),
             replay,
         ));
-        let source = Rc::new(Source(
+        let source = Rc::new(Source(RefCell::new(
             PolicyObservation::new(
                 app.clone(),
                 7.try_into().unwrap(),
@@ -147,7 +119,7 @@ impl Fixture {
                 Instant::now() + Duration::from_secs(600),
             )
             .unwrap(),
-        ));
+        )));
         // The production constructor, so a host that dropped the queue binding
         // would fail these cases rather than pass on a fixture that added it
         // back.
@@ -170,32 +142,55 @@ impl Fixture {
         let state = Rc::new(WorkflowHttpState {
             service,
             auth,
-            policy_source: Some(source as Rc<dyn PolicySource>),
+            policy_source: Some(source.clone() as Rc<dyn PolicySource>),
             runs,
             payloads,
         });
         Self {
             platform,
             state,
-            scope: AssignedScope {
-                app_id: assignment.app_id,
-                assignment_revision: assignment.revision,
-            },
-            issuer,
-            key,
+            enrolled,
+            zone,
+            source,
             app,
-            worker,
         }
     }
 
-    pub(crate) fn authorization(&self) -> String {
-        format!(
-            "Bearer {}",
-            ServiceAssertionMinter::new(self.issuer.clone(), self.key.key_id(), &self.key)
-                .unwrap()
-                .mint(&ServiceIssuer::parse(AUDIENCE).unwrap())
-                .unwrap()
-        )
+    fn authorization(&self) -> String {
+        self.enrolled.authorization()
+    }
+
+    /// Replace the observed policy with a deleted app's, leaving the zone and
+    /// revision where they were: the service must refuse the app on deletion
+    /// alone.
+    fn mark_deleted(&self) {
+        let current = self.source.0.borrow().clone();
+        self.source.0.replace(
+            PolicyObservation::new(
+                current.app_id().clone(),
+                current.revision(),
+                current.policy().clone(),
+                current.execution_zone_id().clone(),
+                true,
+                Instant::now() + Duration::from_secs(600),
+            )
+            .unwrap(),
+        );
+    }
+
+    /// Retire this instance, the way Control's retirement does. `gone` is the
+    /// terminal status the instance check accepts.
+    async fn retire_instance(&self) {
+        let updated = self
+            .platform
+            .admin
+            .execute(
+                "UPDATE zeroship.worker_instances SET status='gone' WHERE id=$1",
+                &[&self.enrolled.instance.as_str()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated, 1, "no instance row to retire");
     }
 
     /// The queued run every case here acts on, seeded by the shared fixture
@@ -215,7 +210,12 @@ impl Fixture {
             .service
             .recovery(RecoveryOptions::default())
             .unwrap()
-            .ensure(&self.app, &DeploymentId::mint(), 1.try_into().unwrap())
+            .ensure(
+                &self.app,
+                &self.zone,
+                &DeploymentId::mint(),
+                1.try_into().unwrap(),
+            )
             .await
             .unwrap();
     }
@@ -227,7 +227,7 @@ impl Fixture {
             .header("authorization", self.authorization())
             .set_json(&SignalRun {
                 request_id: RequestId::mint(),
-                scope: self.scope.clone(),
+                app_id: self.app.clone(),
                 run_id: run.clone(),
                 options: SignalOptions {
                     signal_type: signal_type.to_owned(),
@@ -247,7 +247,7 @@ impl Fixture {
             .header("authorization", self.authorization())
             .set_json(&RestartRun {
                 request_id: RequestId::mint(),
-                scope: self.scope.clone(),
+                app_id: self.app.clone(),
                 run_id: run.clone(),
                 options: RestartOptions::default(),
             })
@@ -391,9 +391,8 @@ impl Fixture {
 
 /// `status` answers over the wire from the service's own journal.
 ///
-/// This is the whole step-3 path in one exchange: an authenticated worker, a
-/// placement the manager holds for exactly that worker, an app bound from the
-/// service's own registry under a freshly observed policy, and a read of the
+/// This is the whole path in one exchange: an authenticated worker of the app's
+/// zone, an app bound from the service's own registry under a freshly observed policy, and a read of the
 /// journal in `workflow_manager` under the grant the migration derived. The
 /// reply is compared against what the journal actually holds rather than
 /// against a status code.
@@ -414,7 +413,7 @@ async fn status_answers_from_the_service_journal() {
             .uri(endpoints::WORKFLOW_RUN_STATUS.path_template())
             .header("authorization", fixture.authorization())
             .set_json(&RunScope {
-                scope: fixture.scope.clone(),
+                app_id: fixture.app.clone(),
                 run_id: run.clone(),
             })
             .to_request(),
@@ -446,7 +445,7 @@ async fn status_answers_from_the_service_journal() {
             .uri(endpoints::WORKFLOW_RUN_STATUS.path_template())
             .header("authorization", fixture.authorization())
             .set_json(&RunScope {
-                scope: fixture.scope.clone(),
+                app_id: fixture.app.clone(),
                 run_id: RunId::mint(),
             })
             .to_request(),
@@ -460,15 +459,15 @@ async fn status_answers_from_the_service_journal() {
     );
 }
 
-/// A run call is served for the app the MANAGER holds a placement for, not the
-/// one the body names.
+/// A run call is served for its zone's app by a worker that has never claimed
+/// any of the app's work.
 ///
-/// The worker is never read from the body, so the only thing a caller can lie
-/// about is the placement revision. A stale one is refused before any journal
-/// read, which is what makes the placement lookup an authorization rather than
-/// a formality.
+/// THE WORKER IS NEVER READ FROM THE BODY, and neither is the zone: the zone is
+/// the one frozen on the authenticating instance row, compared against the
+/// app's zone from the service's own policy observation. The fixture's instance
+/// holds no delivery of the app, so the zone is the whole of what serves it.
 #[ntex::test]
-async fn a_run_call_without_a_live_placement_is_refused() {
+async fn a_worker_that_never_claimed_the_app_serves_its_zones_apps() {
     let fixture = Box::pin(Fixture::new()).await;
     let run = fixture.seed_run().await;
     let app = test::init_service(
@@ -478,43 +477,328 @@ async fn a_run_call_without_a_live_placement_is_refused() {
     )
     .await;
 
-    let mut stale = fixture.scope.clone();
-    stale.assignment_revision = fixture
-        .scope
-        .assignment_revision
-        .get()
-        .checked_add(1)
-        .and_then(|next| next.try_into().ok())
-        .expect("a revision above the one the manager holds");
     let response = test::call_service(
         &app,
         test::TestRequest::post()
             .uri(endpoints::WORKFLOW_RUN_STATUS.path_template())
             .header("authorization", fixture.authorization())
             .set_json(&RunScope {
-                scope: stale,
-                run_id: run.clone(),
-            })
-            .to_request(),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-
-    // The control: the same run, the same credential, the placement the manager
-    // actually holds.
-    let response = test::call_service(
-        &app,
-        test::TestRequest::post()
-            .uri(endpoints::WORKFLOW_RUN_STATUS.path_template())
-            .header("authorization", fixture.authorization())
-            .set_json(&RunScope {
-                scope: fixture.scope.clone(),
+                app_id: fixture.app.clone(),
                 run_id: run,
             })
             .to_request(),
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+/// The same call from an instance of another zone is refused.
+///
+/// The control is the home-zone worker's identical call, so the refusal is the
+/// ZONE and not the run, the app or the credential shape.
+#[ntex::test]
+async fn a_run_call_from_another_zone_is_refused() {
+    let fixture = Box::pin(Fixture::new()).await;
+    let run = fixture.seed_run().await;
+    let (away, away_signer) = zone::declare_zone(&fixture.platform).await;
+    let far = zone::Enrolled::join(&fixture.platform, &away_signer, away.as_str()).await;
+    let app = test::init_service(
+        web::App::new()
+            .state(fixture.state.clone())
+            .configure(zeroship_workflow_server::configure),
+    )
+    .await;
+
+    // Control: the app's own zone is served.
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(endpoints::WORKFLOW_RUN_STATUS.path_template())
+            .header("authorization", fixture.authorization())
+            .set_json(&RunScope {
+                app_id: fixture.app.clone(),
+                run_id: run.clone(),
+            })
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(endpoints::WORKFLOW_RUN_STATUS.path_template())
+            .header("authorization", far.authorization())
+            .set_json(&RunScope {
+                app_id: fixture.app.clone(),
+                run_id: run,
+            })
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let failure: RunFailure = serde_json::from_slice(&test::read_body(response).await).unwrap();
+    assert!(
+        matches!(failure, RunFailure::PermissionDenied {}),
+        "{failure:?}"
+    );
+}
+
+/// Control's facts, counted, so a case can say no Control read happened.
+#[derive(Debug)]
+struct CountedFacts {
+    inner: Rc<dyn zeroship_workflow_manager::app_facts::AppFactsSource>,
+    reads: std::cell::Cell<usize>,
+}
+
+impl zeroship_workflow_manager::app_facts::AppFactsSource for CountedFacts {
+    fn observe<'a>(
+        &'a self,
+        apps: &'a [AppId],
+    ) -> zeroship_workflow_manager::app_facts::AppFactsFuture<'a> {
+        self.reads.set(self.reads.get() + 1);
+        self.inner.observe(apps)
+    }
+}
+
+/// The policy ledger rows this service holds for `app`.
+async fn ledger_rows(platform: &platform::Platform, app: &AppId) -> i64 {
+    platform
+        .admin
+        .query_one(
+            "SELECT count(*) FROM workflow_manager.workflow_policy_ledger WHERE id=$1",
+            &[&app.as_str()],
+        )
+        .await
+        .unwrap()
+        .get(0)
+}
+
+/// A run call names an app and nothing more, so the service fences on its own
+/// queue before it observes the app: an app with no queue scope in the
+/// caller's zone - one Control has never heard of, and one of another zone - is
+/// refused alike, with no Control read and no policy ledger row written for
+/// it. The control is the zone's own app, which is observed through the same
+/// production policy source, recorded in its ledger and served.
+///
+/// On a database of the case's own, because the rollout switches it publishes
+/// are installation-wide.
+#[ntex::test]
+async fn an_unknown_app_and_a_foreign_app_are_refused_alike_before_any_observation() {
+    use crate::support::{app_facts, policy as policy_fixture};
+    use zeroship_workflow_manager::policy::control::{ControlPolicies, PolicyObservations};
+
+    let platform = Box::pin(platform::Platform::fresh_database()).await;
+    let (home, signer) = zone::declare_zone(&platform).await;
+    let enrolled = zone::Enrolled::join(&platform, &signer, home.as_str()).await;
+    let (away, _) = zone::declare_zone(&platform).await;
+    let plans = policy_fixture::plan_admin(&platform).await;
+    let (own, foreign, unknown) = (AppId::mint(), AppId::mint(), AppId::mint());
+    for (app, zone) in [(&own, &home), (&foreign, &away)] {
+        let plan = platform.seed_app_in(app, Some(zone.as_str())).await;
+        platform
+            .admin
+            .execute(
+                "UPDATE zeroship.apps SET workflows_enabled=true WHERE id=$1",
+                &[&app.as_str()],
+            )
+            .await
+            .unwrap();
+        platform.seed_scope(app, zone.as_str()).await;
+        Box::pin(plans.set_plan_policy(&plan, &AppPolicy::default()))
+            .await
+            .unwrap();
+    }
+    policy_fixture::operator(&platform)
+        .await
+        .set_rollout(policy_fixture::rollout())
+        .await
+        .unwrap();
+    let run = journal::seed_run(&platform, &own).await;
+
+    let facts = Rc::new(CountedFacts {
+        inner: app_facts::DatabaseAppFacts::connect(platform.admin_url.as_ref()).await,
+        reads: std::cell::Cell::new(0),
+    });
+    let publication = zeroship_data_orm::orm::Database::connect(
+        zeroship_data_orm::binding::DbBinding::platform(
+            "workflow-policy-ledger",
+            "workflow-policy-ledger",
+            zeroship_core::schema_name::SchemaName::new("workflow_manager").unwrap(),
+        ),
+        zeroship_data_orm::ConnectOptions::new(
+            &platform.runtime_url,
+            zeroship_data_orm::encryption::ProjectKeySource::unavailable(),
+        )
+        .connection_authority(),
+        zeroship_workflow_manager::policy::control::publication_collections().unwrap(),
+    )
+    .await
+    .unwrap();
+    let policies = ControlPolicies::new(
+        zeroship_workflow_manager::policy::control::ControlPolicyStore::new(
+            facts.clone(),
+            publication,
+        )
+        .unwrap(),
+        PolicyObservations::new(std::num::NonZeroUsize::new(8).unwrap()),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    let service = Coordinator::connect(&platform.runtime_url, Options::default(), holds::client())
+        .await
+        .unwrap();
+    let replay = Arc::new(InMemoryReplayStore::default());
+    let auth = Arc::new(WorkflowAuth::new(
+        Arc::new(ServiceAssertionVerifier::new(
+            ServiceTrustBundle::new(),
+            replay.clone(),
+        )),
+        Arc::new(PostgresWorkerRegistry::new(Arc::new(
+            platform::connect(&platform.runtime_url).await,
+        ))),
+        replay,
+    ));
+    let runs = Rc::new(
+        RunService::connect_over(
+            &platform.runtime_url,
+            &service,
+            service.recovery(RecoveryOptions::default()).unwrap(),
+            Options::default().startup_timeout(),
+        )
+        .await
+        .unwrap(),
+    );
+    let payloads = ServicePayloads::open(&StorageBackendConfig::Local(
+        platform.work.path().join("payloads"),
+    ))
+    .unwrap();
+    let state = Rc::new(WorkflowHttpState {
+        service,
+        auth,
+        policy_source: Some(Rc::new(policies) as Rc<dyn PolicySource>),
+        runs,
+        payloads,
+    });
+    let app = test::init_service(
+        web::App::new()
+            .state(state)
+            .configure(zeroship_workflow_server::configure),
+    )
+    .await;
+    let status = |app_id: &AppId, run_id: RunId| {
+        test::TestRequest::post()
+            .uri(endpoints::WORKFLOW_RUN_STATUS.path_template())
+            .header("authorization", enrolled.authorization())
+            .set_json(&RunScope {
+                app_id: app_id.clone(),
+                run_id,
+            })
+            .to_request()
+    };
+
+    let mut answers = Vec::new();
+    for refused in [&unknown, &foreign] {
+        let response = test::call_service(&app, status(refused, RunId::mint())).await;
+        answers.push((response.status(), test::read_body(response).await));
+    }
+    assert!(!answers.is_empty());
+    for (code, body) in &answers {
+        assert_eq!(*code, StatusCode::FORBIDDEN);
+        let failure: RunFailure = serde_json::from_slice(body).unwrap();
+        assert!(matches!(failure, RunFailure::PermissionDenied {}), "{failure:?}");
+    }
+    assert_eq!(answers[0], answers[1], "an unknown app and a foreign one answer alike");
+    assert_eq!(facts.reads.get(), 0, "a refused app was read from Control");
+    assert_eq!(ledger_rows(&platform, &unknown).await, 0);
+    assert_eq!(ledger_rows(&platform, &foreign).await, 0);
+
+    let response = test::call_service(&app, status(&own, run)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(facts.reads.get() > 0, "the zone's own app is observed");
+    assert_eq!(ledger_rows(&platform, &own).await, 1);
+}
+
+/// A deleted app is refused to every worker, in every zone.
+///
+/// The control is the same call before deletion: it is served, so the refusal
+/// after is the deletion and not an unrelated refusal.
+#[ntex::test]
+async fn a_deleted_app_is_refused_to_every_worker() {
+    let fixture = Box::pin(Fixture::new()).await;
+    let run = fixture.seed_run().await;
+    let (away, away_signer) = zone::declare_zone(&fixture.platform).await;
+    let far = zone::Enrolled::join(&fixture.platform, &away_signer, away.as_str()).await;
+    let app = test::init_service(
+        web::App::new()
+            .state(fixture.state.clone())
+            .configure(zeroship_workflow_server::configure),
+    )
+    .await;
+
+    let call = |authorization: String, run: RunId| {
+        test::TestRequest::post()
+            .uri(endpoints::WORKFLOW_RUN_STATUS.path_template())
+            .header("authorization", authorization)
+            .set_json(&RunScope {
+                app_id: fixture.app.clone(),
+                run_id: run,
+            })
+            .to_request()
+    };
+    assert_eq!(
+        test::call_service(&app, call(fixture.authorization(), run.clone())).await.status(),
+        StatusCode::OK
+    );
+
+    fixture.mark_deleted();
+    for authorization in [fixture.authorization(), far.authorization()] {
+        let response = test::call_service(&app, call(authorization, run.clone())).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let failure: RunFailure = serde_json::from_slice(&test::read_body(response).await).unwrap();
+        assert!(
+            matches!(failure, RunFailure::PermissionDenied {}),
+            "{failure:?}"
+        );
+    }
+}
+
+/// A retired instance cannot authenticate, so no run call reaches a zone
+/// check under its identity.
+#[ntex::test]
+async fn a_retired_instance_is_unauthenticated() {
+    let fixture = Box::pin(Fixture::new()).await;
+    let run = fixture.seed_run().await;
+    let app = test::init_service(
+        web::App::new()
+            .state(fixture.state.clone())
+            .configure(zeroship_workflow_server::configure),
+    )
+    .await;
+
+    let request = |authorization: String| {
+        test::TestRequest::post()
+            .uri(endpoints::WORKFLOW_RUN_STATUS.path_template())
+            .header("authorization", authorization)
+            .set_json(&RunScope {
+                app_id: fixture.app.clone(),
+                run_id: run.clone(),
+            })
+            .to_request()
+    };
+    assert_eq!(
+        test::call_service(&app, request(fixture.authorization())).await.status(),
+        StatusCode::OK
+    );
+
+    fixture.retire_instance().await;
+    let response = test::call_service(&app, request(fixture.authorization())).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let failure: RunFailure = serde_json::from_slice(&test::read_body(response).await).unwrap();
+    assert!(
+        matches!(failure, RunFailure::Unauthenticated {}),
+        "{failure:?}"
+    );
 }
 
 /// The three mutating run calls, and the one journal row that decides the third.
@@ -556,7 +840,7 @@ async fn restart_is_served_only_with_the_journals_deployment_hold() {
             endpoints::WORKFLOW_RUN_SIGNAL.path_template(),
             serde_json::to_value(SignalRun {
                 request_id: RequestId::mint(),
-                scope: fixture.scope.clone(),
+                app_id: fixture.app.clone(),
                 run_id: run.clone(),
                 options: SignalOptions {
                     signal_type: "ping".to_owned(),
@@ -569,7 +853,7 @@ async fn restart_is_served_only_with_the_journals_deployment_hold() {
             endpoints::WORKFLOW_RUN_TRANSITION.path_template(),
             serde_json::to_value(TransitionRun {
                 request_id: RequestId::mint(),
-                scope: fixture.scope.clone(),
+                app_id: fixture.app.clone(),
                 run_id: run.clone(),
                 operation: RunOperation::Pause,
             })
@@ -636,7 +920,7 @@ async fn restart_is_served_only_with_the_journals_deployment_hold() {
     assert_eq!(stored.get::<_, String>(1), "queued");
     assert_eq!(stored.get::<_, String>(2), deploy);
 
-    // The control for the binding and the placement: the read that needs
+    // The control for the binding and the zone: the read that needs
     // neither an epoch nor a hold answers throughout, so the arms above are
     // about those prerequisites and not about either of these.
     let response = test::call_service(
@@ -645,7 +929,7 @@ async fn restart_is_served_only_with_the_journals_deployment_hold() {
             .uri(endpoints::WORKFLOW_RUN_STATUS.path_template())
             .header("authorization", fixture.authorization())
             .set_json(&RunScope {
-                scope: fixture.scope.clone(),
+                app_id: fixture.app.clone(),
                 run_id: run,
             })
             .to_request(),
@@ -858,7 +1142,7 @@ async fn start_stages_the_creator_value_and_refuses_a_named_payload_object() {
     let body = |options: serde_json::Value| {
         serde_json::json!({
             "requestId": RequestId::mint(),
-            "scope": fixture.scope,
+            "appId": fixture.app,
             "workflowName": "demo",
             "input": {"order": 7},
             "options": options,
@@ -960,7 +1244,7 @@ async fn a_run_output_read_locates_the_payload_and_carries_no_bytes() {
             .uri(endpoints::WORKFLOW_RUN_OUTPUT.path_template())
             .header("authorization", fixture.authorization())
             .set_json(&RunScope {
-                scope: fixture.scope.clone(),
+                app_id: fixture.app.clone(),
                 run_id: run,
             })
             .to_request(),
@@ -988,7 +1272,7 @@ async fn a_run_output_read_locates_the_payload_and_carries_no_bytes() {
             .uri(endpoints::WORKFLOW_RUN_OUTPUT.path_template())
             .header("authorization", fixture.authorization())
             .set_json(&RunScope {
-                scope: fixture.scope.clone(),
+                app_id: fixture.app.clone(),
                 run_id: bare,
             })
             .to_request(),
@@ -1004,7 +1288,7 @@ async fn a_run_output_read_locates_the_payload_and_carries_no_bytes() {
             .uri(endpoints::WORKFLOW_RUN_STEP_OUTPUT.path_template())
             .header("authorization", fixture.authorization())
             .set_json(&ReadStepOutput {
-                scope: fixture.scope.clone(),
+                app_id: fixture.app.clone(),
                 run_id: RunId::parse(&payload_run(&fixture).await).unwrap(),
                 name: "charge".to_owned(),
                 occurrence: 0,

@@ -24,17 +24,75 @@ pub struct ControlPlane {
     served: std::thread::JoinHandle<Vec<String>>,
 }
 
+/// Holds one route's answer until the case releases it.
+///
+/// The request has ARRIVED when [`Self::arrived`] resolves, so the worker code
+/// that sent it is suspended on the reply at a point the case knows: whatever
+/// the case does before [`Self::release`] happens strictly after everything the
+/// worker did before the request, and strictly before anything it does with
+/// the answer. That ordering is the whole instrument; nothing here sleeps.
+pub struct Gate {
+    arrived: Option<futures::channel::oneshot::Receiver<()>>,
+    release: std::sync::mpsc::Sender<()>,
+}
+
+impl Gate {
+    /// Resolves once the gated request has arrived.
+    pub async fn arrived(&mut self) {
+        self.arrived
+            .take()
+            .expect("a gate opens once")
+            .await
+            .expect("the control plane reports the gated request");
+    }
+
+    /// Answer the gated request.
+    pub fn release(&self) {
+        self.release
+            .send(())
+            .expect("the control plane is waiting to answer the gated request");
+    }
+}
+
 impl ControlPlane {
     /// Start one. `expected` bounds how many requests it answers before the
     /// listener closes, so a case that expects none closes immediately and a
     /// later call is refused rather than silently satisfied.
     pub fn serving(expected: usize, routes: Vec<(String, String)>) -> Self {
+        Self::start(expected, routes, None)
+    }
+
+    /// The same control plane, holding its answer to `gated` until the case
+    /// releases the returned [`Gate`].
+    pub fn gated(expected: usize, routes: Vec<(String, String)>, gated: String) -> (Self, Gate) {
+        let (arrived, observed) = futures::channel::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let plane = Self::start(expected, routes, Some((gated, arrived, released)));
+        (
+            plane,
+            Gate {
+                arrived: Some(observed),
+                release,
+            },
+        )
+    }
+
+    fn start(
+        expected: usize,
+        routes: Vec<(String, String)>,
+        gate: Option<(
+            String,
+            futures::channel::oneshot::Sender<()>,
+            std::sync::mpsc::Receiver<()>,
+        )>,
+    ) -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("a control plane binds");
         let base_url = format!("http://{}", listener.local_addr().expect("its address"));
         listener
             .set_nonblocking(true)
             .expect("poll for connections so a call that never arrives ends the wait");
         let served = std::thread::spawn(move || {
+            let mut gate = gate;
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
             let mut paths = Vec::new();
             while paths.len() < expected && std::time::Instant::now() < deadline {
@@ -67,6 +125,12 @@ impl ControlPlane {
                     .nth(1)
                     .unwrap_or_default()
                     .to_owned();
+                if gate.as_ref().is_some_and(|(gated, _, _)| gated == &path) {
+                    let (_, arrived, release) = gate.take().expect("the gate was just matched");
+                    // A case that has stopped listening still gets its answer.
+                    let _ = arrived.send(());
+                    let _ = release.recv_timeout(std::time::Duration::from_secs(20));
+                }
                 let response = match routes.iter().find(|(route, _)| route == &path) {
                     Some((_, body)) => http_response("200 OK", body),
                     None => http_response("404 Not Found", r#"{"error":"not found"}"#),

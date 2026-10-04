@@ -7,7 +7,7 @@
 use crate::{
     auth::{PostgresWorkerRegistry, WorkflowAuth},
     config::WorkflowSettings,
-    coordinator::{connect_eligibility, Coordinator, Options},
+    coordinator::{Coordinator, Options},
     payloads::ServicePayloads,
     sweeps::{LaneOptions, MaintenanceDriver, MaintenanceLane, SweepReport},
     WorkflowHttpState,
@@ -58,6 +58,7 @@ pub struct ServerOptions {
     pub max_connections: usize,
     pub policy_cache_entries: NonZeroUsize,
     pub max_request_bytes: usize,
+    pub static_pool_slots: u64,
     pub coordinator: Options,
     /// Where this service's payload objects live. Validated by
     /// `--check-config`, which opens nothing; the store itself is opened once
@@ -88,11 +89,13 @@ impl ServerOptions {
         let policy_cache_entries = NonZeroUsize::new(*settings.policy_cache_entries.get())
             .ok_or("workflow policy cache capacity must be positive")?;
         let max_request_bytes = *settings.max_request_bytes.get();
+        let static_pool_slots = *settings.static_pool_slots.get();
         let replay_sweep = Duration::from_millis(*settings.replay_sweep_ms.get());
         let driver_interval = Duration::from_millis(*settings.driver_interval_ms.get());
         if http_threads == 0
             || max_connections == 0
             || max_request_bytes == 0
+            || static_pool_slots == 0
             || replay_sweep.is_zero()
             || driver_interval.is_zero()
         {
@@ -118,8 +121,9 @@ impl ServerOptions {
             connections: *settings.database_connections.get(),
             acquire_timeout: Duration::from_millis(*settings.database_acquire_timeout_ms.get()),
             command_timeout: Duration::from_millis(*settings.database_command_timeout_ms.get()),
-            worker_ttl: Duration::from_millis(*settings.worker_ttl_ms.get()),
-            assignment_ttl: Duration::from_millis(*settings.assignment_ttl_ms.get()),
+            lease: Duration::from_millis(*settings.delivery_lease_ms.get()),
+            max_attempt: Duration::from_millis(*settings.max_attempt_ms.get()),
+            claim_budget: Duration::from_millis(*settings.claim_budget_ms.get()),
             batch_limit: *settings.batch_limit.get(),
             max_pending_management: *settings.max_pending_management.get(),
         };
@@ -160,6 +164,7 @@ impl ServerOptions {
             max_connections,
             policy_cache_entries,
             max_request_bytes,
+            static_pool_slots,
             coordinator,
             storage,
             plaintext_peers,
@@ -287,10 +292,7 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
                     )?);
                     let deployments =
                         deployments(&control_url, &outbound, coordinator, &plaintext_peers)?;
-                    let eligibility = Rc::new(connect_eligibility(&url, coordinator).await?);
-                    let service =
-                        Coordinator::connect(&url, coordinator, Rc::new(holds), eligibility)
-                            .await?;
+                    let service = Coordinator::connect(&url, coordinator, Rc::new(holds)).await?;
                     // The journal shares the service own database and login;
                     // it is the same url the coordinator opened, narrowed to a
                     // different schema by its binding. Its ingress epochs are
@@ -378,13 +380,21 @@ async fn maintenance(
         url,
         options.coordinator,
         Rc::new(holds),
-        Rc::new(connect_eligibility(url, options.coordinator).await?),
     )
     .await?;
     // The closing lane reads Control's deletion marker over the same capability
     // the policy ledger reads its inputs through. There is no second binding
     // and no second credential: one exchange answers both.
     let lifecycle = FactsLifecycle::new(facts.clone());
+    let policies = Rc::new(
+        connect_policies(
+            facts.clone(),
+            url,
+            options.coordinator,
+            observations.clone(),
+        )
+        .await?,
+    );
     let sweeps = if options.maintenance_sweeps {
         Some(sweep_lane(url, options, &startup, facts, observations, deployments).await?)
     } else {
@@ -398,7 +408,10 @@ async fn maintenance(
             startup.manager.clone(),
             options.driver,
             Rc::new(lifecycle),
-            Rc::new(StaticPool),
+            policies,
+            Rc::new(StaticPool {
+                pool_slots: options.static_pool_slots,
+            }),
         )?,
         sweeps,
     ))
@@ -497,8 +510,8 @@ fn deployments(
 /// Bind the policy ledger over the service's own metadata database.
 ///
 /// One startup step, so it is bounded by [`Options::startup_timeout`] like the
-/// authentication connection, the coordinator's pool warm-up, its queue binding
-/// and placement eligibility: a database that accepts connections and never
+/// authentication connection, the coordinator's pool warm-up and its queue
+/// binding: a database that accepts connections and never
 /// answers fails startup within that budget. The ledger's own transactions stay
 /// bounded by [`Options::command_timeout`].
 ///
@@ -767,6 +780,92 @@ const fn retention_error(error: zeroship_workflow_client::Error) -> ManagerError
         | Error::Unavailable
         | Error::Refused(FailureCode::RequestTooLarge | FailureCode::Unavailable) => {
             ManagerError::Unavailable
+        }
+    }
+}
+
+/// The stack each HTTP worker arbiter of the service's runtime runs on.
+///
+/// Declared rather than inherited from the platform default, because a
+/// request's future chain is what spends it: an unoptimized build keeps every
+/// awaited future inline in its caller's frame, and the settle of an execution
+/// that accepts a child workflow runs the deepest chain the service has. The
+/// engine boxes its largest futures on that path; this is the budget the rest
+/// must fit, set by the service rather than by whatever the platform defaults
+/// to.
+pub const RUNTIME_STACK_BYTES: usize = 8 * 1024 * 1024;
+
+/// The runtime the service's `main` runs on.
+#[must_use]
+pub fn runtime() -> ntex::rt::Builder {
+    ntex::rt::System::build()
+        .name("zeroship-workflow-server")
+        .stack_size(RUNTIME_STACK_BYTES)
+}
+
+#[cfg(test)]
+mod runtime_stack_tests {
+    use super::{runtime, RUNTIME_STACK_BYTES};
+
+    /// An arbiter of the service's runtime runs on the declared stack, read
+    /// from the mapping the kernel gave the thread. The control is an arbiter
+    /// of a runtime that asks for a small stack explicitly, so the reading
+    /// discriminates rather than answering "large" for any thread, whatever
+    /// default the test process was started with.
+    #[test]
+    fn http_arbiters_run_on_the_declared_stack() {
+        let declared = arbiter_stack(runtime());
+        let control = arbiter_stack(
+            ntex::rt::System::build()
+                .name("control")
+                .stack_size(1024 * 1024),
+        );
+        assert!(
+            control < RUNTIME_STACK_BYTES / 2,
+            "a small-stack arbiter measured {control} bytes, so this reading does not discriminate"
+        );
+        // A guard page and page rounding are the only shortfall the kernel may
+        // impose on a requested stack.
+        assert!(
+            declared + 64 * 1024 >= RUNTIME_STACK_BYTES && declared <= RUNTIME_STACK_BYTES + 64 * 1024,
+            "an arbiter of the service runtime received {declared} bytes of stack, not its declared budget"
+        );
+    }
+
+    fn arbiter_stack(builder: ntex::rt::Builder) -> usize {
+        builder.build(ntex::rt::DefaultRuntime).block_on(async {
+            let arbiter = ntex::rt::Arbiter::new();
+            let size = arbiter
+                .handle()
+                .spawn(async { stack_bytes() })
+                .await
+                .expect("the arbiter answers");
+            arbiter.stop();
+            size.expect("the arbiter thread's stack attributes are readable")
+        })
+    }
+
+    /// Bytes the kernel gave the calling thread's stack.
+    #[expect(
+        unsafe_code,
+        reason = "a thread's own stack attributes are only readable through pthread"
+    )]
+    fn stack_bytes() -> Option<usize> {
+        // SAFETY: `pthread_getattr_np` fills an attribute object for the
+        // calling thread and `pthread_attr_getstack` reads the base and size
+        // recorded in it. Both receive pointers to locals that outlive the
+        // call, and the attribute object is destroyed before return.
+        unsafe {
+            let mut attr = std::mem::MaybeUninit::<libc::pthread_attr_t>::uninit();
+            if libc::pthread_getattr_np(libc::pthread_self(), attr.as_mut_ptr()) != 0 {
+                return None;
+            }
+            let mut attr = attr.assume_init();
+            let mut base = std::ptr::null_mut();
+            let mut size = 0usize;
+            let read = libc::pthread_attr_getstack(&raw const attr, &raw mut base, &raw mut size);
+            libc::pthread_attr_destroy(&raw mut attr);
+            (read == 0).then_some(size)
         }
     }
 }

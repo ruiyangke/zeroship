@@ -15,7 +15,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::time::Duration;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -377,7 +377,6 @@ impl Identity {
 pub struct Delivery {
     pub job: JobSpec,
     pub worker_id: WorkerId,
-    pub assignment_revision: Revision,
     pub attempt: Revision,
     pub deadline: UnixMillis,
 }
@@ -391,6 +390,96 @@ pub struct Delivery {
 pub struct DeliveryLease {
     pub delivery: Delivery,
     pub remaining_ms: NonZeroU64,
+    pub attempt_remaining_ms: NonZeroU64,
+}
+
+/// One zone-scoped claim request from a worker with free execution slots.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ClaimJobs {
+    /// The most deliveries the reply may hold, at most [`Self::MAX_DELIVERIES`].
+    pub max: NonZeroU32,
+    /// How long the caller waits for the reply, anchored before it sent the
+    /// request. The caller's own exchange is bounded by exactly this, so the
+    /// service and the caller stop at the same instant.
+    pub wait_ms: NonZeroU64,
+    #[serde(deserialize_with = "required_nullable")]
+    pub after: Option<AppId>,
+    /// Apps the caller recently failed to prepare. Narrows only, and holds at
+    /// most [`Self::MAX_EXCLUDE`] entries.
+    pub exclude: Vec<AppId>,
+}
+
+impl ClaimJobs {
+    /// The longest exclusion list a claim may carry.
+    ///
+    /// A PROTOCOL CONSTANT, not a setting of either end. The worker trims its
+    /// skip list to this bound and the service refuses a list above it, so the
+    /// two can never disagree the way a worker-side cap and a configurable
+    /// service-side limit could: a service configured below the worker's cap
+    /// would refuse every claim that worker made while its list was full.
+    pub const MAX_EXCLUDE: usize = 64;
+
+    /// The most deliveries one claim may ask for.
+    ///
+    /// A PROTOCOL CONSTANT for the same reason as [`Self::MAX_EXCLUDE`]. The
+    /// worker asks for no more than this whatever its slot count, and the
+    /// service refuses a request above it before doing any work for it, so no
+    /// caller's number sizes anything the service holds.
+    pub const MAX_DELIVERIES: u32 = 256;
+
+    /// What one delivery carries beside its replay journal and its inline
+    /// trigger input: the delivery's identity and lease, the task credential
+    /// and the invocation's identifiers, each bounded and small.
+    pub const DELIVERY_ENVELOPE_BYTES: usize = 16 * 1024;
+
+    /// The largest encoded reply a claim is answered with: room for one
+    /// maximal delivery.
+    ///
+    /// A PROTOCOL CONSTANT for the same reason as [`Self::MAX_EXCLUDE`]. A
+    /// delivery carries its run's replay journal, which admission bounds by
+    /// `MAX_JOURNAL_BYTES_CEILING`, an inline trigger input, which admission
+    /// bounds by `MAX_INPUT_BYTES_CEILING`, and its envelope. The service
+    /// always sends the first delivery, so no app is left unclaimable by the
+    /// size of its own journal, and this bound holds that delivery at its
+    /// largest. The service stops adding deliveries before the next would pass
+    /// it and gives that delivery back unsent; the worker accepts a reply of
+    /// exactly this size. A reply the worker refused would strand every lease
+    /// the service committed in it, so both ends read this one constant.
+    pub const MAX_REPLY_BYTES: usize = crate::workflow_policy::MAX_JOURNAL_BYTES_CEILING
+        + crate::workflow_policy::MAX_INPUT_BYTES_CEILING
+        + Self::DELIVERY_ENVELOPE_BYTES;
+}
+
+/// A claimed delivery and the journal acceptance for executable work.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ClaimedDelivery<A> {
+    pub lease: DeliveryLease,
+    #[serde(default = "absent_claim", skip_serializing_if = "Option::is_none")]
+    pub accepted: Option<A>,
+}
+
+const fn absent_claim<T>() -> Option<T> {
+    None
+}
+
+/// A batch reply whose cursor advances past every app the claim visited.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ClaimedJobs<A> {
+    pub deliveries: Vec<ClaimedDelivery<A>>,
+    #[serde(deserialize_with = "required_nullable")]
+    pub after: Option<AppId>,
+    pub lap_complete: bool,
+}
+
+fn required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(deserializer)
 }
 
 /// Host-authorized delivery with a deadline on the host's monotonic clock.
@@ -401,6 +490,7 @@ pub struct DeliveryLease {
 pub trait JobLease {
     fn delivery(&self) -> &Delivery;
     fn remaining(&self) -> Option<Duration>;
+    fn attempt_remaining(&self) -> Option<Duration>;
 }
 
 /// Scheduling classification without customer results or free-form failures.

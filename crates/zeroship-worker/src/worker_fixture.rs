@@ -22,6 +22,8 @@ pub struct Worker {
     pub logs: crate::logs::SharedLogs,
     pub meter: Arc<zeroship_metering::Meter>,
     pub storage: tempfile::TempDir,
+    /// The registry the kernel holds apps in, when the case installed one.
+    pub residency: Option<crate::residency::AppResidency>,
 }
 
 impl Worker {
@@ -30,6 +32,17 @@ impl Worker {
     }
 
     pub fn with_kernel(max_size: usize, kernel: KernelConfig) -> Self {
+        Self::build(max_size, kernel, false)
+    }
+
+    /// The same worker with a residency registry over its own stores, as
+    /// `main` composes every worker process: its database service's key and
+    /// binding stores and its shared environments.
+    pub fn holding(max_size: usize, kernel: KernelConfig) -> Self {
+        Self::build(max_size, kernel, true)
+    }
+
+    fn build(max_size: usize, mut kernel: KernelConfig, residency: bool) -> Self {
         zeroship_runtime::init::init_v8();
         let storage = tempfile::tempdir().expect("private worker storage");
         let blob_store: Arc<dyn BlobStore> = Arc::new(
@@ -57,6 +70,14 @@ impl Worker {
             crate::cache::fixture::bind_app(service, &app_id);
         }
         let envs = SharedEnvs::default();
+        if residency {
+            kernel.residency = Some(crate::residency::AppResidency::new(
+                kernel.db_service.as_ref().map(|service| service.project_keys().clone()),
+                kernel.db_service.as_ref().map(|service| service.app_bindings().clone()),
+                envs.clone(),
+            ));
+        }
+        let registry = kernel.residency.clone();
         crate::sync::put_env_from_json(
             &envs,
             app_id.clone(),
@@ -72,12 +93,13 @@ impl Worker {
             logs: crate::logs::new_store(),
             meter,
             storage,
+            residency: registry,
         }
     }
 
     pub async fn load(&self, source: &[u8], limits: AppRuntimeLimits, manifest: &Manifest) {
         crate::cache::load_app(
-            self.app_id.clone(),
+            crate::cache::hold(&self.app_id),
             crate::cache::test_modules(source),
             limits,
             Default::default(),
@@ -138,6 +160,7 @@ pub fn empty_kernel(meter: Arc<zeroship_metering::Meter>) -> KernelConfig {
         kv_store: None,
         storage_backend: None,
         meter,
+        residency: None,
     }
 }
 

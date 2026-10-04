@@ -2,8 +2,8 @@
 //!
 //! [`AppBackend`](zeroship_workflow::service::AppBackend) reaches the journal in
 //! process, over a handle the host opened. This one reaches the workflow service
-//! over HTTP, through the same [`WorkerCoordinator`] the host already registers
-//! and claims jobs with, so a creator call costs one authenticated request and
+//! over HTTP, through the same [`WorkerCoordinator`] the host already claims
+//! jobs with, so a creator call costs one authenticated request and
 //! the journal it lands in is the service's own.
 //!
 //! # Where this lives, and why
@@ -43,8 +43,8 @@ use serde_json::Value;
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{
-        AssignedScope, PayloadLocation, ReadStepOutput, RequestId, RestartRun, RunId, RunScope,
-        SignalRun, StartRun, StepOutputLocation, TransitionRun,
+        PayloadLocation, ReadStepOutput, RequestId, RestartRun, RunId, RunScope, SignalRun,
+        StartRun, StepOutputLocation, TransitionRun,
     },
 };
 use zeroship_workflow::{
@@ -58,12 +58,10 @@ use zeroship_workflow::{
 };
 use zeroship_workflow_client::{RunError, WorkerCoordinator};
 
-/// Creator calls for one app and one placement generation, served remotely.
+/// Creator calls for one app, served remotely.
 ///
-/// The scope is fixed for the life of this backend, the way an
-/// [`AppBackend`](zeroship_workflow::service::AppBackend)'s policy binding is:
-/// an assignment whose revision moves is a different generation, and the host
-/// replaces the entry rather than retargeting it.
+/// The app is fixed for the life of this backend, the way an
+/// [`AppBackend`](zeroship_workflow::service::AppBackend)'s policy binding is.
 ///
 /// # No local policy binding, and that is the decision
 ///
@@ -75,11 +73,12 @@ use zeroship_workflow_client::{RunError, WorkerCoordinator};
 /// rechecks the journal's closed epoch inside the caller's transaction. So the
 /// generation a call is admitted under is decided at the far end, and carrying a
 /// second one here would be a claim nothing rechecks. What this side does carry
-/// is the placement the far end authorizes against, which is `scope`.
+/// is the app every call acts for, which the service admits by the worker's
+/// verified zone.
 #[derive(Clone, Debug)]
 pub struct RemoteBackend {
     client: WorkerCoordinator,
-    scope: AssignedScope,
+    app_id: AppId,
     objects: PayloadObjects,
     /// Ceiling on the bytes one creator read may hold resident at once. The
     /// descriptor's own size is checked against it before the body is drained,
@@ -88,13 +87,13 @@ pub struct RemoteBackend {
 }
 
 impl RemoteBackend {
-    /// Serve `scope`'s app over `client`, reading payload objects from `objects`.
+    /// Serve `app` over `client`, reading payload objects from `objects`.
     ///
     /// # Errors
     /// Rejects an empty read budget.
     pub fn new(
         client: WorkerCoordinator,
-        scope: AssignedScope,
+        app_id: AppId,
         objects: PayloadObjects,
         read_limit: usize,
     ) -> Result<Self, WorkflowServiceError> {
@@ -105,7 +104,7 @@ impl RemoteBackend {
         }
         Ok(Self {
             client,
-            scope,
+            app_id,
             objects,
             read_limit,
         })
@@ -114,13 +113,7 @@ impl RemoteBackend {
     /// The one app every call through this backend acts for.
     #[must_use]
     pub const fn app_id(&self) -> &AppId {
-        &self.scope.app_id
-    }
-
-    /// The placement generation every call names.
-    #[must_use]
-    pub const fn scope(&self) -> &AssignedScope {
-        &self.scope
+        &self.app_id
     }
 
     fn run(run_id: &str) -> Result<RunId, WorkflowServiceError> {
@@ -130,7 +123,7 @@ impl RemoteBackend {
 
     fn scoped(&self, run_id: &str) -> Result<RunScope, WorkflowServiceError> {
         Ok(RunScope {
-            scope: self.scope.clone(),
+            app_id: self.app_id.clone(),
             run_id: Self::run(run_id)?,
         })
     }
@@ -151,6 +144,58 @@ impl RemoteBackend {
         self.objects
             .open_located(self.app_id(), payload_id, reference)
             .await
+    }
+}
+
+/// The request path's registry-free source of app backends.
+///
+/// A host holds one of these for the enrolled client and payload store it
+/// already has, and answers a [`RemoteBackend`] for ANY app that client may
+/// act for. Nothing is published per app: the service admits each call by
+/// the worker's verified zone against the app's frozen
+/// zone, so a worker that never ran an app can still serve its first
+/// `env.workflows` call without preparing anything.
+#[derive(Clone, Debug)]
+pub struct RemoteWorkflows {
+    client: WorkerCoordinator,
+    objects: PayloadObjects,
+    read_limit: usize,
+}
+
+impl RemoteWorkflows {
+    /// Serve any app over `client`, reading payload objects from `objects`.
+    ///
+    /// # Errors
+    /// Rejects an empty read budget.
+    pub fn new(
+        client: WorkerCoordinator,
+        objects: PayloadObjects,
+        read_limit: usize,
+    ) -> Result<Self, WorkflowServiceError> {
+        if read_limit == 0 {
+            return Err(WorkflowServiceError::InvalidRequest(
+                "workflow output read limit must be positive".into(),
+            ));
+        }
+        Ok(Self {
+            client,
+            objects,
+            read_limit,
+        })
+    }
+
+    /// A backend for `app`, which the service admits by the worker's zone.
+    ///
+    /// The read budget was validated when this registry was built, so composing
+    /// a backend cannot fail.
+    #[must_use]
+    pub fn backend(&self, app: AppId) -> RemoteBackend {
+        RemoteBackend {
+            client: self.client.clone(),
+            app_id: app,
+            objects: self.objects.clone(),
+            read_limit: self.read_limit,
+        }
     }
 }
 
@@ -237,7 +282,7 @@ impl WorkflowBackend for RemoteBackend {
         self.client
             .start_run(&StartRun {
                 request_id: RequestId::mint(),
-                scope: self.scope.clone(),
+                app_id: self.app_id.clone(),
                 workflow_name,
                 input,
                 options,
@@ -261,7 +306,7 @@ impl WorkflowBackend for RemoteBackend {
         self.client
             .signal_run(&SignalRun {
                 request_id: RequestId::mint(),
-                scope: self.scope.clone(),
+                app_id: self.app_id.clone(),
                 run_id: Self::run(&run_id)?,
                 options,
             })
@@ -277,7 +322,7 @@ impl WorkflowBackend for RemoteBackend {
         self.client
             .transition_run(&TransitionRun {
                 request_id: RequestId::mint(),
-                scope: self.scope.clone(),
+                app_id: self.app_id.clone(),
                 run_id: Self::run(&run_id)?,
                 operation: op,
             })
@@ -293,7 +338,7 @@ impl WorkflowBackend for RemoteBackend {
         self.client
             .restart_run(&RestartRun {
                 request_id: RequestId::mint(),
-                scope: self.scope.clone(),
+                app_id: self.app_id.clone(),
                 run_id: Self::run(&run_id)?,
                 options,
             })
@@ -316,7 +361,7 @@ impl WorkflowBackend for RemoteBackend {
         let located = self
             .client
             .read_step_output(&ReadStepOutput {
-                scope: self.scope.clone(),
+                app_id: self.app_id.clone(),
                 run_id: Self::run(&run_id)?,
                 name,
                 occurrence,

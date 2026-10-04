@@ -4,12 +4,13 @@
 )]
 
 use crate::support;
+use crate::support::QueueCalls;
 
 use std::{cell::Cell, future::ready, time::Duration};
-use crate::support::{Admin, Backend, Fixture};
+use crate::support::{Admin, Backend, Fixture, Owner};
 use zeroship_core::{
     app_id::AppId,
-    workflow_coordination::{Assignment, RunId, VerifyAssignment, WorkerId},
+    workflow_coordination::{RunId, WorkerId},
     workflow_jobs::{
         Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, JournalSettlement,
         SettlementReceipt,
@@ -119,21 +120,12 @@ async fn until(fixture: &Fixture, deadline: i64) {
     .expect("database clock reached the requested deadline");
 }
 
-async fn assignment(fixture: &Fixture, app: &AppId) -> Assignment {
-    Assignment {
-        app_id: app.clone(),
-        worker_id: WorkerId::mint(),
-        revision: 1.try_into().unwrap(),
-        expires_at: (now(fixture).await + 120_000).try_into().unwrap(),
-    }
+async fn assignment(_fixture: &Fixture, app: &AppId) -> Owner {
+    Owner::new(app.clone(), WorkerId::mint())
 }
 
-fn identity(assignment: &Assignment) -> VerifyAssignment {
-    VerifyAssignment {
-        app_id: assignment.app_id.clone(),
-        worker_id: assignment.worker_id.clone(),
-        assignment_revision: assignment.revision,
-    }
+fn identity(assignment: &Owner) -> WorkerId {
+    assignment.worker_id.clone()
 }
 
 fn job(app: &AppId) -> JobSpec {
@@ -174,7 +166,7 @@ fn sweep(app: &AppId) -> JobSpec {
 /// An app whose queue holds a creator row at the head of the dispatch order and
 /// a maintenance row behind it. Returns them in that order.
 async fn head_then_sweep(queue: &Queue, fixture: &Fixture, app: &AppId) -> (JobSpec, JobSpec) {
-    queue.register_scope(app).await.unwrap();
+    queue.register_scope(app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     let head = job(app);
     let behind = sweep(app);
     queue.submit(&head).await.unwrap();
@@ -211,6 +203,27 @@ async fn stored(fixture: &Fixture, id: &JobId) -> Option<Value> {
     rows.into_iter().next()
 }
 
+/// Expire a leased job's delivery without waiting out its lease window: the
+/// stored deadline moves into the past, which is the observable state a
+/// redelivery waits for.
+async fn expire(fixture: &Fixture, spec: &JobSpec) {
+    let updated = fixture
+        .database()
+        .await
+        .collection("jobs")
+        .unwrap()
+        .execute(Operation::Update {
+            filter: value!({
+                "id":spec.id.as_str(),"app_id":spec.app_id.as_str(),"state":"leased"
+            }),
+            patch: value!({"lease_deadline":0}),
+            many: true,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(updated, Output::Count(1)), "{updated:?}");
+}
+
 /// Wait until a manager session queues behind a lock the administrator holds.
 /// The predicate names the live waiter and its blocker rather than the
 /// statement text, because the server serves the activity snapshot it cached
@@ -233,29 +246,33 @@ async fn blocked_manager(admin: &compio_postgres::Client, predicate: &str) {
 #[compio::test]
 async fn postgres_blocked_candidate_read_uses_fresh_lease() {
     let fixture = Fixture::new(Backend::Postgres).await;
+    let lease = Duration::from_secs(1);
     let queue = queue(
         &fixture,
         Options {
-            lease: Duration::from_millis(200),
+            lease,
             ..Options::default()
         },
     )
     .await;
     let app = AppId::mint();
-    queue.register_scope(&app).await.unwrap();
+    queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     let spec = job(&app);
     queue.submit(&spec).await.unwrap();
     let authority = assignment(&fixture, &app).await;
     let Admin::Postgres(admin) = &fixture.admin else {
         unreachable!()
     };
+    // A lease measured before the claim reached the lock would end by here
+    // plus one lease, on the database clock.
+    let stale_by = now(&fixture).await + i64::try_from(lease.as_millis()).unwrap();
     admin
         .batch_execute("BEGIN; LOCK TABLE workflow_manager.jobs IN ACCESS EXCLUSIVE MODE")
         .await
         .unwrap();
     let release = async {
         blocked_manager(admin, "l.relation='workflow_manager.jobs'::regclass").await;
-        compio::time::sleep(Duration::from_millis(400)).await;
+        until(&fixture, stale_by).await;
         admin.batch_execute("COMMIT").await.unwrap();
     };
     let (delivery, ()) = futures::join!(queue.claim(&authority), release);
@@ -267,120 +284,6 @@ async fn postgres_blocked_candidate_read_uses_fresh_lease() {
     assert_eq!(
         stored(&fixture, &spec.id).await.unwrap()["lease_deadline"],
         value!(delivery.deadline.get())
-    );
-}
-
-#[compio::test]
-async fn postgres_shortened_authority_bounds_commit_wait_and_receipt_replays() {
-    let fixture = Fixture::new(Backend::Postgres).await;
-    let queue = queue(&fixture, Options::default()).await;
-    let app = AppId::mint();
-    queue.register_scope(&app).await.unwrap();
-    let spec = job(&app);
-    queue.submit(&spec).await.unwrap();
-    let authority = assignment(&fixture, &app).await;
-    let delivery = queue
-        .claim(&authority)
-        .await
-        .unwrap()
-        .unwrap()
-        .delivery()
-        .clone();
-    let command = settlement(&delivery);
-    let Admin::Postgres(admin) = &fixture.admin else {
-        unreachable!()
-    };
-    admin
-        .batch_execute(
-            "CREATE FUNCTION workflow_manager.block_settlement_commit() RETURNS trigger \
-         LANGUAGE plpgsql AS $$ BEGIN \
-           IF NEW.state = 'settled' THEN PERFORM pg_advisory_xact_lock(90316); END IF; \
-           RETURN NEW; END $$; \
-         CREATE CONSTRAINT TRIGGER block_settlement_commit \
-           AFTER UPDATE ON workflow_manager.jobs DEFERRABLE INITIALLY DEFERRED \
-           FOR EACH ROW EXECUTE FUNCTION workflow_manager.block_settlement_commit(); \
-         SELECT pg_advisory_lock(90316)",
-        )
-        .await
-        .unwrap();
-    let checks = Cell::new(0);
-    let shortened_expiry = Cell::new(0);
-    let (send, response) = futures::channel::oneshot::channel();
-    let settle = async {
-        let result = queue
-            .settle_authorized(
-                &identity(&authority),
-                &command,
-                |_| {
-                    checks.set(checks.get() + 1);
-                    let final_check = checks.get() > 1;
-                    let mut observed = authority.clone();
-                    let fixture = &fixture;
-                    let shortened_expiry = &shortened_expiry;
-                    async move {
-                        if final_check {
-                            let expires = now(fixture).await + 200;
-                            shortened_expiry.set(expires);
-                            observed.expires_at = expires.try_into().unwrap();
-                        }
-                        Ok(observed)
-                    }
-                },
-                |_| ready(Ok(authority.worker_id.clone())),
-            )
-            .await;
-        let _ = send.send(result);
-    };
-    let release = async {
-        blocked_manager(admin, "l.locktype='advisory'").await;
-        let result = compio::time::timeout(Duration::from_secs(1), response).await;
-        admin
-            .query("SELECT pg_advisory_unlock(90316)", &[])
-            .await
-            .unwrap();
-        result
-            .expect("final verified expiry must bound the commit reply wait")
-            .unwrap()
-    };
-    let ((), result) = futures::join!(settle, release);
-    assert_eq!(result, Err(Error::Timeout));
-    until(&fixture, shortened_expiry.get()).await;
-    let expired_authority = Assignment {
-        expires_at: shortened_expiry.get().try_into().unwrap(),
-        ..authority.clone()
-    };
-    let receipt = queue
-        .settle_authorized(
-            &identity(&expired_authority),
-            &command,
-            |_| ready(Err(Error::Denied)),
-            |_| ready(Ok(authority.worker_id.clone())),
-        )
-        .await
-        .unwrap();
-    assert_eq!(receipt.job_id, spec.id);
-    assert_eq!(receipt.app_id, app);
-    assert_eq!(receipt.attempt, delivery.attempt);
-    assert_eq!(receipt.outcome, *command.outcome());
-    assert_eq!(
-        queue.settle(&expired_authority, &command).await.unwrap(),
-        receipt
-    );
-    let Output::Rows { rows, .. } = fixture
-        .database()
-        .await
-        .collection("jobs")
-        .unwrap()
-        .find(value!({"app_id":app.as_str()}), value!({}))
-        .await
-        .unwrap()
-    else {
-        panic!("job query returned a count");
-    };
-    assert_eq!(rows.len(), 1, "a settlement publishes no successor row");
-    assert_eq!(
-        stored(&fixture, &spec.id).await.unwrap()["state"],
-        value!("settled")
     );
 }
 
@@ -434,37 +337,15 @@ async fn concurrent_scope_registration_preserves_identity_and_queue(fixture: &Fi
     }
 }
 
-async fn register_scopes_together(fixture: &Fixture, hosts: &[Queue], app: &AppId, round: usize) {
-    let registrations =
-        futures::future::join_all(hosts.iter().map(|host| host.register_scope(app)));
-    let results = if let Admin::Postgres(admin) = &fixture.admin {
-        admin
-            .batch_execute("BEGIN; LOCK TABLE workflow_manager.queue_scopes IN SHARE MODE")
-            .await
-            .unwrap();
-        let release = async {
-            compio::time::timeout(Duration::from_secs(3), async {
-                loop {
-                    let blocked: i64 = admin.query(
-                        "SELECT count(DISTINCT l.pid) FROM pg_locks l WHERE NOT l.granted \
-                         AND l.mode='RowExclusiveLock' AND l.relation='workflow_manager.queue_scopes'::regclass",
-                        &[],
-                    ).await.unwrap()[0].get(0);
-                    if usize::try_from(blocked).unwrap() == hosts.len() {
-                        break;
-                    }
-                    compio::time::sleep(Duration::from_millis(1)).await;
-                }
-            })
-            .await
-            .expect("independent registrations must reach the shared table barrier");
-            admin.batch_execute("COMMIT").await.unwrap();
-        };
-        let (results, ()) = futures::join!(registrations, release);
-        results
-    } else {
-        registrations.await
-    };
+async fn register_scopes_together(_fixture: &Fixture, hosts: &[Queue], app: &AppId, round: usize) {
+    // The scope insert conflicts on the identity and leaves the winner's row
+    // untouched, so every concurrent registration observes the same scope row
+    // and answers the same success.
+    let zone = zeroship_core::ZoneId::default_zone();
+    let results = futures::future::join_all(
+        hosts.iter().map(|host| host.register_scope(app, &zone)),
+    )
+    .await;
     for (host, result) in results.into_iter().enumerate() {
         result.unwrap_or_else(|error| panic!("registration round {round}, host {host}: {error:?}"));
     }
@@ -491,10 +372,14 @@ async fn submission_and_competing_claims(fixture: &Fixture) {
     let foreign = AppId::mint();
     let spec = job(&app);
     assert_eq!(first.submit(&spec).await, Err(Error::Denied));
-    let (a, b) = futures::join!(first.register_scope(&app), second.register_scope(&app));
+    let zone = zeroship_core::ZoneId::default_zone();
+    let (a, b) = futures::join!(
+        first.register_scope(&app, &zone),
+        second.register_scope(&app, &zone)
+    );
     a.unwrap();
     b.unwrap();
-    first.register_scope(&foreign).await.unwrap();
+    first.register_scope(&foreign, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     let (a, b) = futures::join!(first.submit(&spec), second.submit(&spec));
     assert_eq!(a.unwrap(), spec);
     assert_eq!(b.unwrap(), spec);
@@ -505,40 +390,34 @@ async fn submission_and_competing_claims(fixture: &Fixture) {
     let other_authority = assignment(fixture, &foreign).await;
     assert!((first.claim(&other_authority).await.unwrap()).is_none());
     let (a, b) = futures::join!(first.claim(&authority), second.claim(&authority));
-    let deliveries: Vec<_> = [a.unwrap(), b.unwrap()].into_iter().flatten().collect();
+    let deliveries: Vec<_> = [a, b]
+        .into_iter()
+        .filter_map(|result| match result {
+            Ok(grant) => grant,
+            // The loser of the scope lock is skipped, not delayed.
+            Err(Error::Contended) => None,
+            Err(error) => panic!("competing claim: {error:?}"),
+        })
+        .collect();
     assert_eq!(deliveries.len(), 1);
     let delivery = deliveries[0].delivery();
     assert_eq!(delivery.job, spec);
     assert_eq!(delivery.attempt.get(), 1);
-    assert!(delivery.deadline <= authority.expires_at);
-    first.register_scope(&app).await.unwrap();
+    assert!(delivery.deadline.get() > now(fixture).await);
+    first.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     first.submit(&spec).await.unwrap();
     assert!((second.claim(&authority).await.unwrap()).is_none());
-    for foreign_authority in [
-        Assignment {
-            worker_id: WorkerId::mint(),
-            ..authority.clone()
-        },
-        Assignment {
-            app_id: foreign.clone(),
-            ..authority.clone()
-        },
-        Assignment {
-            revision: 2.try_into().unwrap(),
-            ..authority.clone()
-        },
-    ] {
-        assert!(matches!(
-            first.heartbeat(&foreign_authority, delivery).await,
-            Err(Error::Denied)
-        ));
-        assert_eq!(
-            first
-                .settle(&foreign_authority, &settlement(delivery))
-                .await,
-            Err(Error::Denied)
-        );
-    }
+    let foreign_worker = Owner::new(app.clone(), WorkerId::mint());
+    assert!(matches!(
+        first.heartbeat(&foreign_worker, delivery).await,
+        Err(Error::Denied)
+    ));
+    assert_eq!(
+        first
+            .settle(&foreign_worker, &settlement(delivery))
+            .await,
+        Err(Error::Denied)
+    );
     let mut forged = delivery.clone();
     forged.attempt = 2.try_into().unwrap();
     assert!(matches!(
@@ -570,7 +449,7 @@ async fn delayed_jobs_and_redelivery(fixture: &Fixture) {
     )
     .await;
     let app = AppId::mint();
-    queue.register_scope(&app).await.unwrap();
+    queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     let authority = assignment(fixture, &app).await;
     let mut spec = job(&app);
     spec.available_at = (now(fixture).await + 400).try_into().unwrap();
@@ -592,7 +471,6 @@ async fn delayed_jobs_and_redelivery(fixture: &Fixture) {
         .delivery()
         .clone();
     assert!(renewed.deadline >= delivery.deadline);
-    assert!(renewed.deadline <= authority.expires_at);
     until(fixture, renewed.deadline.get()).await;
     assert!(matches!(
         queue.heartbeat(&authority, &renewed).await,
@@ -633,37 +511,14 @@ async fn delayed_jobs_and_redelivery(fixture: &Fixture) {
             .await,
         Err(Error::Conflict)
     );
-    let expired = Assignment {
-        expires_at: 0.try_into().unwrap(),
-        ..replacement_authority.clone()
-    };
-    assert!(matches!(
-        replacement.claim(&expired).await,
-        Err(Error::Denied)
-    ));
+    let expired = Owner::new(replacement_authority.app_id.clone(), WorkerId::mint());
     assert!(matches!(
         replacement.heartbeat(&expired, &redelivered).await,
         Err(Error::Denied)
     ));
 
-    let bounded_app = AppId::mint();
-    replacement.register_scope(&bounded_app).await.unwrap();
-    let bounded = Assignment {
-        expires_at: (now(fixture).await + 400).try_into().unwrap(),
-        ..assignment(fixture, &bounded_app).await
-    };
-    replacement.submit(&job(&bounded_app)).await.unwrap();
-    let delivery = replacement
-        .claim(&bounded)
-        .await
-        .unwrap()
-        .unwrap()
-        .delivery()
-        .clone();
-    assert_eq!(delivery.deadline, bounded.expires_at);
-
     let retry_app = AppId::mint();
-    queue.register_scope(&retry_app).await.unwrap();
+    queue.register_scope(&retry_app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     let retry_authority = assignment(fixture, &retry_app).await;
     queue.submit(&job(&retry_app)).await.unwrap();
     let original = queue
@@ -698,7 +553,7 @@ async fn delayed_jobs_and_redelivery(fixture: &Fixture) {
 async fn atomic_receipt_and_replayed_receipts(fixture: &Fixture) {
     let queue = queue(fixture, Options::default()).await;
     let app = AppId::mint();
-    queue.register_scope(&app).await.unwrap();
+    queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     let authority = assignment(fixture, &app).await;
     let parent = job(&app);
     queue.submit(&parent).await.unwrap();
@@ -747,21 +602,17 @@ async fn atomic_receipt_and_replayed_receipts(fixture: &Fixture) {
 
 async fn assert_replay_authentication(
     queue: &Queue,
-    authority: &Assignment,
+    authority: &Owner,
     command: &JournalSettlement,
     receipt: &SettlementReceipt,
 ) {
-    let expired = Assignment {
-        expires_at: 0.try_into().unwrap(),
-        ..authority.clone()
-    };
     let identity_checked = Cell::new(false);
     assert_eq!(
         &queue
             .settle_authorized(
-                &identity(&expired),
+                &authority.worker_id,
                 command,
-                |_| async { panic!("receipt replay must not require live placement") },
+                |_| ready(Err(Error::Denied)),
                 |tx| {
                     identity_checked.set(true);
                     async move {
@@ -778,9 +629,9 @@ async fn assert_replay_authentication(
     assert_eq!(
         queue
             .settle_authorized(
-                &identity(&expired),
+                &authority.worker_id,
                 command,
-                |_| ready(Ok(expired.clone())),
+                |_| ready(Err(Error::Denied)),
                 |_| ready(Ok(WorkerId::mint()))
             )
             .await,
@@ -789,9 +640,9 @@ async fn assert_replay_authentication(
     assert_eq!(
         queue
             .settle_authorized(
-                &identity(&expired),
+                &authority.worker_id,
                 command,
-                |_| ready(Ok(expired.clone())),
+                |_| ready(Err(Error::Denied)),
                 |_| ready(Err(Error::Denied))
             )
             .await,
@@ -802,7 +653,7 @@ async fn assert_replay_authentication(
 async fn revocation_rolls_back_mutations(fixture: &Fixture) {
     let queue = queue(fixture, Options::default()).await;
     let app = AppId::mint();
-    queue.register_scope(&app).await.unwrap();
+    queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     let authority = assignment(fixture, &app).await;
     let spec = job(&app);
     queue.submit(&spec).await.unwrap();
@@ -810,8 +661,9 @@ async fn revocation_rolls_back_mutations(fixture: &Fixture) {
     assert!(matches!(
         queue
             .claim_authorized(
-                &identity(&authority),
-                Claimant::Placed,
+            &authority.app_id,
+            &authority.worker_id,
+                Claimant::Worker,
                 Ok(support::delivery_ceiling()),
                 |tx| {
                     checks.set(checks.get() + 1);
@@ -835,7 +687,7 @@ async fn revocation_rolls_back_mutations(fixture: &Fixture) {
     checks.set(0);
     assert!(matches!(
         queue
-            .heartbeat_authorized(&identity(&authority), &delivery, |tx| {
+            .heartbeat_authorized(&authority.worker_id, &delivery, |tx| {
                 checks.set(checks.get() + 1);
                 revoke_in_transaction(tx, &authority, &spec, ["leased", "leased"], checks.get())
             })
@@ -852,7 +704,7 @@ async fn revocation_rolls_back_mutations(fixture: &Fixture) {
     assert_eq!(
         queue
             .settle_authorized(
-                &identity(&authority),
+            &authority.worker_id,
                 &command,
                 |tx| {
                     checks.set(checks.get() + 1);
@@ -896,11 +748,11 @@ async fn assert_transaction_job(tx: &Database, spec: &JobSpec, state: &str) -> R
 
 async fn revoke_in_transaction(
     tx: Database,
-    authority: &Assignment,
+    authority: &Owner,
     spec: &JobSpec,
     states: [&str; 2],
     check: i64,
-) -> Result<Assignment, Error> {
+) -> Result<WorkerId, Error> {
     assert!((1..=2).contains(&check));
     assert_transaction_job(&tx, spec, states[usize::try_from(check - 1).unwrap()]).await?;
     let written = tx
@@ -916,7 +768,7 @@ async fn revoke_in_transaction(
         "authorization must see its previous write in the same transaction"
     );
     if check == 1 {
-        Ok(authority.clone())
+        Ok(authority.worker_id.clone())
     } else {
         Err(Error::Denied)
     }
@@ -941,7 +793,7 @@ async fn assert_authorization_rolled_back(fixture: &Fixture, app: &AppId) {
 async fn cancellation_rolls_back_settlement(
     fixture: &Fixture,
     queue: &Queue,
-    authority: &Assignment,
+    authority: &Owner,
     command: &JournalSettlement,
 ) {
     let blocked = Queue::connect(
@@ -959,7 +811,7 @@ async fn cancellation_rolls_back_settlement(
     assert_eq!(
         blocked
             .settle_authorized(
-                &identity(authority),
+            &authority.worker_id,
                 command,
                 |tx| {
                     checks.set(checks.get() + 1);
@@ -967,7 +819,7 @@ async fn cancellation_rolls_back_settlement(
                     let authority = authority.clone();
                     async move {
                         if complete {
-                            Ok(authority)
+                            Ok(authority.worker_id.clone())
                         } else {
                             assert_transaction_job(&tx, &command.delivery().job, "settled").await?;
                             std::future::pending().await
@@ -1005,7 +857,7 @@ async fn claim_timeout_rolls_back(fixture: &Fixture) {
     .await
     .unwrap();
     let expiring_app = AppId::mint();
-    expiring.register_scope(&expiring_app).await.unwrap();
+    expiring.register_scope(&expiring_app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     let expiring_authority = assignment(fixture, &expiring_app).await;
     let expiring_spec = job(&expiring_app);
     expiring.submit(&expiring_spec).await.unwrap();
@@ -1013,8 +865,9 @@ async fn claim_timeout_rolls_back(fixture: &Fixture) {
     let timed = compio::time::timeout(
         Duration::from_secs(1),
         expiring.claim_authorized(
-            &identity(&expiring_authority),
-            Claimant::Placed,
+            &expiring_authority.app_id,
+            &expiring_authority.worker_id,
+            Claimant::Worker,
             Ok(support::delivery_ceiling()),
             |_| {
                 checks.set(checks.get() + 1);
@@ -1022,7 +875,7 @@ async fn claim_timeout_rolls_back(fixture: &Fixture) {
                 let authority = expiring_authority.clone();
                 async move {
                     if first {
-                        Ok(authority)
+                        Ok(authority.worker_id.clone())
                     } else {
                         std::future::pending().await
                     }
@@ -1055,10 +908,11 @@ async fn refused_kind_at_the_head(fixture: &Fixture) {
     let authority = assignment(fixture, &restricted).await;
     let claimed = queue
         .claim_authorized(
-            &identity(&authority),
+            &authority.app_id,
+            &authority.worker_id,
             Claimant::Maintenance,
             Ok(support::delivery_ceiling()),
-            |_| ready(Ok(authority.clone())),
+            |_| ready(Ok(authority.worker_id.clone())),
         )
         .await
         .unwrap()
@@ -1072,10 +926,11 @@ async fn refused_kind_at_the_head(fixture: &Fixture) {
     let control_authority = assignment(fixture, &full).await;
     let control = queue
         .claim_authorized(
-            &identity(&control_authority),
-            Claimant::Placed,
+            &control_authority.app_id,
+            &control_authority.worker_id,
+            Claimant::Worker,
             Ok(support::delivery_ceiling()),
-            |_| ready(Ok(control_authority.clone())),
+            |_| ready(Ok(control_authority.worker_id.clone())),
         )
         .await
         .unwrap()
@@ -1095,10 +950,11 @@ async fn refused_kind_at_the_head(fixture: &Fixture) {
     );
     assert!(queue
         .claim_authorized(
-            &identity(&authority),
+            &authority.app_id,
+            &authority.worker_id,
             Claimant::Maintenance,
             Ok(support::delivery_ceiling()),
-            |_| ready(Ok(authority.clone())),
+            |_| ready(Ok(authority.worker_id.clone())),
         )
         .await
         .unwrap()
@@ -1115,11 +971,11 @@ async fn refused_kind_at_the_head(fixture: &Fixture) {
     );
 }
 
-/// A placed host leaves every journal sweep for the lane that owns the journal,
+/// A worker leaves every journal sweep for the lane that owns the journal,
 /// including the ones that move payload objects.
 ///
 /// The collection row sits at the head of the dispatch order with a creator row
-/// behind it. The placed claimant answers the row behind, and once that is
+/// behind it. A worker's claim answers the row behind, and once that is
 /// settled it answers nothing while the collection row is still `ready`. The
 /// control differs only in the claimant, which takes that same row out of that
 /// same queue.
@@ -1133,7 +989,7 @@ async fn refused_kind_at_the_head(fixture: &Fixture) {
 async fn journal_sweep_is_left_to_the_lane(fixture: &Fixture) {
     let queue = queue(fixture, Options::default()).await;
     let app = AppId::mint();
-    queue.register_scope(&app).await.unwrap();
+    queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     let bytes = collection(&app);
     let behind = job(&app);
     queue.submit(&bytes).await.unwrap();
@@ -1161,17 +1017,18 @@ async fn journal_sweep_is_left_to_the_lane(fixture: &Fixture) {
     );
     assert!(
         queue.claim(&authority).await.unwrap().is_none(),
-        "the sweep is all that is left and a placed host answers nothing"
+        "the sweep is all that is left and a worker's claim answers nothing"
     );
 
     // The control: the same row, differing only in who claims it.
     assert_eq!(
         queue
             .claim_authorized(
-                &identity(&authority),
+            &authority.app_id,
+            &authority.worker_id,
                 Claimant::Maintenance,
                 Ok(support::delivery_ceiling()),
-                |_| ready(Ok(authority.clone())),
+                |_| ready(Ok(authority.worker_id.clone())),
             )
             .await
             .unwrap()
@@ -1181,17 +1038,17 @@ async fn journal_sweep_is_left_to_the_lane(fixture: &Fixture) {
         bytes
     );
 
-    // The population. The lane refuses creator work alone, and a placed host
+    // The population. The lane refuses creator work alone, and a worker
     // refuses every sweep - so a kind classified as neither, or a tenth
     // operation added without a class, fails here rather than silently landing
     // on whichever host asked first.
     let mut lane: Vec<&str> = Claimant::Maintenance.denied().collect();
     lane.sort_unstable();
     assert_eq!(lane, ["advance"]);
-    let mut placed: Vec<&str> = Claimant::Placed.denied().collect();
-    placed.sort_unstable();
+    let mut worker: Vec<&str> = Claimant::Worker.denied().collect();
+    worker.sort_unstable();
     assert_eq!(
-        placed,
+        worker,
         [
             "activate",
             "close",
@@ -1209,7 +1066,7 @@ async fn journal_sweep_is_left_to_the_lane(fixture: &Fixture) {
 async fn bounds_and_privileges(fixture: &Fixture) {
     let queue = queue(fixture, Options::default()).await;
     let app = AppId::mint();
-    queue.register_scope(&app).await.unwrap();
+    queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     let authority = assignment(fixture, &app).await;
     let spec = job(&app);
     queue.submit(&spec).await.unwrap();
@@ -1344,16 +1201,9 @@ case!(
 /// job, because no executor produced an outcome for it.
 async fn delivery_budget_bounds_redelivery(fixture: &Fixture) {
     const CEILING: i64 = 2;
-    let queue = queue(
-        fixture,
-        Options {
-            lease: Duration::from_millis(300),
-            ..Options::default()
-        },
-    )
-    .await;
+    let queue = queue(fixture, Options::default()).await;
     let app = AppId::mint();
-    queue.register_scope(&app).await.unwrap();
+    queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     let authority = assignment(fixture, &app).await;
     let selector = identity(&authority);
     let spec = job(&app);
@@ -1364,8 +1214,8 @@ async fn delivery_budget_bounds_redelivery(fixture: &Fixture) {
         let queue = queue.clone();
         async move {
             queue
-                .claim_authorized(&selector, Claimant::Placed, Ok(ceiling), move |_| {
-                    ready(Ok(authority.clone()))
+                .claim_authorized(&authority.app_id, &selector, Claimant::Worker, Ok(ceiling), move |_| {
+                    ready(Ok(authority.worker_id.clone()))
                 })
                 .await
                 .unwrap()
@@ -1377,7 +1227,7 @@ async fn delivery_budget_bounds_redelivery(fixture: &Fixture) {
         let queue = queue.clone();
         async move {
             queue
-                .heartbeat_authorized(&selector, &delivery, move |_| ready(Ok(authority.clone())))
+                .heartbeat_authorized(&selector, &delivery, move |_| ready(Ok(authority.worker_id.clone())))
                 .await
                 .unwrap()
         }
@@ -1385,14 +1235,14 @@ async fn delivery_budget_bounds_redelivery(fixture: &Fixture) {
     // More deferred attempts than the budget allows. Each is claimed, never
     // renewed, and left to expire; none of them may count.
     for _ in 0..=CEILING {
-        let grant = claim(CEILING)
+        claim(CEILING)
             .await
             .expect("an attempt that never began keeps the job claimable");
         assert_eq!(
             stored(fixture, &spec.id).await.unwrap()["execution_attempts"],
             value!(0)
         );
-        until(fixture, grant.delivery().deadline.get()).await;
+        expire(fixture, &spec).await;
     }
     // Attempts that began. Renewing twice within one attempt must spend the
     // budget once.
@@ -1405,7 +1255,7 @@ async fn delivery_budget_bounds_redelivery(fixture: &Fixture) {
             stored(fixture, &spec.id).await.unwrap()["execution_attempts"],
             value!(spent)
         );
-        until(fixture, renewed.delivery().deadline.get()).await;
+        expire(fixture, &spec).await;
     }
     assert!(
         claim(CEILING).await.is_none(),
@@ -1424,9 +1274,13 @@ async fn delivery_budget_bounds_redelivery(fixture: &Fixture) {
     assert_eq!(readmitted.delivery().job, spec);
     assert!(matches!(
         queue
-            .claim_authorized(&selector, Claimant::Placed, Ok(0), |_| ready(Ok(
-                authority.clone()
-            )))
+            .claim_authorized(
+                &authority.app_id,
+                &selector,
+                Claimant::Worker,
+                Ok(0),
+                |_| ready(Ok(authority.worker_id.clone()))
+            )
             .await,
         Err(Error::Invalid)
     ));
@@ -1448,22 +1302,18 @@ async fn delivery_grant_budget(fixture: &Fixture) {
     )
     .await;
     let app = AppId::mint();
-    queue.register_scope(&app).await.unwrap();
+    queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     let authority = assignment(fixture, &app).await;
-    let stale = Assignment {
-        expires_at: 0.try_into().unwrap(),
-        ..authority.clone()
-    };
-    let selector = identity(&stale);
+    let selector = identity(&authority);
     let spec = job(&app);
     queue.submit(&spec).await.unwrap();
-    assert!(matches!(queue.claim(&stale).await, Err(Error::Denied)));
     let grant = queue
         .claim_authorized(
+            &authority.app_id,
             &selector,
-            Claimant::Placed,
+            Claimant::Worker,
             Ok(support::delivery_ceiling()),
-            |_| ready(Ok(authority.clone())),
+            |_| ready(Ok(authority.worker_id.clone())),
         )
         .await
         .unwrap()
@@ -1477,7 +1327,7 @@ async fn delivery_grant_budget(fixture: &Fixture) {
     assert!(delayed.remaining_ms < original.remaining_ms);
     let renewed = queue
         .heartbeat_authorized(&selector, grant.delivery(), |_| {
-            ready(Ok(authority.clone()))
+            ready(Ok(authority.worker_id.clone()))
         })
         .await
         .unwrap();
@@ -1504,4 +1354,63 @@ async fn delivery_grant_budget(fixture: &Fixture) {
         .settle(&authority, &settlement(renewed.delivery()))
         .await
         .unwrap();
+}
+
+case!(
+    sqlite_a_heartbeat_never_extends_a_lease_past_the_attempt_cap,
+    postgres_a_heartbeat_never_extends_a_lease_past_the_attempt_cap,
+    attempt_cap_bounds_renewal
+);
+
+/// Renewal moves a delivery's lease, but never past the instant its attempt
+/// began plus the queue's attempt cap. The control is a renewal early in the
+/// attempt, which a whole lease still fits inside the cap, and which moves the
+/// deadline later than the claim set it.
+async fn attempt_cap_bounds_renewal(fixture: &Fixture) {
+    let lease = Duration::from_secs(2);
+    let cap = Duration::from_secs(3);
+    let queue = queue(
+        fixture,
+        Options {
+            lease,
+            max_attempt: cap,
+            ..Options::default()
+        },
+    )
+    .await;
+    let app = AppId::mint();
+    queue
+        .register_scope(&app, &zeroship_core::ZoneId::default_zone())
+        .await
+        .unwrap();
+    let spec = job(&app);
+    queue.submit(&spec).await.unwrap();
+    let owner = assignment(fixture, &app).await;
+    let claimed = queue.claim(&owner).await.unwrap().unwrap();
+    let row = stored(fixture, &spec.id).await.unwrap();
+    let leased_at = row["leased_at"].as_i64().expect("a claim stamps its attempt");
+    let millis = |duration: Duration| i64::try_from(duration.as_millis()).unwrap();
+    let ceiling = leased_at + millis(cap);
+    let claimed_until = row["lease_deadline"].as_i64().unwrap();
+    assert!(claimed_until <= leased_at + millis(lease));
+
+    until(fixture, leased_at + 300).await;
+    let renewed = queue.heartbeat(&owner, claimed.delivery()).await.unwrap();
+    let renewed_until = stored(fixture, &spec.id).await.unwrap()["lease_deadline"]
+        .as_i64()
+        .unwrap();
+    assert!(
+        claimed_until < renewed_until && renewed_until < ceiling,
+        "an early renewal moved the lease from {claimed_until} to {renewed_until}, cap {ceiling}"
+    );
+
+    until(fixture, ceiling - millis(lease) + 300).await;
+    let capped = queue.heartbeat(&owner, renewed.delivery()).await.unwrap();
+    assert_eq!(
+        stored(fixture, &spec.id).await.unwrap()["lease_deadline"],
+        value!(ceiling),
+        "a renewal a whole lease would carry past the cap stops at it"
+    );
+    assert_eq!(capped.delivery().deadline.get(), ceiling);
+    assert!(capped.lease().unwrap().attempt_remaining_ms.get() <= u64::try_from(millis(cap)).unwrap());
 }

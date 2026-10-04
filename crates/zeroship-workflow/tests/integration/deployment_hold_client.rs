@@ -307,7 +307,6 @@ fn request_contract_rejects_caller_supplied_authority_and_unscoped_metadata() {
     for (field, value) in [
         ("holderId", json!(typed_id::generate("dhl"))),
         ("workerId", json!(WorkerId::mint())),
-        ("assignmentRevision", json!(1)),
         ("deployHash", json!("a".repeat(64))),
         ("schema", json!("customer")),
         ("generation", json!(0)),

@@ -1,6 +1,8 @@
 //! Closed deployment scheduling metadata; business input stays in the app bundle.
 
-use crate::{app_id::AppId, workflow_coordination::Revision, workflow_jobs::DeploymentId};
+use crate::{
+    app_id::AppId, workflow_coordination::Revision, workflow_jobs::DeploymentId, zone_id::ZoneId,
+};
 use serde::{Deserialize, Serialize};
 pub use zeroship_id::workflow::ScheduleId;
 pub use zeroship_workflow_calendar::{ScheduleCatchUp, ScheduleOverlap, ScheduleTiming};
@@ -23,6 +25,7 @@ pub struct ScheduleDescriptor {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RegisterSchedules {
     pub app_id: AppId,
+    pub execution_zone_id: ZoneId,
     pub deployment_id: DeploymentId,
     pub schedules: Vec<ScheduleDescriptor>,
 }
@@ -32,6 +35,7 @@ pub struct RegisterSchedules {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ActivateSchedules {
     pub app_id: AppId,
+    pub execution_zone_id: ZoneId,
     pub deployment_id: DeploymentId,
     pub revision: Revision,
 }
@@ -43,5 +47,6 @@ pub struct ActivateSchedules {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DisableSchedules {
     pub app_id: AppId,
+    pub execution_zone_id: ZoneId,
     pub revision: Revision,
 }

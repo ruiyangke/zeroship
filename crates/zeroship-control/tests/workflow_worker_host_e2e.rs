@@ -4,10 +4,9 @@
 //! Testcontainers PostgreSQL. The run is started the way an end user starts
 //! one - an ordinary HTTP request to the app through the gateway, reaching
 //! `env.workflows` in a request isolate - and it completes only if the host
-//! registered, took its placement, prepared the app from this process's own
-//! resources, published its backend to the request thread, and executed the
-//! job the manager delivered back. Then the worker is stopped the way an
-//! orchestrator stops it.
+//! registered, admitted the start by the worker's zone, prepared the app when
+//! the manager delivered its job, and executed that job. Then the worker is
+//! stopped the way an orchestrator stops it.
 //!
 //! Native library availability proves none of that: every seam here is a
 //! process boundary.
@@ -78,10 +77,10 @@ async fn a_worker_host_runs_a_run_started_through_ordinary_app_ingress() {
     // The host registers under the identity it enrolled with at boot; nothing
     // in this test hands it a credential, and nothing here nominates a worker.
     // Control's lifecycle publisher registers and activates the deployment with
-    // the manager, whose placement lane gives the app an owner because it has
-    // claimable work. Until the host has taken that placement, prepared the app
-    // and published its backend, a start is refused, so this poll is the
-    // readiness assertion for the whole chain.
+    // the manager. The run is admitted by the worker's zone against the app's
+    // frozen zone as soon as the host is enrolled, so this poll is the
+    // readiness assertion for the whole chain; the manager later places the
+    // advance job the start created.
     let run = until(
         &mut fleet,
         "the app never became ready on the worker",

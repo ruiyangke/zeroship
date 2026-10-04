@@ -222,10 +222,10 @@ async fn the_two_zones_run_a_workflow_without_reaching_each_other() {
     );
 
     // The host registers under the identity it enrolled with at boot; nothing
-    // here hands it a credential and nothing here nominates a worker. Until
-    // the host has taken its placement, prepared the app from this process's
-    // own creator resources and published its backend, a start is refused, so
-    // this poll is the readiness assertion for the whole chain.
+    // here hands it a credential and nothing here nominates a worker. The run
+    // is admitted by the worker's ZONE against the app's frozen zone, so a
+    // start is served as soon as the host is enrolled and the app is in its
+    // zone -- no claimed job and no per-app preparation gate the request path.
     let run = until(
         &mut fleet,
         "the app never became ready on the worker",
@@ -310,21 +310,27 @@ async fn the_two_zones_run_a_workflow_without_reaching_each_other() {
         "a retained handle must answer while its generation is published: {body}",
     );
 
-    // REMOVING THE APP is what withdraws that generation. Control's archive and
-    // delete markers make the manager's lifecycle lane abandon the app; the
-    // placement is released, and the host's next assignment scan retires the
-    // entry - which withdraws the published backend and revokes its policy
-    // generation. A handle the app cloned earlier holds that retired
-    // generation and must refuse.
+    // REMOVING THE APP is what makes the SERVICE refuse the retained handle.
+    // Control's archive and delete markers set `deleted_at`; the workflow
+    // service's policy source reads `deleted` beside the app's zone on its next
+    // observation, and `PolicyObservation::admits_zone` refuses a deleted app to
+    // every worker. The handle the app cloned earlier holds a backend that
+    // reaches the service for its app, so its next call is refused there rather
+    // than locally.
+    //
+    // THE OBSERVATION VALIDITY BOUNDS THE POLL. `ControlPolicies` answers the
+    // cached observation until `workflow_rollout_config.source_validity_ms`
+    // expires, so deletion becomes visible to a run call within one validity
+    // window, which the `until` deadline below covers.
     //
     // THE TWO COLUMNS ARE DELIBERATELY THE SEAM, and this arm is about the
-    // manager and the worker rather than about Control's delete handler.
-    // `deleted_at IS NOT NULL` is the whole of what the manager reads
-    // (`zeroship-workflow-manager/src/lifecycle.rs`), and `archived_at` comes
-    // with it because the platform's own `apps_deleted_app_is_archived` check
-    // refuses a deleted app that is not archived - so writing both is writing
-    // the state Control produces. What this does NOT cover: whether Control's
-    // own delete endpoint writes them, or what else it does around them.
+    // service and the worker rather than about Control's delete handler.
+    // `deleted_at IS NOT NULL` is what the app-facts source reports as
+    // `deleted`, and `archived_at` comes with it because the platform's own
+    // `apps_deleted_app_is_archived` check refuses a deleted app that is not
+    // archived - so writing both is writing the state Control produces. What
+    // this does NOT cover: whether Control's own delete endpoint writes them,
+    // or what else it does around them.
     let plan: String = platform
         .query_one(
             "SELECT plan_id FROM zeroship.apps WHERE id = $1",
@@ -348,14 +354,16 @@ async fn the_two_zones_run_a_workflow_without_reaching_each_other() {
     // from the key the fleet's gateway process holds - with the route table
     // taken out of the question.
     //
-    // The exact code, not merely some code: a retired generation is
-    // `WorkflowServiceError::Unavailable` from `ReadyApps::current`, and a
-    // refusal that changed to anything else - a policy denial, a fenced
-    // ingress, an internal error - would be a different mechanism wearing the
-    // same status.
+    // The exact code, not merely some code: the service's zone rule refuses a
+    // deleted app with `PermissionDenied`, which reaches creator code as
+    // `workflow_permission_denied`, and a refusal that changed to anything else
+    // - a retired generation's `workflow_unavailable`, a fenced ingress, an
+    // internal error - would be a different mechanism wearing the same status.
+    // The fixture app maps every workflow refusal to 503, so the code is what
+    // tells the two mechanisms apart.
     let refusal = until(
         &mut fleet,
-        "a retained handle outlived the app's retired generation",
+        "a retained handle outlived the app the service was told to refuse",
         async |fleet| {
             let (status, body) = dispatch(fleet, &plan, "/__host/retained").await;
             (status == 503).then(|| body["code"].as_str().unwrap_or_default().to_owned())
@@ -363,8 +371,8 @@ async fn the_two_zones_run_a_workflow_without_reaching_each_other() {
     )
     .await;
     assert_eq!(
-        refusal, "workflow_unavailable",
-        "the revoked handle must refuse as a retired generation",
+        refusal, "workflow_permission_denied",
+        "the SERVICE must refuse a deleted app, not a local retired generation",
     );
 
     drop(creator);

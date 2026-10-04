@@ -42,22 +42,26 @@ test("compiles both manager backends with matching typed collection metadata", (
     ["app_id", "operation_kind", "state", "id"],
   ]);
   assert(collections.jobs.indexes.some(index => index.unique && index.fields.join() === "app_id,dispatch_order"));
-  for (const [name, duplicateIdentity] of [["queue_scopes", "app_id"], ["workers", "worker_id"]]) {
-    assert.equal(collections[name].fields[duplicateIdentity], undefined);
-    assert.equal(collections[name].indexes?.some(index => index.unique) ?? false, false);
-  }
+  assert.equal(collections.queue_scopes.fields.app_id, undefined);
+  assert.equal(collections.queue_scopes.indexes.some(index => index.unique), false);
+  assert.equal(collections.queue_scopes.fields.execution_zone_id.required, true);
+  assert(collections.queue_scopes.indexes.some(index => index.fields.join() === "execution_zone_id,id"));
   assert.deepEqual(Object.keys(collections).sort(), Object.keys(managerIdentityColumns).sort());
-  assert.equal(collections.workers.fields.lock_version.default, 0);
-  assert.equal(collections.workers.fields.capacity.default, 1);
-  assert.equal(collections.workers.fields.state.default, "ready");
-  assert.equal(collections.workers.fields.expires_at.default, 0);
+  for (const retired of ["workers", "assignments", "placement_receipts", "capacity_demands"]) {
+    assert.equal(collections[retired], undefined, retired);
+  }
+  assert.equal(collections.jobs.fields.assignment_revision, undefined);
+  assert.equal(collections.jobs.fields.deferred_until.required ?? false, false);
+  assert.equal(collections.jobs.fields.deferrals.default, 0);
+  assert.equal(collections.jobs.fields.leased_at.required ?? false, false);
+  for (const count of ["exhausted_jobs", "backed_off_jobs", "withheld_jobs"]) {
+    assert.equal(collections.capacity_targets.fields[count].default, 0, count);
+  }
+  assert.equal(collections.capacity_targets.fields.observed, undefined);
   for (const collection of Object.values(collections)) {
     assert.deepEqual(Object.keys(collection.fields).filter(name => collection.fields[name].primaryKey), ["id"]);
   }
-  for (const name of ["placement_receipts", "management"]) {
-    assert(collections[name].indexes.some(index => index.unique && index.fields.join() === "app_id,request_id"));
-  }
-  assert(collections.assignments.indexes.some(index => index.unique && index.fields.join() === "app_id,worker_id"));
+  assert(collections.management.indexes.some(index => index.unique && index.fields.join() === "app_id,request_id"));
   assert.equal(collections.schema_version.fields.fingerprint.required, true);
   assert.deepEqual(JSON.parse(artifacts.find(artifact => artifact.name === "identity-columns.json").content), managerIdentityColumns);
 });

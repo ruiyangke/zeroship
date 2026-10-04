@@ -806,3 +806,124 @@ async fn postgres_row_lock_handles_and_unpolled_reads_expire_with_the_callback()
     );
     owner.close().await;
 }
+
+/// A non-waiting locking read refuses a row another session holds as lock
+/// contention, at once rather than after the lock budget, through both the
+/// entity query and the read builder. The control is the same read of a row
+/// nobody holds, which locks and returns it.
+#[compio::test]
+async fn postgres_for_update_nowait_refuses_a_held_row_without_waiting() {
+    let owner = fixture(true).await;
+    let backend = postgres_backend(&owner);
+    let holder = backend.pool().acquire().await.unwrap();
+    let table = qualified(&owner, "lock_rows");
+    holder
+        .batch_execute(&format!(
+            "BEGIN; SELECT id FROM {table} WHERE id = 'held' FOR UPDATE"
+        ))
+        .await
+        .unwrap();
+    // Well inside the lock budget a waiting read would spend before refusing.
+    let budget = Duration::from_millis(u64::from(crate::budgets::DB_LOCK_TIMEOUT_MS / 2));
+
+    let refused = compio::time::timeout(
+        budget,
+        owner.database.transaction(|tx| async move {
+            tx.entity::<lock_rows::Entity>()?
+                .query()
+                .filter(lock_rows::id.eq("held")?)
+                .for_update_nowait()?
+                .first::<LockedRow>()
+                .await
+        }),
+    )
+    .await
+    .expect("a non-waiting locking read waited for the held row");
+    assert!(
+        matches!(refused, Err(DbError::LockContention { .. })),
+        "{refused:?}"
+    );
+    let refused = compio::time::timeout(
+        budget,
+        owner.database.transaction(|tx| async move {
+            let alias = tx.entity::<lock_rows::Entity>()?.alias("r")?;
+            tx.from(&alias)
+                .filter(alias.column(lock_rows::id).eq("held")?)
+                .for_update_nowait()?
+                .select(alias.row::<LockedRow>())?
+                .all()
+                .await
+        }),
+    )
+    .await
+    .expect("a non-waiting builder read waited for the held row");
+    assert!(
+        matches!(refused, Err(DbError::LockContention { .. })),
+        "{refused:?}"
+    );
+
+    let free = owner
+        .database
+        .transaction(|tx| async move {
+            tx.entity::<lock_rows::Entity>()?
+                .query()
+                .filter(lock_rows::id.eq("free")?)
+                .for_update_nowait()?
+                .first::<LockedRow>()
+                .await
+        })
+        .await
+        .unwrap()
+        .expect("a row nobody holds is locked and returned");
+    assert_eq!(free.id, "free");
+    holder.batch_execute("ROLLBACK").await.unwrap();
+    drop(holder);
+    owner.close().await;
+}
+
+/// A backend without row locks refuses a non-waiting locking read exactly as it
+/// refuses a waiting one, and outside a transaction the builder refuses before
+/// any read.
+#[compio::test]
+async fn sqlite_refuses_for_update_nowait_as_it_refuses_for_update() {
+    let owner = fixture(false).await;
+    let root = owner.database.clone();
+    assert_code(
+        root.entity::<lock_rows::Entity>()
+            .unwrap()
+            .query()
+            .for_update_nowait()
+            .unwrap_err(),
+        "transaction_required",
+    );
+    owner
+        .database
+        .transaction(|tx| async move {
+            let table = tx.entity::<lock_rows::Entity>()?;
+            assert_code(
+                table
+                    .query()
+                    .for_update_nowait()?
+                    .all::<LockedRow>()
+                    .await
+                    .unwrap_err(),
+                "unsupported_backend_feature",
+            );
+            let alias = table.alias("r")?;
+            assert_code(
+                tx.from(&alias)
+                    .for_update_nowait()?
+                    .select(alias.row::<LockedRow>())?
+                    .all()
+                    .await
+                    .unwrap_err(),
+                "unsupported_backend_feature",
+            );
+            // Control: the same transaction keeps reading.
+            assert_eq!(table.query().all::<LockedRow>().await?.len(), 2);
+            Ok::<_, DbError>(())
+        })
+        .await
+        .unwrap();
+    owner.close().await;
+}

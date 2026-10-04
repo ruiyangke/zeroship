@@ -14,7 +14,7 @@
 //! is therefore logged once per attempt, not once per pass.
 
 use super::catalog::{self, CatalogError, ACKNOWLEDGED, ACTIVATE, DISABLE, PENDING};
-use super::models::catalog::app_lifecycle_intents as intents;
+use super::models::catalog::{app_lifecycle_intents as intents, apps};
 use super::shared::{Catalog, Closing};
 use futures::future::{self, Either};
 use std::{
@@ -156,6 +156,12 @@ pub enum PublishError {
     Catalog(CatalogError),
 }
 
+impl From<CatalogError> for PublishError {
+    fn from(error: CatalogError) -> Self {
+        PublishError::Catalog(error)
+    }
+}
+
 #[derive(Debug, Clone, FromRow)]
 #[orm(entity = intents)]
 struct PendingIntent {
@@ -177,6 +183,12 @@ struct StoredIntent {
     registration: Option<String>,
     state: String,
     receipt: Option<String>,
+}
+
+#[derive(FromRow)]
+#[orm(entity = apps)]
+struct AppZone {
+    execution_zone_id: String,
 }
 
 /// A rotating publication driver over Control's pending intents.
@@ -322,6 +334,22 @@ impl<M: ScheduleManager> Publisher<M> {
 
     async fn publish(&self, intent: &PendingIntent) -> Result<(), PublishError> {
         let app = AppId::parse(&intent.app_id).map_err(|_| PublishError::InvalidIntent("app"))?;
+        let zone = self
+            .database
+            .entity::<apps::Entity>()
+            .map_err(CatalogError::from)?
+            .query()
+            .filter(
+                apps::id
+                    .eq(app.as_str())
+                    .map_err(CatalogError::from)?,
+            )
+            .first::<AppZone>()
+            .await
+            .map_err(CatalogError::from)?
+            .ok_or(PublishError::InvalidIntent("app zone"))?;
+        let zone = zeroship_core::ZoneId::parse(&zone.execution_zone_id)
+            .map_err(|_| PublishError::InvalidIntent("app zone"))?;
         let revision = Revision::try_from(intent.revision)
             .map_err(|_| PublishError::InvalidIntent("revision"))?;
         let receipt = match (
@@ -343,6 +371,7 @@ impl<M: ScheduleManager> Publisher<M> {
                     .map_err(PublishError::Manager)?;
                 let request = ActivateSchedules {
                     app_id: app,
+                    execution_zone_id: zone,
                     deployment_id: deployment,
                     revision,
                 };
@@ -359,6 +388,7 @@ impl<M: ScheduleManager> Publisher<M> {
             (DISABLE, None, None) => {
                 let request = DisableSchedules {
                     app_id: app,
+                    execution_zone_id: zone,
                     revision,
                 };
                 let receipt = self

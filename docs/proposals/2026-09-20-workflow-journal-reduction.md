@@ -124,9 +124,9 @@ is why "enforce it in the database" is a floor here rather than a resolution.
 
 **Lease validity has two representations and they are not kept apart.** The durable form is
 already right: `__zeroship_workflow_tasks.deadline` is an absolute integer, as are the manager's
-`assignments.expires_at` and `workers.expires_at`, and `Clock::sample` in
+`jobs.lease_deadline` and `jobs.leased_at`, and `Clock::sample` in
 `crates/zeroship-workflow-manager/src/clock.rs` reads the DATABASE clock rather than a local one.
-But `Instant` escapes the enforcement site: `Lease` and `Budget` in
+But `Instant` escapes the enforcement site: `DeliveryGrant` and `Budget` in
 `crates/zeroship-workflow-manager/src/queue.rs` hold one, and `Validity::Until` in
 `crates/zeroship-workflow/src/service/policy.rs` holds one. An `Instant` is process-local by
 construction, so two replicas holding one cannot compare them at all.
@@ -796,7 +796,7 @@ match on that triple alone. A pair is only reported here when the agreement surv
 ### The tenant root and the lock, which is the one with a consequence
 
     journal   __zeroship_workflow_app_state    id, app_id, signal_epoch, last_polled_at, ...
-    manager   queue_scopes                     id, lock_version, dispatch_cursor
+    manager   queue_scopes                     id, execution_zone_id, lock_version, dispatch_cursor
 
 Not a column in common beyond the key, and the same role: one row per app, the target of nearly
 every foreign key on its side, and the row carrying that side's concurrency counter.
@@ -808,16 +808,15 @@ because neither can see the other's schema.** `lock_app_state` in
     patch: value!({"$inc":{"signal_epoch":0}}),
 
 an increment by zero, which changes no value and exists only to take the row lock. The manager
-writes the same statement against its own counter in
-`crates/zeroship-workflow-manager/src/queue.rs` and
-`crates/zeroship-workflow-manager/src/coordinator/placement.rs`:
+writes the same statement against its own counter in `lock_scope`
+(`crates/zeroship-workflow-manager/src/queue.rs`):
 
     value!({"$inc":{"lock_version":0}}),
 
-and again through the typed form `targets::lock_version.increment(0)?` in
-`crates/zeroship-workflow-manager/src/capacity.rs`. Two independently designed schemas arrived at
-the same tenant-root-plus-zero-increment lock, which is good evidence the shape is right and
-exactly why the collision matters.
+and a worker's claim on PostgreSQL takes the same row with `SELECT ... FOR UPDATE NOWAIT`
+(`lock_scope_for_claim` in the same file), so a contended app is passed rather than waited for.
+Two independently designed schemas arrived at the same tenant-root-plus-zero-increment lock,
+which is good evidence the shape is right and exactly why the collision matters.
 
 This document already argues that the journal's concurrency unit is not an arbitrary row but the
 row the schema designates as the tenant. **The manager designates a different row, for the same
@@ -1097,7 +1096,7 @@ probe keeps passing while saying nothing about the tables it now depends on.
 **Step 1 was right not to.** It installed the journal and granted nothing;
 `MANAGER_TABLES` names no journal table and neither does the census, and
 `platform_role_serves_the_journal_without_customer_or_ddl_privileges` in
-`crates/zeroship-workflow-server/tests/platform_schema.rs` binds that absence.
+`crates/zeroship-workflow-server/tests/integration/platform_schema.rs` binds that absence.
 At step 1 the correct state is no privileges and no entries. This proposal
 first assigned the obligation to step 1; that was wrong, and the check is what
 found it.
@@ -1106,5 +1105,5 @@ Neither schema is installed by the service. The journal arrives by the platform
 migration above, and the manager schema by
 `db/migrations-ts/20260911000000_workflow_coordination.ts`; `SCHEMA_SQL` is the
 manager's generated PostgreSQL DDL, which
-`crates/zeroship-workflow-server/tests/coordinator.rs` applies to stand a fixture
+`crates/zeroship-workflow-server/tests/integration/coordinator.rs` applies to stand a fixture
 up.

@@ -7,9 +7,8 @@ use zeroship_data_orm::{orm::FromRow, schema::Schema};
 
 mod schema_definition;
 pub use schema::{
-    assignments, capacity_demands, capacity_targets, jobs, management,
-    management_scopes, placement_receipts, queue_scopes, recovery_duties, recovery_scopes,
-    workers,
+    capacity_targets, jobs, management, management_scopes, queue_scopes, recovery_duties,
+    recovery_scopes,
 };
 pub use schema_definition::schema;
 
@@ -44,8 +43,9 @@ pub struct Job {
     /// renewals of one delivery contribute once.
     pub executed_attempt: Option<i64>,
     pub worker_id: Option<String>,
-    pub assignment_revision: Option<i64>,
     pub lease_deadline: Option<i64>,
+    pub leased_at: Option<i64>,
+    pub deferrals: i64,
     pub outcome: Option<String>,
     pub settlement_digest: Option<String>,
     pub created_at: i64,
@@ -75,16 +75,6 @@ impl Job {
 }
 
 #[derive(FromRow)]
-#[orm(entity = workers)]
-pub struct Worker {
-    pub id: String,
-    pub capacity: i64,
-    pub state: String,
-    pub expires_at: i64,
-    pub execution_zone_id: Option<String>,
-}
-
-#[derive(FromRow)]
 #[orm(entity = queue_scopes)]
 pub struct Scope {
     #[expect(
@@ -92,28 +82,8 @@ pub struct Scope {
         reason = "queue_scopes.id completes the FromRow projection; only dispatch_cursor is read"
     )]
     pub id: String,
+    pub execution_zone_id: String,
     pub dispatch_cursor: i64,
-}
-
-#[derive(FromRow)]
-#[orm(entity = assignments)]
-pub struct Placement {
-    pub id: String,
-    pub app_id: String,
-    pub worker_id: String,
-    pub revision: i64,
-    pub expires_at: i64,
-    pub released: bool,
-    pub refused: bool,
-}
-
-#[derive(FromRow)]
-#[orm(entity = placement_receipts)]
-pub struct PlacementReceipt {
-    pub operation: String,
-    pub worker_id: String,
-    pub expected_revision: Option<i64>,
-    pub reason: Option<String>,
 }
 
 #[derive(FromRow)]
@@ -157,11 +127,9 @@ enum Work {
 /// A host that takes rows off an app's queue.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Claimant {
-    /// A worker holding a placement on the app. It runs creator code, and that
-    /// is the whole of what it takes: the sweeps need no placement, and a host
-    /// that runs creator code is the wrong privilege for the journal or for the
-    /// store behind it.
-    Placed,
+    /// An enrolled worker in the app's execution zone. It runs creator code,
+    /// while maintenance stays with the journal-owning service.
+    Worker,
     /// A lane in the process that owns the journal and the payload store, so
     /// every sweep is its to take and creator code is not.
     Maintenance,
@@ -188,8 +156,8 @@ impl Claimant {
     /// host asked first.
     const fn admits(self, work: Work) -> bool {
         match (self, work) {
-            (Self::Placed, Work::Creator) | (Self::Maintenance, Work::Maintenance) => true,
-            (Self::Placed, Work::Maintenance) | (Self::Maintenance, Work::Creator) => false,
+            (Self::Worker, Work::Creator) | (Self::Maintenance, Work::Maintenance) => true,
+            (Self::Worker, Work::Maintenance) | (Self::Maintenance, Work::Creator) => false,
         }
     }
 }

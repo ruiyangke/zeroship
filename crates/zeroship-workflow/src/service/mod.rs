@@ -37,8 +37,7 @@ pub use payloads::{
     PayloadTarget, PayloadWriter, StagedPayload, StepOutput, PAYLOAD_NAMESPACE,
 };
 pub use policy::{
-    AssignedPolicies, HostPolicies, IngressEpochs, PolicyAuthority, PolicyBinding, PolicyRefresh,
-    PolicySnapshot,
+    HostPolicies, IngressEpochs, PolicyAuthority, PolicyBinding, PolicyRefresh, PolicySnapshot,
 };
 mod schedules;
 mod signals;

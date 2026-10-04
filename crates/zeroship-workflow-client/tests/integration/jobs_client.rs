@@ -8,6 +8,7 @@ use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use futures::{channel::oneshot, future::Either};
 use serde_json::{json, Value};
 use std::{
+    num::{NonZeroU32, NonZeroU64},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -20,20 +21,19 @@ use zeroship_core::{
     service_identity::{endpoints, verify_service_call, ServiceEndpoint},
     service_peers::{ServiceAuth, ServiceKeyring},
     workflow_coordination::{
-        AssignedScope, FailureCode, ManagementOutcome, RequestId, RestartTarget, RunId,
-        RunOperation, RunState, WorkerId, AUDIENCE,
+        FailureCode, ManagementOutcome, RequestId, RestartTarget, RunId, RunOperation, RunState,
+        WorkerId, AUDIENCE,
     },
     workflow_jobs::{
-        BroadcastId, Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
+        BroadcastId, ClaimJobs, Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
         ManagementCommand, PropagationId, SettlementReceipt,
     },
     workflow_schedules::ScheduleId,
 };
-use zeroship_workflow_client::{Error, JobJournal, Options, WorkerCoordinator};
+use zeroship_workflow_client::{ClaimedJob, Error, JobJournal, Options, WorkerCoordinator};
 
 struct Fixture {
     auth: Arc<ServiceAuth>,
-    scope: AssignedScope,
     spec: JobSpec,
     delivery: Delivery,
 }
@@ -55,13 +55,10 @@ impl Fixture {
             .unwrap(),
             Arc::new(TransportAssertionVerifier::new(ServiceTrustBundle::new())),
         ));
-        let scope = AssignedScope {
-            app_id: AppId::mint(),
-            assignment_revision: 1.try_into().unwrap(),
-        };
+        let app = AppId::mint();
         let spec = JobSpec {
             id: JobId::mint(),
-            app_id: scope.app_id.clone(),
+            app_id: app.clone(),
             operation: JobOperation::Advance {
                 deployment_id: DeploymentId::mint(),
                 run_id: RunId::mint(),
@@ -73,14 +70,12 @@ impl Fixture {
         let delivery = Delivery {
             job: spec.clone(),
             worker_id: worker,
-            assignment_revision: scope.assignment_revision,
             attempt: 1.try_into().unwrap(),
             // Deliberately unrelated to the receiving worker's wall clock.
             deadline: 1.try_into().unwrap(),
         };
         Self {
             auth,
-            scope,
             spec,
             delivery,
         }
@@ -158,7 +153,25 @@ fn receipt(delivery: &Delivery, outcome: JobOutcome) -> SettlementReceipt {
 }
 
 fn lease(delivery: &Delivery, remaining_ms: u64) -> Value {
-    json!({"delivery":delivery,"remainingMs":remaining_ms})
+    json!({"delivery":delivery,"remainingMs":remaining_ms,"attemptRemainingMs":remaining_ms})
+}
+
+/// The batch claim request these contracts send: one delivery, a wait that the
+/// scripted peer answers immediately, and no cursor or exclusions. The app is
+/// not named: the credential supplies the zone the claim is scoped to.
+fn claim_request() -> ClaimJobs {
+    ClaimJobs {
+        max: NonZeroU32::new(1).unwrap(),
+        wait_ms: NonZeroU64::new(1_000).unwrap(),
+        after: None,
+        exclude: Vec::new(),
+    }
+}
+
+/// The first delivery a batch claim answered, or none for an empty lap.
+async fn claimed_job(client: &WorkerCoordinator) -> Result<Option<ClaimedJob<Value>>, Error> {
+    let batch = client.claim_jobs::<AnyJournal>(&claim_request()).await?;
+    Ok(batch.deliveries.into_iter().next())
 }
 
 /// A renewal request naming no journal task, so these cases exercise the queue
@@ -206,16 +219,21 @@ impl Exchange {
         Self::new(endpoint, request, json!({"lease": lease}))
     }
 
-    /// A claim reply: the queue lease, and the journal acceptance the same
-    /// exchange carries for the one operation that hands out a task. Derived from
-    /// the lease rather than passed in, so a case that alters the operation in a
-    /// reply body alters which halves that reply is allowed to carry.
+    /// A claim reply: the zone-claim envelope holding one delivery, and the
+    /// journal acceptance the same exchange carries for the one operation that
+    /// hands out a task. Derived from the lease rather than passed in, so a
+    /// case that alters the operation in a reply body alters which halves that
+    /// reply is allowed to carry.
     fn claimed(request: &impl serde::Serialize, lease: Value) -> Self {
-        let mut body = json!({"lease": lease});
-        if body["lease"]["delivery"]["job"]["operation"]["kind"] == json!("advance") {
-            body["accepted"] = json!({"kind": "deferred"});
+        let mut delivery = json!({"lease": lease});
+        if delivery["lease"]["delivery"]["job"]["operation"]["kind"] == json!("advance") {
+            delivery["accepted"] = json!({"kind": "deferred"});
         }
-        Self::new(endpoints::WORKFLOW_JOB_CLAIM, request, body)
+        Self::new(
+            endpoints::WORKFLOW_JOB_CLAIM,
+            request,
+            json!({"deliveries":[delivery],"after":null,"lapComplete":true}),
+        )
     }
 
     /// A settlement reply. It carries the queue receipt alone, whichever half
@@ -360,14 +378,18 @@ async fn exercise_job_methods(fixture: &Fixture) {
     peer(
         fixture,
         vec![
-            Exchange::claimed(&fixture.scope, lease(&fixture.delivery, 60_000)),
+            Exchange::claimed(&claim_request(), lease(&fixture.delivery, 60_000)),
             Exchange::granted(endpoints::WORKFLOW_JOB_HEARTBEAT, &renewal(&fixture.delivery), lease(&renewed, 60_000)),
             Exchange::settled(&committed(&renewed), json!(settled)),
             Exchange::settled(&committed(&renewed), json!(settled)),
-            Exchange::new(endpoints::WORKFLOW_JOB_CLAIM, &fixture.scope, Value::Null),
+            Exchange::new(
+                endpoints::WORKFLOW_JOB_CLAIM,
+                &claim_request(),
+                json!({"deliveries":[],"after":null,"lapComplete":true}),
+            ),
         ],
         async |client| {
-            let claimed = client.claim_job::<AnyJournal>(&fixture.scope).await.unwrap().unwrap();
+            let claimed = claimed_job(&client).await.unwrap().unwrap();
             assert_eq!(claimed.lease.delivery(), &fixture.delivery);
             assert!(claimed.lease.remaining().unwrap() <= Duration::from_secs(60));
             let heartbeat = client.heartbeat_job::<AnyJournal>(&claimed.lease, None).await.unwrap();
@@ -375,7 +397,7 @@ async fn exercise_job_methods(fixture: &Fixture) {
             assert!(heartbeat.lease.remaining().unwrap() <= Duration::from_secs(60));
             assert_eq!(client.settle_committed(&renewed).await.unwrap(), settled);
             assert_eq!(client.settle_committed(&renewed).await.unwrap(), settled);
-            assert!(client.claim_job::<AnyJournal>(&fixture.scope).await.unwrap().is_none());
+            assert!(claimed_job(&client).await.unwrap().is_none());
         },
     )
     .await;
@@ -443,11 +465,11 @@ async fn manager_dispatched_jobs_can_be_claimed_and_settled() {
         peer(
             &fixture,
             vec![
-                Exchange::claimed(&fixture.scope, lease(&fixture.delivery, 60_000)),
+                Exchange::claimed(&claim_request(), lease(&fixture.delivery, 60_000)),
                 Exchange::settled(&committed(&fixture.delivery), json!(settled)),
             ],
             async |client| {
-                let claimed = client.claim_job::<AnyJournal>(&fixture.scope).await.unwrap().unwrap();
+                let claimed = claimed_job(&client).await.unwrap().unwrap();
                 assert_eq!(claimed.lease.delivery(), &fixture.delivery);
                 assert_eq!(client.settle_committed(&fixture.delivery).await.unwrap(), settled);
             },
@@ -647,13 +669,12 @@ async fn settlement_receipts_reject_open_outcomes_and_foreign_families() {
 }
 
 #[compio::test]
-async fn claim_rejects_foreign_and_malformed_lease_metadata() {
+async fn claim_rejects_malformed_lease_metadata() {
     let fixture = Fixture::new();
     let valid = lease(&fixture.delivery, 60_000);
     let mut cases = Vec::new();
     for (field, value) in [
         ("workerId", json!(WorkerId::mint())),
-        ("assignmentRevision", json!(2)),
         ("attempt", json!(0)),
         ("input", json!("private")),
     ] {
@@ -661,9 +682,6 @@ async fn claim_rejects_foreign_and_malformed_lease_metadata() {
         altered["delivery"][field] = value;
         cases.push(altered);
     }
-    let mut foreign = valid.clone();
-    foreign["delivery"]["job"]["appId"] = json!(AppId::mint());
-    cases.push(foreign);
     let mut nested = valid.clone();
     nested["delivery"]["job"]["operation"]["history"] = json!(["private"]);
     cases.push(nested);
@@ -710,10 +728,10 @@ async fn claim_rejects_foreign_and_malformed_lease_metadata() {
     for body in cases {
         peer(
             &fixture,
-            vec![Exchange::claimed(&fixture.scope, body)],
+            vec![Exchange::claimed(&claim_request(), body)],
             async |client| {
                 assert_eq!(
-                    client.claim_job::<AnyJournal>(&fixture.scope).await.unwrap_err(),
+                    claimed_job(&client).await.unwrap_err(),
                     Error::InvalidResponse
                 );
             },
@@ -729,7 +747,6 @@ async fn heartbeat_preserves_the_full_immutable_delivery() {
     let mut cases = Vec::new();
     for (field, value) in [
         ("workerId", json!(WorkerId::mint())),
-        ("assignmentRevision", json!(2)),
         ("attempt", json!(2)),
     ] {
         let mut altered = valid.clone();
@@ -755,11 +772,11 @@ async fn heartbeat_preserves_the_full_immutable_delivery() {
         peer(
             &fixture,
             vec![
-                Exchange::claimed(&fixture.scope, valid.clone()),
+                Exchange::claimed(&claim_request(), valid.clone()),
                 Exchange::granted(endpoints::WORKFLOW_JOB_HEARTBEAT, &renewal(&fixture.delivery), body),
             ],
             async |client| {
-                let claimed = client.claim_job::<AnyJournal>(&fixture.scope).await.unwrap().unwrap();
+                let claimed = claimed_job(&client).await.unwrap().unwrap();
                 assert_eq!(
                     client.heartbeat_job::<AnyJournal>(&claimed.lease, None).await.unwrap_err(),
                     Error::InvalidResponse
@@ -784,16 +801,22 @@ async fn a_foreign_worker_delivery_is_rejected_without_http() {
     .await;
 }
 
+/// A grant the reply's own delay spent is not handed out as live: the clock it
+/// is measured on started when the claim was sent, not when the reply arrived.
+/// It is that delivery's loss alone, reported as lapsed, so the reply itself is
+/// still read.
 #[compio::test]
 async fn delayed_claim_reply_cannot_reset_the_grant_clock() {
     let fixture = Fixture::new();
-    let mut exchange = Exchange::claimed(&fixture.scope, lease(&fixture.delivery, 50));
+    let mut exchange = Exchange::claimed(&claim_request(), lease(&fixture.delivery, 50));
     exchange.delay = Duration::from_millis(100);
     peer(&fixture, vec![exchange], async |client| {
-        assert_eq!(
-            client.claim_job::<AnyJournal>(&fixture.scope).await.unwrap_err(),
-            Error::Timeout
-        );
+        let batch = client
+            .claim_jobs::<AnyJournal>(&claim_request())
+            .await
+            .unwrap();
+        assert!(batch.deliveries.is_empty(), "a spent grant was handed out as live");
+        assert_eq!(batch.lapsed, std::slice::from_ref(&fixture.delivery));
     })
     .await;
 }
@@ -806,11 +829,11 @@ async fn heartbeat_reply_cannot_revive_expired_local_authority() {
     peer(
         &fixture,
         vec![
-            Exchange::claimed(&fixture.scope, lease(&fixture.delivery, 500)),
+            Exchange::claimed(&claim_request(), lease(&fixture.delivery, 500)),
             heartbeat,
         ],
         async |client| {
-            let claimed = client.claim_job::<AnyJournal>(&fixture.scope).await.unwrap().unwrap();
+            let claimed = claimed_job(&client).await.unwrap().unwrap();
             assert_eq!(
                 client.heartbeat_job::<AnyJournal>(&claimed.lease, None).await.unwrap_err(),
                 Error::Timeout
@@ -828,11 +851,11 @@ async fn expired_handle_refuses_heartbeat_but_allows_receipt_replay() {
     peer(
         &fixture,
         vec![
-            Exchange::claimed(&fixture.scope, lease(&fixture.delivery, 200)),
+            Exchange::claimed(&claim_request(), lease(&fixture.delivery, 200)),
             Exchange::settled(&committed(&fixture.delivery), json!(settled)),
         ],
         async |client| {
-            let claimed = client.claim_job::<AnyJournal>(&fixture.scope).await.unwrap().unwrap();
+            let claimed = claimed_job(&client).await.unwrap().unwrap();
             let cloned = claimed.lease.clone();
             compio::time::sleep(claimed.lease.remaining().unwrap()).await;
             assert_eq!(claimed.lease.remaining(), Err(Error::Timeout));
@@ -862,11 +885,11 @@ async fn job_refusals_keep_the_closed_error_contract() {
         ),
     ] {
         // A refusal body is not a reply envelope: it is read by status and code.
-        let mut exchange = Exchange::new(endpoints::WORKFLOW_JOB_CLAIM, &fixture.scope, body);
+        let mut exchange = Exchange::new(endpoints::WORKFLOW_JOB_CLAIM, &claim_request(), body);
         exchange.status = 503;
         peer(&fixture, vec![exchange], async |client| {
             assert_eq!(
-                client.claim_job::<AnyJournal>(&fixture.scope).await.unwrap_err(),
+                claimed_job(&client).await.unwrap_err(),
                 expected
             );
         })
@@ -896,7 +919,7 @@ async fn fanout_replies_cannot_substitute_broadcast_or_revision() {
         },
     ];
     let mut exchanges = Vec::new();
-    exchanges.push(Exchange::claimed(&fixture.scope, lease(&fixture.delivery, 60_000)));
+    exchanges.push(Exchange::claimed(&claim_request(), lease(&fixture.delivery, 60_000)));
     for operation in &changes {
         let changed = Delivery {
             job: JobSpec {
@@ -908,7 +931,7 @@ async fn fanout_replies_cannot_substitute_broadcast_or_revision() {
         exchanges.push(Exchange::granted(endpoints::WORKFLOW_JOB_HEARTBEAT, &renewal(&fixture.delivery), lease(&changed, 60_000)));
     }
     peer(&fixture, exchanges, async |client| {
-        let job = client.claim_job::<AnyJournal>(&fixture.scope).await.unwrap().unwrap();
+        let job = claimed_job(&client).await.unwrap().unwrap();
         for _ in &changes {
             assert_eq!(
                 client.heartbeat_job::<AnyJournal>(&job.lease, None).await.unwrap_err(),

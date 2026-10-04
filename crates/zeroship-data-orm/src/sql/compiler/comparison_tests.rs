@@ -52,6 +52,7 @@ fn upsert(table: &Table, op: CompareOp, value: Value) -> Result<Upsert, CompileE
             alias: None,
         }],
         insert_generated_identity: false,
+        do_nothing: false,
     })
 }
 

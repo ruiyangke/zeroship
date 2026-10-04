@@ -1,4 +1,4 @@
-//! Schedule publication is a Control capability, independent of worker placement.
+//! Schedule publication is a Control capability, independent of any worker.
 
 use super::{authorization, read_json, respond};
 use crate::{coordinator::Error, SharedState};

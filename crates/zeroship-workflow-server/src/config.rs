@@ -89,21 +89,25 @@ pub struct WorkflowSettings {
     ///
     /// One setting bounds both, and there is no separate startup setting. At
     /// startup it bounds, one step at a time, the authentication connection,
-    /// the coordinator's pool warm-up, its queue binding, placement
-    /// eligibility, the journal open and the policy-ledger open, so a database
-    /// that accepts connections and never answers fails startup within this
-    /// budget.
+    /// the coordinator's pool warm-up, its queue binding, the journal open and
+    /// the policy-ledger open, so a database that accepts connections and never
+    /// answers fails startup within this budget.
     #[config(name = "workflow.database_acquire_timeout_ms", default = 5000)]
     pub database_acquire_timeout_ms: Operational<u64>,
     /// Deadline for a complete metadata transaction.
     #[config(name = "workflow.database_command_timeout_ms", default = 10000)]
     pub database_command_timeout_ms: Operational<u64>,
-    /// Worker registration lifetime between heartbeats.
-    #[config(name = "workflow.worker_ttl_ms", default = 30000)]
-    pub worker_ttl_ms: Operational<u64>,
-    /// Placement lifetime between authorized renewals.
-    #[config(name = "workflow.assignment_ttl_ms", default = 30000)]
-    pub assignment_ttl_ms: Operational<u64>,
+    /// How long a claimed delivery stays leased without a heartbeat before it
+    /// is redelivered.
+    #[config(name = "workflow.delivery_lease_ms", default = 30000)]
+    pub delivery_lease_ms: Operational<u64>,
+    /// Maximum wall-clock span of one delivery attempt across heartbeats. At
+    /// least `workflow.delivery_lease_ms`.
+    #[config(name = "workflow.max_attempt_ms", default = 300_000)]
+    pub max_attempt_ms: Operational<u64>,
+    /// Server work budget inside the wait stated by a batch claim.
+    #[config(name = "workflow.claim_budget_ms", default = 5000)]
+    pub claim_budget_ms: Operational<u64>,
     /// Maximum records in a metadata response page.
     #[config(name = "workflow.batch_limit", default = 128)]
     pub batch_limit: Operational<usize>,
@@ -143,12 +147,15 @@ pub struct WorkflowSettings {
     /// Ceiling of the doubling closing backoff.
     #[config(name = "workflow.closing_backoff_max_ms", default = 3_600_000)]
     pub closing_backoff_max_ms: Operational<u64>,
-    /// Fewest placement slots an execution zone's capacity target may name.
+    /// Fewest execution slots an execution zone's capacity target may name.
     #[config(name = "workflow.capacity_min_slots", default = 0)]
     pub capacity_min_slots: Operational<i64>,
-    /// Most placement slots an execution zone's capacity target may name.
+    /// Most execution slots an execution zone's capacity target may name.
     #[config(name = "workflow.capacity_max_slots", default = 1024)]
     pub capacity_max_slots: Operational<i64>,
+    /// Execution slots already provisioned by the static deployment.
+    #[config(name = "workflow.static_pool_slots", default = 1024)]
+    pub static_pool_slots: Operational<u64>,
     /// Idleness a zone's demand must stay below its target before it shrinks.
     #[config(name = "workflow.capacity_hold_down_ms", default = 300_000)]
     pub capacity_hold_down_ms: Operational<u64>,

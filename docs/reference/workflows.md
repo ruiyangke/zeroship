@@ -282,8 +282,9 @@ interface StepContext {
 
 `ctx.idempotencyKey` is the idempotency defence. A step body runs *before* its
 journal row is committed. If the worker crashes or its lease expires in that
-window, the frontier is discarded, the run is reassigned, and the body runs
-again — against an external effect that already landed. Pass the key to the
+window, the frontier is discarded, any worker in the app's execution zone may
+claim the job again, and the body runs again - against an external effect that
+already landed. Pass the key to the
 external system so the duplicate is recognised and dropped:
 
 ```ts

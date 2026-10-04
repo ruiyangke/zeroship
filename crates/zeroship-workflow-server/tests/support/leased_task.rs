@@ -11,9 +11,10 @@ use zeroship_core::{
 
 /// A LEASED dispatch of a seeded run, and one object its replay edge names.
 ///
-/// Arranged for the task payload read, whose authority is the dispatch rather
-/// than a placement, so the row shape is what `authorized_task` and
-/// `owned_reference` require rather than what the columns accept:
+/// Arranged for the task payload read, whose authority is the dispatch held under
+/// a live delivery of the app, so the row shape is what `require_live_holder`,
+/// `authorized_task` and `owned_reference` require rather than what the columns
+/// accept:
 ///
 /// - the task is `leased` with a deadline ahead of the journal's clock, and the
 ///   run points BACK at it, because `validate_live` compares the run's
@@ -54,7 +55,6 @@ pub async fn seed_leased_task(
     // NULL, which is what "claimed but not yet committed" looks like.
     let job = JobId::mint();
     let attempt: i64 = 1;
-    let assignment_revision: i64 = 1;
     let specification = serde_json::json!({
         "id": job.as_str(),
         "appId": app.as_str(),
@@ -87,10 +87,10 @@ pub async fn seed_leased_task(
         &[&job.as_str(), &app, &run.as_str(), &specification],
     ).await.unwrap();
     platform.admin.execute(
-        "INSERT INTO workflow_manager.__zeroship_workflow_tasks(id,app_id,run_id,generation,worker,epoch,token_hash,deadline,state,frontier_revision,created_at,job_id,delivery_attempt,assignment_revision) \
-         VALUES($1,$2,$3,0,$4,0,$5,$6,'leased',1,0,$7,$8,$9)",
+        "INSERT INTO workflow_manager.__zeroship_workflow_tasks(id,app_id,run_id,generation,worker,epoch,token_hash,deadline,state,frontier_revision,created_at,job_id,delivery_attempt) \
+         VALUES($1,$2,$3,0,$4,0,$5,$6,'leased',1,0,$7,$8)",
         &[&task, &app, &run.as_str(), &worker.as_str(), &token_hash, &deadline,
-          &job.as_str(), &attempt, &assignment_revision],
+          &job.as_str(), &attempt],
     ).await.unwrap();
     platform
         .admin
@@ -101,6 +101,20 @@ pub async fn seed_leased_task(
         )
         .await
         .unwrap();
+    // The live queue lease the dispatch was claimed under. A task call names no
+    // delivery, so the service fences it on the caller holding a live lease of
+    // the app before it observes the app at all; a dispatch with no lease behind
+    // it is one no claim could have handed out. The app's queue scope is the
+    // caller's to have registered, in the app's zone.
+    let operation = serde_json::from_str::<serde_json::Value>(&specification).unwrap()["operation"]
+        .to_string();
+    platform.admin.execute(
+        "INSERT INTO workflow_manager.jobs(id,app_id,deployment_id,operation,operation_kind,run_id,spec_digest,available_at,dispatch_order,state,attempt,worker_id,lease_deadline,leased_at,created_at) \
+         SELECT $1,$2,$3,$4,'advance',$5,$6,0,COALESCE(MAX(dispatch_order),0)+1,'leased',$7,$8,$9,0,0 \
+         FROM workflow_manager.jobs WHERE app_id=$2",
+        &[&job.as_str(), &app, &app.replacen("app_", "dep_", 1), &operation, &run.as_str(),
+          &"a".repeat(64), &attempt, &worker.as_str(), &deadline],
+    ).await.unwrap();
     platform.admin.execute(
         "INSERT INTO workflow_manager.__zeroship_workflow_payloads(id,app_id,run_id,generation,task_id,request_id,hash,size,content_type,state,created_at,expires_at) \
          VALUES($1,$2,$3,0,$4,$5,$6,$7,'application/json','referenced',0,$8)",

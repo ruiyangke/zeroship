@@ -13,4 +13,5 @@ mod support;
 
 mod worker_retirement_e2e;
 mod workflow_private_zones_e2e;
+mod workflow_two_worker_e2e;
 mod workflow_worker_host_e2e;

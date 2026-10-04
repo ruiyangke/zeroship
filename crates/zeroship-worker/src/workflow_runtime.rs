@@ -37,7 +37,7 @@ impl std::fmt::Debug for WorkflowAppContext {
     }
 }
 
-/// Runtime-local access to current, trusted metadata for an assigned app.
+/// Runtime-local access to current, trusted metadata for a prepared app.
 ///
 /// Implementations must refuse unknown apps and stale execution authority.
 /// Resolution happens for each task; retaining an old snapshot in this loader
@@ -53,8 +53,8 @@ pub trait WorkflowContextProvider {
 /// Creates a fresh isolate for each execution; never shares an HTTP runtime.
 ///
 /// The owning host initializes V8 and drives the executor on its compio thread.
-/// Runtime metadata may refresh, but the workflow backend retains the original
-/// placement for every isolate built by this loader.
+/// Runtime metadata may refresh, but every isolate built by this loader keeps
+/// the workflow backend of the one app the loader was built for.
 pub struct WorkerWorkflowRuntimeLoader {
     contexts: Rc<dyn WorkflowContextProvider>,
     backend: RemoteBackend,
@@ -185,7 +185,6 @@ mod tests {
         )))
         .unwrap()
     }
-    use compio::io::AsyncWriteExt;
     use std::{
         cell::RefCell,
         collections::BTreeMap,
@@ -200,7 +199,7 @@ mod tests {
         },
         service_peers::{ServiceAuth, ServiceKeyring},
         typed_id,
-        workflow_coordination::{AssignedScope, WorkerId},
+        workflow_coordination::WorkerId,
     };
     use zeroship_runtime::{
         plugin::NativeRegistrar, CancelFlag, FetchOutcome, RequestCtx, SettledFetch,
@@ -267,116 +266,12 @@ mod tests {
         .unwrap()
     }
 
-    fn scope(app: &AppId, revision: i64) -> AssignedScope {
-        AssignedScope {
-            app_id: app.clone(),
-            assignment_revision: revision.try_into().unwrap(),
-        }
-    }
-
-    fn backend(directory: &std::path::Path, scope: AssignedScope) -> RemoteBackend {
-        RemoteBackend::new(unreachable(), scope, payload_objects(directory), 64 * 1024).unwrap()
-    }
-
-    /// A workflow service answering each creator call by the PLACEMENT its body
-    /// names, and recording which placements called.
-    struct Service {
-        url: String,
-        seen: Rc<RefCell<Vec<i64>>>,
-        stop: Option<futures::channel::oneshot::Sender<()>>,
-        handle: Option<compio::runtime::JoinHandle<()>>,
-    }
-
-    impl Service {
-        async fn new(replies: BTreeMap<i64, (u16, Value)>) -> Self {
-            let listener = compio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let url = format!("http://{}", listener.local_addr().unwrap());
-            let seen = Rc::new(RefCell::new(Vec::new()));
-            let recorded = seen.clone();
-            let (stop, stopped) = futures::channel::oneshot::channel::<()>();
-            let handle = compio::runtime::spawn(async move {
-                let mut stopped = stopped;
-                loop {
-                    let (mut stream, _) =
-                        match futures::future::select(stopped, Box::pin(listener.accept())).await {
-                            futures::future::Either::Left(_) => break,
-                            futures::future::Either::Right((accepted, remaining)) => {
-                                stopped = remaining;
-                                accepted.unwrap()
-                            }
-                        };
-                    let body = read_request(&mut stream).await;
-                    let revision = body["scope"]["assignmentRevision"]
-                        .as_i64()
-                        .expect("a creator call names its placement");
-                    recorded.borrow_mut().push(revision);
-                    let (status, reply) = replies
-                        .get(&revision)
-                        .expect("an unscripted placement reached the service");
-                    let encoded = serde_json::to_vec(reply).unwrap();
-                    let mut response = format!(
-                        "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\n\
-                         Connection: close\r\nContent-Length: {}\r\n\r\n",
-                        encoded.len()
-                    )
-                    .into_bytes();
-                    response.extend(encoded);
-                    let _ = stream.write_all(response).await;
-                }
-            });
-            Self {
-                url,
-                seen,
-                stop: Some(stop),
-                handle: Some(handle),
-            }
-        }
-
-        fn backend(&self, directory: &std::path::Path, scope: AssignedScope) -> RemoteBackend {
-            RemoteBackend::new(
-                WorkerCoordinator::new(&self.url, auth(), ClientOptions::default()).unwrap(),
-                scope,
-                payload_objects(directory),
-                64 * 1024,
-            )
-            .unwrap()
-        }
-
-        /// The placements every call this service served named.
-        async fn calls(mut self) -> Vec<i64> {
-            drop(self.stop.take());
-            if let Some(handle) = self.handle.take() {
-                let _ = handle.await;
-            }
-            self.seen.borrow().clone()
-        }
-    }
-
-    async fn read_request(stream: &mut compio::net::TcpStream) -> Value {
-        let mut seen = Vec::new();
-        loop {
-            let (read, buffer) =
-                compio::io::AsyncRead::read(stream, Vec::with_capacity(8192)).await.unwrap();
-            assert!(read > 0, "a creator call must send a body");
-            seen.extend_from_slice(&buffer[..read]);
-            let Some(at) = seen.windows(4).position(|window| window == b"\r\n\r\n") else {
-                continue;
-            };
-            let headers = String::from_utf8_lossy(&seen[..at]).to_lowercase();
-            let length = headers
-                .split("content-length:")
-                .nth(1)
-                .and_then(|rest| rest.split("\r\n").next()?.trim().parse::<usize>().ok())
-                .expect("a creator call declares its body length");
-            if seen.len() >= at + 4 + length {
-                return serde_json::from_slice(&seen[at + 4..at + 4 + length]).unwrap();
-            }
-        }
+    fn backend(directory: &std::path::Path, app: AppId) -> RemoteBackend {
+        RemoteBackend::new(unreachable(), app, payload_objects(directory), 64 * 1024).unwrap()
     }
 
     struct Fixture {
         _directory: tempfile::TempDir,
-        app: AppId,
         contexts: Rc<Contexts>,
         backend: RemoteBackend,
         blobs: LocalDiskBlobStore,
@@ -408,8 +303,7 @@ mod tests {
                 meter: Some(Arc::new(Meter::new())),
             };
             Self {
-                backend: backend(directory.path(), scope(&app, 1)),
-                app,
+                backend: backend(directory.path(), app),
                 contexts: Rc::new(Contexts(RefCell::new(context))),
                 blobs: LocalDiskBlobStore::new(directory.path().join("bundles")).unwrap(),
                 _directory: directory,
@@ -574,10 +468,10 @@ mod tests {
             dishonest.load(&fixture.assignment(), &executable),
             Err(WorkflowServiceError::PermissionDenied)
         ));
-        // A backend whose placement names another app. The identity the loader
-        // can check is the one the backend carries, and it carries a placement.
+        // A backend whose app is another one. The identity the loader can check
+        // is the one the backend carries.
         let assignment = fixture.assignment();
-        let foreign_backend = backend(fixture._directory.path(), scope(&AppId::mint(), 1));
+        let foreign_backend = backend(fixture._directory.path(), AppId::mint());
         assert!(matches!(
             WorkerWorkflowRuntimeLoader::new(fixture.contexts.clone(), foreign_backend)
                 .load(&assignment, &executable),
@@ -656,94 +550,6 @@ mod tests {
         assert_eq!(new["netAvailable"], false);
         assert_eq!(new["app"], fixture.contexts.0.borrow().app.as_str());
         assert_eq!(new["deployment"], assignment.invocation.deploy_hash);
-    }
-
-    /// A metadata refresh cannot swap the backend an isolate was built with.
-    ///
-    /// The loader keeps the backend it was constructed from, so two isolates built
-    /// across a refresh reach two DIFFERENT placements. That is asserted by what
-    /// each call carried rather than by the error it got back, and the two
-    /// placements are answered differently so the codes distinguish them:
-    ///
-    /// - the placement that still holds gets `NotFound` for an absent run, which
-    ///   is the ordinary creator answer;
-    /// - the superseded one gets `Conflict`, because the placement moved under a
-    ///   caller that was legitimately placed and a retry is the honest
-    ///   instruction. `PermissionDenied` would say "not allowed", which is both
-    ///   false and non-retryable. The reason-to-code pairing itself is bound where
-    ///   a real coordinator answers, in `zeroship-workflow-server`'s
-    ///   `a_moved_assignment_revision_conflicts_rather_than_denying`.
-    #[compio::test]
-    async fn metadata_refresh_cannot_replace_a_retired_workflow_backend() {
-        let fixture = Fixture::new().await;
-        let service = Service::new(BTreeMap::from([
-            (
-                1,
-                (
-                    409,
-                    json!({"code":"conflict","message":"workflow placement is no longer current"}),
-                ),
-            ),
-            (
-                2,
-                (404, json!({"code":"not_found","message":"workflow run not found"})),
-            ),
-        ]))
-        .await;
-        let retired_backend = service.backend(fixture._directory.path(), scope(&fixture.app, 1));
-        let fresh_backend = service.backend(fixture._directory.path(), scope(&fixture.app, 2));
-        let assignment = fixture.assignment();
-        fixture
-            .contexts
-            .0
-            .borrow_mut()
-            .env_vars
-            .insert("MISSING_RUN".into(), assignment.invocation.run_id.clone());
-        let executable = fixture
-            .executable(
-                r"
-            export default { async fetch(_request, env) {
-                try {
-                    await env.workflows.Example.get(process.env.MISSING_RUN)
-                        .signal({type:'wake', payload:null});
-                    return Response.json({color:env.COLOR, code:'unexpected_success'});
-                } catch (error) {
-                    return Response.json({color:env.COLOR, code:error.code});
-                }
-            }};
-        ",
-                None,
-            )
-            .await;
-        let loader =
-            WorkerWorkflowRuntimeLoader::new(fixture.contexts.clone(), retired_backend.clone());
-        let (before, before_env) = loader.build(&assignment, &executable).unwrap();
-        before.exit_isolate();
-        assert_eq!(
-            fetch(before, &before_env).await,
-            json!({"color":"blue", "code":"workflow_conflict"})
-        );
-
-        fixture.contexts.0.borrow_mut().env = EnvSnapshot::vars_only(json!({"COLOR":"green"}));
-        // The SAME loader after the refresh: its backend is the one it was built
-        // with, so this isolate still reaches the superseded placement.
-        let (retired, retired_env) = loader.build(&assignment, &executable).unwrap();
-        retired.exit_isolate();
-        let fresh_loader =
-            WorkerWorkflowRuntimeLoader::new(fixture.contexts.clone(), fresh_backend);
-        let (fresh, fresh_env) = fresh_loader.build(&assignment, &executable).unwrap();
-        fresh.exit_isolate();
-        assert_eq!(
-            fetch(retired, &retired_env).await,
-            json!({"color":"green", "code":"workflow_conflict"})
-        );
-        assert_eq!(
-            fetch(fresh, &fresh_env).await,
-            json!({"color":"green", "code":"workflow_not_found"})
-        );
-        // What each call actually named. Without this the codes above could agree
-        // for a reason other than which backend was reached.
-        assert_eq!(service.calls().await, vec![1, 1, 2]);
     }
 
     async fn fetch(runtime: Runtime, env: &EnvSnapshot) -> Value {

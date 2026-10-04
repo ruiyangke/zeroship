@@ -4,16 +4,17 @@
 )]
 
 use crate::support;
+use crate::support::QueueCalls;
 
 use zeroship_workflow_manager::schema::{
     deployment_holds, jobs, recovery_duties, recovery_scopes, schedule_activations,
     schedule_disables, schedule_occurrences, schedule_scopes, schedules,
 };
 use std::{cell::RefCell, future::Future, pin::Pin, rc::Rc, time::Duration};
-use crate::support::{Admin, Backend, Fixture};
+use crate::support::{Admin, Backend, Fixture, Owner};
 use zeroship_core::{
     app_id::AppId,
-    workflow_coordination::{Assignment, RequestId, WorkerId},
+    workflow_coordination::{RequestId, WorkerId},
     workflow_deployments::{HoldGeneration, HoldReceipt},
     workflow_jobs::{DeploymentId, JobId, JobOperation, JobOutcome, JobSpec},
     workflow_schedules::{
@@ -171,6 +172,7 @@ async fn host(fixture: &Fixture) -> (Scheduler, Queue) {
 fn metadata(app: &AppId) -> RegisterSchedules {
     RegisterSchedules {
         app_id: app.clone(),
+                execution_zone_id: zeroship_core::ZoneId::default_zone(),
         deployment_id: DeploymentId::mint(),
         schedules: vec![ScheduleDescriptor {
             name: "scheduled".into(),
@@ -188,6 +190,7 @@ fn metadata(app: &AppId) -> RegisterSchedules {
 fn activate(metadata: &RegisterSchedules, revision: i64) -> ActivateSchedules {
     ActivateSchedules {
         app_id: metadata.app_id.clone(),
+                execution_zone_id: zeroship_core::ZoneId::default_zone(),
         deployment_id: metadata.deployment_id.clone(),
         revision: revision.try_into().unwrap(),
     }
@@ -196,6 +199,7 @@ fn activate(metadata: &RegisterSchedules, revision: i64) -> ActivateSchedules {
 fn disable(app: &AppId, revision: i64) -> DisableSchedules {
     DisableSchedules {
         app_id: app.clone(),
+                execution_zone_id: zeroship_core::ZoneId::default_zone(),
         revision: revision.try_into().unwrap(),
     }
 }
@@ -301,15 +305,16 @@ async fn history(fixture: &Fixture) {
 
 /// Discharge sweeps until `target` is one of them. Activation and calendar jobs
 /// are sweeps, so the host taking them is the lane of the process that owns the
-/// journal rather than a placed worker.
-async fn settle_until(queue: &Queue, assignment: &Assignment, target: &JobId, blocked: &[JobSpec]) {
+/// journal rather than a worker.
+async fn settle_until(queue: &Queue, assignment: &Owner, target: &JobId, blocked: &[JobSpec]) {
     for _ in 0..16 {
         let grant = queue
             .claim_authorized(
-                &assignment.into(),
+                &assignment.app_id,
+                &assignment.worker_id,
                 Claimant::Maintenance,
                 Ok(support::delivery_ceiling()),
-                |_| std::future::ready(Ok(assignment.clone())),
+                |_| std::future::ready(Ok(assignment.worker_id.clone())),
             )
             .await
             .unwrap()
@@ -375,12 +380,7 @@ async fn restore(fixture: &Fixture) {
             .await,
         Err(Error::Conflict)
     );
-    let assignment = Assignment {
-        app_id: app.clone(),
-        worker_id: WorkerId::mint(),
-        revision: 1.try_into().unwrap(),
-        expires_at: i64::MAX.try_into().unwrap(),
-    };
+    let assignment = Owner::new(app.clone(), WorkerId::mint());
     settle_until(&queue, &assignment, &original.id, &first.jobs).await;
     settle_until(&queue, &assignment, &first.jobs[0].id, &[]).await;
 

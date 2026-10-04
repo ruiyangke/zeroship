@@ -57,8 +57,7 @@ fn main() {
         report.emit(*settings.check_config_format.get());
         return;
     }
-    let result = ntex::rt::System::build()
-        .name("zeroship-workflow-server")
+    let result = zeroship_workflow_server::server::runtime()
         .build(ntex::rt::DefaultRuntime)
         .block_on(run(settings, options));
     if let Err(error) = result {

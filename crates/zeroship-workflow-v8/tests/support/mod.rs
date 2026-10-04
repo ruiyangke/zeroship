@@ -7,5 +7,6 @@
 //! that need it reach it by one name.
 
 pub mod orm;
+pub mod unreachable;
 
 pub use zeroship_workflow_fixtures::deployment as deployment_fixture;

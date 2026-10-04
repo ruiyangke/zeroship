@@ -61,6 +61,7 @@ async fn seed(platform: &platform::Platform) -> Seed {
     let deployment = DeploymentId::mint();
     let registration = RegisterSchedules {
         app_id: app.clone(),
+        execution_zone_id: zeroship_core::ZoneId::default_zone(),
         deployment_id: deployment.clone(),
         schedules: ["calendar-a", "calendar-b"]
             .into_iter()
@@ -80,6 +81,7 @@ async fn seed(platform: &platform::Platform) -> Seed {
     let activation = scheduler
         .activate(&ActivateSchedules {
             app_id: app.clone(),
+            execution_zone_id: zeroship_core::ZoneId::default_zone(),
             deployment_id: deployment.clone(),
             revision: 1.try_into().unwrap(),
         })
@@ -87,7 +89,12 @@ async fn seed(platform: &platform::Platform) -> Seed {
         .unwrap();
     Recovery::new(queue.clone(), RecoveryOptions::default())
         .unwrap()
-        .ensure(&app, &deployment, 1.try_into().unwrap())
+        .ensure(
+            &app,
+            &zeroship_core::ZoneId::default_zone(),
+            &deployment,
+            1.try_into().unwrap(),
+        )
         .await
         .unwrap();
 
@@ -332,17 +339,10 @@ async fn jobs(platform: &platform::Platform, app: &AppId) -> Vec<String> {
 async fn no_workers(platform: &platform::Platform) {
     let row = platform
         .admin
-        .query_one(
-            "SELECT (SELECT COUNT(*) FROM zeroship.worker_instances), \
-                    (SELECT COUNT(*) FROM workflow_manager.workers), \
-                    (SELECT COUNT(*) FROM workflow_manager.assignments)",
-            &[],
-        )
+        .query_one("SELECT COUNT(*) FROM zeroship.worker_instances", &[])
         .await
         .unwrap();
-    for column in 0..3 {
-        assert_eq!(row.get::<_, i64>(column), 0);
-    }
+    assert_eq!(row.get::<_, i64>(0), 0);
 }
 
 async fn initial_progress(platform: &platform::Platform, seed: &Seed) {
@@ -653,7 +653,7 @@ async fn job_holder(platform: &platform::Platform, job: &JobId) -> (String, Opti
 }
 
 /// A host configured the way a deployment configures one claims the maintenance
-/// rows of the queue it owns, and settles them under an identity nothing placed.
+/// rows of the queue it owns, and settles them under an identity of its own.
 ///
 /// `workflow.maintenance_sweeps` decides whether the process composes a sweep
 /// lane, and it defaults ON. A gate that defaulted off, or one that ignored its
@@ -668,8 +668,8 @@ async fn job_holder(platform: &platform::Platform, job: &JobId) -> (String, Opti
 /// and duty suites run under: under it this row is the caller's to claim, and
 /// those suites go red if the lane runs anyway.
 ///
-/// No worker is registered and no placement exists, so the settlement can only be
-/// the lane asserting its own authority.
+/// No worker instance exists, so the settlement can only be the lane asserting
+/// its own authority.
 #[ntex::test]
 async fn a_default_host_claims_and_settles_the_maintenance_rows_of_its_own_queue() {
     // The spawned process composes the manager driver and sweep lane, which
@@ -689,7 +689,10 @@ async fn a_default_host_claims_and_settles_the_maintenance_rows_of_its_own_queue
     .unwrap();
     let app = AppId::mint();
     provision::provision(&platform, &app, &AppPolicy::default()).await;
-    queue.register_scope(&app).await.unwrap();
+    queue
+        .register_scope(&app, &zeroship_core::ZoneId::default_zone())
+        .await
+        .unwrap();
     journal::seed_run(&platform, &app).await;
     let row = JobSpec {
         id: JobId::mint(),
@@ -723,7 +726,111 @@ async fn a_default_host_claims_and_settles_the_maintenance_rows_of_its_own_queue
         "a settled maintenance row must name the lane that leased it"
     );
     ready(&http, &server.url).await;
-    // The lane asserts its own authority rather than reading a placement, so a
-    // settlement here proves the lane ran and not that something was placed.
+    // The lane asserts its own authority, so a settlement here proves the lane
+    // ran and not that some worker claimed the row.
     no_workers(&platform).await;
+}
+
+/// The capacity target a zone's backlog asks the static pool for.
+async fn zone_target(platform: &platform::Platform) -> Option<(i64, String, Option<String>)> {
+    platform
+        .admin
+        .query(
+            "SELECT desired, state, refusal FROM workflow_manager.capacity_targets WHERE id=$1",
+            &[&platform::DEFAULT_ZONE_ID],
+        )
+        .await
+        .unwrap()
+        .first()
+        .map(|row| (row.get(0), row.get(1), row.get(2)))
+}
+
+/// A host's static pool is the size `workflow.static_pool_slots` names: a zone
+/// whose backlog wants more slots than that is refused as an exhausted pool, and
+/// the same backlog under a pool large enough is accepted.
+///
+/// Two apps of the deployment's one zone each hold one claimable advance, so the
+/// capacity lane asks for two slots. The pool is the one variable between the
+/// arms, and the capacity ceiling stays far above both, so the refusal is the
+/// pool's and not the ceiling's.
+///
+/// The refused arm runs with the sweep lane stood down: the capacity lane reads
+/// policy through the driver's own source, so a host that is not the sweep
+/// authority over its queue still sizes its zones.
+#[ntex::test]
+async fn the_static_pool_refuses_a_zone_target_beyond_its_configured_slots() {
+    for (slots, sweeps, expected) in [
+        (1_u64, false, ("refused", Some("pool_exhausted"))),
+        (2, true, ("steady", None)),
+    ] {
+        // The capacity lane visits every zone of the queue, so each arm gets a
+        // database of its own.
+        let platform = platform::Platform::fresh_database().await;
+        let queue = Queue::connect(
+            DbBinding::platform(
+                "workflow_manager",
+                "static-pool",
+                SchemaName::new("workflow_manager").unwrap(),
+            ),
+            &platform.runtime_url,
+            Options::default(),
+            holds::client(),
+        )
+        .await
+        .unwrap();
+        for _ in 0..2 {
+            let app = AppId::mint();
+            provision::provision(&platform, &app, &AppPolicy::default()).await;
+            queue
+                .register_scope(&app, &zeroship_core::ZoneId::default_zone())
+                .await
+                .unwrap();
+            let run = journal::seed_run(&platform, &app).await;
+            queue
+                .submit(&JobSpec {
+                    id: JobId::mint(),
+                    app_id: app.clone(),
+                    operation: JobOperation::Advance {
+                        deployment_id: DeploymentId::parse_owned(
+                            app.as_str().replacen("app_", "dep_", 1),
+                        )
+                        .unwrap(),
+                        run_id: run,
+                        generation: 0,
+                        revision: 1.try_into().unwrap(),
+                    },
+                    available_at: 0.try_into().unwrap(),
+                })
+                .await
+                .unwrap();
+        }
+        let http = Client::new().await;
+        let _server = server_process::ServerProcess::start_with(
+            &platform,
+            &peers(&platform),
+            platform.work.path(),
+            "static-pool",
+            &http,
+            json!({
+                "static_pool_slots": slots,
+                "maintenance_sweeps": sweeps,
+                "driver_interval_ms": 50,
+            }),
+        )
+        .await;
+        // Two claimable advances want two slots, and the row starts out
+        // `steady` at none, so the answer is the first non-requesting state at
+        // two.
+        let (_, state, refusal) = until("answer a two-slot capacity request", async || {
+            zone_target(&platform)
+                .await
+                .filter(|(desired, state, _)| *desired == 2 && state != "requesting")
+        })
+        .await;
+        assert_eq!(
+            (state.as_str(), refusal.as_deref()),
+            expected,
+            "a pool of {slots} slots"
+        );
+    }
 }

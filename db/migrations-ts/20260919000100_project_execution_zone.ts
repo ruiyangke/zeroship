@@ -3,14 +3,13 @@ import { createFunction, raw, t, table } from "@zeroship/migrate";
 // The execution zone moves up to the project, from
 // docs/proposals/2026-08-28-app-database-decoupling.md.
 //
-// `apps.execution_zone_id` (20260914000600_placement_eligibility.ts) landed
+// `apps.execution_zone_id` (20260914000600_app_execution_zones.ts) landed
 // before anything above the app needed a zone. With a project-owned database it
 // is the project that has to carry it, or "same project" stops implying "can
 // share" and every sharing surface has to explain a second rule. The app keeps
 // its copy under a composite foreign key, `apps_project_zone_fkey` in
 // 20260919000300_database_placement_keys.ts, so the two cannot disagree:
-// `instance_serves_app` joins on it and the workflow manager holds a column
-// grant on it, and both keep working untouched.
+// `instance_serves_app` joins on it and keeps working untouched.
 //
 // THE FOREIGN KEY THAT SPENDS THE PAIR IS AUTHORED ELSEWHERE, for the reason
 // 20260906000200_apps_project_ownership_key.ts states: the engine lowers a
@@ -42,9 +41,10 @@ export default {
       .unique("projects_zone_identity_key")
       .add({ columns: ["id", "execution_zone_id"] });
 
-    // Frozen for the same reason an app's zone is: placement reads the fact
-    // after taking its locks and again before commit, and a fact that could move
-    // between those two reads would reopen the window the second read closes.
+    // Frozen for the same reason an app's zone is: the zone is copied, to the
+    // app under `apps_project_zone_fkey` and from the app to the workflow
+    // manager's queue scope, and a zone that could move would leave every copy
+    // naming a zone the project had left.
     createFunction({
       schema: "zeroship",
       name: "projects_reject_execution_zone_change",

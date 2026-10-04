@@ -7,10 +7,8 @@
 //!
 //!   cargo test -p zeroship-workflow-client --test main -- `integration::jobs_client::`
 
-mod coordination_client;
 mod coordination_transport;
 mod jobs_client;
-mod policy_client;
 mod queue_holds;
 mod round_trip_cost;
 mod schedules_client;

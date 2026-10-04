@@ -84,7 +84,7 @@ async fn journal_jobs(fixture: &Fixture) {
     let recovery = Recovery::new(queue.clone(), RecoveryOptions::default()).unwrap();
     let provenance = DeploymentId::mint();
     recovery
-        .ensure(&app, &provenance, 1.try_into().unwrap())
+        .ensure(&app, &zeroship_core::ZoneId::default_zone(), &provenance, 1.try_into().unwrap())
         .await
         .unwrap();
     for kind in [DutyKind::Reconcile, DutyKind::Collect] {
@@ -103,7 +103,7 @@ async fn journal_jobs(fixture: &Fixture) {
 
 async fn exercise_journal_job(fixture: &Fixture, queue: &Queue, operation: JobOperation) {
     let app = AppId::mint();
-    queue.register_scope(&app).await.unwrap();
+    queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     let authority = assignment(&app);
     let spec = JobSpec {
         id: JobId::mint(),
@@ -166,6 +166,10 @@ async fn journal_commands(queue: &Queue) {
     }
     for command in commands {
         let app = AppId::mint();
+        queue
+            .register_scope(&app, &zeroship_core::ZoneId::default_zone())
+            .await
+            .unwrap();
         let request = ManageRun {
             app_id: app.clone(),
             request_id: RequestId::mint(),
@@ -293,7 +297,7 @@ async fn reject_ready_projection(
     fixture: &Fixture,
     queue: &Queue,
     faults: &FaultClient,
-    authority: &Assignment,
+    authority: &Owner,
     spec: &JobSpec,
 ) {
     let app = &spec.app_id;
@@ -318,7 +322,7 @@ async fn reject_leased_projection(
     fixture: &Fixture,
     queue: &Queue,
     faults: &FaultClient,
-    authority: &Assignment,
+    authority: &Owner,
     settlement: &JournalSettlement,
     projection: Value,
 ) {
@@ -364,7 +368,7 @@ async fn projection_mismatch(fixture: &Fixture) {
         },
     ] {
         let app = AppId::mint();
-        queue.register_scope(&app).await.unwrap();
+        queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
         let authority = assignment(&app);
         let spec = JobSpec {
             id: JobId::mint(),
@@ -472,7 +476,7 @@ async fn paged_dependencies(fixture: &Fixture) {
     let faults = FaultClient::new(catalog.client());
     let queue = queue(fixture, faults.clone()).await;
     let app = AppId::mint();
-    queue.register_scope(&app).await.unwrap();
+    queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     let deployment = catalog.publish(&app, "late queue dependency", &[]).await;
     let (pending, dependency) =
         submit_dependency_after_first_page(fixture, &queue, &app, &deployment.id).await;
@@ -536,12 +540,12 @@ async fn provenance_reclamation(fixture: &Fixture) {
     let faults = FaultClient::new(catalog.client());
     let queue = queue(fixture, faults.clone()).await;
     let app = AppId::mint();
-    queue.register_scope(&app).await.unwrap();
+    queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     let provenance = catalog.publish(&app, "recovery provenance", &[]).await;
     queue.ensure_deployment(&app, &provenance.id).await.unwrap();
     let recovery = Recovery::new(queue.clone(), RecoveryOptions::default()).unwrap();
     recovery
-        .ensure(&app, &provenance.id, 1.try_into().unwrap())
+        .ensure(&app, &zeroship_core::ZoneId::default_zone(), &provenance.id, 1.try_into().unwrap())
         .await
         .unwrap();
     let pending = recovery
@@ -564,7 +568,7 @@ async fn provenance_reclamation(fixture: &Fixture) {
     let acquired = faults.acquired.get();
     let released = faults.released.get();
     recovery
-        .ensure(&app, &provenance.id, 1.try_into().unwrap())
+        .ensure(&app, &zeroship_core::ZoneId::default_zone(), &provenance.id, 1.try_into().unwrap())
         .await
         .unwrap();
     assert_eq!(
@@ -600,12 +604,12 @@ async fn provenance_reclamation(fixture: &Fixture) {
 async fn pending_identity(fixture: &Fixture) {
     let queue = queue(fixture, support::synthetic_holds()).await;
     let app = AppId::mint();
-    queue.register_scope(&app).await.unwrap();
+    queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
     let code = job(&app, &DeploymentId::mint());
     queue.submit(&code).await.unwrap();
     let recovery = Recovery::new(queue.clone(), RecoveryOptions::default()).unwrap();
     recovery
-        .ensure(&app, code.deployment_id().unwrap(), 1.try_into().unwrap())
+        .ensure(&app, &zeroship_core::ZoneId::default_zone(), code.deployment_id().unwrap(), 1.try_into().unwrap())
         .await
         .unwrap();
     let pending = recovery

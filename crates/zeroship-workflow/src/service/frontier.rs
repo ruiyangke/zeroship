@@ -327,7 +327,10 @@ pub(crate) async fn apply(
     }
     let (checkpoints, update) =
         fold_outcomes(&execution.outcomes).map_err(WorkflowServiceError::InvalidRequest)?;
-    journal::append(tx, app, run, policy, checkpoints, now).await?;
+    // Boxed: the journal append and the child creation under it are the
+    // deepest futures on the commit path, and held inline they put this frame
+    // past an HTTP worker thread's stack in an unoptimized build.
+    Box::pin(journal::append(tx, app, run, policy, checkpoints, now)).await?;
     // Checked before continuation so a fenced child cannot continue as new.
     let intent = super::propagation::effective_control(tx, app, run).await?;
     if intent == ControlIntent::Cancel {

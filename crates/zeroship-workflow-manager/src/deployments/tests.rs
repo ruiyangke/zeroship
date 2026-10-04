@@ -138,8 +138,8 @@ async fn contract(url: &str) {
         receipt
     );
 
-    // Reconnect through a new ORM handle; no in-memory owner or placement lease
-    // is needed to recover the acknowledgement.
+    // Reconnect through a new ORM handle; no in-memory owner is needed to
+    // recover the acknowledgement.
     let restarted = DeploymentHolds::new(database(url).await).unwrap();
     assert_eq!(
         restarted
@@ -304,65 +304,7 @@ async fn contract(url: &str) {
         ));
     }
 
-    authority_is_rechecked_before_committing(&db, &holds, &app).await;
     callback_errors_and_cancellation_roll_back(&db, &holds, &app).await;
-}
-
-async fn authority_is_rechecked_before_committing(
-    database: &Database,
-    ledger: &DeploymentHolds,
-    app: &AppId,
-) {
-    let deployment = seed(database, app, &"e".repeat(64)).await;
-    let holder = scope(app);
-    for reject_at in [1, 2] {
-        for failure in [Error::PermissionDenied, Error::Timeout] {
-            let checks = std::cell::Cell::new(0);
-            let result = ledger
-                .acquire_authorized(&holder, &deployment, generation(1), || {
-                    checks.set(checks.get() + 1);
-                    std::future::ready(if checks.get() == reject_at {
-                        Err(failure.clone())
-                    } else {
-                        Ok(())
-                    })
-                })
-                .await;
-            assert_eq!(result, Err(failure));
-            assert_eq!(checks.get(), reject_at);
-            let stored = database.collection(holds::Entity::COLLECTION).unwrap()
-                .count(value!({"app_id":app.as_str(), "deploy_id":deployment, "holder_id":holder.holder()}), value!({}))
-                .await.unwrap();
-            assert!(matches!(stored, Output::Count(0)));
-        }
-    }
-    let acquired = ledger
-        .acquire(&holder, &deployment, generation(1))
-        .await
-        .unwrap();
-    let checks = std::cell::Cell::new(0);
-    let release = ledger
-        .release_authorized(&holder, &deployment, generation(1), || {
-            checks.set(checks.get() + 1);
-            std::future::ready(if checks.get() == 2 {
-                Err(Error::PermissionDenied)
-            } else {
-                Ok(())
-            })
-        })
-        .await;
-    assert_eq!(release, Err(Error::PermissionDenied));
-    assert_eq!(
-        ledger
-            .acquire(&holder, &deployment, generation(1))
-            .await
-            .unwrap(),
-        acquired
-    );
-    ledger
-        .release(&holder, &deployment, generation(1))
-        .await
-        .unwrap();
 }
 
 async fn callback_errors_and_cancellation_roll_back(
