@@ -568,10 +568,6 @@ impl Platform {
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one host lifetime carries both holder classes to reclamation"
-)]
 fn republished_bundle_releases_both_deployment_holders() {
     let root = tempfile::tempdir().unwrap();
     // The signal wait's timeout job outlives the signal, so a short timeout

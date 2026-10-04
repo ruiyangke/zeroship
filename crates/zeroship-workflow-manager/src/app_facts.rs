@@ -12,10 +12,6 @@
 //! against. That is the severing - there is no database-backed source here to
 //! fall back to, so a host that configures nothing gets no facts rather than a
 //! silent direct read.
-#![expect(
-    clippy::future_not_send,
-    reason = "Control reads stay on the owning compio runtime"
-)]
 
 use crate::Error;
 use std::{fmt::Debug, future::Future, pin::Pin};

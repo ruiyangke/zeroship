@@ -1,10 +1,5 @@
 //! Connect authorized creator resources to the native worker and V8 executor.
 
-#![expect(
-    clippy::future_not_send,
-    reason = "creator resources and V8 execution belong to their owning compio thread"
-)]
-
 use crate::workflow_runtime::{
     validate_context, WorkerWorkflowRuntimeLoader, WorkflowAppContext, WorkflowContextProvider,
 };

@@ -5,8 +5,6 @@
 //! journal and the app's storage. Publishing the app archive registers and
 //! activates its schedules, so creator activation arrives as a delivered job.
 
-#![expect(clippy::future_not_send, reason = "the host owns a compio thread")]
-
 mod host;
 mod manager;
 

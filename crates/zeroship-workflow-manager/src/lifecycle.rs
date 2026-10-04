@@ -3,10 +3,6 @@
 //! Deletion is terminal: an app never returns from it. The closing lane asks
 //! which of its candidates Control deleted and abandons their responsibility
 //! instead of closing it.
-#![expect(
-    clippy::future_not_send,
-    reason = "lifecycle reads stay on the manager's owning compio runtime"
-)]
 
 use crate::{Error, app_facts::AppFactsSource};
 use std::{collections::BTreeSet, fmt::Debug, future::Future, pin::Pin, rc::Rc};

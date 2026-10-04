@@ -13,11 +13,6 @@
 //! needs none of this. Which arm a host takes is decided by what it holds, in
 //! `AppDeployments`.
 
-#![expect(
-    clippy::future_not_send,
-    reason = "HTTP exchanges stay on their compio thread"
-)]
-
 use crate::{service::DeployRegistration, WorkflowServiceError};
 use std::sync::Arc;
 use zeroship_core::{
