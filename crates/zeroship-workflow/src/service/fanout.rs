@@ -18,7 +18,7 @@ use zeroship_core::{
     app_id::AppId,
     workflow_jobs::{BroadcastId, JobOperation, JobOutcome, JobSpec},
 };
-use zeroship_data_orm::orm::FindOptions;
+use zeroship_data_orm::{orm::FindOptions, sql::MAX_ROW_LIMIT};
 
 mod application;
 mod history;
@@ -28,6 +28,9 @@ pub(super) mod signals;
 use records::{Broadcast, Page, PageResult, Pending, TopicRecord};
 
 /// Upper bound on eligible subscription work committed by one delivered page.
+///
+/// The page reads its recipients in one query, which the ORM bounds at
+/// [`MAX_ROW_LIMIT`] rows, so no larger page bound can deliver a page.
 #[derive(Debug, Clone, Copy)]
 pub struct FanoutOptions {
     pub page_size: u32,
@@ -39,7 +42,7 @@ impl Default for FanoutOptions {
 }
 impl FanoutOptions {
     pub fn validate(self) -> Result<(), WorkflowServiceError> {
-        if self.page_size == 0 || self.page_size > 1024 {
+        if self.page_size == 0 || i64::from(self.page_size) > MAX_ROW_LIMIT {
             return Err(WorkflowServiceError::InvalidRequest(
                 "invalid workflow fanout page bound".into(),
             ));
@@ -47,6 +50,10 @@ impl FanoutOptions {
         Ok(())
     }
 }
+
+/// The most successors a page retains: an Advance for each recipient the
+/// largest page bound admits, and the next page.
+const MAX_SUCCESSORS: i64 = MAX_ROW_LIMIT + 1;
 
 impl AppWorkflows {
     /// Materialize one topic page. A later broadcast remains unacknowledged until

@@ -16,7 +16,7 @@ use zeroship_data_orm::{
     connection::ConnectionFactory,
     encryption::ProjectKeySource,
     error::DbError,
-    orm::{Database, Entity, FindOptions, Operation},
+    orm::{Database, Entity, FindOptions, FromRow, Insertable, Operation},
     sql::registration::{POSTGRES_FAMILY, SQLITE_FAMILY},
     value, OrmContext,
 };
@@ -312,6 +312,27 @@ impl Transaction {
     #[must_use]
     pub fn database(&self) -> &Database {
         &self.database
+    }
+    /// Insert `rows` into `E` in one statement, returning the rows written.
+    ///
+    /// One row goes in as a plain INSERT. More go in as one multi-row insert,
+    /// whose atomic frame costs a savepoint that a single row does not need.
+    #[expect(
+        clippy::future_not_send,
+        reason = "journal writes use the creator transaction thread"
+    )]
+    pub(crate) async fn insert_rows<E: Entity, D: Insertable<E>, R: FromRow<E>>(
+        &self,
+        mut rows: Vec<D>,
+    ) -> Result<Vec<R>, WorkflowServiceError> {
+        let entity = self.database.entity::<E>()?;
+        if rows.len() > 1 {
+            return Ok(Box::pin(entity.insert_many::<_, R>(rows)).await?);
+        }
+        match rows.pop() {
+            Some(row) => Ok(vec![Box::pin(entity.insert::<_, R>(row)).await?]),
+            None => Ok(Vec::new()),
+        }
     }
     pub(crate) fn host_app_ids(&self) -> Result<Vec<AppId>, WorkflowServiceError> {
         if let Some(binding) = &self.policy_binding {

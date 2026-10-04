@@ -27,7 +27,10 @@ use super::{
     AppWorkflows,
 };
 use crate::WorkflowServiceError;
-use std::future::Future;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    future::Future,
+};
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{Revision, RunId, UnixMillis},
@@ -40,8 +43,8 @@ use zeroship_data_orm::{
         Entity, EntityAlias, EntityProjection, FindOptions, FromRow, Insertable, Operation, Output,
         ReadBuilder,
     },
-    sql::MAX_ROW_LIMIT,
-    value,
+    sql::{MAX_MEMBERSHIP_LIST_LEN, MAX_ROW_LIMIT},
+    value, Value,
 };
 
 /// Host-bound metadata publisher, shared by remote and local compositions.
@@ -303,6 +306,7 @@ impl AppWorkflows {
 #[derive(FromRow)]
 #[orm(entity = runs)]
 struct RunFrontier {
+    id: String,
     deploy_id: String,
     generation: i64,
     frontier_revision: i64,
@@ -330,106 +334,158 @@ pub(super) async fn advance_job(
     run: &str,
     now: i64,
 ) -> Result<Option<JobSpec>, WorkflowServiceError> {
-    let changed = tx
-        .database()
-        .collection(runs::Entity::COLLECTION)?
-        .execute(Operation::Update {
-            filter: value!({"app_id":app.as_str(), "id":run, "frontier_revision":{"$lt":i64::MAX}}),
-            patch: value!({"$inc":{"frontier_revision":1}}),
-            many: true,
-        })
-        .await?;
-    if !matches!(changed, Output::Count(1)) {
-        return Err(WorkflowServiceError::ResourceExhausted(
-            "workflow frontier revision exhausted".into(),
-        ));
-    }
-    Box::pin(record_job(tx, app, run, now)).await
+    Ok(Box::pin(advance_jobs(tx, app, &[run], now)).await?.pop())
 }
 
-/// Record the final runnable frontier in the same transaction as its cause.
-/// The derived identity coalesces repeated observations without changing a
-/// previously published job's due time or immutable identity.
+/// [`advance_job`] for distinct `runs` together, returning the runnable intents
+/// recorded for them in `runs` order.
+///
+/// Each statement covers a membership list of runs, at most
+/// [`MAX_MEMBERSHIP_LIST_LEN`], rather than one run, so the round trips grow by
+/// one per membership list instead of one per run. The caller holds the app
+/// lock.
+pub(super) async fn advance_jobs(
+    tx: &Transaction,
+    app: &AppId,
+    runs: &[&str],
+    now: i64,
+) -> Result<Vec<JobSpec>, WorkflowServiceError> {
+    distinct(runs)?;
+    for chunk in runs.chunks(MAX_MEMBERSHIP_LIST_LEN) {
+        let members: Vec<Value> = chunk.iter().map(|run| Value::from(*run)).collect();
+        let changed = tx
+            .database()
+            .collection(runs::Entity::COLLECTION)?
+            .execute(Operation::Update {
+                filter: value!({"app_id":app.as_str(), "id":{"$in":members}, "frontier_revision":{"$lt":i64::MAX}}),
+                patch: value!({"$inc":{"frontier_revision":1}}),
+                many: true,
+            })
+            .await?;
+        if !matches!(changed, Output::Count(count) if usize::try_from(count) == Ok(chunk.len())) {
+            return Err(WorkflowServiceError::ResourceExhausted(
+                "workflow frontier revision exhausted".into(),
+            ));
+        }
+    }
+    Box::pin(record_jobs(tx, app, runs, now)).await
+}
+
+/// Record the final runnable frontier in the same transaction as its cause,
+/// returning the intent recorded for it, if the run is runnable. The derived
+/// identity coalesces repeated observations without changing an already
+/// published job's due time or immutable identity.
 pub(super) async fn record(
     tx: &Transaction,
     app: &AppId,
     run: &str,
     now: i64,
-) -> Result<(), WorkflowServiceError> {
-    record_job(tx, app, run, now).await.map(|_| ())
+) -> Result<Option<JobSpec>, WorkflowServiceError> {
+    Ok(Box::pin(record_jobs(tx, app, &[run], now)).await?.pop())
 }
 
-pub(super) async fn record_job(
+/// [`record`] for distinct `runs` together, returning the intents recorded for
+/// the runs that are runnable, in `runs` order. A run without a due frontier,
+/// with a live task or in a terminal state records nothing.
+async fn record_jobs(
     tx: &Transaction,
     app: &AppId,
-    run: &str,
+    runs: &[&str],
     now: i64,
-) -> Result<Option<JobSpec>, WorkflowServiceError> {
-    let frontier = tx
-        .database()
-        .entity::<runs::Entity>()?
-        .find::<RunFrontier>(runs::app_id.eq(app.as_str())?.and(runs::id.eq(run)?), one())
-        .await?
-        .into_iter()
-        .next()
-        .ok_or_else(|| not_found("workflow run"))?;
-    let Some(due) = frontier.due_at else {
-        return Ok(None);
-    };
-    if frontier.task_id.is_some() || parse_state(&frontier.state)?.is_terminal() {
-        return Ok(None);
+) -> Result<Vec<JobSpec>, WorkflowServiceError> {
+    distinct(runs)?;
+    let mut frontiers = BTreeMap::new();
+    for chunk in runs.chunks(MAX_MEMBERSHIP_LIST_LEN) {
+        let rows = tx
+            .database()
+            .entity::<runs::Entity>()?
+            .find::<RunFrontier>(
+                runs::app_id
+                    .eq(app.as_str())?
+                    .and(runs::id.in_values(chunk.iter().copied())?),
+                limited(chunk.len())?,
+            )
+            .await?;
+        frontiers.extend(rows.into_iter().map(|row| (row.id.clone(), row)));
     }
-    let operation = JobOperation::Advance {
-        deployment_id: DeploymentId::parse(&frontier.deploy_id).map_err(|_| invalid())?,
-        run_id: RunId::parse(run).map_err(|_| invalid())?,
-        generation: frontier.generation.try_into().map_err(|_| invalid())?,
-        revision: Revision::try_from(frontier.frontier_revision).map_err(|_| invalid())?,
-    };
-    Box::pin(publish(
-        tx,
-        app,
-        operation,
-        due.try_into().map_err(|_| invalid())?,
-        now,
-    ))
-    .await
-    .map(Some)
+    let mut intents = Vec::new();
+    for run in runs {
+        let frontier = frontiers
+            .get(*run)
+            .ok_or_else(|| not_found("workflow run"))?;
+        let Some(due) = frontier.due_at else {
+            continue;
+        };
+        if frontier.task_id.is_some() || parse_state(&frontier.state)?.is_terminal() {
+            continue;
+        }
+        intents.push((
+            JobOperation::Advance {
+                deployment_id: DeploymentId::parse(&frontier.deploy_id).map_err(|_| invalid())?,
+                run_id: RunId::parse(run).map_err(|_| invalid())?,
+                generation: frontier.generation.try_into().map_err(|_| invalid())?,
+                revision: Revision::try_from(frontier.frontier_revision).map_err(|_| invalid())?,
+            },
+            due.try_into().map_err(|_| invalid())?,
+        ));
+    }
+    Box::pin(publish_all(tx, app, intents, now)).await
 }
 
 async fn read(tx: &Transaction, app: &AppId, id: &JobId) -> Result<Record, WorkflowServiceError> {
-    existing(tx, app, id)
+    existing(tx, app, &[id.as_str()])
         .await?
+        .remove(id.as_str())
         .ok_or_else(|| not_found("workflow job publication"))
 }
 
-/// The intent stored under one derived id, if the journal already holds it.
+/// The intents already stored under any of `ids`, keyed by id.
 async fn existing(
     tx: &Transaction,
     app: &AppId,
-    id: &JobId,
-) -> Result<Option<Record>, WorkflowServiceError> {
+    ids: &[&str],
+) -> Result<BTreeMap<String, Record>, WorkflowServiceError> {
     let source = Source::new(tx)?;
-    Ok(source
-        .scan(tx)
-        .filter(
-            source
-                .intents
-                .column(publications::app_id)
-                .eq(app.as_str())?
-                .and(source.intents.column(publications::id).eq(id.as_str())?),
-        )
-        .select(source.projection())?
-        .limit(1)?
-        .all()
-        .await?
-        .into_iter()
-        .next())
+    let mut found = BTreeMap::new();
+    for chunk in ids.chunks(MAX_MEMBERSHIP_LIST_LEN) {
+        let rows: Vec<Record> = source
+            .scan(tx)
+            .filter(
+                source
+                    .intents
+                    .column(publications::app_id)
+                    .eq(app.as_str())?
+                    .and(
+                        source
+                            .intents
+                            .column(publications::id)
+                            .in_values(chunk.iter().copied())?,
+                    ),
+            )
+            .select(source.projection())?
+            .limit(i64::try_from(chunk.len()).map_err(|_| invalid())?)?
+            .all()
+            .await?;
+        found.extend(rows.into_iter().map(|row| (row.id.clone(), row)));
+    }
+    Ok(found)
 }
 
-fn one() -> FindOptions {
-    FindOptions {
-        limit: Some(1),
+fn limited(rows: usize) -> Result<FindOptions, WorkflowServiceError> {
+    Ok(FindOptions {
+        limit: Some(i64::try_from(rows).map_err(|_| invalid())?),
         ..Default::default()
+    })
+}
+
+/// Refuse a list naming one item twice. A run named twice would have its
+/// frontier advanced once while the caller counted two, and a publication id
+/// named twice would collide with itself on insert.
+fn distinct(items: &[&str]) -> Result<(), WorkflowServiceError> {
+    if items.iter().collect::<BTreeSet<_>>().len() == items.len() {
+        Ok(())
+    } else {
+        Err(invalid())
     }
 }
 
@@ -439,12 +495,6 @@ fn invalid() -> WorkflowServiceError {
 
 /// Record one publishable operation, returning the immutable job that now owns
 /// its identity.
-///
-/// The id is derived first, so an equal observation reads the intent it already
-/// wrote instead of writing a second one, and two transactions racing the same
-/// observation compute the same key: the loser's insert collides on the primary
-/// key rather than committing a duplicate job. The seven operations that are
-/// never published derive no identity and are refused here.
 async fn publish(
     tx: &Transaction,
     app: &AppId,
@@ -452,38 +502,99 @@ async fn publish(
     available_at: UnixMillis,
     now: i64,
 ) -> Result<JobSpec, WorkflowServiceError> {
-    let job = JobSpec {
-        id: publication_id(app, &operation, available_at).ok_or_else(invalid)?,
-        app_id: app.clone(),
-        operation,
-        available_at,
-    };
-    if let Some(stored) = existing(tx, app, &job.id).await? {
-        // The recorded specification wins, not the one just built. A fanout or
-        // propagation page is identified by its obligation and revision alone,
-        // so an equal observation at a later moment carries a later
-        // `available_at` and must still resolve to the job already published.
-        let recorded = stored.job(app)?;
-        if recorded.operation != job.operation {
+    Box::pin(publish_all(tx, app, vec![(operation, available_at)], now))
+        .await?
+        .pop()
+        .ok_or_else(invalid)
+}
+
+/// Record publishable operations, returning the immutable job that now owns
+/// each identity, in order.
+///
+/// Each id is derived first, so an equal observation reads the intent it
+/// already wrote instead of writing a second one, and two transactions racing
+/// the same observation compute the same key: the loser's insert collides on
+/// the primary key rather than committing a duplicate job. The seven
+/// operations that are never published derive no identity and are refused
+/// here, as is a batch naming one identity twice.
+async fn publish_all(
+    tx: &Transaction,
+    app: &AppId,
+    intents: Vec<(JobOperation, UnixMillis)>,
+    now: i64,
+) -> Result<Vec<JobSpec>, WorkflowServiceError> {
+    let jobs = intents
+        .into_iter()
+        .map(|(operation, available_at)| {
+            Ok(JobSpec {
+                id: publication_id(app, &operation, available_at).ok_or_else(invalid)?,
+                app_id: app.clone(),
+                operation,
+                available_at,
+            })
+        })
+        .collect::<Result<Vec<_>, WorkflowServiceError>>()?;
+    let ids: Vec<&str> = jobs.iter().map(|job| job.id.as_str()).collect();
+    distinct(&ids)?;
+    let stored = existing(tx, app, &ids).await?;
+    let mut published = Vec::with_capacity(jobs.len());
+    let mut fresh = BTreeMap::new();
+    let mut records = Vec::new();
+    for job in jobs {
+        if let Some(stored) = stored.get(job.id.as_str()) {
+            // The recorded specification wins, not the one just built. A
+            // fanout or propagation page is identified by its obligation and
+            // revision alone, so an equal observation at a later moment
+            // carries a later `available_at` and must still resolve to the job
+            // already published.
+            let recorded = stored.job(app)?;
+            if recorded.operation != job.operation {
+                return Err(invalid());
+            }
+            published.push(recorded);
+        } else {
+            records.push(Record::new(&job, now)?);
+            fresh.insert(job.id.as_str().to_owned(), job.clone());
+            published.push(job);
+        }
+    }
+    if !records.is_empty() {
+        let saved: Vec<Record> =
+            Box::pin(tx.insert_rows::<publications::Entity, _, _>(records)).await?;
+        if saved.len() != fresh.len() {
             return Err(invalid());
         }
-        return Ok(recorded);
+        for row in &saved {
+            if fresh.get(row.id.as_str()) != Some(&row.job(app)?) {
+                return Err(invalid());
+            }
+        }
     }
-    let saved = Box::pin(
-        tx.database()
-            .entity::<publications::Entity>()?
-            .insert::<_, Record>(Record::new(&job, now)?),
-    )
-    .await?;
-    if saved.job(&job.app_id)? != job {
-        return Err(invalid());
-    }
-    Ok(job)
+    Ok(published)
 }
 
 pub(super) async fn exact(tx: &Transaction, job: &JobSpec) -> Result<(), WorkflowServiceError> {
-    if read(tx, &job.app_id, &job.id).await?.job(&job.app_id)? != *job {
+    exact_all(tx, &job.app_id, std::slice::from_ref(job)).await
+}
+
+/// [`exact`] for many intents of `app`, read a membership list at a time.
+pub(super) async fn exact_all(
+    tx: &Transaction,
+    app: &AppId,
+    jobs: &[JobSpec],
+) -> Result<(), WorkflowServiceError> {
+    if jobs.iter().any(|job| job.app_id != *app) {
         return Err(invalid());
+    }
+    let ids: Vec<&str> = jobs.iter().map(|job| job.id.as_str()).collect();
+    let stored = existing(tx, app, &ids).await?;
+    for job in jobs {
+        let record = stored
+            .get(job.id.as_str())
+            .ok_or_else(|| not_found("workflow job publication"))?;
+        if record.job(app)? != *job {
+            return Err(invalid());
+        }
     }
     Ok(())
 }

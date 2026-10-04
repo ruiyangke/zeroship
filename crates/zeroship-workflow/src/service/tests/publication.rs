@@ -309,7 +309,7 @@ async fn record_each(
     let page = Revision::try_from(revision).unwrap();
     let mut recorded = Vec::new();
 
-    // The run's frontier is re-observed, not advanced: `record_job` reads the
+    // The run's frontier is re-observed, not advanced: `record` reads the
     // revision the row carries, so setting it is how this names one identity
     // twice and a second one once.
     let mut tx = service.begin().await.unwrap();
@@ -322,7 +322,7 @@ async fn record_each(
     )
     .await;
     recorded.push(
-        publication::record_job(&tx, app, run, now)
+        publication::record(&tx, app, run, now)
             .await
             .unwrap()
             .expect("a runnable frontier publishes an Advance"),

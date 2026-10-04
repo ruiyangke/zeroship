@@ -12,6 +12,7 @@ use zeroship_core::{
 };
 
 mod failures;
+mod latency;
 mod ordering;
 mod retention;
 mod rollback;
@@ -185,4 +186,14 @@ paired!(
     sqlite_pending_publication_validation_fences_code_release,
     postgres_pending_publication_validation_fences_code_release,
     retention::damaged_specification
+);
+paired!(
+    sqlite_fanout_delivers_the_final_signal_sequence,
+    postgres_fanout_delivers_the_final_signal_sequence,
+    failures::final_sequence
+);
+paired!(
+    sqlite_fanout_largest_admitted_page_bound_delivers_a_page,
+    postgres_fanout_largest_admitted_page_bound_delivers_a_page,
+    failures::page_bound
 );

@@ -1,8 +1,11 @@
 use super::{
-    changed_once, increment, invalid, models, one, AppId, Broadcast, Transaction,
-    WorkflowServiceError,
+    changed_once, increment, invalid, models, AppId, Broadcast, Transaction, WorkflowServiceError,
 };
-use zeroship_data_orm::orm::{FromRow, Insertable};
+use std::collections::{BTreeMap, BTreeSet};
+use zeroship_data_orm::{
+    orm::{FindOptions, FromRow, Insertable},
+    sql::MAX_MEMBERSHIP_LIST_LEN,
+};
 
 #[derive(FromRow)]
 #[orm(entity = models::app_state)]
@@ -10,12 +13,33 @@ struct Counter {
     signal_sequence: i64,
 }
 
+/// Reserve the app's next delivery sequence.
 pub(in crate::service) async fn allocate(
     tx: &Transaction,
     app: &AppId,
 ) -> Result<i64, WorkflowServiceError> {
+    Ok(*allocate_block(tx, app, 1).await?.start())
+}
+
+/// Reserve `count` consecutive delivery sequences in one counter write,
+/// returning them. The last may be `i64::MAX`.
+async fn allocate_block(
+    tx: &Transaction,
+    app: &AppId,
+    count: usize,
+) -> Result<std::ops::RangeInclusive<i64>, WorkflowServiceError> {
     let current = counter(tx, app).await?;
-    let next = increment(current, "workflow signal delivery sequence exhausted")?;
+    let first = increment(current, "workflow signal delivery sequence exhausted")?;
+    let last = i64::try_from(count)
+        .ok()
+        .filter(|count| *count > 0)
+        .ok_or_else(invalid)?
+        .checked_add(current)
+        .ok_or_else(|| {
+            WorkflowServiceError::ResourceExhausted(
+                "workflow signal delivery sequence exhausted".into(),
+            )
+        })?;
     changed_once(
         tx.database()
             .entity::<models::app_state::Entity>()?
@@ -23,18 +47,19 @@ pub(in crate::service) async fn allocate(
                 models::app_state::app_id
                     .eq(app.as_str())?
                     .and(models::app_state::signal_sequence.eq(current)?),
-                models::app_state::signal_sequence.set(next)?,
+                models::app_state::signal_sequence.set(last)?,
             )
-            .await?, invalid
+            .await?,
+        invalid,
     )?;
-    Ok(next)
+    Ok(first..=last)
 }
 
 async fn counter(tx: &Transaction, app: &AppId) -> Result<i64, WorkflowServiceError> {
     let row = tx
         .database()
         .entity::<models::app_state::Entity>()?
-        .find::<Counter>(models::app_state::app_id.eq(app.as_str())?, one())
+        .find::<Counter>(models::app_state::app_id.eq(app.as_str())?, super::one())
         .await?
         .into_iter()
         .next()
@@ -74,33 +99,45 @@ pub(in crate::service) struct SignalRecord {
     pub target_ordinal: Option<i64>,
 }
 
-pub(super) async fn materialize(
-    tx: &mut Transaction,
+#[derive(FromRow)]
+#[orm(entity = models::signals)]
+struct Delivered {
+    run_id: String,
+}
+
+/// Materialize this broadcast's signal for every recipient run of the page
+/// that does not hold one yet, returning those recipients in page order.
+///
+/// A run already holding the broadcast's signal, from an earlier page or an
+/// earlier recipient row of this one, receives no second. Each statement covers
+/// the whole page, or for a membership read at most [`MAX_MEMBERSHIP_LIST_LEN`]
+/// runs of it, so the round trips grow by one per membership list instead of
+/// one per recipient.
+pub(super) async fn materialize<'a>(
+    tx: &Transaction,
     app: &AppId,
     broadcast: &Broadcast,
-    recipient: &models::SubscriptionRecipient,
+    recipients: &'a [models::SubscriptionRecipient],
     now: i64,
-) -> Result<bool, WorkflowServiceError> {
-    if tx
-        .database()
-        .entity::<models::signals::Entity>()?
-        .exists(
-            models::signals::app_id
-                .eq(app.as_str())?
-                .and(models::signals::broadcast_id.eq(Some(broadcast.id.as_str()))?)
-                .and(models::signals::run_id.eq(recipient.run_id.as_str())?),
-        )
-        .await?
-    {
-        return Ok(false);
+) -> Result<Vec<&'a models::SubscriptionRecipient>, WorkflowServiceError> {
+    let delivered = delivered(tx, app, broadcast, recipients).await?;
+    let mut named = BTreeSet::new();
+    let fresh: Vec<_> = recipients
+        .iter()
+        .filter(|recipient| {
+            !delivered.contains(recipient.run_id.as_str())
+                && named.insert(recipient.run_id.as_str())
+        })
+        .collect();
+    if fresh.is_empty() {
+        return Ok(fresh);
     }
-    let sequence = allocate(tx, app).await?;
-    let id = zeroship_core::typed_id::new_workflow_signal_id();
-    let saved = tx
-        .database()
-        .entity::<models::signals::Entity>()?
-        .insert::<_, SignalRecord>(SignalRecord {
-            id: id.clone(),
+    let sequences = allocate_block(tx, app, fresh.len()).await?;
+    let records: Vec<SignalRecord> = fresh
+        .iter()
+        .zip(sequences)
+        .map(|(recipient, sequence)| SignalRecord {
+            id: zeroship_core::typed_id::new_workflow_signal_id(),
             app_id: app.as_str().to_owned(),
             run_id: recipient.run_id.clone(),
             signal_type: broadcast.signal_type.clone(),
@@ -114,18 +151,72 @@ pub(super) async fn materialize(
             target_generation: Some(recipient.generation),
             target_ordinal: Some(recipient.ordinal),
         })
-        .await?;
-    if saved.id != id || saved.delivery_sequence != sequence {
+        .collect();
+    let expected: BTreeMap<String, i64> = records
+        .iter()
+        .map(|record| (record.id.clone(), record.delivery_sequence))
+        .collect();
+    let events: Vec<(String, serde_json::Value)> = records
+        .iter()
+        .map(|record| {
+            (
+                record.id.clone(),
+                serde_json::json!({"runId":record.run_id,"broadcastId":broadcast.id}),
+            )
+        })
+        .collect();
+    let saved: Vec<SignalRecord> =
+        Box::pin(tx.insert_rows::<models::signals::Entity, _, _>(records)).await?;
+    if saved.len() != expected.len()
+        || saved
+            .iter()
+            .any(|row| expected.get(&row.id) != Some(&row.delivery_sequence))
+    {
         return Err(invalid());
     }
-    super::super::app::emit(
+    Box::pin(super::super::app::emit_all(
         tx,
         app,
-        &id,
         "workflow.signal",
-        serde_json::json!({"runId":recipient.run_id,"broadcastId":broadcast.id}),
+        events,
         now,
-    )
+    ))
     .await?;
-    Ok(true)
+    Ok(fresh)
+}
+
+/// The recipient runs that already hold this broadcast's signal. The journal
+/// keeps at most one per run, so a membership list of runs reads at most as
+/// many rows.
+async fn delivered(
+    tx: &Transaction,
+    app: &AppId,
+    broadcast: &Broadcast,
+    recipients: &[models::SubscriptionRecipient],
+) -> Result<BTreeSet<String>, WorkflowServiceError> {
+    let runs: Vec<&str> = recipients
+        .iter()
+        .map(|recipient| recipient.run_id.as_str())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let mut delivered = BTreeSet::new();
+    for chunk in runs.chunks(MAX_MEMBERSHIP_LIST_LEN) {
+        let rows = tx
+            .database()
+            .entity::<models::signals::Entity>()?
+            .find::<Delivered>(
+                models::signals::app_id
+                    .eq(app.as_str())?
+                    .and(models::signals::broadcast_id.eq(Some(broadcast.id.as_str()))?)
+                    .and(models::signals::run_id.in_values(chunk.iter().copied())?),
+                FindOptions {
+                    limit: Some(i64::try_from(chunk.len()).map_err(|_| invalid())?),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        delivered.extend(rows.into_iter().map(|row| row.run_id));
+    }
+    Ok(delivered)
 }

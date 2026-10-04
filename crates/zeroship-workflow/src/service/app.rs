@@ -19,7 +19,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_data_orm::{
-    orm::{Entity, FindOptions, Operation, Output},
+    orm::{Entity, FindOptions, FromRow, Insertable, Operation, Output},
+    sql::MAX_MEMBERSHIP_LIST_LEN,
     value,
 };
 
@@ -987,19 +988,81 @@ pub(crate) async fn emit(
     payload: serde_json::Value,
     now: i64,
 ) -> Result<(), WorkflowServiceError> {
-    let outbox = tx
-        .database()
-        .collection(models::outbox::Entity::COLLECTION)?;
-    let Output::Count(count) = outbox
-        .count(value!({"app_id":app.as_str(), "id":id}), value!({}))
-        .await?
-    else {
+    Box::pin(emit_all(tx, app, kind, vec![(id.to_owned(), payload)], now)).await
+}
+
+#[derive(FromRow, Insertable)]
+#[orm(entity = models::outbox)]
+struct OutboxEvent {
+    id: String,
+    app_id: String,
+    kind: String,
+    payload: String,
+    created_at: i64,
+}
+
+#[derive(FromRow)]
+#[orm(entity = models::outbox)]
+struct OutboxId {
+    id: String,
+}
+
+/// Append one outbox event of `kind` per `(id, payload)`, leaving an id the
+/// outbox already holds, or one named earlier in `events`, as it is. The
+/// statements cover a membership list of ids each rather than one event.
+#[expect(
+    clippy::future_not_send,
+    reason = "journal writes use the creator transaction thread"
+)]
+pub(super) async fn emit_all(
+    tx: &Transaction,
+    app: &AppId,
+    kind: &str,
+    events: Vec<(String, serde_json::Value)>,
+    now: i64,
+) -> Result<(), WorkflowServiceError> {
+    let ids: Vec<&str> = events.iter().map(|(id, _)| id.as_str()).collect();
+    let mut held = std::collections::BTreeSet::new();
+    for chunk in ids.chunks(MAX_MEMBERSHIP_LIST_LEN) {
+        let rows = tx
+            .database()
+            .entity::<models::outbox::Entity>()?
+            .find::<OutboxId>(
+                models::outbox::app_id
+                    .eq(app.as_str())?
+                    .and(models::outbox::id.in_values(chunk.iter().copied())?),
+                FindOptions {
+                    limit: Some(i64::try_from(chunk.len()).map_err(|_| {
+                        WorkflowServiceError::Internal("workflow outbox batch overflow".into())
+                    })?),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        held.extend(rows.into_iter().map(|row| row.id));
+    }
+    let mut fresh = Vec::new();
+    for (id, payload) in &events {
+        if held.insert(id.clone()) {
+            fresh.push(OutboxEvent {
+                id: id.clone(),
+                app_id: app.as_str().to_owned(),
+                kind: kind.to_owned(),
+                payload: encode(payload)?,
+                created_at: now,
+            });
+        }
+    }
+    if fresh.is_empty() {
+        return Ok(());
+    }
+    let expected = fresh.len();
+    let saved: Vec<OutboxId> =
+        Box::pin(tx.insert_rows::<models::outbox::Entity, _, _>(fresh)).await?;
+    if saved.len() != expected {
         return Err(WorkflowServiceError::Internal(
-            "workflow count returned rows".into(),
+            "workflow outbox insert returned a different row count".into(),
         ));
-    };
-    if count == 0 {
-        outbox.insert(value!({"app_id":app.as_str(), "id":id, "kind":kind, "payload":encode(&payload)?, "created_at":now})).await?;
     }
     Ok(())
 }

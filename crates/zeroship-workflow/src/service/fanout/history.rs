@@ -1,7 +1,7 @@
 use super::{
     broadcast, decode, delivery, invalid, models, one, publication, topic_record, AppId, Broadcast,
     JobOperation, JobOutcome, JobReceipt, JobSpec, Page, PageResult, TopicRecord, Transaction,
-    WorkflowServiceError,
+    WorkflowServiceError, MAX_SUCCESSORS,
 };
 
 /// Fresh work follows the immutable previous page and completed topic head.
@@ -142,7 +142,9 @@ pub(super) async fn receipt(
         || result.after > current.cutoff_sequence
         || result.delivered < 0
         || result.delivered > result.after - result.before
-        || result.successors.len() > 1025
+        || i64::try_from(result.successors.len())
+            .ok()
+            .is_none_or(|len| len > MAX_SUCCESSORS)
         || current.revision <= result.revision
         || current.cursor < result.after
         || current.sequence > topic.accepted_sequence
@@ -166,7 +168,6 @@ pub(super) async fn receipt(
         if successor.app_id != job.app_id || !identities.insert(successor.id.clone()) {
             return Err(invalid());
         }
-        publication::exact(tx, successor).await?;
         match &successor.operation {
             JobOperation::Advance { .. } => {}
             JobOperation::Fanout {
@@ -179,5 +180,6 @@ pub(super) async fn receipt(
     if next_pages != usize::from(!result.finished) {
         return Err(invalid());
     }
+    publication::exact_all(tx, &job.app_id, &result.successors).await?;
     Ok(Some(receipt))
 }

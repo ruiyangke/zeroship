@@ -262,3 +262,88 @@ pub(super) async fn counters(store: Rc<OrmStore>) {
         .unwrap()
         .is_some());
 }
+
+/// The last delivery sequence the counter can name is delivered: a page whose
+/// signals end exactly on `i64::MAX` commits all of them.
+pub(super) async fn final_sequence(store: Rc<OrmStore>) {
+    let (service, app, _, _deployments) = Box::pin(registered_service(store)).await;
+    let scope = service.fixture_app(app.clone());
+    let worker = WorkerIdentity::new("fanout-final-sequence".into()).unwrap();
+    wait_on_topic(&service, &scope, &worker).await;
+    wait_on_topic(&service, &scope, &worker).await;
+    let accepted = broadcast(&scope, "last").await;
+    let grant = Grant::new(&job(&scope, &accepted.id, 1).await);
+    let tx = service.begin().await.unwrap();
+    Box::pin(
+        tx.database()
+            .entity::<app_state::Entity>()
+            .unwrap()
+            .update_many(
+                app_state::app_id.eq(app.as_str()).unwrap(),
+                app_state::signal_sequence.set(i64::MAX - 2).unwrap(),
+            ),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    assert!(scope
+        .fanout_job(&grant, FanoutOptions::default())
+        .await
+        .unwrap()
+        .is_some());
+    let tx = service.begin().await.unwrap();
+    let mut sequences: Vec<i64> = journal_rows(&tx, "signals", json!({"app_id":app.as_str()}))
+        .await
+        .iter()
+        .map(|row| row.integer("delivery_sequence").unwrap())
+        .collect();
+    tx.commit().await.unwrap();
+    sequences.sort_unstable();
+    assert_eq!(sequences, [i64::MAX - 1, i64::MAX]);
+}
+
+/// The largest page bound the options admit delivers a page, and the next one
+/// is refused before any journal work.
+pub(super) async fn page_bound(store: Rc<OrmStore>) {
+    /// A bound past every admitted one, where the search for the largest starts.
+    const SEARCHED: u32 = 4096;
+    let (service, app, _, _deployments) = Box::pin(registered_service(store)).await;
+    let scope = service.fixture_app(app.clone());
+    let worker = WorkerIdentity::new("fanout-page-bound".into()).unwrap();
+    wait_on_topic(&service, &scope, &worker).await;
+    let accepted = broadcast(&scope, "bounded").await;
+    let grant = Grant::new(&job(&scope, &accepted.id, 1).await);
+    assert!(FanoutOptions {
+        page_size: SEARCHED
+    }
+    .validate()
+    .is_err());
+    let largest = (1..SEARCHED)
+        .rev()
+        .find(|page_size| {
+            FanoutOptions {
+                page_size: *page_size,
+            }
+            .validate()
+            .is_ok()
+        })
+        .expect("some page bound is admitted");
+    let before = snapshot(&scope).await;
+    assert!(matches!(
+        scope
+            .fanout_job(
+                &grant,
+                FanoutOptions {
+                    page_size: largest + 1
+                }
+            )
+            .await,
+        Err(WorkflowServiceError::InvalidRequest(_))
+    ));
+    assert_eq!(snapshot(&scope).await, before);
+    assert!(scope
+        .fanout_job(&grant, FanoutOptions { page_size: largest })
+        .await
+        .expect("the largest admitted page bound delivers a page")
+        .is_some());
+}
