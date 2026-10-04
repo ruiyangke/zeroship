@@ -181,7 +181,7 @@ mod live_db_tests {
     use super::*;
 
     async fn pg() -> compio_postgres::Client {
-        let db_url = crate::test_database::url();
+        let db_url = zeroship_testkit::postgres::platform().admin_url().to_string();
         let (client, conn) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
             .await
             .expect("pg connect");

@@ -77,7 +77,7 @@ mod tests {
 
     #[compio::test]
     async fn routes_use_the_owned_postgres_client() {
-        let database_url = crate::test_database::url();
+        let database_url = zeroship_testkit::postgres::platform().admin_url().to_string();
         let (client, connection) =
             compio_postgres::connect(&database_url, compio_postgres::NoTls)
                 .await

@@ -7,9 +7,8 @@
 //! is rejected) and that `get_versions` derives runtime limits from the catalog
 //! row rather than a hardcoded plan-name table.
 //!
-//! The database comes from `crate::support::require_control_db`, which REFUSES the run
-//! when there is no migrated one; provision it with
-//! `tests/provision_test_backends.sh`. The pure tier math is unit-tested DB-free
+//! The database comes from `crate::support::isolated_control_db`, which hands
+//! each case a migrated clone from the shared server. The pure tier math is unit-tested DB-free
 //! in `src/pricing.rs`.
 
 
@@ -25,7 +24,7 @@ use zeroship_core::types::{AppNetPolicyLimits, AppRuntimeLimits};
 use zeroship_core::{AppId, UserId};
 
 fn db_url() -> String {
-    crate::support::require_control_db()
+    crate::support::isolated_control_db()
 }
 
 /// `pricing_config (id='global')` is a fleet-wide SINGLETON, and the MAJOR-3

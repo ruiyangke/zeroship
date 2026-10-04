@@ -13,7 +13,7 @@ use zeroship_control::bootstrap_builder::{
 };
 
 fn db_url() -> String {
-    crate::support::require_control_db()
+    crate::support::isolated_control_db()
 }
 
 /// All three bootstrap tests operate on the *same* singleton OAuth client row

@@ -1,8 +1,7 @@
 //! Integration tests for `EnvStore` against a real Postgres.
 //!
-//! The database comes from `crate::support::require_control_db`, which REFUSES the run
-//! when there is no migrated one; provision it with
-//! `tests/provision_test_backends.sh`.
+//! The database comes from `crate::support::require_control_db`, which hands
+//! each case a migrated clone from the shared server.
 //!
 //! Each test uses a unique app row so parallel runs don't collide.
 

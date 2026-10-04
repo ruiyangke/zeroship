@@ -306,7 +306,7 @@ impl Fixture {
 }
 
 async fn build_fixture(envelope: EnrolmentEnvelope) -> Fixture {
-    let db_url = crate::support::require_control_db();
+    let db_url = crate::support::isolated_control_db();
     let blob_root = tmpdir("blob");
     let deploy_tmp_dir = tmpdir("deploy");
     let key_dir = tmpdir("keys");
@@ -1731,7 +1731,7 @@ struct RaceOutcome {
 /// `zeroship.purge_worker_join_signer` definitions are CURRENTLY LIVE in the
 /// target database.
 async fn run_the_join_purge_race() -> RaceOutcome {
-    let db_url = crate::support::require_control_db();
+    let db_url = crate::support::isolated_control_db();
     let (pg_client, pg_conn) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
         .await
         .expect("control-pg connect");
@@ -2049,7 +2049,7 @@ async fn two_replicas_racing_one_key_converge_on_one_instance() {
 async fn only_one_control_replica_holds_the_join_token_minter_lease() {
     use zeroship_control::join_minter::claim_minter_lease;
 
-    let url = crate::support::require_control_db();
+    let url = crate::support::isolated_control_db();
     let open = || async {
         let (client, connection) = compio_postgres::connect(&url, compio_postgres::NoTls)
             .await

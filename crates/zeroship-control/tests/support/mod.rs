@@ -1,10 +1,9 @@
-//! Shared fixtures for the `zeroship-control` suites: the one migrated
-//! PostgreSQL server a test binary owns, platform bearer minting, recording
+//! Shared fixtures for the `zeroship-control` suites: the migrated PostgreSQL
+//! template every test process shares, platform bearer minting, recording
 //! doubles and the workflow fleet/postgres helpers.
 
 pub mod authz_fixture;
 pub mod deployments;
-pub mod isolated_case;
 pub mod live;
 pub use zeroship_workflow_testkit::platform;
 pub mod stripe_mock;
@@ -35,9 +34,56 @@ pub const DEFAULT_EXECUTION_ZONE_ID: &str = "ezn_default000000000000000000";
 const PLATFORM_KID: &str = "platform-control-test-kid";
 const PLATFORM_KEY_SEED: u8 = 47;
 
-/// The migrated PostgreSQL instance owned by this test binary.
+/// The migrated working database every test process of a worktree shares.
+///
+/// Every case scopes itself to the rows it mints - its ids, organizations,
+/// apps and zones - so cases running at once never observe each other's writes.
+/// A subject that is database-global rather than row-scoped, such as a
+/// fleet-wide sweep or the `pricing_config` singleton, asks for
+/// [`fresh_control_db`] instead of reaching through here.
 pub fn require_control_db() -> String {
-    test_database::url()
+    zeroship_testkit::postgres::platform().admin_url().to_string()
+}
+
+/// A database a database-global case owns, cloned from the migrated template on
+/// the one server every test process shares.
+///
+/// The clone is removed when the returned guard drops, which must be after
+/// every connection the case opened to it. Only a subject that no sibling may
+/// observe - a fleet-wide sweep, a mutated singleton - asks for one.
+pub fn fresh_control_db() -> zeroship_testkit::postgres::FreshDatabase {
+    zeroship_testkit::postgres::platform().fresh_database()
+}
+
+/// A database-global case's URL, cloned from the migrated template and held for
+/// the case.
+///
+/// [`require_control_db`] hands an ordinary case the shared working database,
+/// where it scopes itself to the rows it mints. A case whose subject is instead
+/// database-global - it sweeps a period fleet-wide, declares an execution zone,
+/// or mutates a config singleton - must not observe a sibling, so it works in a
+/// clone of its own. The clone is keyed by the test thread (libtest names a
+/// thread after the case it runs), so a case that asks repeatedly reaches one
+/// database and two cases running at once never share one.
+pub fn isolated_control_db() -> String {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    static DATABASES: OnceLock<Mutex<HashMap<String, zeroship_testkit::postgres::FreshDatabase>>> =
+        OnceLock::new();
+    let key = std::thread::current()
+        .name()
+        .unwrap_or("control-test")
+        .to_owned();
+    let databases = DATABASES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut databases = databases
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    databases
+        .entry(key)
+        .or_insert_with(|| zeroship_testkit::postgres::platform().fresh_database())
+        .admin_url()
+        .to_string()
 }
 
 /// Refuse the calling test because a backend it requires is not there.
@@ -716,7 +762,10 @@ async fn run_band_base_months() -> u32 {
 /// this is also what `a_later_run_starts_above_every_period_this_run_seeded`
 /// calls to ask what a LATER run would resolve after this one has written.
 pub async fn resolve_run_band_base() -> u32 {
-    let db_url = require_control_db();
+    // The base is read from the same database the window will be used in: a
+    // database-global case works in a clone, so a scan of the shared working
+    // database would not see the months it seeded.
+    let db_url = isolated_control_db();
     let (client, connection) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
         .await
         .expect("connect to resolve the isolated billing period band base");
@@ -878,6 +927,3 @@ pub fn lite_billing_stack(
         invoicer: provider,
     })
 }
-
-#[path = "../../src/test_database/mod.rs"]
-pub(crate) mod test_database;

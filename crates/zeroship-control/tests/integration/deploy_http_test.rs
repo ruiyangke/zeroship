@@ -13,8 +13,8 @@
 //!
 //! All cases gate on a test database - Postgres is required to
 //! construct `AppState` (registry/env_store/auth all dial the DB
-//! on startup). `crate::support::require_control_db` REFUSES the run when
-//! there is no migrated database, rather than skipping it.
+//! on startup). `crate::support::require_control_db` hands each case a migrated
+//! database from the shared server; it never skips.
 //!
 //! Note on the missing case: a "body exceeds the 256 MiB cap"
 //! test isn't here — sending 256+ MiB through ntex test plumbing

@@ -29,8 +29,8 @@ use zeroship_core::app_id::AppId;
 use zeroship_metering::{Meter, UsageOutbox};
 use zeroship_stream::{adapters, StreamConfig, StreamRegistry};
 
-use crate::support::test_database::container_reaper::lifetime;
-use crate::support::test_database::container_reaper::{start_owned, DockerCli, OwnedContainer, Ownership};
+use zeroship_testkit::lifetime;
+use zeroship_testkit::{start_owned, DockerCli, OwnedContainer, Ownership};
 
 fn db_url() -> String {
     crate::support::require_control_db()

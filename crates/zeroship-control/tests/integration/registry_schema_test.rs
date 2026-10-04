@@ -1,8 +1,7 @@
 //! Live-PG schema regression tests for control-plane registry tables.
 //!
-//! Configure a test database (`zeroship_core::config::test_database_url_opt`;
-//! run `tests/provision_test_backends.sh` to provision one) to run; tests
-//! skip otherwise.
+//! Runs against the migrated database `crate::support::require_control_db`
+//! hands this case; there is no skip.
 
 use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;

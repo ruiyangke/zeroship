@@ -14,8 +14,7 @@
 //! FAITHFUL by construction: every assertion runs against a live, migrated
 //! Postgres (the REAL `invoices`/`invoice_lines`/`billing_provider_refs` tables +
 //! the REAL immutability triggers + the REAL `charge_cents`). Gated on a
-//! configured test database (`zeroship_core::config::test_database_url_opt`);
-//! the run refuses otherwise.
+//! the migrated database `crate::support::require_control_db` hands this case.
 
 
 use std::collections::HashMap;

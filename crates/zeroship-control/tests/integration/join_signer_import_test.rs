@@ -27,7 +27,7 @@ const DEFAULT_ZONE: &str = "default";
 
 /// The fixture database, reached as the production control-plane login.
 fn control_login_url() -> String {
-    let mut url = url::Url::parse(&crate::support::require_control_db()).expect("fixture URL parses");
+    let mut url = url::Url::parse(&crate::support::isolated_control_db()).expect("fixture URL parses");
     url.set_username("zeroship_control").expect("username");
     url.set_password(Some("zeroship_control")).expect("password");
     url.into()
@@ -37,7 +37,7 @@ fn control_login_url() -> String {
 /// (revocation, row inspection and cleanup).
 async fn admin() -> compio_postgres::Client {
     let (client, connection) =
-        compio_postgres::connect(&crate::support::require_control_db(), compio_postgres::NoTls)
+        compio_postgres::connect(&crate::support::isolated_control_db(), compio_postgres::NoTls)
             .await
             .expect("admin connect");
     crate::support::live::spawn(async move {

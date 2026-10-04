@@ -632,7 +632,23 @@ mod live_db_tests {
     }
 
     fn db_url() -> String {
-        crate::test_database::url()
+        // A recompute cycle deletes and rewrites every usage aggregate of a
+        // period, so this case works in a clone of the migrated template: on the
+        // shared database its rewrite of the current month would delete a
+        // sibling case's rows. The clone drops when the case's thread ends.
+        use std::cell::RefCell;
+
+        thread_local! {
+            static FRESH: RefCell<Option<zeroship_testkit::postgres::FreshDatabase>> =
+                const { RefCell::new(None) };
+        }
+        FRESH.with(|fresh| {
+            fresh
+                .borrow_mut()
+                .get_or_insert_with(|| zeroship_testkit::postgres::platform().fresh_database())
+                .admin_url()
+                .to_string()
+        })
     }
 
     async fn pg(db_url: &str) -> compio_postgres::Client {
@@ -749,7 +765,12 @@ mod live_db_tests {
 
     #[compio::test]
     async fn stream_recompute_replaces_usage_aggregates_and_spend_state_idempotently() {
-        let url = db_url();
+        // `evaluate_all` below sweeps every app fleet-wide, so this case works
+        // in a clone of the migrated template: a sibling's sweep must not
+        // transition this case's apps first and leave this case's `evaluate_all`
+        // with nothing to report.
+        let fresh = zeroship_testkit::postgres::platform().fresh_database();
+        let url = fresh.admin_url().to_string();
         let client = pg(&url).await;
         let registry = Registry::new(&url).await.expect("registry");
         let period = current_period_start_unix();

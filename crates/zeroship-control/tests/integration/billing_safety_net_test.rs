@@ -26,7 +26,7 @@ const METER: &str = "compute_units";
 const SECOND_METER: &str = "db_reads";
 
 fn db_url() -> String {
-    crate::support::require_control_db()
+    crate::support::isolated_control_db()
 }
 
 fn tmpdir(label: &str) -> PathBuf {

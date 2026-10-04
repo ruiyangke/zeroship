@@ -3,9 +3,8 @@
 //! These tests exercise `zeroship_control::deploy::ingest` directly
 //! against an on-disk `LocalDiskBlobStore` (under a tmpdir). The DB
 //! step is exercised end-to-end against a real Postgres only when a test
-//! database is configured (`zeroship_core::config::test_database_url_opt`)
-//! — otherwise the registry-side asserts are skipped silently, matching the
-//! pattern in `env_store.rs`.
+//! database `crate::support::require_control_db` hands this case
+//! - the registry-side asserts run.
 //!
 //! The deploy pipeline is structured so its core (`ingest`) is a pure
 //! function over `(blob_store, app_id, compressed_bytes) -> result`.

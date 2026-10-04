@@ -6,9 +6,8 @@
 //! mock-Stripe HTTP server, and the REAL `billing_reconcile::sweep` /
 //! `proration::record_plan_change` — NO shims. The plan-change write path is the
 //! exact server-side code `api.rs::set_plan` runs (`record_plan_change` in a
-//! per-organization-advisory-locked txn). Real Postgres via a configured test
-//! database (`zeroship_core::config::test_database_url_opt`); a refusal
-//! otherwise. The DB must have changesets 0050 + 0051 applied.
+//! per-organization-advisory-locked txn). Real Postgres via the migrated
+//! database `crate::support::isolated_control_db` hands this case. The DB must have changesets 0050 + 0051 applied.
 
 
 use std::collections::HashMap;
@@ -28,7 +27,7 @@ use zeroship_control::{
 use zeroship_core::AppId;
 
 fn db_url() -> String {
-    crate::support::require_control_db()
+    crate::support::isolated_control_db()
 }
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";

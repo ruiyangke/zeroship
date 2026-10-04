@@ -286,7 +286,7 @@ impl Fixture {
 }
 
 async fn build_fixture() -> Fixture {
-    let db_url = crate::support::require_control_db();
+    let db_url = crate::support::isolated_control_db();
     let blob_root = tmpdir("blob");
     let deploy_tmp_dir = tmpdir("deploy");
     let key_dir = tmpdir("keys");

@@ -9,8 +9,8 @@
 //! `AppState.stripe_base_url`, so the request building, the `Authorization: Bearer` +
 //! `Stripe-Version` headers, the HTTP round-trip and the JSON parse are all exercised end to
 //! end. The reconcile core (`stripe_reconcile::tick_with`) runs against a live, migrated
-//! Postgres (a configured test database, `zeroship_core::config::test_database_url_opt`;
-//! the run refuses otherwise) with real `invoices` / `refunds` /
+//! Postgres (the migrated database `crate::support::isolated_control_db` hands
+//! this case) with real `invoices` / `refunds` /
 //! `billing_disputes` / `billing_provider_refs` / `billing_reconciliation_findings` rows.
 //!
 //! The required cases (each seeds its OWN organization + globally-unique Stripe ids, so the
@@ -41,7 +41,7 @@ use zeroship_control::{
 };
 
 fn db_url() -> String {
-    crate::support::require_control_db()
+    crate::support::isolated_control_db()
 }
 
 /// `stripe_reconcile::tick_with` single-flights fleet-wide via `pg_try_advisory_lock` (the

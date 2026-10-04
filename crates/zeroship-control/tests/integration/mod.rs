@@ -54,7 +54,7 @@ mod stream_forwarder_recompute_test;
 mod stripe_reconcile_test;
 mod stripe_store;
 mod stripe_webhook_test;
-mod test_database_lifetime;
+mod testkit_shared_server;
 mod trusted_clients_test;
 mod worker_health_test;
 mod worker_join_test;

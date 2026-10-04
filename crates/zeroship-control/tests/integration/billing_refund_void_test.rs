@@ -4,8 +4,7 @@
 //! endpoint, and the void+reissue + `void_reversal` + negative-invoice true-up bridge.
 //!
 //! FAITHFUL by construction: every assertion runs against a live, migrated Postgres
-//! (a configured test database, `zeroship_core::config::test_database_url_opt`;
-//! the run refuses otherwise) and exercises the REAL paths --
+//! (the migrated database `crate::support::isolated_control_db` hands this case) and exercises the REAL paths --
 //!   * the REAL `refunds` table / domains / over-refund trigger / immutability trigger;
 //!   * the REAL `refund::issue_refund` + `void_reissue::void_and_reissue` helpers (so the
 //!     claim-then-call, the `void_reversal` append, and the true-up math all run for real);
@@ -49,7 +48,7 @@ use zeroship_control::{
 use zeroship_core::AppId;
 
 fn db_url() -> String {
-    crate::support::require_control_db()
+    crate::support::isolated_control_db()
 }
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";

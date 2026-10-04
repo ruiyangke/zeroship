@@ -3,8 +3,7 @@
 //! (`0041`/`0047`), the `BillingNotifier` seam, and the `cron::billing_notify` sweep.
 //!
 //! FAITHFUL by construction: every assertion runs against a LIVE, migrated Postgres
-//! (a configured test database, `zeroship_core::config::test_database_url_opt`;
-//! the run refuses otherwise) and exercises the REAL paths --
+//! (the migrated database `crate::support::isolated_control_db` hands this case) and exercises the REAL paths --
 //!   * the REAL `account_status::AccountStatusStore` (mints the `obh_…` surrogate id);
 //!   * the REAL `cron::billing_notify::{tick, sweep}` (advisory lock, claim-before-send,
 //!     scan → send → flip, the `NOTIFY_REDRIVE_HORIZON` re-drive);
@@ -50,7 +49,7 @@ use zeroship_control::{
 use zeroship_core::AppId;
 
 fn db_url() -> String {
-    crate::support::require_control_db()
+    crate::support::isolated_control_db()
 }
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";

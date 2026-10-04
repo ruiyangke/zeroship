@@ -56,7 +56,7 @@ struct Fx {
 
 impl Fx {
     async fn new() -> Self {
-        let url = crate::support::require_control_db();
+        let url = crate::support::isolated_control_db();
         let (pg, conn) = connect(&url, NoTls).await.expect("control-pg connect");
         crate::support::live::spawn(async move {
             let _ = conn.run().await;

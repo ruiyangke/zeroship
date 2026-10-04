@@ -97,10 +97,22 @@ impl Scope {
     /// The worktree's shared scope for one kind of server.
     #[must_use]
     pub fn worktree(kind: &str) -> Self {
+        Self::worktree_with_grace(kind, DEFAULT_IDLE_GRACE)
+    }
+
+    /// The worktree's shared scope for one kind of server, with `idle_grace`
+    /// before an unheld server is removed.
+    ///
+    /// A server whose lease is held per test process rather than per test
+    /// binary needs a grace that spans a run: the lease is unheld between the
+    /// tests that use it, and a grace shorter than those gaps removes the
+    /// server mid-run, so a later test boots a second one.
+    #[must_use]
+    pub fn worktree_with_grace(kind: &str, idle_grace: Duration) -> Self {
         Self {
             kind: kind.to_owned(),
             explicit: None,
-            idle_grace: DEFAULT_IDLE_GRACE,
+            idle_grace,
         }
     }
 

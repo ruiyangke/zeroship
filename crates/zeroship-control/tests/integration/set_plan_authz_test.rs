@@ -12,9 +12,8 @@
 //! alone is not a sufficient gate: an app_owner satisfies it, so without the
 //! flag a creator could self-assign a cheaper operator plan and underpay.
 //!
-//! Configure a test database (`zeroship_core::config::test_database_url_opt`;
-//! run `tests/provision_test_backends.sh` to provision one) to run; silently
-//! skips otherwise.
+//! Runs against the migrated database `crate::support::require_control_db`
+//! hands this case; there is no skip.
 
 use std::path::PathBuf;
 use std::sync::Arc;

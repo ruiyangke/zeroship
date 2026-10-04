@@ -3,8 +3,7 @@
 //! `POST /api/billing/credit` grant endpoint.
 //!
 //! FAITHFUL by construction: every assertion runs against a live, migrated Postgres
-//! (a configured test database, `zeroship_core::config::test_database_url_opt`;
-//! the run refuses otherwise) and exercises the REAL paths --
+//! (the migrated database `crate::support::isolated_control_db` hands this case) and exercises the REAL paths --
 //!   * the REAL `credit_ledger` table / domain / kind↔sign CHECK / immutability trigger;
 //!   * the REAL reconciler `billing_reconcile::bill_organization` (so consume runs inside the
 //!     real finalize-in-one-UPDATE, the real balance CHECK validates the row);
@@ -44,7 +43,7 @@ use zeroship_control::{
 use zeroship_core::AppId;
 
 fn db_url() -> String {
-    crate::support::require_control_db()
+    crate::support::isolated_control_db()
 }
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";

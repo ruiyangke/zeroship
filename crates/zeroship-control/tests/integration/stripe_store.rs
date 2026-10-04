@@ -1,8 +1,7 @@
 //! Integration tests for `StripeStore` against a live Postgres.
 //!
-//! The database comes from `crate::support::require_control_db`, which REFUSES the run
-//! when there is no migrated one; provision it with
-//! `tests/provision_test_backends.sh`.
+//! The database comes from `crate::support::require_control_db`, which hands
+//! each case a migrated clone from the shared server.
 
 
 use compio_postgres::{connect, NoTls};

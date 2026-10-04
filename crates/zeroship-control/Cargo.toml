@@ -113,8 +113,10 @@ thiserror = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 
 [dev-dependencies]
-zeroship-workflow-testkit = { path = "../zeroship-workflow-testkit" }
+# The platform database every test process shares, and the container reaper the
+# Redpanda e2e fixture owns its broker through.
 zeroship-testkit = { path = "../../tests/testkit" }
+zeroship-workflow-testkit = { path = "../zeroship-workflow-testkit" }
 zeroship-workflow-server = { path = "../zeroship-workflow-server" }
 # The workflow lane holds a payload store, so composing one in a test names the
 # backend it is rooted at.
@@ -154,8 +156,9 @@ tracing-subscriber = { workspace = true }
 # rather than asserting the ORM layer underneath them.
 zeroship-data-v8 = { workspace = true }
 
-# Database verification is mandatory in ordinary cargo test runs. Each test
-# binary owns and migrates its PostgreSQL instance.
+# Database verification is mandatory in ordinary cargo test runs. The suites
+# reach the one migrated platform database `zeroship-testkit` shares across
+# every test process of a worktree.
 
 # One integration binary; tests/support, tests/integration and tests/e2e
 # declare every suite.

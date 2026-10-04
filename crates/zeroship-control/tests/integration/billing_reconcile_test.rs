@@ -9,9 +9,8 @@
 //! the `Authorization: Bearer` + `Idempotency-Key` headers, the HTTP round-trip
 //! and the JSON parse are all exercised end to end.
 //!
-//! Real Postgres via a configured test database
-//! (`crate::support::require_control_db`); an absent or unmigrated one REFUSES
-//! the run.
+//! Real Postgres via the migrated database `crate::support::isolated_control_db`
+//! hands this case.
 //! The DB must have changeset 0040 applied.
 
 
@@ -36,7 +35,7 @@ use zeroship_control::{
 use zeroship_core::AppId;
 
 fn db_url() -> String {
-    crate::support::require_control_db()
+    crate::support::isolated_control_db()
 }
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
@@ -1994,13 +1993,14 @@ async fn crashed_run_with_null_invoice_id_is_redriven() {
 /// (error out) and produce NO invoice and NO `billing_runs` row — never a silent
 /// base-only $0 invoice, which would leak revenue.
 ///
-/// This case mutates the fleet-wide `pricing_config` singleton every case in this
-/// shared-database binary reads, so it runs alone in a child copy of the binary
-/// (see the spawner below) rather than racing a sibling's pricing.
+/// This case mutates the fleet-wide `pricing_config` singleton every case in the
+/// shared database reads, so it runs on a database cloned from the migrated
+/// template: the clone has no sibling's pricing, and deleting the global default
+/// cannot race a sibling's sweep.
 #[compio::test(crate = "crate::support::live")]
-#[ignore = "mutates the fleet-wide pricing_config singleton; its spawner runs it alone in a child"]
 async fn missing_default_fx_aborts_sweep_and_bills_no_one() {
-    let url = db_url();
+    let fresh = crate::support::fresh_control_db();
+    let url = fresh.admin_url().to_string();
     let fx = build_fixture(&url, "nofx").await;
     let now = now_for_closed_period().await;
     let period = prev_period(now);
@@ -2112,14 +2112,6 @@ async fn missing_default_fx_aborts_sweep_and_bills_no_one() {
     assert!(
         runs.is_empty(),
         "no invoice row — bill no one when the platform can't price"
-    );
-}
-
-/// Run the fleet-wide-singleton case alone in a child (see [`crate::support::isolated_case`]).
-#[test]
-fn missing_default_fx_aborts_sweep_and_bills_no_one_in_an_isolated_process() {
-    crate::support::isolated_case::run_alone(
-        "integration::billing_reconcile_test::missing_default_fx_aborts_sweep_and_bills_no_one",
     );
 }
 

@@ -14,9 +14,8 @@
 //!   * `payment_success_reactivates`        (suspended → active, reversible)
 //!   * `out_of_order_paid_then_failed_does_not_resuspend`   (critic #1 regression)
 //!
-//! Gated on a configured test database
-//! (`crate::support::require_control_db`); an absent or unmigrated one REFUSES
-//! the run.
+//! Runs against the migrated database `crate::support::require_control_db`
+//! hands this case.
 //! The DB must have changeset 0045 applied.
 
 

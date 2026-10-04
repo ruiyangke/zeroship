@@ -12,9 +12,8 @@
 //! handler read `s.spend_limit_cents` from `app_spend_state`, a column that no
 //! longer exists there — the query would error.)
 //!
-//! Gated on a configured test database
-//! (`crate::support::require_control_db`); an absent or unmigrated one REFUSES
-//! the run.
+//! Runs against the migrated database `crate::support::require_control_db`
+//! hands this case.
 
 #![allow(clippy::future_not_send)]
 

@@ -74,6 +74,15 @@ const TEMPLATE_DATABASE: &str = "zeroship_template";
 /// The seed row the platform schema requires an app to reference.
 const SEED_PLAN: &str = "INSERT INTO zeroship.plans (id, name, runtime_limits_json) \
      VALUES ('free', 'Free', '{}') ON CONFLICT (id) DO NOTHING";
+
+/// How long the platform server may go unleased before its watchdog removes it.
+///
+/// A run leases the server from the test processes that use the database, and
+/// under a process-per-test runner those processes are interleaved with long
+/// database-free ones. A grace shorter than the gaps between them removes the
+/// server mid-run and a later test boots a second one, so the grace spans a
+/// run rather than one test.
+const PLATFORM_IDLE_GRACE: Duration = Duration::from_mins(15);
 /// The migrated platform database every case in a worktree shares.
 pub struct Platform {
     base: url::Url,
@@ -84,7 +93,7 @@ impl Platform {
     /// Join the worktree's shared server, booting it if this process is elected.
     fn join() -> Result<Self, String> {
         let spec = spec()?;
-        let scope = Scope::worktree("platform");
+        let scope = Scope::worktree_with_grace("platform", PLATFORM_IDLE_GRACE);
         let lease = shared::join(&scope, &spec, boot_platform)?;
         let mut base =
             url::Url::parse(&format!("postgresql://postgres:fixture@127.0.0.1/{DATABASE}"))

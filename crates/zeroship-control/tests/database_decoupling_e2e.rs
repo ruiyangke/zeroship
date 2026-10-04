@@ -190,11 +190,16 @@ struct World {
     zone: String,
     project: String,
     owner: UserId,
+    /// The database cloned from the migrated template. This world declares its
+    /// own execution zone, so it runs on a clone no other case's zone list
+    /// observes. Dropped (removing the clone) after the world's connections.
+    fresh: zeroship_testkit::postgres::FreshDatabase,
 }
 
 impl World {
     async fn new(label: &str) -> Self {
-        let control_url = crate::support::require_control_db();
+        let fresh = crate::support::fresh_control_db();
+        let control_url = fresh.admin_url().to_string();
         let pg = connect(&control_url).await;
         let registry = Registry::new(&control_url).await.expect("control registry");
         crate::support::ensure_builtin_plans(&registry).await;
@@ -250,6 +255,7 @@ impl World {
             zone,
             project,
             owner,
+            fresh,
         }
     }
 

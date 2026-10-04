@@ -4,9 +4,8 @@
 //! the advisory lock, runs `SpendEngine::evaluate_all`, and on a transition
 //! writes the enriched `SpendStateChange` audit row. No shims.
 //!
-//! Gated on a configured test database
-//! (`crate::support::require_control_db`); an absent or unmigrated one REFUSES
-//! the run.
+//! Runs against the migrated database `crate::support::isolated_control_db`
+//! hands this case.
 //! The DB must have changeset 0039 applied.
 
 
@@ -23,7 +22,7 @@ use zeroship_control::{
 use zeroship_core::AppId;
 
 fn db_url() -> String {
-    crate::support::require_control_db()
+    crate::support::isolated_control_db()
 }
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";

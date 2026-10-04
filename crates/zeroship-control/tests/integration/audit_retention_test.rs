@@ -3,10 +3,8 @@
 //! the sanctioned `control::cron::audit_retention` sweep (which sets
 //! `zeroship.audit_retention = 'on'`) deletes rows past the retention window.
 //!
-//! Configure a migrated test database
-//! (`zeroship_core::config::test_database_url_opt`; run
-//! `tests/provision_test_backends.sh` to provision one); skipped otherwise
-//! so this file doesn't gate CI without a DB.
+//! Runs against the migrated database `crate::support::require_control_db`
+//! hands this case; there is no skip.
 
 use compio_postgres::{connect, NoTls};
 use uuid::Uuid;

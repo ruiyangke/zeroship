@@ -62,9 +62,6 @@ pub mod worker_join;
 pub mod worker_health;
 pub mod deployment_hold_api;
 
-#[cfg(test)]
-mod test_database;
-
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};

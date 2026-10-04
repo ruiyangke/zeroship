@@ -23,9 +23,8 @@
 //! asserts per-organization scope, so the default cargo runner can run them
 //! concurrently without cross-test interference.
 //!
-//! Configure a test database (`zeroship_core::config::test_database_url_opt`;
-//! run `tests/provision_test_backends.sh` to provision one) to run; silently
-//! skips otherwise.
+//! Runs against the migrated database `crate::support::require_control_db`
+//! hands this case; there is no skip.
 
 #![allow(clippy::future_not_send)]
 

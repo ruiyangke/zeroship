@@ -1488,7 +1488,10 @@ mod session_name_tests {
     /// apart from the sessions Control keeps open.
     #[compio::test]
     async fn a_request_connection_announces_its_source() {
-        let registry = Registry::new(&crate::test_database::url()).await.unwrap();
+        let registry =
+            Registry::new(&zeroship_testkit::postgres::platform().admin_url().to_string())
+                .await
+                .unwrap();
         let conn = registry.conn().await.unwrap();
         let name: String = conn
             .query_one("SELECT current_setting('application_name')", &[])

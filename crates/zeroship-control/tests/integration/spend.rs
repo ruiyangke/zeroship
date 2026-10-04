@@ -5,9 +5,9 @@
 //! `zeroship.app_spend_state` + `zeroship.spend_state_history`), not the pure
 //! `derive_state` (that is unit-tested in `src/spend.rs`).
 //!
-//! The database comes from `crate::support::require_control_db`, which refuses the run
-//! rather than skipping it or substituting one: the whole target shares one
-//! database. Provision it with `tests/provision_test_backends.sh`.
+//! The database comes from `crate::support::isolated_control_db`, which hands
+//! each case its own migrated clone from the shared server; there is no skip
+//! and no substitute.
 
 
 use compio_postgres::{connect, NoTls};
@@ -19,7 +19,7 @@ use zeroship_control::Registry;
 use zeroship_core::AppId;
 
 fn db_url() -> String {
-    crate::support::require_control_db()
+    crate::support::isolated_control_db()
 }
 
 async fn pg(db_url: &str) -> compio_postgres::Client {
@@ -594,16 +594,17 @@ async fn evaluate_all_skips_an_app_deleted_mid_sweep() {
 /// SELECT does not block) and then block at the write. Releasing lets them race;
 /// the durable history count must be one.
 ///
-/// Runs alone in a child process: the sweep is fleet-wide, so a sibling case's
-/// sweep could transition this app first and write the one history (and,
-/// best-effort, audit) row itself, hiding whether THIS case's drives arbitrated.
-/// The spawner below runs it in a child whose own database no sibling observes.
+/// Runs on a database cloned from the migrated template: the sweep is
+/// fleet-wide, so a sibling case's sweep over the shared database could
+/// transition this app first and write the one history (and, best-effort,
+/// audit) row itself, hiding whether THIS case's drives arbitrated. The clone
+/// holds no sibling's apps, so the race this case forces is the only one.
 #[compio::test(crate = "crate::support::live")]
-#[ignore = "shares the fleet-wide app/state space with siblings; its spawner runs it alone in a child"]
 async fn concurrent_evaluate_all_appends_one_history_row() {
     use std::time::Duration;
 
-    let url = db_url();
+    let fresh = crate::support::fresh_control_db();
+    let url = fresh.admin_url().to_string();
     let client = pg(&url).await;
     let registry = Registry::new(&url).await.expect("registry");
     let engine = SpendEngine::new(registry);
@@ -695,14 +696,5 @@ async fn concurrent_evaluate_all_appends_one_history_row() {
     assert_eq!(
         audit, 1,
         "exactly one SpendStateChange audit row for our app across the concurrent drives",
-    );
-}
-
-/// Run the forced concurrent-transition case alone in a child (see
-/// [`crate::support::isolated_case`]) so no sibling fleet-wide sweep touches its app.
-#[test]
-fn concurrent_evaluate_all_appends_one_history_row_in_an_isolated_process() {
-    crate::support::isolated_case::run_alone(
-        "integration::spend::concurrent_evaluate_all_appends_one_history_row",
     );
 }

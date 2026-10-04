@@ -12,8 +12,7 @@
 //! `record_infra_payment` (charge row + pi_/ch_ linkage) → `charge.dispute.*` →
 //! `disputes::record_dispute_*` → `invoice_payments::append_dispute_row`. The over-refund
 //! interaction runs the REAL `refund::issue_refund` against the REAL trigger. Gated on
-//! a configured test database (`zeroship_core::config::test_database_url_opt`);
-//! the run refuses otherwise.
+//! the migrated database `crate::support::require_control_db` hands this case.
 //!
 //! Invariants pinned:
 //!   (a) `charge.dispute.created` (naming the REAL `pi_…`) records a `billing_disputes` row
