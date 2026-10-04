@@ -2,7 +2,7 @@ use crate::support::{Admin, Fixture};
 use std::{collections::HashMap, rc::Rc};
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore, Manifest, WorkerCode};
 use zeroship_core::{
-    app_id::AppId, schema_name::SchemaName, workflow_jobs::DeploymentId,
+    app_id::AppId, schema_name::SchemaName, typed_id, workflow_jobs::DeploymentId,
     workflow_schedules::ScheduleDescriptor,
 };
 use zeroship_data_orm::{
@@ -18,6 +18,17 @@ pub struct Catalog {
     pub database: Database,
     pub artifacts: LocalDiskBlobStore,
     _files: tempfile::TempDir,
+    /// This case's own minted login and where to reach it for teardown;
+    /// `None` on `SQLite`, which carries no roles.
+    role: Option<MintedRole>,
+}
+
+/// What `Catalog`'s `Drop` needs to revoke and drop its minted role: the role
+/// itself, the database it was granted on and the shared server's container.
+struct MintedRole {
+    role: String,
+    database: String,
+    container_id: String,
 }
 
 pub struct Published {
@@ -28,15 +39,20 @@ pub struct Published {
 impl Catalog {
     pub async fn new(fixture: &Fixture) -> Self {
         let files = tempfile::tempdir().unwrap();
-        let (url, schema) = match &fixture.admin {
+        let (url, schema, minted_role) = match &fixture.admin {
             Admin::Postgres(admin) => {
+                // Minted per case, not fixed: `PostgreSQL` roles are
+                // cluster-global and the bare server now serves every case of
+                // the run.
+                let role = typed_id::generate("dct");
                 admin
-                    .batch_execute(
+                    .batch_execute(&format!(
                         "CREATE SCHEMA zeroship;
-                         CREATE ROLE deployment_catalog_test LOGIN NOSUPERUSER NOCREATEDB \
+                         CREATE ROLE \"{role}\" LOGIN PASSWORD '{role}' NOSUPERUSER NOCREATEDB \
                             NOCREATEROLE NOREPLICATION NOINHERIT NOBYPASSRLS;
-                         GRANT CONNECT ON DATABASE postgres TO deployment_catalog_test;",
-                    )
+                         GRANT CONNECT ON DATABASE \"{database}\" TO \"{role}\";",
+                        database = fixture.database_name()
+                    ))
                     .await
                     .unwrap();
                 admin
@@ -44,18 +60,22 @@ impl Catalog {
                     .await
                     .unwrap();
                 admin
-                    .batch_execute(
-                        "GRANT USAGE ON SCHEMA zeroship TO deployment_catalog_test;
+                    .batch_execute(&format!(
+                        "GRANT USAGE ON SCHEMA zeroship TO \"{role}\";
                          GRANT SELECT, INSERT, UPDATE, DELETE \
-                            ON ALL TABLES IN SCHEMA zeroship TO deployment_catalog_test;",
-                    )
+                            ON ALL TABLES IN SCHEMA zeroship TO \"{role}\";"
+                    ))
                     .await
                     .unwrap();
+                let minted_role = MintedRole {
+                    database: fixture.database_name().to_owned(),
+                    container_id: fixture.container_id().to_owned(),
+                    role: role.clone(),
+                };
                 (
-                    fixture
-                        .url()
-                        .replace("workflow_manager_test@", "deployment_catalog_test@"),
+                    fixture.role_url(&role),
                     SchemaName::new("zeroship").unwrap(),
+                    Some(minted_role),
                 )
             }
             Admin::Sqlite(_) => {
@@ -67,6 +87,7 @@ impl Catalog {
                 (
                     format!("sqlite:{}", path.display()),
                     SchemaName::new("main").unwrap(),
+                    None,
                 )
             }
         };
@@ -82,11 +103,21 @@ impl Catalog {
             database,
             artifacts: LocalDiskBlobStore::new(files.path().join("artifacts")).unwrap(),
             _files: files,
+            role: minted_role,
         }
     }
 
     pub fn client(&self) -> Rc<dyn HoldClient> {
         Rc::new(CatalogClient::new(self.ledger.clone()))
+    }
+
+    /// This case's own minted login, bare, so a contract can confirm `Drop`
+    /// removed it from the shared server. `PostgreSQL` only.
+    pub fn role(&self) -> &str {
+        self.role
+            .as_ref()
+            .map(|minted| minted.role.as_str())
+            .expect("role() is a PostgreSQL-only Catalog helper")
     }
 
     pub async fn publish(
@@ -164,5 +195,31 @@ impl Catalog {
             self.artifacts.get_manifest(app, &hash).await,
             Err(zeroship_bundle::BlobError::NotFound(_))
         ));
+    }
+}
+
+impl Drop for Catalog {
+    fn drop(&mut self) {
+        let Some(minted) = self.role.take() else {
+            return;
+        };
+        // The role's grants (`CONNECT` on this database, `USAGE` and the
+        // table grants) live in `minted.database`, which `Catalog` does not
+        // own and must not drop - that database is the `Fixture`'s, still
+        // alive here. `pg_shdepend` tracks every one of those grants across
+        // the whole cluster, so `DROP ROLE` refuses until `DROP OWNED` has
+        // revoked them from the database that holds them.
+        let _ = zeroship_testkit::shared::psql(
+            &minted.container_id,
+            &minted.database,
+            &format!("DROP OWNED BY \"{}\"", minted.role),
+        );
+        // "postgres" is the shared server's own always-connectable
+        // maintenance database, not this case's database.
+        let _ = zeroship_testkit::shared::psql(
+            &minted.container_id,
+            "postgres",
+            &format!("DROP ROLE IF EXISTS \"{}\"", minted.role),
+        );
     }
 }

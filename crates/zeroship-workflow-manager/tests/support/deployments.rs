@@ -30,10 +30,7 @@ impl Source {
                     .batch_execute(deployments::POSTGRES_SCHEMA)
                     .await
                     .unwrap();
-                (
-                    "zeroship",
-                    fixture.url().replace("workflow_manager_test@", "postgres@"),
-                )
+                ("zeroship", fixture.admin_url().to_owned())
             }
             Admin::Sqlite(admin) => {
                 admin.execute_batch(deployments::SQLITE_SCHEMA).unwrap();

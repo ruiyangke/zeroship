@@ -1,12 +1,8 @@
 use super::*;
 use std::{path::Path, process::Command, time::Duration};
-use testcontainers::{
-    Container, GenericImage, ImageExt,
-    core::{IntoContainerPort, WaitFor},
-    runners::SyncRunner,
-};
 use zeroship_core::schema_name::SchemaName;
 use zeroship_data_orm::{ConnectOptions, binding::DbBinding, encryption::ProjectKeySource};
+use zeroship_testkit::postgres::server::Postgres as BareServer;
 
 mod catalog;
 
@@ -368,12 +364,14 @@ async fn postgres_reclamation_serializes_with_concurrent_hold_acquisition() {
         });
         // Observe the real competing database lock before committing the collector.
         // This proves the ordering without assuming a scheduler delay.
+        let activity_sql = format!(
+            "SELECT count(*) FROM pg_stat_activity \
+             WHERE usename = '{}' AND datname = current_database() AND wait_event_type = 'Lock'",
+            fixture.role
+        );
         compio::time::timeout(Duration::from_secs(10), async {
             loop {
-                let row = fixture.admin.query_one(
-                    "SELECT count(*) FROM pg_stat_activity WHERE usename = 'zeroship_control' AND wait_event_type = 'Lock'",
-                    &[],
-                ).await.unwrap();
+                let row = fixture.admin.query_one(&activity_sql, &[]).await.unwrap();
                 if row.get::<_, i64>(0) > 0 { break; }
                 compio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -408,37 +406,66 @@ fn deployment_models_match_the_migration_compiler() {
 }
 
 struct Postgres {
-    _container: Container<GenericImage>,
     url: String,
+    /// This case's own minted stand-in for the Control service login.
+    /// `PostgreSQL` roles are cluster-global and the bare server now serves
+    /// every case of the run, so a fixed name would collide with - or let a
+    /// probe like the one above observe - a concurrent case's session.
+    role: String,
     admin: compio_postgres::Client,
+    /// The case's clone of the shared bare server; `None` once `Drop` has
+    /// force-dropped it to clear every cluster-wide ACL entry naming `role`,
+    /// which must happen before `role` itself can be dropped.
+    server: Option<BareServer>,
 }
 impl Postgres {
     async fn start() -> Self {
-        let container = GenericImage::new("postgres", "18")
-            .with_exposed_port(5432.tcp())
-            .with_wait_for(WaitFor::message_on_stderr(
-                "database system is ready to accept connections",
-            ))
-            .with_env_var("POSTGRES_HOST_AUTH_METHOD", "trust")
-            .start()
-            .expect("deployment hold tests require PostgreSQL");
-        let host = container.get_host().unwrap();
-        let port = container.get_host_port_ipv4(5432).unwrap();
-        let admin = connect(&format!("postgres://postgres@{host}:{port}/postgres")).await;
-        admin.batch_execute(
+        let server = BareServer::start();
+        let admin = connect(&server.url()).await;
+        let role = typed_id::generate("dht");
+        admin.batch_execute(&format!(
             "CREATE SCHEMA zeroship; \
-             CREATE ROLE zeroship_control LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS; \
+             CREATE ROLE \"{role}\" LOGIN PASSWORD '{role}' \
+                NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS; \
              CREATE SCHEMA customer; CREATE TABLE customer.__zeroship_workflow_runs (id text PRIMARY KEY);"
-        ).await.unwrap();
+        )).await.unwrap();
         admin.batch_execute(POSTGRES_SCHEMA).await.unwrap();
-        admin.batch_execute(
-            "GRANT USAGE ON SCHEMA zeroship TO zeroship_control; \
-             GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA zeroship TO zeroship_control;"
-        ).await.unwrap();
+        admin.batch_execute(&format!(
+            "GRANT USAGE ON SCHEMA zeroship TO \"{role}\"; \
+             GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA zeroship TO \"{role}\";"
+        )).await.unwrap();
+        let url = format!(
+            "postgres://{role}:{role}@127.0.0.1:{}/{}",
+            server.port(),
+            server.name()
+        );
         Self {
-            _container: container,
-            url: format!("postgres://zeroship_control@{host}:{port}/postgres"),
+            url,
+            role,
             admin,
+            server: Some(server),
+        }
+    }
+}
+impl Drop for Postgres {
+    fn drop(&mut self) {
+        // Drop the per-case clone first: `pg_shdepend` tracks every ACL entry
+        // granted to a role across the whole cluster, so with the clone (and
+        // its grants to the minted role) still present, `DROP ROLE` would
+        // refuse, naming privileges in this very case's own database.
+        let server = self.server.take();
+        let container_id = server
+            .as_ref()
+            .map(|server| server.container_id().to_owned());
+        drop(server);
+        if let Some(container_id) = container_id {
+            // "postgres" is the shared server's own always-connectable
+            // maintenance database, not this case's now-removed clone.
+            let _ = zeroship_testkit::shared::psql(
+                &container_id,
+                "postgres",
+                &format!("DROP ROLE IF EXISTS \"{}\"", self.role),
+            );
         }
     }
 }

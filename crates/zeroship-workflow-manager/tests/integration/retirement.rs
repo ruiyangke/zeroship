@@ -953,11 +953,12 @@ async fn submission_refuses_closure(fixture: &Fixture) {
 /// Wait until `waiters` manager sessions are queued behind a lock. The admin
 /// polls from inside its own open transaction, where the server would otherwise
 /// keep serving the activity statistics it cached at first access.
-async fn blocked_manager(admin: &compio_postgres::Client, predicate: &str, waiters: i64) {
+async fn blocked_manager(admin: &compio_postgres::Client, role: &str, predicate: &str, waiters: i64) {
     let sql = format!(
         "SELECT count(DISTINCT a.pid) FROM pg_locks l \
          JOIN pg_stat_activity a ON a.pid=l.pid \
-         WHERE a.usename='workflow_manager_test' AND NOT l.granted AND ({predicate})"
+         WHERE a.usename='{role}' AND a.datname=current_database() \
+         AND NOT l.granted AND ({predicate})"
     );
     compio::time::timeout(Duration::from_secs(4), async {
         loop {
@@ -1018,7 +1019,7 @@ async fn postgres_claim_and_establishment_share_the_app_lock_and_reopen_once() {
     let release = async {
         // Only the establishment waits on the administrator's row lock; the
         // claim skips a contended app rather than queuing on it.
-        blocked_manager(admin, BLOCKED_BY_ADMIN, 1).await;
+        blocked_manager(admin, fixture.role(), BLOCKED_BY_ADMIN, 1).await;
         assert_eq!(admin_state(admin, &host.app).await, "retired");
         admin.batch_execute("ROLLBACK").await.unwrap();
     };
@@ -1087,7 +1088,7 @@ async fn postgres_establishment_and_close_settlement_serialize_in_both_orders() 
             .unwrap();
         let first = Cell::new(None);
         let release = async {
-            blocked_manager(admin, BLOCKED_BY_ADMIN, 1).await;
+            blocked_manager(admin, fixture.role(), BLOCKED_BY_ADMIN, 1).await;
             admin.batch_execute("ROLLBACK").await.unwrap();
         };
         if establish_first {

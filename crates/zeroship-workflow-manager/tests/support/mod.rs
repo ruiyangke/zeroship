@@ -8,14 +8,10 @@ use std::{
     pin::Pin,
     rc::Rc,
 };
-use testcontainers::{
-    core::{IntoContainerPort, WaitFor},
-    runners::SyncRunner,
-    Container, GenericImage, ImageExt,
-};
 use zeroship_core::{
     app_id::AppId,
     schema_name::SchemaName,
+    typed_id,
     workflow_coordination::WorkerId,
     workflow_deployments::{HoldGeneration, HoldReceipt, HoldScope, HoldState},
     workflow_jobs::{
@@ -26,6 +22,7 @@ use zeroship_core::{
 use zeroship_data_orm::{
     binding::DbBinding, encryption::ProjectKeySource, orm::Database, ConnectOptions,
 };
+use zeroship_testkit::postgres::server::Postgres as BareServer;
 use zeroship_workflow_manager::{
     capacity::LocalCapacity,
     coordinator::{self, Coordinator},
@@ -244,9 +241,23 @@ pub enum Admin {
 pub struct Fixture {
     pub admin: Admin,
     runtime_url: String,
+    admin_url: String,
     schema: SchemaName,
+    /// This case's own minted login. `PostgreSQL` roles are cluster-global
+    /// (`pg_authid`), and the bare server now serves every case of the run, so
+    /// a fixed name would let one case's grants - or a role-membership
+    /// mutation - reach another case's session; `None` on `SQLite`, which
+    /// carries no roles.
+    role: Option<String>,
+    /// `host:port` of the shared server and this case's own database name, for
+    /// building a connection string to another role on the same clone
+    /// (`Self::role_url`); `None` on `SQLite`.
+    address: Option<(String, String)>,
     _work: tempfile::TempDir,
-    _postgres: Option<Container<GenericImage>>,
+    /// The case's clone of the shared bare server. Its `Drop` force-drops the
+    /// clone; `Fixture`'s own `Drop` runs that first and then drops the minted
+    /// role, once no ACL entry anywhere in the cluster still names it.
+    postgres: Option<BareServer>,
 }
 
 impl Fixture {
@@ -260,29 +271,19 @@ impl Fixture {
     }
 
     async fn postgres() -> Self {
-        let postgres = GenericImage::new("postgres", "18")
-            .with_exposed_port(5432.tcp())
-            .with_wait_for(WaitFor::message_on_stdout(
-                "PostgreSQL init process complete; ready for start up.",
-            ))
-            .with_wait_for(WaitFor::message_on_stderr(
-                "database system is ready to accept connections",
-            ))
-            .with_env_var("POSTGRES_HOST_AUTH_METHOD", "trust")
-            .start()
-            .expect("manager tests require Testcontainers PostgreSQL");
-        let address = format!(
-            "{}:{}",
-            postgres.get_host().unwrap(),
-            postgres.get_host_port_ipv4(5432).unwrap()
-        );
-        let admin = connect(&format!("postgres://postgres@{address}/postgres")).await;
+        let postgres = BareServer::start();
+        let address = format!("127.0.0.1:{}", postgres.port());
+        let database = postgres.name().to_owned();
+        let admin_url = postgres.url();
+        let admin = connect(&admin_url).await;
+        // Minted per case rather than fixed: see the `role` field doc.
+        let role = typed_id::generate("wmt");
         admin
-            .batch_execute(
-                "CREATE ROLE workflow_manager_test LOGIN NOSUPERUSER NOCREATEDB \
+            .batch_execute(&format!(
+                "CREATE ROLE \"{role}\" LOGIN PASSWORD '{role}' NOSUPERUSER NOCREATEDB \
                     NOCREATEROLE NOREPLICATION NOINHERIT NOBYPASSRLS;
-                 REVOKE ALL ON DATABASE postgres FROM PUBLIC;
-                 GRANT CONNECT ON DATABASE postgres TO workflow_manager_test;
+                 REVOKE ALL ON DATABASE \"{database}\" FROM PUBLIC;
+                 GRANT CONNECT ON DATABASE \"{database}\" TO \"{role}\";
                  REVOKE ALL ON SCHEMA public FROM PUBLIC;
                  CREATE SCHEMA workflow_manager;
                  CREATE SCHEMA customer;
@@ -290,8 +291,8 @@ impl Fixture {
                     (id text PRIMARY KEY, secret text NOT NULL);
                  INSERT INTO customer.__zeroship_workflow_history \
                     VALUES ('private-history', 'customer-private-history');
-                 REVOKE ALL ON SCHEMA customer FROM PUBLIC;",
-            )
+                 REVOKE ALL ON SCHEMA customer FROM PUBLIC;"
+            ))
             .await
             .unwrap();
         admin
@@ -299,20 +300,23 @@ impl Fixture {
             .await
             .expect("generated manager PostgreSQL schema must apply");
         admin
-            .batch_execute(
-                "GRANT USAGE ON SCHEMA workflow_manager TO workflow_manager_test;
+            .batch_execute(&format!(
+                "GRANT USAGE ON SCHEMA workflow_manager TO \"{role}\";
                  GRANT SELECT, INSERT, UPDATE, DELETE \
-                    ON ALL TABLES IN SCHEMA workflow_manager TO workflow_manager_test;
-                 REVOKE INSERT, UPDATE, DELETE ON workflow_manager.schema_version FROM workflow_manager_test;",
-            )
+                    ON ALL TABLES IN SCHEMA workflow_manager TO \"{role}\";
+                 REVOKE INSERT, UPDATE, DELETE ON workflow_manager.schema_version FROM \"{role}\";"
+            ))
             .await
             .unwrap();
         Self {
             admin: Admin::Postgres(admin),
-            runtime_url: format!("postgres://workflow_manager_test@{address}/postgres"),
+            runtime_url: format!("postgres://{role}:{role}@{address}/{database}"),
+            admin_url,
             schema: SchemaName::new("workflow_manager").unwrap(),
+            role: Some(role),
+            address: Some((address, database)),
             _work: tempfile::tempdir().unwrap(),
-            _postgres: Some(postgres),
+            postgres: Some(postgres),
         }
     }
 
@@ -326,22 +330,73 @@ impl Fixture {
         admin
             .execute_batch(include_str!("../../schema/sqlite.sql"))
             .expect("generated manager SQLite schema must apply");
+        let url = work
+            .path()
+            .join("manager.sqlite")
+            .to_str()
+            .unwrap()
+            .to_owned();
         Self {
             admin: Admin::Sqlite(admin),
-            runtime_url: work
-                .path()
-                .join("manager.sqlite")
-                .to_str()
-                .unwrap()
-                .to_owned(),
+            runtime_url: url.clone(),
+            admin_url: url,
             schema: SchemaName::new("main").unwrap(),
+            role: None,
+            address: None,
             _work: work,
-            _postgres: None,
+            postgres: None,
         }
     }
 
     pub fn url(&self) -> &str {
         &self.runtime_url
+    }
+
+    /// The fixture's superuser connection string, for a case that provisions
+    /// something the scoped runtime role was never granted (Control's
+    /// deployment catalog, in its own schema).
+    pub fn admin_url(&self) -> &str {
+        &self.admin_url
+    }
+
+    /// A connection string for another role on this case's own database.
+    /// `PostgreSQL` only; the caller mints and creates `role` itself.
+    pub fn role_url(&self, role: &str) -> String {
+        let (address, database) = self
+            .address
+            .as_ref()
+            .expect("role_url is a PostgreSQL-only fixture helper");
+        format!("postgres://{role}:{role}@{address}/{database}")
+    }
+
+    /// This case's own database name, for a caller that grants a role of its
+    /// own `CONNECT` on it directly. `PostgreSQL` only.
+    pub fn database_name(&self) -> &str {
+        &self
+            .address
+            .as_ref()
+            .expect("database_name() is a PostgreSQL-only fixture helper")
+            .1
+    }
+
+    /// This case's own minted runtime login, bare - the name a
+    /// `pg_stat_activity`/`pg_locks` probe filters its own session by, since
+    /// the role is unique to this case rather than a fixed, shared name.
+    /// `PostgreSQL` only.
+    pub fn role(&self) -> &str {
+        self.role
+            .as_deref()
+            .expect("role() is a PostgreSQL-only fixture helper")
+    }
+
+    /// The Docker id of the shared bare server this case's database lives on,
+    /// so a contract can show two cases of a run share one container.
+    /// `PostgreSQL` only.
+    pub fn container_id(&self) -> &str {
+        self.postgres
+            .as_ref()
+            .expect("container_id() is a PostgreSQL-only fixture helper")
+            .container_id()
     }
 
     pub const fn schema(&self) -> &SchemaName {
@@ -365,6 +420,29 @@ impl Fixture {
         )
         .await
         .unwrap()
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        // Drop the per-case clone first: `pg_shdepend` tracks every ACL entry
+        // granted to a role across the whole cluster, so with the clone (and
+        // its grants to the minted role) still present, `DROP ROLE` would
+        // refuse, naming privileges in this very case's own database.
+        let server = self.postgres.take();
+        let container_id = server
+            .as_ref()
+            .map(|server| server.container_id().to_owned());
+        drop(server);
+        if let (Some(role), Some(container_id)) = (self.role.take(), container_id) {
+            // "postgres" is the shared server's own always-connectable
+            // maintenance database, not this case's now-removed clone.
+            let _ = zeroship_testkit::shared::psql(
+                &container_id,
+                "postgres",
+                &format!("DROP ROLE IF EXISTS \"{role}\""),
+            );
+        }
     }
 }
 

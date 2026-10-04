@@ -228,11 +228,12 @@ async fn expire(fixture: &Fixture, spec: &JobSpec) {
 /// The predicate names the live waiter and its blocker rather than the
 /// statement text, because the server serves the activity snapshot it cached
 /// at first access for the rest of the administrator's transaction.
-async fn blocked_manager(admin: &compio_postgres::Client, predicate: &str) {
+async fn blocked_manager(admin: &compio_postgres::Client, role: &str, predicate: &str) {
     let sql = format!(
         "SELECT EXISTS (SELECT 1 FROM pg_locks l \
          JOIN pg_stat_activity a ON a.pid=l.pid \
-         WHERE a.usename='workflow_manager_test' AND NOT l.granted AND ({predicate}))"
+         WHERE a.usename='{role}' AND a.datname=current_database() \
+         AND NOT l.granted AND ({predicate}))"
     );
     compio::time::timeout(Duration::from_secs(3), async {
         while !admin.query(&sql, &[]).await.unwrap()[0].get::<_, bool>(0) {
@@ -271,7 +272,12 @@ async fn postgres_blocked_candidate_read_uses_fresh_lease() {
         .await
         .unwrap();
     let release = async {
-        blocked_manager(admin, "l.relation='workflow_manager.jobs'::regclass").await;
+        blocked_manager(
+            admin,
+            fixture.role(),
+            "l.relation='workflow_manager.jobs'::regclass",
+        )
+        .await;
         until(&fixture, stale_by).await;
         admin.batch_execute("COMMIT").await.unwrap();
     };

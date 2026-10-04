@@ -22,4 +22,5 @@ mod retention;
 mod retirement;
 mod schedule_lifecycle;
 mod scheduling;
+mod shared_server;
 mod storage_classification;

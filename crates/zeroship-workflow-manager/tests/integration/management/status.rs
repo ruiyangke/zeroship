@@ -60,13 +60,18 @@ async fn postgres_management_status_serializes_with_atomic_acceptance() {
         .unwrap();
     let accepting = host.manage(&request);
     let status = async {
-        let accepting_pid = waiting_acceptance(admin).await;
+        let accepting_pid = waiting_acceptance(admin, fixture.role()).await;
         let release = async {
-            wait_for_status(admin).await;
+            wait_for_status(admin, fixture.role()).await;
             let serialized: bool = admin.query_one(
-                "SELECT EXISTS(SELECT 1 FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid \
-                 WHERE a.usename='workflow_manager_test' AND NOT l.granted AND l.locktype='transactionid' \
-                 AND $1=ANY(pg_blocking_pids(a.pid)))", &[&accepting_pid],
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid \
+                     WHERE a.usename='{}' AND a.datname=current_database() \
+                     AND NOT l.granted AND l.locktype='transactionid' \
+                     AND $1=ANY(pg_blocking_pids(a.pid)))",
+                    fixture.role()
+                ),
+                &[&accepting_pid],
             ).await.unwrap().get(0);
             admin.batch_execute("COMMIT").await.unwrap();
             serialized
@@ -91,30 +96,33 @@ async fn postgres_management_status_serializes_with_atomic_acceptance() {
     assert_eq!(host.holds.acquired.get(), 0);
 }
 
-async fn waiting_acceptance(admin: &compio_postgres::Client) -> i32 {
+async fn waiting_acceptance(admin: &compio_postgres::Client, role: &str) -> i32 {
+    let sql = format!(
+        "SELECT a.pid FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid \
+         WHERE a.usename='{role}' AND a.datname=current_database() \
+         AND NOT l.granted AND l.locktype='relation' \
+         AND l.relation='workflow_manager.management'::regclass \
+         AND pg_backend_pid()=ANY(pg_blocking_pids(a.pid))"
+    );
     compio::time::timeout(Duration::from_secs(3), async {
         loop {
             admin.query_one("SELECT pg_stat_clear_snapshot()", &[]).await.unwrap();
-            let waiting = admin.query(
-                "SELECT a.pid FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid \
-                 WHERE a.usename='workflow_manager_test' AND NOT l.granted AND l.locktype='relation' \
-                 AND l.relation='workflow_manager.management'::regclass \
-                 AND pg_backend_pid()=ANY(pg_blocking_pids(a.pid))", &[],
-            ).await.unwrap();
+            let waiting = admin.query(&sql, &[]).await.unwrap();
             if let [row] = waiting.as_slice() { return row.get(0); }
             compio::time::sleep(Duration::from_millis(10)).await;
         }
     }).await.expect("acceptance must reach the administrator's management table lock")
 }
 
-async fn wait_for_status(admin: &compio_postgres::Client) {
+async fn wait_for_status(admin: &compio_postgres::Client, role: &str) {
+    let sql = format!(
+        "SELECT count(DISTINCT a.pid) FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid \
+         WHERE a.usename='{role}' AND a.datname=current_database() AND NOT l.granted"
+    );
     compio::time::timeout(Duration::from_secs(3), async {
         loop {
             admin.query_one("SELECT pg_stat_clear_snapshot()", &[]).await.unwrap();
-            let count: i64 = admin.query_one(
-                "SELECT count(DISTINCT a.pid) FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid \
-                 WHERE a.usename='workflow_manager_test' AND NOT l.granted", &[],
-            ).await.unwrap().get(0);
+            let count: i64 = admin.query_one(&sql, &[]).await.unwrap().get(0);
             if count >= 2 { break; }
             compio::time::sleep(Duration::from_millis(10)).await;
         }
