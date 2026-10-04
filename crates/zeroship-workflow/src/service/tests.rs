@@ -580,16 +580,41 @@ async fn journal_login_has_dml_without_ddl_and_other_platform_roles_have_no_acce
         .batch_execute("DELETE FROM workflow_manager.__zeroship_workflow_runs")
         .await
         .unwrap();
+    // THE OTHER PLATFORM ROLES ARE CLUSTER-GLOBAL, and other suites on the same
+    // server own their logins: the datastore bootstrap creates `zeroship_worker`
+    // with no password, and the suites that run it give it one of their own. So
+    // no case logs in as them. Each role is reached through a login this case
+    // mints for it, a member of that role and of nothing else, which assumes the
+    // role with `SET ROLE`: every statement then runs with exactly the role's
+    // privileges, and `SET ROLE` to the journal owner is decided by whether the
+    // role reaches it, because the minted login holds no other membership.
     for role in [
         "zeroship_worker",
         "zeroship_gateway",
         "zeroship_app",
         "zeroship_control",
     ] {
+        let login = typed_id::generate("wpl");
+        admin
+            .batch_execute(&format!(
+                "CREATE ROLE \"{login}\" LOGIN PASSWORD '{login}'; GRANT {role} TO \"{login}\";"
+            ))
+            .await
+            .unwrap();
         let url = fixture
             .admin_url
-            .replacen("postgres:fixture@", &format!("{role}:{role}@"), 1);
+            .replacen("postgres:fixture@", &format!("{login}:{login}@"), 1);
         let client = connect(&url).await;
+        client
+            .batch_execute(&format!("SET ROLE {role}"))
+            .await
+            .unwrap();
+        let acting: String = client
+            .query_one("SELECT current_user::text", &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(acting, role, "the minted login acts as the platform role");
         assert!(client
             .batch_execute("SELECT * FROM workflow_manager.__zeroship_workflow_runs")
             .await
@@ -602,6 +627,11 @@ async fn journal_login_has_dml_without_ddl_and_other_platform_roles_have_no_acce
             .batch_execute("SET ROLE zeroship_workflow_migrator")
             .await
             .is_err());
+        drop(client);
+        admin
+            .batch_execute(&format!("DROP ROLE \"{login}\""))
+            .await
+            .unwrap();
     }
     for role in [
         journal_fixture::JOURNAL_LOGIN,
