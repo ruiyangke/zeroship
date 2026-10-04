@@ -285,9 +285,6 @@ zeroship-runtime = { path = "crates/zeroship-runtime" }
 zeroship-runtime-macros = { path = "crates/zeroship-runtime-macros" }
 zeroship-config-macros = { path = "crates/zeroship-config-macros" }
 zeroship-config-contract = { path = "crates/zeroship-config-contract" }
-# The contract's declaration fixtures and compile-fail cases. A leaf, so
-# trybuild rebuilds it and `zeroship-core` rather than every audited service.
-zeroship-config-contract-fixtures = { path = "crates/zeroship-config-contract-fixtures" }
 zeroship-workflow-server = { path = "crates/zeroship-workflow-server" }
 # The five server libraries, listed here so the non-shipped
 # `zeroship-config-contract` checker can LINK their generated registries rather

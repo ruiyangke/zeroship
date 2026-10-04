@@ -1,5 +1,5 @@
 //! The positive control for
-//! `crates/zeroship-config-contract-fixtures/tests/ui/wrong_consumer.rs`.
+//! `crates/zeroship-core/tests/ui/wrong_consumer.rs`.
 //!
 //! This lives in its own integration-test binary ON PURPOSE. It is the only
 //! place in the test suite that names a read site by hand, and while it sat in
@@ -8,7 +8,7 @@
 //! there ("enumerated without this crate naming a read site") and forced a
 //! `dedup` that hid double registration. Separate binaries, separate registries.
 
-use zeroship_config_contract_fixtures::fixtures::FixtureControlConfigConsumer;
+use zeroship_config_contract::fixtures::FixtureControlConfigConsumer;
 use zeroship_core::config::{CanonicalName, EnvKey};
 
 const CONTROL_PORT: EnvKey<String, FixtureControlConfigConsumer> =
@@ -17,7 +17,7 @@ const CONTROL_PORT: EnvKey<String, FixtureControlConfigConsumer> =
 #[test]
 fn the_matching_consumer_token_compiles_and_reads() {
     // Same macro, same const key, same shape as
-    // crates/zeroship-config-contract-fixtures/tests/ui/wrong_consumer.rs. The
+    // crates/zeroship-core/tests/ui/wrong_consumer.rs. The
     // ONLY difference is that the consumer marker matches the key's. That
     // partner is what separates "the type check discriminates" from "the
     // fixture failed for some unrelated reason".

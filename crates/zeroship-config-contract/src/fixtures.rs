@@ -1,13 +1,13 @@
 //! Inert declarations that exist only so the macro's output is compiled.
 //!
-//! These live in this leaf LIBRARY, while the assertions live in the contract
-//! crate's integration test that links it. That split is deliberate: it proves
-//! the linked read-site registry aggregates entries emitted in a different
-//! crate from the one doing the enumeration, which is the property a
-//! five-service registry needs.
+//! These live in the LIBRARY, while the assertions live in an integration test
+//! that links it. That split is deliberate: it proves the linked read-site
+//! registry aggregates entries emitted in a different crate from the one doing
+//! the enumeration, which is the property a five-service registry needs and the
+//! reason the contract crate sits above `zeroship-core` rather than inside it.
 //!
-//! No process reads these. They name settings from the proposal's worked
-//! examples so the projections under test are the real ones.
+//! No process reads these. They name real platform settings so the projections
+//! under test are the real ones.
 
 use std::path::PathBuf;
 

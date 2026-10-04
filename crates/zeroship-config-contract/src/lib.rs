@@ -6,6 +6,7 @@
 
 pub mod contract;
 pub mod docs;
+pub mod fixtures;
 pub mod metadata;
 pub mod overlay;
 pub mod registry;

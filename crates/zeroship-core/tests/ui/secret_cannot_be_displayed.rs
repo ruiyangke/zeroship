@@ -1,7 +1,9 @@
 //! `Secret<T>` must have no value-revealing formatting surface at all.
 //!
-//! The redaction test in the linked-registry suite covers `Debug`. This covers
-//! `Display`, which a redacting `Debug` alone would not stop.
+//! `the_resolved_struct_redacts_its_secret_without_a_hand_written_debug` in
+//! crates/zeroship-config-contract/tests/integration/linked_registry.rs covers
+//! `Debug`. This covers `Display`, which a redacting `Debug` alone would not
+//! stop.
 //!
 //! The constructor matters: written against a constructor that no longer
 //! exists, this file would still FAIL to compile and the test would still pass,

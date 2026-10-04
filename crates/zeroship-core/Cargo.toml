@@ -77,6 +77,10 @@ ntex = { workspace = true }
 # `logout_token` verifier's unit tests. PKCS#8 encoding is needed
 # because `jsonwebtoken::EncodingKey::from_ed_der` takes the DER form.
 ed25519-dalek = { workspace = true, features = ["pkcs8"] }
+# The compile-fail suite exercises the rules the config attribute and the
+# consumer-key types enforce. It lives beside the config types so each case
+# compiles against the same spellings a declaration uses.
+trybuild = "1.0"
 
 [[test]]
 name = "main"

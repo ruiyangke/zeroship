@@ -4,6 +4,7 @@
 //! nothing until it is declared here.
 
 mod auth_test;
+mod compile_fail;
 mod generated_secret_scrape;
 mod schema_name;
 mod service_assertion_test;

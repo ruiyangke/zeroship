@@ -7954,7 +7954,6 @@ dependencies = [
  "thiserror 2.0.18",
  "toml 0.8.23",
  "zeroship-auth",
- "zeroship-config-contract-fixtures",
  "zeroship-control",
  "zeroship-core",
  "zeroship-data-cdc-server",
@@ -7962,15 +7961,6 @@ dependencies = [
  "zeroship-migrate-server",
  "zeroship-worker",
  "zeroship-workflow-server",
-]
-
-[[package]]
-name = "zeroship-config-contract-fixtures"
-version = "0.1.0"
-dependencies = [
- "clap",
- "trybuild",
- "zeroship-core",
 ]
 
 [[package]]
@@ -8077,6 +8067,7 @@ dependencies = [
  "tracing-log 0.2.0",
  "tracing-logfmt",
  "tracing-subscriber",
+ "trybuild",
  "url",
  "uuid",
  "xxhash-rust",

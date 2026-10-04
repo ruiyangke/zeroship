@@ -8,10 +8,16 @@
 //! have to fall back to not emitting one at all.
 //!
 //! The positive control is the same call with a `const` key in
-//! tests/integration/declared_env.rs.
+//! `every_shape_of_declared_read_registers_a_site` in
+//! crates/zeroship-config-contract/tests/integration/declared_env.rs.
 
-use zeroship_config_contract_fixtures::fixtures::FixtureControlConfigConsumer;
-use zeroship_core::config::DeclaredEnvKey;
+use zeroship_core::config::{zeroship_config, DeclaredEnvKey};
+
+#[zeroship_config(binary = "zeroship-fixture-control", scope = "control")]
+struct FixtureControlConfig {
+    #[config(name = "control.port")]
+    port: zeroship_core::config::Operational<u16>,
+}
 
 fn main() {
     let runtime_key: DeclaredEnvKey<String, FixtureControlConfigConsumer> =

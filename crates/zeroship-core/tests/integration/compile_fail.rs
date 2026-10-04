@@ -11,7 +11,8 @@ use std::path::Path;
 fn declaration_and_consumer_misuse_does_not_compile() {
     // Does not cover: anything that is legal Rust but wrong policy, such as an
     // identity with no ConfigSpec. That is a linked-registry check, not a type
-    // error, and lives in contract_fixtures.rs.
+    // error, and lives in `a_wrong_consumer_is_both_unread_and_undeclared` in
+    // crates/zeroship-config-contract/tests/integration/contract_fixtures.rs.
     let ui = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/ui");
     let cases = fs::read_dir(&ui)
         .expect("ui fixture directory")

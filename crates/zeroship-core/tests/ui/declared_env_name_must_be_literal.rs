@@ -5,9 +5,16 @@
 //! non-literal is a macro-match failure.
 //!
 //! The positive control is the identical call with a string literal in
-//! tests/integration/declared_env.rs.
+//! `every_shape_of_declared_read_registers_a_site` in
+//! crates/zeroship-config-contract/tests/integration/declared_env.rs.
 
-use zeroship_config_contract_fixtures::fixtures::FixtureControlConfigConsumer;
+use zeroship_core::config::zeroship_config;
+
+#[zeroship_config(binary = "zeroship-fixture-control", scope = "control")]
+struct FixtureControlConfig {
+    #[config(name = "control.port")]
+    port: zeroship_core::config::Operational<u16>,
+}
 
 fn main() {
     let name = "SOME_EXTERNAL_NAME";
