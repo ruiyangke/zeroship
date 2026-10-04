@@ -12,12 +12,15 @@
 //! VFS with a bundle written to disk, and the actual
 //! `cron::orphaned_app_reaper` tick. No shims.
 //!
-//! All cases gate on a configured test database
-//! (`crate::support::require_control_db`); an absent or unmigrated one REFUSES
-//! the run.
+//! The reaper's subject is a FLEET-WIDE sweep, so each case works in a database
+//! of its own (`crate::support::isolated_control_db`): a case's tick archives
+//! every owner-less app in whatever database it reaches, and a sibling case's
+//! tick on the shared working database would archive this case's freshly
+//! inserted orphan before this case asserted its own report. An absent or
+//! unmigrated database REFUSES the run.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use uuid::Uuid;
 
@@ -30,30 +33,10 @@ use zeroship_core::{AppId, UserId};
 
 
 fn db_url() -> String {
-    crate::support::require_control_db()
+    crate::support::isolated_control_db()
 }
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
-
-// These tests all exercise the production sweep against the same live test
-// database. Serialize them so one test's sweep cannot archive another test's
-// freshly inserted ownerless app before that test asserts its own report.
-static REAPER_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-/// Take the serialization token, ignoring poison.
-///
-/// The guard protects NO shared data - it is `Mutex<()>`, an ordering token -
-/// so a previous test's panic leaves nothing inconsistent behind for the next
-/// one to observe. `.expect(...)` on the poison therefore converted ONE real
-/// failure into four, three of which reported `PoisonError { .. }` and said
-/// nothing about their own subject. One fleet-count assertion failing here used
-/// to take every other case in the module with it through the poisoned lock, and
-/// none of them said which verdict it would have reached.
-fn reaper_test_lock() -> std::sync::MutexGuard<'static, ()> {
-    REAPER_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
 
 fn tmpdir(label: &str) -> PathBuf {
     let mut p = std::env::temp_dir();
@@ -245,16 +228,9 @@ async fn seed_owner_user(state: &AppState) -> UserId {
 // ---------------------------------------------------------------------------
 // (a) owner-less app + a bundle in the VFS -> archive row, retain bundle
 // ---------------------------------------------------------------------------
-// REAPER_TEST_LOCK guards `Mutex<()>` - a pure test-serialization token,
-// not shared mutable data accessed across the await. compio::test runs
-// each test on its own single-threaded runtime, so the held guard cannot
-// deadlock another task's poll the way it could under a work-stealing
-// executor.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::support::live")]
 async fn reaper_archives_ownerless_app_and_retains_its_bundle() {
     let url = db_url();
-    let _guard = reaper_test_lock();
     let fx = build_state(&url, "ownerless").await;
     let state = &fx.state;
 
@@ -299,13 +275,8 @@ async fn reaper_archives_ownerless_app_and_retains_its_bundle() {
     // IDEMPOTENCE IS ABOUT THIS APP, NOT ABOUT THE REPORT'S COUNT.
     //
     // `tick` sweeps the whole fleet: every non-system, unarchived, owner-less
-    // app past the five-minute grace, archived one at a time in a loop. A fleet
-    // count is not this test's subject and is not stable: on a database that
-    // already holds same-aged orphans, some cross the grace boundary mid-tick.
-    // Orphans crossing grace mid-tick is the reaper WORKING; nothing about that
-    // number says the orphan below was touched twice.
-    //
-    // So the claim is made about the app the test owns, and about SELECTION
+    // app past the five-minute grace, archived one at a time in a loop. The
+    // claim here is made about the app the test owns, and about SELECTION
     // rather than about the count: the detection query must no longer return
     // this id. `archived_at IS NULL` in `find_orphaned_apps` is what makes it
     // true, and it is the half the count cannot express on its own.
@@ -348,12 +319,9 @@ async fn reaper_archives_ownerless_app_and_retains_its_bundle() {
 // ---------------------------------------------------------------------------
 // (b) app WITH an owner member → untouched
 // ---------------------------------------------------------------------------
-// See the allow on `reaper_archives_ownerless_app_and_retains_its_bundle` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::support::live")]
 async fn reaper_leaves_owned_app_untouched() {
     let url = db_url();
-    let _guard = reaper_test_lock();
     let fx = build_state(&url, "owned").await;
     let state = &fx.state;
 
@@ -394,12 +362,9 @@ async fn reaper_leaves_owned_app_untouched() {
 // ---------------------------------------------------------------------------
 // (c) THE CONSOLE-SAFETY TEST: system = true, owner-less → NEVER reaped
 // ---------------------------------------------------------------------------
-// See the allow on `reaper_archives_ownerless_app_and_retains_its_bundle` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::support::live")]
 async fn reaper_never_touches_system_app() {
     let url = db_url();
-    let _guard = reaper_test_lock();
     let fx = build_state(&url, "system").await;
     let state = &fx.state;
 
@@ -425,12 +390,9 @@ async fn reaper_never_touches_system_app() {
 // ---------------------------------------------------------------------------
 // (d) owner-less app YOUNGER than the grace → not yet reaped
 // ---------------------------------------------------------------------------
-// See the allow on `reaper_archives_ownerless_app_and_retains_its_bundle` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::support::live")]
 async fn reaper_respects_grace_window() {
     let url = db_url();
-    let _guard = reaper_test_lock();
     let fx = build_state(&url, "grace").await;
     let state = &fx.state;
 
@@ -453,12 +415,9 @@ async fn reaper_respects_grace_window() {
 // ---------------------------------------------------------------------------
 // (e) direct archive is the same retained-state transition used by the reaper
 // ---------------------------------------------------------------------------
-// See the allow on `reaper_archives_ownerless_app_and_retains_its_bundle` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test(crate = "crate::support::live")]
 async fn direct_archive_retains_db_row_and_vfs_blob() {
     let url = db_url();
-    let _guard = reaper_test_lock();
     let fx = build_state(&url, "purge").await;
     let state = &fx.state;
 

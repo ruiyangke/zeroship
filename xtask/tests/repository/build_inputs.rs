@@ -599,16 +599,16 @@ fn embedded_package_bundles() -> BTreeSet<String> {
     found
 }
 
-/// The root `build:workflow-artifacts` script must run the same cargo
-/// invocation the control workflow test areas run, so the build-input gate's
-/// rebuild command and the test-side failure both name one command.
+/// The root `build:test-artifacts` script must run the same cargo invocation
+/// the control workflow test areas run, so the build-input gate's rebuild
+/// command and the test-side failure both name one command.
 #[test]
-fn the_root_build_script_runs_the_workflow_executable_build() {
+fn the_root_build_script_runs_the_test_artifact_build() {
     let manifest: Value =
         serde_json::from_str(&repo::read("package.json")).expect("parse package.json");
-    let script = manifest["scripts"]["build:workflow-artifacts"]
+    let script = manifest["scripts"]["build:test-artifacts"]
         .as_str()
-        .expect("the root package declares build:workflow-artifacts");
+        .expect("the root package declares build:test-artifacts");
     assert_eq!(
         script,
         prebuilt::build_command(),

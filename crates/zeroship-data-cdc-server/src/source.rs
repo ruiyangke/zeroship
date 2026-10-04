@@ -7,9 +7,21 @@ use compio_postgres::{MakeRustlsConnect, Pool};
 use futures::FutureExt;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 use zeroship_data_cdc_wire::{Event, Operation};
 
 type Error = Box<dyn std::error::Error>;
+
+/// How long a capture waits for the server to release its slot before leaving
+/// it to the relay's startup scan.
+const SLOT_RELEASE_WAIT: Duration = Duration::from_secs(5);
+
+/// How often that wait re-reads the server's `active` flag.
+///
+/// The walsender backend exits on the server's own schedule, so re-reading
+/// faster than that scheduling round trip only multiplies queries against the
+/// production database without observing the release any sooner.
+const SLOT_RELEASE_POLL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Limits {
@@ -141,13 +153,62 @@ pub(crate) async fn run(
     }
     // Only this capture's exact name is ever deleted, and it carries the
     // database as well as the app, so a sibling capture of the same app is out
-    // of reach here. An active slot is never terminated; a failed cleanup is
-    // retried at relay startup, where the prefix scan reclaims every inactive
-    // relay slot whatever pair composed it.
-    if pool.query("SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1 AND NOT active AND database = current_database()", &[&slot]).await.is_err() {
-        tracing::warn!(app_id = %key.app, database_id = %key.database, "CDC slot cleanup failed");
+    // of reach here. A failed cleanup is retried at relay startup, where the
+    // prefix scan reclaims every inactive relay slot whatever pair composed it.
+    if let Err(error) = drop_released_slot(&pool, &slot).await {
+        tracing::warn!(
+            app_id = %key.app,
+            database_id = %key.database,
+            error = %crate::cause_chain(&*error),
+            "CDC slot cleanup failed"
+        );
     }
     hub.end(&key, start.generation);
+}
+
+/// Drop `slot` once the server has released it.
+///
+/// Dropping the capture's replication stream shuts its socket down
+/// synchronously, but the server marks the slot inactive only after the
+/// walsender backend exits, which follows that close by a scheduling round
+/// trip. A `pg_drop_replication_slot` issued inside that window matches no row
+/// (`NOT active`) and would leave the slot behind until the relay's startup
+/// scan. Reading the server's own `active` flag is what lets the capture reach
+/// the slot it just released. The wait is bounded so a walsender that will not
+/// exit cannot stall the capture's shutdown.
+async fn drop_released_slot(pool: &Pool, slot: &str) -> Result<(), Error> {
+    let deadline = Instant::now() + SLOT_RELEASE_WAIT;
+    loop {
+        let active: Option<bool> = pool
+            .query(
+                "SELECT active FROM pg_replication_slots \
+                 WHERE slot_name = $1 AND database = current_database()",
+                &[&slot],
+            )
+            .await?
+            .first()
+            .map(|row| row.try_get(0))
+            .transpose()?;
+        // Absent means something else already reclaimed it; inactive means the
+        // walsender is gone and the drop below reaches it.
+        if active != Some(true) {
+            pool.query(
+                "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots \
+                 WHERE slot_name = $1 AND NOT active AND database = current_database()",
+                &[&slot],
+            )
+            .await?;
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            tracing::warn!(
+                slot = %slot,
+                "replication slot still active after the release wait; leaving it for the relay's startup scan"
+            );
+            return Ok(());
+        }
+        compio::time::sleep(SLOT_RELEASE_POLL).await;
+    }
 }
 
 async fn capture(
@@ -1024,6 +1085,198 @@ mod tests {
             slots(&admin, &slot).await,
             0,
             "the capture reclaims its slot"
+        );
+
+        relay.close().await;
+        admin.close().await;
+    }
+
+    /// **Cleanup waits for the server to release a slot still held.**
+    ///
+    /// The capture closes its replication socket synchronously, but the server
+    /// marks the slot inactive only after the walsender backend exits. A
+    /// cleanup that ran once in that window would match no row and leave the
+    /// slot for the relay's startup scan. This holds the slot active from an
+    /// independent walsender, so the one-shot drop is the arm that can fail:
+    /// the cleanup must neither force-drop the held slot nor return while the
+    /// server holds it, and once the holder disconnects it must observe the
+    /// release and drop the slot.
+    #[compio::test]
+    async fn slot_cleanup_waits_for_the_server_to_release_a_held_slot() {
+        let database = zeroship_testkit::postgres::platform().fresh_database();
+        let platform = Platform::at(database.admin_url().to_string());
+        let admin = admin_pool(&platform, 2).await;
+        let relay = relay_pool(&platform, 2).await;
+        let url = platform.relay_url();
+        let schema = zeroship_core::database_derivation::schema_name(
+            &zeroship_core::DatabaseId::mint(),
+        );
+        let publication = zeroship_core::replication_names::DATASTORE_PUBLICATION;
+        admin
+            .batch_execute(&format!(
+                "CREATE SCHEMA \"{schema}\";
+                 CREATE TABLE \"{schema}\".orders (id int PRIMARY KEY);
+                 CREATE PUBLICATION \"{publication}\" FOR TABLES IN SCHEMA \"{schema}\";"
+            ))
+            .await
+            .expect("logical WAL and publication required");
+        let key = StreamKey::new(
+            &zeroship_core::typed_id::generate(zeroship_core::typed_id::APP_PREFIX),
+            zeroship_core::DatabaseId::mint().as_str(),
+        );
+        let slot = slot_name(&key).unwrap();
+        let lsn: String = relay
+            .query(
+                "SELECT lsn::text FROM \
+                 pg_create_logical_replication_slot($1, 'pgoutput', false, false)",
+                &[&slot],
+            )
+            .await
+            .expect("create the capture's slot")[0]
+            .try_get(0)
+            .expect("the slot position decodes");
+
+        // THE HOLDER: a walsender streaming from the slot, so the server
+        // reports it active.
+        let config: compio_postgres::Config = url.parse().unwrap();
+        let tls = MakeRustlsConnect::from_config(&config).unwrap();
+        let connection = replication::connect_replication(tls, &config)
+            .await
+            .expect("a replication connection");
+        let holder = connection
+            .start_logical_replication(StartReplicationOptions {
+                slot_name: &slot,
+                start_lsn: &lsn,
+                publication_names: &[publication],
+                ..Default::default()
+            })
+            .await
+            .expect("the holder starts streaming");
+        assert!(
+            answer::<bool>(
+                &admin,
+                "SELECT active FROM pg_replication_slots WHERE slot_name = $1",
+                &[&slot],
+            )
+            .await,
+            "the holder must make the slot active, or the wait is vacuous"
+        );
+
+        let cleanup = compio::runtime::spawn({
+            let relay = relay.clone();
+            let slot = slot.clone();
+            async move { drop_released_slot(&relay, &slot).await }
+        });
+        futures::pin_mut!(cleanup);
+        assert!(
+            compio::time::timeout(Duration::from_millis(500), cleanup.as_mut())
+                .await
+                .is_err(),
+            "cleanup returned while the server still held the slot"
+        );
+        assert_eq!(
+            slots(&admin, &slot).await,
+            1,
+            "cleanup must not force-drop a slot the server still holds"
+        );
+        drop(holder);
+        compio::time::timeout(Duration::from_secs(10), cleanup)
+            .await
+            .expect("cleanup returns once the server releases the slot")
+            .expect("the cleanup task does not panic")
+            .expect("cleanup succeeds");
+        assert_eq!(
+            slots(&admin, &slot).await,
+            0,
+            "the released slot is dropped"
+        );
+
+        relay.close().await;
+        admin.close().await;
+    }
+
+    /// **A slot the server still holds at the deadline is named, not dropped.**
+    ///
+    /// The wait is bounded so a walsender that will not exit cannot stall the
+    /// capture's shutdown. When the deadline passes the cleanup leaves the slot
+    /// for the relay's startup scan and logs a warning naming it, so the
+    /// leftover is visible rather than silent.
+    #[compio::test]
+    async fn a_slot_still_held_at_the_deadline_is_warned_and_left_for_the_startup_scan() {
+        let database = zeroship_testkit::postgres::platform().fresh_database();
+        let platform = Platform::at(database.admin_url().to_string());
+        let admin = admin_pool(&platform, 2).await;
+        let relay = relay_pool(&platform, 2).await;
+        let url = platform.relay_url();
+        let schema = zeroship_core::database_derivation::schema_name(
+            &zeroship_core::DatabaseId::mint(),
+        );
+        let publication = zeroship_core::replication_names::DATASTORE_PUBLICATION;
+        admin
+            .batch_execute(&format!(
+                "CREATE SCHEMA \"{schema}\";
+                 CREATE TABLE \"{schema}\".orders (id int PRIMARY KEY);
+                 CREATE PUBLICATION \"{publication}\" FOR TABLES IN SCHEMA \"{schema}\";"
+            ))
+            .await
+            .expect("logical WAL and publication required");
+        let key = StreamKey::new(
+            &zeroship_core::typed_id::generate(zeroship_core::typed_id::APP_PREFIX),
+            zeroship_core::DatabaseId::mint().as_str(),
+        );
+        let slot = slot_name(&key).unwrap();
+        let lsn: String = relay
+            .query(
+                "SELECT lsn::text FROM \
+                 pg_create_logical_replication_slot($1, 'pgoutput', false, false)",
+                &[&slot],
+            )
+            .await
+            .expect("create the capture's slot")[0]
+            .try_get(0)
+            .expect("the slot position decodes");
+        let config: compio_postgres::Config = url.parse().unwrap();
+        let tls = MakeRustlsConnect::from_config(&config).unwrap();
+        let connection = replication::connect_replication(tls, &config)
+            .await
+            .expect("a replication connection");
+        let holder = connection
+            .start_logical_replication(StartReplicationOptions {
+                slot_name: &slot,
+                start_lsn: &lsn,
+                publication_names: &[publication],
+                ..Default::default()
+            })
+            .await
+            .expect("the holder starts streaming");
+
+        let (result, warnings) =
+            Box::pin(warnings_during(drop_released_slot(&relay, &slot))).await;
+        result.expect("cleanup returns at its deadline");
+        assert_eq!(
+            slots(&admin, &slot).await,
+            1,
+            "the held slot is left for the relay's startup scan"
+        );
+        let warned: Vec<&Warning> = warnings
+            .iter()
+            .filter(|warning| warning.message.starts_with("replication slot still active"))
+            .collect();
+        assert_eq!(warned.len(), 1, "the deadline warns once: {warnings:?}");
+        assert_eq!(
+            warned[0].fields.get("slot").map(String::as_str),
+            Some(slot.as_str()),
+            "the warning names the slot left behind"
+        );
+
+        drop(holder);
+        drop_released_slot(&relay, &slot)
+            .await
+            .expect("cleanup drops the slot once the holder exits");
+        assert_eq!(
+            slots(&admin, &slot).await,
+            0,
+            "the released slot is dropped"
         );
 
         relay.close().await;

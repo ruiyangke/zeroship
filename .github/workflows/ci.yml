@@ -132,9 +132,11 @@ jobs:
       # The control workflow process suites start the real service binaries and
       # the workflow-test-environment example. Build them here, once, so each
       # nextest process locates a fresh artifact instead of running a nested
-      # cargo build of its own on the shared target directory.
-      - name: Build the workflow process executables
-        run: pnpm build:workflow-artifacts
+      # cargo build of its own on the shared target directory. The same step
+      # warms the ORM compile-fail project's trybuild target directory, which
+      # trybuild otherwise compiles cold inside its test process.
+      - name: Build the test artifacts and warm the ORM trybuild target
+        run: pnpm build:test-artifacts
       # nextest runs every test, not just every target: a failing test does not
       # stop the targets after it, and the `ci` profile's `fail-fast = false`
       # keeps a failure from hiding the suites behind it. The verdict is

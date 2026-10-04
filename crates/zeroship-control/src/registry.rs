@@ -1489,7 +1489,7 @@ mod session_name_tests {
     #[compio::test]
     async fn a_request_connection_announces_its_source() {
         let registry =
-            Registry::new(&zeroship_testkit::postgres::platform().admin_url().to_string())
+            Registry::new(zeroship_testkit::postgres::platform().admin_url().as_ref())
                 .await
                 .unwrap();
         let conn = registry.conn().await.unwrap();

@@ -114,16 +114,36 @@ pub const ARTIFACTS: &[&str] = &[
     "target/debug/examples/workflow-test-environment",
 ];
 
-/// The command that rebuilds every executable above.
-pub const REBUILD: &str = "pnpm build:workflow-artifacts";
+/// The command that rebuilds every executable above and warms the ORM
+/// compile-fail project's trybuild target.
+pub const REBUILD: &str = "pnpm build:test-artifacts";
 
-/// [`BUILD_ARGS`] as one command line, so a package script and the build-input
-/// gate name the same invocation.
+/// The `cargo test` invocation that warms the ORM compile-fail project's
+/// trybuild target directory.
+///
+/// `trybuild` compiles its generated project's whole dependency graph inside
+/// the test process, into a target directory of its own, on the first run of a
+/// cold checkout. The ordered build chain runs this once before the suite, so
+/// the test only compiles its fixture bins rather than the ORM's closure.
+pub const WARM_ARGS: &[&str] = &[
+    "test",
+    "-p",
+    "zeroship-data-orm",
+    "--test",
+    "main",
+    "integration::derive_contract",
+];
+
+/// [`BUILD_ARGS`] and [`WARM_ARGS`] as one command line, so a package script
+/// and the build-input gate name the same invocation.
 pub fn build_command() -> String {
-    std::iter::once("cargo")
-        .chain(BUILD_ARGS.iter().copied())
-        .collect::<Vec<_>>()
-        .join(" ")
+    let invocation = |args: &[&str]| {
+        std::iter::once("cargo")
+            .chain(args.iter().copied())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    format!("{} && {}", invocation(BUILD_ARGS), invocation(WARM_ARGS))
 }
 
 /// The cargo profile directory the running test binary was built into.
