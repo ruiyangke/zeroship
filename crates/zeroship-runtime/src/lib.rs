@@ -7,10 +7,10 @@
 //!
 //! # The REJECTION rules are pinned in `tests/`, not here
 //!
-//! Six rules are pinned by trybuild fixtures with `.stderr` snapshots:
-//!
-//!   tests/v8_async_method_compile_fail.rs  + tests/compile_fail_async_method/
-//!   tests/v8_fastcall_compile_fail.rs      + tests/compile_fail_fastcall/
+//! They are pinned by trybuild fixtures with `.stderr` snapshots, run from
+//! `tests/integration/v8_compile_fail.rs`; the async-method and fastcall
+//! fixtures live in `tests/compile_fail_async_method/` and
+//! `tests/compile_fail_fastcall/`.
 //!
 //! A raw `compile_fail` passes on ANY compilation error, so it cannot
 //! distinguish the rejection it means to pin from a typo, a renamed
