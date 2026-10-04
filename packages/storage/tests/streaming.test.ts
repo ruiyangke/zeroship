@@ -106,7 +106,7 @@ function mockNative(): { native: NativeStorage; cancels: number[] } {
         streams.delete(streamId);
         return undefined;
       }
-      // 64 KiB pull granularity, mirroring a real backend's chunking.
+      // 64 KiB per pull, so an object spans several pulls as a real download does.
       const end = Math.min(s.off + 64 * 1024, s.bytes.length);
       const chunk = s.bytes.subarray(s.off, end);
       s.off = end;

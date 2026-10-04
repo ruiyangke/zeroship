@@ -15,7 +15,6 @@
 //!     JS `env.storage.getStream(bucket, key)` + `readChunk(id)` loop
 //!       → Backend::get_stream → isolate-owned registry
 //!         (cross-tenant isolation is covered by cross_tenant_streams.rs)
-//!       → ResolveValue::Bytes
 //!       → JS reassembles the object
 //!
 //! The handler self-asserts a multi-chunk upload → download round-trip

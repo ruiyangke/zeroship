@@ -113,8 +113,10 @@ the buffered cap has to be read with `getStream`.
 ## 4. Large objects: stream both ways
 
 `put` with a `Blob` or a `ReadableStream` never holds the whole object, and `getStream`
-pulls at your own pace. `fetch`, `ReadableStream` and `Blob` are runtime globals, so a
-response body is one such stream:
+pulls at your own pace. Each `read()` resolves with at most one download chunk
+(`DOWNLOAD_CHUNK_BYTES` in `crates/zeroship-storage-v8/src/limits.rs`), less when the object
+ends or its backend delivers slowly. `fetch`, `ReadableStream` and `Blob` are runtime globals,
+so a response body is one such stream:
 
 ```ts
 const source = await fetch("https://example.com/big.csv");

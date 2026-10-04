@@ -3,6 +3,22 @@
 /// Buffer shared by the V8 producer and the Rust upload consumer.
 pub const UPLOAD_STREAM_BUFFER_CAP: usize = 16 * 1024 * 1024;
 
+/// Bytes one `readChunk` resolves with.
+///
+/// A download gathers backend frames until it holds this many or the object
+/// ends, so the V8 round trip is paid once per this many bytes rather than
+/// once per network frame. Every chunk but an object's last is exactly this
+/// size, and it bounds what an in-flight read holds beyond the remainder of
+/// one backend frame.
+pub const DOWNLOAD_CHUNK_BYTES: usize = 256 * 1024;
+
+/// How long a download keeps gathering once a chunk holds its first byte.
+///
+/// The gather ends at the first frame to arrive after this, so a backend
+/// that trickles frames hands JavaScript a partial chunk rather than holding
+/// one read for a frame wait per frame the chunk needs.
+pub const DOWNLOAD_GATHER_BUDGET: std::time::Duration = std::time::Duration::from_millis(100);
+
 pub const DEFAULT_MAX_LIVE_GET_STREAMS_PER_APP: usize = 64;
 
 /// Environment variable overriding [`DEFAULT_MAX_LIVE_GET_STREAMS_PER_APP`].

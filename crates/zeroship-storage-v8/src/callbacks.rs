@@ -7,11 +7,12 @@
 use base64::Engine;
 use serde_json::json;
 use zeroship_runtime::channel::{stream_buffer_with_cap, StreamReader};
-use zeroship_runtime::state::{OpError, OpResult, ResolveValue, SharedState};
+use zeroship_runtime::state::{NativeValue, OpError, OpResult, ResolveValue, SharedState};
 use zeroship_runtime::streams::response_forwarder;
 
 use zeroship_storage::backend::{ChunkResult, ChunkSource, ObjectMeta};
 use zeroship_storage::StorageError;
+use crate::download::{Download, Gathered};
 use crate::StorageContext;
 
 /// Raw usage metrics a storage op emits in its success arm. `storage_ops`
@@ -574,7 +575,7 @@ pub fn get_stream(
                 // Park the source in this isolate. A refusal here means
                 // the app is over its live-stream cap; the source is dropped
                 // (releasing its fd / HTTP body) and the op fails.
-                let stream_id = match context.streams.open(source) {
+                let stream_id = match context.streams.open(Download::new(source, meta.size)) {
                     Ok(id) => id,
                     Err(e) => return OpResult::Failed { op_id, error: e.to_string(), request_id },
                 };
@@ -640,45 +641,65 @@ pub fn read_chunk(
     };
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        // Take the source out for the pull, then put it back. compio is
+        // Take the download out for the pull, then put it back. compio is
         // single-threaded and the SDK pulls sequentially, so no two
         // `readChunk`s for the same id overlap.
-        let mut source = match slot.borrow_mut().source.take() {
-            Some(s) => s,
-            None => {
-                return OpResult::JsValue {
-                    resolver,
-                    value: ResolveValue::Undefined,
-                    request_id,
-                };
-            }
+        let Some(mut download) = slot.borrow_mut().download.take() else {
+            return OpResult::JsValue { resolver, value: ResolveValue::Undefined, request_id };
         };
-        let next = source.next_chunk().await;
-        match next {
-            Some(Ok(chunk)) => {
-                slot.borrow_mut().source = Some(source);
-                OpResult::JsValue {
-                    resolver,
-                    value: ResolveValue::Bytes(chunk.to_vec()),
-                    request_id,
+        let gathered = download
+            .gather(
+                crate::limits::DOWNLOAD_CHUNK_BYTES,
+                crate::limits::DOWNLOAD_GATHER_BUDGET,
+                || context.streams.is_open(stream_id, &slot),
+            )
+            .await;
+        let value = match gathered {
+            Gathered::Chunk(chunk) => {
+                slot.borrow_mut().download = Some(download);
+                ResolveValue::Native(Box::new(ChunkValue(chunk)))
+            }
+            // The object's bytes end here. Closing now releases the backend
+            // body and the permit; the next `readChunk` finds no handle and
+            // resolves EOF.
+            Gathered::Last(chunk) => {
+                context.streams.close_slot(stream_id, &slot);
+                if chunk.is_empty() {
+                    ResolveValue::Undefined
+                } else {
+                    ResolveValue::Native(Box::new(ChunkValue(chunk)))
                 }
             }
-            Some(Err(e)) => {
-                context.streams.close(stream_id);
-                OpResult::JsValue {
-                    resolver,
-                    value: ResolveValue::RejectError(OpError::error(e.to_string())),
-                    request_id,
-                }
+            Gathered::Failed(e) => {
+                context.streams.close_slot(stream_id, &slot);
+                ResolveValue::RejectError(OpError::error(e.to_string()))
             }
-            None => {
-                context.streams.close(stream_id);
-                OpResult::JsValue { resolver, value: ResolveValue::Undefined, request_id }
-            }
-        }
+            // Cancelled before the gather ended, whatever it gathered: the read
+            // resolves EOF and the download drops here with its source.
+            Gathered::Closed => ResolveValue::Undefined,
+        };
+        OpResult::JsValue { resolver, value, request_id }
     }));
 
     rv.set(promise.into());
+}
+
+/// A gathered chunk, handed to V8 as the backing store of a fresh
+/// `Uint8Array` so its bytes are not copied again.
+struct ChunkValue(Vec<u8>);
+
+impl NativeValue for ChunkValue {
+    fn into_v8<'s>(
+        self: Box<Self>,
+        scope: &mut v8::PinScope<'s, '_>,
+    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
+        let length = self.0.len();
+        let store = v8::ArrayBuffer::new_backing_store_from_vec(self.0).make_shared();
+        let buffer = v8::ArrayBuffer::with_backing_store(scope, &store);
+        v8::Uint8Array::new(scope, buffer, 0, length)
+            .map(Into::into)
+            .ok_or_else(|| OpError::error("storage: could not allocate a download chunk"))
+    }
 }
 
 // ---------------------------------------------------------------------------

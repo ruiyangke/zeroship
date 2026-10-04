@@ -6,12 +6,12 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
-use zeroship_storage::backend::BoxByteStream;
+use crate::download::Download;
 
 pub(crate) type StreamSlot = Rc<RefCell<StreamEntry>>;
 
 pub(crate) struct StreamEntry {
-    pub source: Option<BoxByteStream>,
+    pub download: Option<Download>,
     _permit: Permit,
 }
 
@@ -69,7 +69,7 @@ impl LiveStreams {
         }
     }
 
-    pub fn open(&self, source: BoxByteStream) -> Result<u32, String> {
+    pub fn open(&self, download: Download) -> Result<u32, String> {
         if self.budget.live.get() >= self.cap {
             return Err(format!(
                 "storage: too many live download streams ({} max per app); read one to the end, or cancel it",
@@ -87,7 +87,7 @@ impl LiveStreams {
         streams.insert(
             id,
             Rc::new(RefCell::new(StreamEntry {
-                source: Some(source),
+                download: Some(download),
                 _permit: Permit(Rc::clone(&self.budget)),
             })),
         );
@@ -100,6 +100,25 @@ impl LiveStreams {
 
     pub fn close(&self, id: u32) {
         self.streams.borrow_mut().remove(&id);
+    }
+
+    /// Whether `slot` is still the live handle for `id`: false once the handle
+    /// is closed, even if the id has since been issued to another download.
+    pub fn is_open(&self, id: u32, slot: &StreamSlot) -> bool {
+        self.streams
+            .borrow()
+            .get(&id)
+            .is_some_and(|live| Rc::ptr_eq(live, slot))
+    }
+
+    /// Close `id` only while `slot` is its live handle, so a pull that ends
+    /// after its handle was closed cannot close a download the id was issued
+    /// to since.
+    pub fn close_slot(&self, id: u32, slot: &StreamSlot) {
+        let mut streams = self.streams.borrow_mut();
+        if streams.get(&id).is_some_and(|live| Rc::ptr_eq(live, slot)) {
+            streams.remove(&id);
+        }
     }
 }
 
@@ -116,11 +135,15 @@ mod tests {
         }
     }
 
+    fn idle() -> Download {
+        Download::new(Box::new(Idle), 0)
+    }
+
     #[test]
     fn stream_ownership_is_per_isolate_even_for_the_same_app() {
         let a = LiveStreams::new("app_a");
         let b = LiveStreams::new("app_a");
-        let id = a.open(Box::new(Idle)).unwrap();
+        let id = a.open(idle()).unwrap();
         assert!(b.slot(id).is_none());
         b.close(id);
         assert!(a.slot(id).is_some());
@@ -132,13 +155,13 @@ mod tests {
         let b = LiveStreams::new("app_b");
         let c = LiveStreams::new("app_c");
         for _ in 0..a.cap {
-            a.open(Box::new(Idle)).unwrap();
+            a.open(idle()).unwrap();
         }
-        assert!(a.open(Box::new(Idle)).is_err());
-        assert!(b.open(Box::new(Idle)).is_err());
-        assert!(c.open(Box::new(Idle)).is_ok());
+        assert!(a.open(idle()).is_err());
+        assert!(b.open(idle()).is_err());
+        assert!(c.open(idle()).is_ok());
         drop(a);
-        assert!(b.open(Box::new(Idle)).is_ok());
+        assert!(b.open(idle()).is_ok());
     }
 
     #[test]
@@ -158,7 +181,7 @@ mod tests {
         let dropped = Rc::new(Cell::new(false));
         let registry = LiveStreams::new("app_drop");
         registry
-            .open(Box::new(Tracked(Rc::clone(&dropped))))
+            .open(Download::new(Box::new(Tracked(Rc::clone(&dropped))), 0))
             .unwrap();
         drop(registry);
         assert!(dropped.get());
@@ -166,9 +189,31 @@ mod tests {
     }
 
     #[test]
+    fn a_closed_handle_stays_closed_when_its_id_is_issued_again() {
+        let registry = LiveStreams::new("app_reissue");
+        let id = registry.open(idle()).unwrap();
+        let slot = registry.slot(id).unwrap();
+        assert!(registry.is_open(id, &slot));
+        registry.close(id);
+        assert!(!registry.is_open(id, &slot));
+        registry.next_id.set(id - 1);
+        assert_eq!(registry.open(idle()).unwrap(), id);
+        assert!(!registry.is_open(id, &slot), "a pull on the closed handle must not resume");
+        let reissued = registry.slot(id).unwrap();
+        assert!(registry.is_open(id, &reissued));
+        registry.close_slot(id, &slot);
+        assert!(
+            registry.is_open(id, &reissued),
+            "ending the closed handle's pull must not close the download its id now names"
+        );
+        registry.close_slot(id, &reissued);
+        assert!(registry.slot(id).is_none(), "a live handle closes by its own slot");
+    }
+
+    #[test]
     fn closing_a_pulled_stream_retains_its_permit_until_the_pull_finishes() {
         let registry = LiveStreams::new("app_pull");
-        let id = registry.open(Box::new(Idle)).unwrap();
+        let id = registry.open(idle()).unwrap();
         let slot = registry.slot(id).unwrap();
         registry.close(id);
         assert_eq!(registry.budget.live.get(), 1);

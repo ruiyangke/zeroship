@@ -9,6 +9,9 @@
 //! The container is a testcontainers `Container` handle: dropping it removes the
 //! gateway, and the crate's process watchdog removes it if the owning process is
 //! signalled before the drop runs.
+//!
+//! [`StalledObject`] is the one fault the gateway cannot produce: a response
+//! body that stops arriving. It is a loopback endpoint, not a container.
 
 use std::time::Duration;
 
@@ -93,5 +96,86 @@ impl S3Server {
     #[must_use]
     pub fn secret_key(&self) -> &'static str {
         SECRET
+    }
+}
+
+/// An S3-shaped endpoint whose one object stalls partway through its body.
+///
+/// It accepts a single connection, answers its request with a successful
+/// object response that declares `declared` bytes, sends the first `sent` of
+/// them and then sends nothing more, holding the connection open until the
+/// client hangs up. A real S3 server cannot be made to stall, and a stall is
+/// the only input that shows a client's body-read bound is applied rather
+/// than merely configured. The server does not check signatures.
+#[derive(Debug)]
+pub struct StalledObject {
+    endpoint: String,
+    stalled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// How long the endpoint holds a stalled connection before it gives up on
+/// the client. It bounds the server thread, not the client under test.
+const STALLED_HOLD: Duration = Duration::from_mins(1);
+
+impl StalledObject {
+    /// Serve one stalled object on a loopback port.
+    ///
+    /// # Panics
+    /// Panics if `sent` exceeds `declared` or no loopback port can be bound.
+    #[must_use]
+    pub fn start(sent: usize, declared: usize) -> Self {
+        use std::io::{Read, Write};
+
+        assert!(sent <= declared, "a stalled object cannot send more than it declares");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+        let endpoint = format!("http://{}", listener.local_addr().expect("listener address"));
+        let stalled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let witness = std::sync::Arc::clone(&stalled);
+        std::thread::spawn(move || {
+            let Ok((mut socket, _)) = listener.accept() else { return };
+            socket.set_read_timeout(Some(STALLED_HOLD)).expect("set the hold bound");
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                match socket.read(&mut byte) {
+                    Ok(1) => request.push(byte[0]),
+                    _ => return,
+                }
+            }
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {declared}\r\n\
+                 Content-Type: application/octet-stream\r\n\
+                 Last-Modified: Wed, 21 Oct 2015 07:28:00 GMT\r\n\r\n"
+            );
+            if socket.write_all(head.as_bytes()).is_err()
+                || socket.write_all(&vec![0x5a; sent]).is_err()
+                || socket.flush().is_err()
+            {
+                return;
+            }
+            witness.store(true, std::sync::atomic::Ordering::Release);
+            // Hold the connection without sending more until the client hangs
+            // up (a read of zero bytes) or the hold bound passes.
+            let mut drain = [0u8; 1024];
+            while matches!(socket.read(&mut drain), Ok(n) if n > 0) {}
+        });
+        Self { endpoint, stalled }
+    }
+
+    /// The `s3://` URL of `prefix` on this endpoint, in the form
+    /// `compio_s3::S3Config::parse_url` reads.
+    #[must_use]
+    pub fn url(&self, prefix: &str) -> String {
+        format!(
+            "s3://{BUCKET}/{prefix}?provider=generic&endpoint={}&region=us-east-1&style=path&dev_http=true&checksum=none",
+            self.endpoint,
+        )
+    }
+
+    /// Whether the endpoint has written the head of the body and begun to
+    /// stall.
+    #[must_use]
+    pub fn has_stalled(&self) -> bool {
+        self.stalled.load(std::sync::atomic::Ordering::Acquire)
     }
 }

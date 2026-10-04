@@ -11,6 +11,7 @@ use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
 use zeroship_storage::{Namespace, Storage, StorageStore};
 
 mod callbacks;
+mod download;
 pub mod limits;
 mod live_streams;
 

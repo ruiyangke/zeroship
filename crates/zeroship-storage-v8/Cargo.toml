@@ -31,3 +31,8 @@ workspace = true
 [[test]]
 name = "main"
 path = "tests/main.rs"
+
+# Prints the download throughput of one S3-backed stream read three ways.
+[[bench]]
+name = "stream_read"
+harness = false
