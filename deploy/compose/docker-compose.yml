@@ -122,44 +122,17 @@ services:
     # flags pending_restart. So it must be on the command line here; putting it
     # in postgres-init.sql would appear to succeed and change nothing.
     #
-    # CONCRETE COST of leaving it at the default: TEN plugin-db integration
-    # tests FAIL on a `replica` server (`pg_has_logical_wal`). They used to
-    # SKIP, which is worse and is why this setting was pinned here in the first
-    # place - the run reported the same "11 passed; 0 failed" either way and
-    # only the elapsed time differed. They refuse now, naming this setting and
-    # that it needs a RESTART rather than a reload, so a stack brought up
-    # without it is loud instead of hollow. Pin it anyway: a red suite is not a
-    # working development stack. crates/zeroship-data-v8/tests/integration.rs
-    # anticipated this, saying CI's pg-test image gets `-c wal_level=logical`
-    # "once the rollout lands". This is that rollout for the compose stack.
-    #
-    # TEN, not the 12 this said until 2026-08-18. Counted three ways that day
-    # and they agree: `pg_has_logical_wal` has 10 call sites, a full run on a
-    # `replica` server announced one skip per wal-gated test (plus one for
-    # postgis), and the same run on a `logical` server announced none of them.
-    # Nearby comments still say eleven and twelve - the number was written once
-    # and copied, and nothing re-ran it. Count the call sites; that is the one
-    # of the three that is still measurable now the announcements are gone.
-    # max_prepared_transactions is also a restart-only setting. PostgreSQL's
-    # default is zero, which makes PREPARE TRANSACTION unavailable and leaves
-    # pgoutput's `two_phase` protocol untestable. compio-postgres exercises the
-    # real prepare/commit/rollback frames against this service, so keep a small
-    # nonzero budget here rather than weakening that test into a skip.
     # max_replication_slots and max_wal_senders are restart-only budgets, and
-    # both default to ten. The driver suite runs its tests concurrently against
-    # this one server, so each test that decodes a stream holds a slot plus a
-    # walsender at the same time; at the default the suite fails with `all
-    # replication slots are in use` (53400) before any of its assertions run.
-    # A slot is also not released the instant its stream closes, so the budget
-    # has to clear the suite's real parallelism with room for that teardown
-    # window. Raised here, at the server's own start, because neither setting
-    # can be changed by a running session.
+    # both default to ten. The CDC relay runs one capture per (app, database)
+    # pair, each holding a logical slot and a walsender (`relay_slot_name` in
+    # crates/zeroship-core/src/replication_names.rs), so a development stack
+    # past a handful of bound databases would fail its next capture with `all
+    # replication slots are in use` (53400). Raised here, at the server's own
+    # start, because neither setting can be changed by a running session.
     command:
       - postgres
       - -c
       - wal_level=logical
-      - -c
-      - max_prepared_transactions=10
       - -c
       - max_replication_slots=128
       - -c
@@ -984,20 +957,16 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
-    # PUBLISHED, unlike every other compose revision before this one. The
-    # in-compose services reach this by service name and need no host port, so
-    # it had none - which meant `docker compose up` gave the HOST no Redis at
-    # all, and `cargo test -p compio-redis` had nothing to dial. Those tests
-    # returned early and counted as passes; the flag that was supposed to catch
-    # that (`ZEROSHIP_REQUIRE_LIVE_BACKENDS=1`) was opt-in and nothing set it.
-    # `tests/provision_test_backends.sh` brings this up and the test default
-    # dials exactly this address.
+    # PUBLISHED on loopback so a host-side client can reach the stack's Redis;
+    # the in-compose services reach it by service name and need no host port.
+    # Test suites start their own Redis through testcontainers and never dial
+    # this one.
     #
     # 6390, not 6379. 6379 is the conventional default and is therefore the
     # port some other project's container is already holding on a shared
     # development machine - one was holding it when this line was written. A
-    # test suite that silently connects to a stranger's Redis is a worse
-    # outcome than one that cannot connect at all.
+    # client that silently connects to a stranger's Redis is a worse outcome
+    # than one that cannot connect at all.
     #
     # Loopback-bound, like every non-edge port here. That was enforced by
     # tests/compose_port_exposure_gate.sh until 2026-08-21; it is now a

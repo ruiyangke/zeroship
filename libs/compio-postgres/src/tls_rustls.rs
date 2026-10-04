@@ -24,7 +24,7 @@
 //!
 //! The pairing that catches a no-op verifier is `verify-ca` and `verify-full`
 //! against the *same* host-name-mismatched server: they must go opposite ways.
-//! `tests/tls_live.rs` runs that live, and
+//! `tests/integration/tls_live.rs` runs that live, and
 //! `the_three_policies_discriminate` runs it offline against committed
 //! certificates, so the proof is in CI and not only on a machine with Docker.
 //!
@@ -412,7 +412,7 @@ fn verifier_for(
 /// Only its host-name error is suppressed; every chain, expiry, purpose, and
 /// revocation error is returned unchanged. A custom verifier is needed because
 /// [`WebPkiServerVerifier`] has no knob to disable only the name check. The
-/// combined wrong-name/revoked-certificate case in `tests/tls_live.rs` guards
+/// combined wrong-name/revoked-certificate case in `tests/integration/tls_live.rs` guards
 /// that load-bearing order against a rustls change.
 #[derive(Debug)]
 struct ChainOnlyServerCert {
@@ -1279,7 +1279,7 @@ impl MakeRustlsConnect {
         // Leaving resumption ENABLED for every other configuration is safe for
         // a reason that lives on the SERVER, not here, so it is worth writing
         // down: PostgreSQL hands out no resumable session at all. Probing the
-        // `tls_live_setup.sh` servers with
+        // TLS fixture servers (`compio_postgres_testkit::tls`) with
         // `openssl s_client -starttls postgres -sess_out`, on both a TLS 1.2
         // and a TLS 1.3 server, shows the Session-ID coming back empty, no
         // session ticket arriving, and `-sess_out` writing NO file - so there is
@@ -2493,7 +2493,7 @@ mod tests {
     /// This checks only that the selection *discriminates*: a SHA-256-signed
     /// certificate hashes to 32 bytes with SHA-256, a SHA-384-signed one to 48
     /// with SHA-384. It does NOT check the value against a PostgreSQL server -
-    /// that is what the live SCRAM-PLUS handshake in `tests/tls_live.rs`
+    /// that is what the live SCRAM-PLUS handshake in `tests/integration/tls_live.rs`
     /// does.
     #[test]
     fn end_point_hash_follows_the_signature_algorithm() {

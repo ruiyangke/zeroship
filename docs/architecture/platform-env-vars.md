@@ -566,25 +566,12 @@ per-example dev port.
 Reachable only from test code. Setting any of them in a deployment does
 nothing.
 
-### The test backends live in a config file, not in variables
+### The test backends are fixtures, not variables
 
-The test PostgreSQL instance is named once in a generated, gitignored
-configuration file rather than in an environment variable, because its database
-and key-value values contain credentials for the local instances. A misspelled
-key there is an error rather than a value that configures nothing.
-
-### The surviving test-only names
-
-`PG_TEST_URL` is the PostgreSQL test override. It redirects the PostgreSQL
-suites; it does not enable them. The key-value and Redis driver suites start
-their own containers and fail when the container runtime cannot provide them, so
-there is no Redis test address override and no opt-in switch.
-
-CI also sets `PG_CONTAINER`, `PG_HOST`, `PG_PORT`, `PG_USER`, `PG_PASS`,
-`POSTGRES_USER`, `POSTGRES_PASSWORD` and `ZS_FRESHNESS_STRICT`. The host and
-port names are inputs to the provisioning script, which writes what they resolve
-to into the generated file. Mailer tests own their database and mail containers
-and accept no address override.
+No environment variable or generated file names a database, a broker or a
+key-value server for a test. Every suite that needs one starts or joins its own
+server through testcontainers, and a server that cannot start fails the tests
+that asked for it, so there is no address override and no opt-in switch.
 
 ---
 

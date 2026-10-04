@@ -20,14 +20,12 @@ and a dead stream cannot print the same result.
 
 ## Prerequisites
 
-- Docker.
-- The usual test server on 5455 (or whatever `PG_TEST_URL` names).
-- A free port for the second server. 5459 below; check with `docker ps`.
-
-Do **not** reuse another project's container (there is a `postgres:18` on 5434
-belonging to `zero-migrate`). Concurrent suites on one server contend for
-replication slots and hang, and you would also be interfering with someone
-else's run.
+- Docker. The suite starts its PostgreSQL 18 server itself, through
+  `compio_postgres_testkit::server::server_on_postgres_18`, with the same
+  settings as the PostgreSQL 16 server it runs against by default: logical
+  decoding for replication, prepared transactions for the two-phase tests, and
+  replication slot budgets the suite's parallelism cannot exhaust. Nothing is
+  started by hand and nothing points the suite at a server from outside.
 
 ## `psql --version` DOES NOT NAME THE LIBPQ THAT CONNECTS
 
@@ -67,52 +65,15 @@ the server's `SELECT version()`, neither of which constrains the client library.
 
 ## Steps
 
-Start a dedicated server. The three settings are load-bearing: logical
-decoding for replication, prepared transactions for the two-phase tests, and
-enough slots that a run does not exhaust them.
+Run the ordinary suite against PostgreSQL 18:
 
 ```bash
-docker run -d --name zs-cpg-pg18-5459 -p 127.0.0.1:5459:5432 \
-  -e POSTGRES_PASSWORD=zeroship -e POSTGRES_DB=zeroship \
-  postgres:18 postgres \
-    -c wal_level=logical \
-    -c max_prepared_transactions=10 \
-    -c max_replication_slots=20
+cargo nextest run -p compio-postgres --features suite-on-postgres-18
 ```
 
-Wait for it to accept **TCP**, not just to exist:
-
-```bash
-for i in $(seq 1 40); do
-  docker exec zs-cpg-pg18-5459 \
-    psql "postgres://postgres:zeroship@127.0.0.1:5432/zeroship" -tAc "SELECT 1" \
-    >/dev/null 2>&1 && { echo "ready"; break; }
-  sleep 2
-done
-```
-
-`pg_isready` is NOT sufficient here: it checks the unix socket and reports
-ready while the TCP listener is still refusing connections.
-
-Confirm the settings actually took, rather than assuming the flags applied:
-
-```bash
-docker exec zs-cpg-pg18-5459 \
-  psql "postgres://postgres:zeroship@127.0.0.1:5432/zeroship" -tAc \
-  "SELECT current_setting('server_version'), current_setting('wal_level'),
-          current_setting('max_prepared_transactions')"
-```
-
-Run the suite against it:
-
-```bash
-PG_TEST_URL=postgres://postgres:zeroship@127.0.0.1:5459/zeroship \
-  cargo test -p compio-postgres -- --test-threads=1
-```
-
-Expected: the same pass count as the primary server, 0 failed. Anything else
-is either a real version difference or a test that pinned one version's
-behaviour - triage below.
+Expected: the same pass count as the default PostgreSQL 16 run, 0 failed.
+Anything else is either a real version difference or a test that pinned one
+version's behaviour - triage below.
 
 MEASURED 2026-08-26: **79 binaries, 1779 passed, 0 failed on 18.4**, the same
 totals the primary server on 5455 reported the same day. Re-measure rather than
@@ -134,73 +95,39 @@ same I/O either way. Do not expect this run to get faster.
 
 EVERY FIGURE ABOVE IS A DEFAULT-FEATURES RUN, and this crate declares
 `default = []`. Such a run compiles no `tls`-gated test at all, so it says
-nothing about the TLS surface on either version. Measured 2026-08-26 with both
-live fixture sets generated (`tls_live_setup.sh` and `unix_socket_setup.sh`):
+nothing about the TLS surface on either version.
 
-## DO NOT CROSS VERSIONS WITH `--all-features`. IT IGNORES `PG_TEST_URL`.
+## The second major over TLS
 
-`--all-features` turns on `suite-over-tls`, and that feature does not merely
-add TLS - it `#[cfg]`-replaces `common::test_url()` so the whole suite reads
-its DSN from `tests/data/live/tls_live.conf` instead. `PG_TEST_URL` is then
-DEAD, and the run measures the TLS fixture server no matter what you set.
-
-This is not theoretical. Measured 2026-08-27 with `PG_TEST_URL` pointed at the
-18.4 container on 5459, using the suite's own oracle line:
-
-```text
---all-features                          -> server_version_num=160015  protocol=V3_0
---features tls,live-tls-tests,live-unix-socket -> server_version_num=180004  protocol=V3_2
-```
-
-The first is the 16.15 fixture server. A whole cross-version verdict was
-reported off runs shaped like that: both "versions" passed identically because
-both were the same server, and the identical totals read as CONFIRMATION rather
-than as the tell they were. Two runs agreeing perfectly is a reason to ask what
-they were pointed at.
-
-So use the TLS features WITHOUT `suite-over-tls`. That set compiles every
-`tls`-gated test and still honours `PG_TEST_URL`:
+`suite-over-tls` and `suite-on-postgres-18` together run the same test bodies
+over TLS against the TLS fixture's PostgreSQL 18 server, `directtls`, which
+carries the suite's settings for exactly this; `--all-features` turns both on.
+The TLS-specific suite talks to its own six servers whatever the variant, one
+of them PostgreSQL 18 for the direct-SSL case:
 
 ```bash
-PG_TEST_URL=postgres://postgres:zeroship@127.0.0.1:5459/zeroship \
-  cargo test -p compio-postgres --features tls,live-tls-tests,live-unix-socket \
-  -- --test-threads=1
+cargo nextest run -p compio-postgres --features suite-over-tls,suite-on-postgres-18
+cargo nextest run -p compio-postgres --features tls -E 'test(/^integration::tls_live::/)'
 ```
 
 Confirm the server before believing any cross-version figure, rather than
-trusting the variable you exported:
+trusting the feature you passed:
 
 ```bash
-... --test main -- --nocapture cancel_request::raw_cancel_interrupts_running_query_and_preserves_session
+cargo nextest run -p compio-postgres --features suite-on-postgres-18 --no-capture \
+  -E 'test(cancel_request::raw_cancel_interrupts_running_query_and_preserves_session)'
 # prints: cancel oracle: server_version_num=... protocol=... backend_key_len=...
 ```
 
-The TLS suite proper still talks to its OWN servers on 5447-5452 regardless of
-`PG_TEST_URL` - that part of the old note was right - and the fixture set
-includes a PostgreSQL 18 `directtls` server for the direct-SSL case. What was
-wrong was the conclusion that the rest of the suite therefore crossed versions.
-
-The superseded figure, kept so it is not re-derived as if it were sound:
-**1062 passed, 0 failed, exit 0** was recorded on 2026-08-26 as "18.4" from an
-`--all-features` run. It was the fixture server. Nothing is known about 18.4
-from it.
-
-Count BINARIES as well as tests. Both numbers come from the same log and only
-the pair is evidence: every test passing across HALF the binaries would print a
-clean `0 failed` for the half it reached.
+Count BINARIES as well as tests. Both numbers come from the same summary and
+only the pair is evidence: every test passing across HALF the binaries would
+print a clean `0 failed` for the half it reached.
 
 Wait for the run to EXIT, not for its output to go quiet.
 `pgoutput_subtransactions` streams for minutes on 18 without printing, so a
-"has the log stopped growing" check calls the run finished at roughly half the
-binaries - 39 of 78 - and prints a clean 0 failures for the half it saw. Poll
-`pgrep -f 'cargo[ ]test -p compio-postgres'` instead, and confirm the binary
-count as well as the failure count.
-
-Tear down when finished:
-
-```bash
-docker rm -f zs-cpg-pg18-5459
-```
+"has the log stopped growing" check calls the run finished early and prints a
+clean 0 failures for the part it saw. Wait on the nextest process instead,
+and confirm the binary count as well as the failure count.
 
 ## The floor is PostgreSQL 16, and that is measured rather than assumed
 

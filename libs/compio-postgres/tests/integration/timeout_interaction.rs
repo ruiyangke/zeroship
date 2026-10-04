@@ -515,7 +515,7 @@ async fn command_timeout_recovers_without_a_read_timeout() {
     compio::time::timeout(ASYNC_WATCHDOG, async {
         let url = live_url();
         let transport = support::test_transport(&url, support::suite_tls()).await;
-        let mut connection_config: Config = url.parse().expect("parse PG_TEST_URL");
+        let mut connection_config: Config = url.parse().expect("parse the suite DSN");
         connection_config
             .connect_timeout(CONNECT_TIMEOUT)
             .options("-c statement_timeout=0");

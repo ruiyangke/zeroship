@@ -52,24 +52,24 @@ const CHILD_TEST: &str =
 #[test]
 #[ignore = "spawned by a lifetime measurement as a child process, with its scope on stdin"]
 fn child_joins_the_billing_broker_at_a_throwaway_scope() {
-    let broker = zeroship_testkit::redpanda::Broker::join(&zeroship_testkit::lifetime::child_scope())
+    let broker = zeroship_testkit::redpanda::Broker::join(&zeroship_shared_server::lifetime::child_scope())
         .expect("join the broker recipe");
     assert!(
         broker.brokers().starts_with("127.0.0.1:"),
         "{}",
         broker.brokers()
     );
-    zeroship_testkit::lifetime::report_container(broker.container_id());
+    zeroship_shared_server::lifetime::report_container(broker.container_id());
 }
 
 #[test]
 fn the_redpanda_broker_is_removed_when_its_process_ends() {
-    zeroship_testkit::lifetime::assert_removed_after_the_child_exits(CHILD_TEST);
+    zeroship_shared_server::lifetime::assert_removed_after_the_child_exits(CHILD_TEST);
 }
 
 #[test]
 fn the_redpanda_broker_is_removed_when_its_process_is_killed_while_starting() {
-    zeroship_testkit::lifetime::assert_removed_after_a_kill_during_startup(CHILD_TEST);
+    zeroship_shared_server::lifetime::assert_removed_after_a_kill_during_startup(CHILD_TEST);
 }
 
 async fn pg(url: &str) -> compio_postgres::Client {

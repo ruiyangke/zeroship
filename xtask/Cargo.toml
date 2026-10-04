@@ -16,9 +16,6 @@ name = "main"
 path = "tests/main.rs"
 
 [dependencies]
-compio = { version = "0.18", features = ["macros", "time", "runtime", "polling"] }
-compio-postgres = { path = "../libs/compio-postgres" }
-sha2 = "0.10"
 clap = { version = "4", features = ["derive"] }
 ctrlc = { version = "3", features = ["termination"] }
 nix = { version = "0.31", features = ["signal", "process"] }

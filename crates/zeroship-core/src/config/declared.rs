@@ -3,11 +3,11 @@
 //! [`super::names::EnvKey`] covers ONE population: zeroship platform startup
 //! settings, whose environment spelling is derived (`ZEROSHIP_` plus the
 //! canonical identity). Every OTHER first-party read must be accounted for as
-//! well - `PATH`, `AWS_ACCESS_KEY_ID`,
-//! `RUST_LOG`, a test's `PG_TEST_URL`, a build script's `OUT_DIR` - and those
-//! have literal names owned by somebody else. Projecting them from a canonical
-//! identity would be a lie, and leaving them as bare `std::env::var` calls is
-//! exactly the invisibility the step exists to remove.
+//! well - `PATH`, `AWS_ACCESS_KEY_ID`, `RUST_LOG`, a test fixture's
+//! `ZEROSHIP_CONFIG_CONTRACT_FIXTURE_TEST`, a build script's `OUT_DIR` - and
+//! those have literal names owned by somebody else. Projecting them from a
+//! canonical identity would be a lie, and leaving them as bare `std::env::var`
+//! calls is exactly the invisibility the step exists to remove.
 //!
 //! So they get their own key type. A [`DeclaredEnvKey`] carries the LITERAL
 //! name plus an [`EnvClass`] saying whose contract it is, and is bound to a
@@ -735,7 +735,7 @@ mod tests {
     fn valid_env_names_are_uppercase_ascii() {
         assert!(is_valid_env_name("PATH"));
         assert!(is_valid_env_name("AWS_ACCESS_KEY_ID"));
-        assert!(is_valid_env_name("PG_TEST_URL2"));
+        assert!(is_valid_env_name("ZEROSHIP_FIXTURE_2"));
         assert!(!is_valid_env_name(""));
         assert!(!is_valid_env_name("2FAST"));
         assert!(!is_valid_env_name("lowercase"));
@@ -746,7 +746,8 @@ mod tests {
     #[test]
     fn each_constructor_records_its_own_class() {
         const EXTERNAL: DeclaredEnvKey<String, TestConsumer> = DeclaredEnvKey::external("PATH");
-        const TEST: DeclaredEnvKey<String, TestConsumer> = DeclaredEnvKey::test("PG_TEST_URL");
+        const TEST: DeclaredEnvKey<String, TestConsumer> =
+            DeclaredEnvKey::test("ZEROSHIP_DECLARED_ENV_FIXTURE_TEST");
         const DEV: DeclaredEnvKey<String, TestConsumer> = DeclaredEnvKey::dev("ZEROSHIP_DEV");
         const CLI: DeclaredEnvKey<String, TestConsumer> = DeclaredEnvKey::cli("ZEROSHIP_TOKEN");
         const BUILD: DeclaredEnvKey<String, TestConsumer> = DeclaredEnvKey::build("OUT_DIR");

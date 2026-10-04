@@ -2,7 +2,7 @@
 //! suites.
 //!
 //! [`redis()`] and [`cluster()`] each join one server a worktree boots through
-//! [`crate::shared`]: the first process elects itself, the image is built, the
+//! [`zeroship_shared_server`]: the first process elects itself, the image is built, the
 //! container starts, and every other process of the run joins the ready
 //! server. A process holds its lease for as long as it runs; each container's
 //! watchdog removes its server once no process has held it for the idle
@@ -39,17 +39,17 @@ use testcontainers::{Container, GenericImage, ImageExt};
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::SyncRunner;
 
-use crate::shared::{self, Boot, Entrypoint, HostPort, Port, Readiness, Scope, Spec};
+use zeroship_shared_server::{self as shared, Boot, Entrypoint, HostPort, Port, Readiness, Scope, Spec};
 
 mod image;
 
-pub use image::{build as build_cluster_image, reference as cluster_image_ref};
+pub use image::reference as cluster_image;
 
 /// The port the standalone Redis server listens on.
 const STANDALONE_PORT: u16 = 6379;
 
 /// The watchdog baked into both the standalone and cluster images.
-const WATCHDOG: &str = "/usr/local/bin/zeroship-watchdog";
+const WATCHDOG: &str = zeroship_shared_server::image::WATCHDOG;
 
 /// The wrapper the cluster image runs as the watchdog's single tracked child.
 const CLUSTER_WRAPPER: &str = "/usr/local/bin/zeroship-dragonfly-cluster";
@@ -188,7 +188,7 @@ pub fn case_prefix() -> String {
 /// # Errors
 /// When the image cannot be built.
 pub fn standalone_spec() -> Result<Spec, String> {
-    let image = crate::image::with_watchdog("redis:7")?;
+    let image = zeroship_shared_server::image::with_watchdog("redis:7")?;
     let args = vec!["docker-entrypoint.sh".to_owned(), "redis-server".to_owned()];
     let ready = standalone_readiness();
     let inputs = standalone_inputs(&image, &args, &ready);
@@ -237,9 +237,8 @@ fn standalone_inputs(image: &str, args: &[String], ready: &Readiness) -> String 
 /// # Errors
 /// When the cluster image cannot be built.
 pub fn cluster_spec() -> Result<Spec, String> {
-    let _ = build_cluster_image()
+    let image = cluster_image()
         .map_err(|error| format!("could not build the shared Dragonfly cluster image: {error}"))?;
-    let image = cluster_image_ref();
     let args = vec![
         CLUSTER_WRAPPER.to_owned(),
         CLUSTER_BASE_PORT.to_string(),

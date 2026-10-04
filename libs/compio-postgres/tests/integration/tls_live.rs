@@ -7,22 +7,13 @@
 //! way, and the encryption claim is settled by the *server's* view of the
 //! session (`pg_stat_ssl`), never by `connect()` returning `Ok`.
 //!
-//! Run with:
-//!   libs/compio-postgres/tests/tls_live_setup.sh
-//!   cargo test -p compio-postgres --features tls,live-tls-tests --test tls_live
-//!
-//! **This suite cannot skip.** It used to: a missing descriptor made every test
-//! return early, which cargo counts as a pass, so the file's own header said "a
-//! skipped run is not a passing run" while the file quietly delivered one. The
-//! target now sits behind `required-features = ["tls", "live-tls-tests"]`. Without
-//! the feature cargo does not build it at all - visibly absent, contributing no
-//! green ticks. With the feature, a missing descriptor is a panic naming the
-//! setup script. There is no longer a state in which this file reports success
-//! without having connected to anything.
-
-// This target deliberately carries many independent async behavioral pairs;
-// their state-machine layouts exceed rustc's default query-depth budget.
-#![recursion_limit = "256"]
+//! The servers are `compio_postgres_testkit::tls`'s: six PostgreSQL servers
+//! started in Docker and shared by every test process of the worktree, each
+//! checked with libpq when it boots. Docker is the one prerequisite. The
+//! module is compiled with the crate's `tls` feature, because the connector it
+//! drives exists only there; with the feature, servers that cannot start are a
+//! panic naming the reason, so there is no state in which this file reports
+//! success without having connected to anything.
 
 use compio_postgres::config::SslCertMode;
 use compio_postgres::{Client, Config, Error, MakeRustlsConnect, NoTls, Pool};
@@ -30,89 +21,17 @@ use futures_channel::oneshot;
 use rustls::server::{ClientHello, ResolvesServerCert};
 use std::sync::Mutex;
 
-/// Written by `tls_live_setup.sh`. A file, not an environment variable,
-/// because `libs/compio-postgres` may not read the environment outside
-/// `libs/compio-postgres/testkit` (see the header of that crate).
-const DESCRIPTOR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/live/tls_live.conf");
-
 /// A committed CA that signed nothing in this suite.
 ///
 /// Used as a *wrong* trust anchor: it is a well-formed PEM, so it exercises
 /// chain verification failing rather than `sslrootcert` failing to parse.
 const FOREIGN_CA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/verifier_ca.pem");
 
-struct Servers {
-    /// `ssl=on`, certificate for `localhost` signed by `ca`.
-    tls_url: String,
-    /// TLS off entirely.
-    plain_url: String,
-    /// `ssl=on`, certificate signed by `ca` for a name that is NOT `localhost`.
-    /// The one server that separates `verify-ca` from `verify-full`.
-    mismatch_url: String,
-    /// `ssl=on`, `pg_hba` accepting `hostssl` only. The one server that makes
-    /// `allow` reach its TLS leg.
-    sslonly_url: String,
-    /// `ssl=on` with `ssl_ca_file` and `cert` authentication: no password is
-    /// accepted and the client must present a certificate.
-    clientcert_url: String,
-    /// PostgreSQL 18 with `ssl=on` and the same certificate as `tls`.
-    directtls_url: String,
-    /// The private CA that signed the certificates above. It is in no system
-    /// trust store, which is what makes the `sslrootcert=system` case a real
-    /// negative.
-    ca: String,
-    /// A client certificate signed by `ca`, with `CN=postgres`.
-    client_cert: String,
-    /// The private key for `client_cert`.
-    client_key: String,
-    /// The same key encoded as passphrase-encrypted PKCS#8.
-    client_encrypted_key: String,
-    /// The passphrase used for `client_encrypted_key`.
-    client_key_password: String,
-    /// A CRL issued by `ca` that revokes the exact certificate on `tls_url`.
-    server_crl: String,
-    /// The same CRL under its OpenSSL issuer-hash lookup name.
-    server_crl_dir: String,
-    /// The same CRL under a syntactically valid but incorrect issuer hash.
-    server_crl_wrong_hash_dir: String,
-}
-
-impl Servers {
-    fn load() -> Servers {
-        let text = std::fs::read_to_string(DESCRIPTOR).unwrap_or_else(|e| {
-            panic!(
-                "cannot read {DESCRIPTOR}: {e}\n\
-                 Run libs/compio-postgres/tests/tls_live_setup.sh first. This suite is opted \
-                 into with --features live-tls-tests and does not skip."
-            )
-        });
-        let field = |key: &str| {
-            text.lines()
-                .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))
-                .map(str::to_owned)
-                .unwrap_or_else(|| panic!("{DESCRIPTOR} has no {key}=; re-run tls_live_setup.sh"))
-        };
-        Servers {
-            tls_url: field("tls_url"),
-            plain_url: field("plain_url"),
-            mismatch_url: field("mismatch_url"),
-            sslonly_url: field("sslonly_url"),
-            clientcert_url: field("clientcert_url"),
-            directtls_url: field("directtls_url"),
-            ca: field("ca"),
-            client_cert: field("client_cert"),
-            client_key: field("client_key"),
-            client_encrypted_key: field("client_encrypted_key"),
-            client_key_password: field("client_key_password"),
-            server_crl: field("server_crl"),
-            server_crl_dir: field("server_crl_dir"),
-            server_crl_wrong_hash_dir: field("server_crl_wrong_hash_dir"),
-        }
-    }
-}
-
-fn servers() -> Servers {
-    Servers::load()
+/// The six servers, the CA, the CRL and the client identity, from the fixture
+/// that started them; `compio_postgres_testkit::tls` says what each server is
+/// the control for.
+fn servers() -> &'static compio_postgres_testkit::tls::TlsServers {
+    compio_postgres_testkit::tls::servers()
 }
 
 /// Ask the server - not the client - whether the session is encrypted.
@@ -145,7 +64,10 @@ async fn transport_of(url: &str) -> Result<bool, Error> {
     let pool = match Pool::connect(url, 1).await {
         Ok(pool) => pool,
         Err(e) => {
-            println!("  [pg_stat_ssl] REFUSED  {redacted}\n               {}", describe(&e));
+            println!(
+                "  [pg_stat_ssl] REFUSED  {redacted}\n               {}",
+                describe(&e)
+            );
             return Err(e);
         }
     };
@@ -233,12 +155,9 @@ async fn sni_offered_by(option: &str) -> Option<String> {
     );
     let config = dsn.parse::<Config>().expect("parse SNI probe DSN");
     let tls = MakeRustlsConnect::from_config(&config).expect("build SNI probe connector");
-    let connection = compio::time::timeout(
-        std::time::Duration::from_secs(5),
-        config.connect(tls),
-    )
-    .await
-    .expect("SNI probe connection timed out");
+    let connection = compio::time::timeout(std::time::Duration::from_secs(5), config.connect(tls))
+        .await
+        .expect("SNI probe connection timed out");
     assert!(
         connection.is_err(),
         "capture-only TLS server completed a connection after ClientHello"
@@ -319,10 +238,7 @@ async fn postgres_18_accepts_direct_and_postgres_tls_negotiation() {
 #[compio::test]
 async fn direct_negotiation_distinguishes_postgres_18_from_postgres_16() {
     let s = servers();
-    let pg16 = format!(
-        "{} sslmode=verify-full sslrootcert={}",
-        s.tls_url, s.ca
-    );
+    let pg16 = format!("{} sslmode=verify-full sslrootcert={}", s.tls_url, s.ca);
     let pg18 = format!(
         "{} sslmode=verify-full sslrootcert={}",
         s.directtls_url, s.ca
@@ -526,9 +442,12 @@ async fn require_encrypts_without_verifying_an_untrusted_certificate() {
 async fn require_verifies_the_chain_once_a_ca_is_configured() {
     let s = servers();
     assert!(
-        transport_of(&format!("{} sslmode=require sslrootcert={}", s.tls_url, s.ca))
-            .await
-            .expect("the real CA verifies"),
+        transport_of(&format!(
+            "{} sslmode=require sslrootcert={}",
+            s.tls_url, s.ca
+        ))
+        .await
+        .expect("the real CA verifies"),
         "require did not encrypt"
     );
     transport_of(&format!(
@@ -610,9 +529,12 @@ async fn ssl_max_protocol_version_is_enforced_by_the_handshake() {
 async fn verify_ca_connects_against_its_own_ca() {
     let s = servers();
     assert!(
-        transport_of(&format!("{} sslmode=verify-ca sslrootcert={}", s.tls_url, s.ca))
-            .await
-            .expect("verify-ca with the signing CA"),
+        transport_of(&format!(
+            "{} sslmode=verify-ca sslrootcert={}",
+            s.tls_url, s.ca
+        ))
+        .await
+        .expect("verify-ca with the signing CA"),
         "verify-ca did not encrypt"
     );
 }
@@ -676,9 +598,12 @@ async fn verify_full_connects_when_the_name_matches() {
 #[compio::test]
 async fn verify_full_fails_against_system_roots() {
     let s = servers();
-    let err = transport_of(&format!("{} sslmode=verify-full sslrootcert=system", s.tls_url))
-        .await
-        .expect_err("a certificate signed by an untrusted private CA must be rejected");
+    let err = transport_of(&format!(
+        "{} sslmode=verify-full sslrootcert=system",
+        s.tls_url
+    ))
+    .await
+    .expect_err("a certificate signed by an untrusted private CA must be rejected");
     let text = describe(&err);
     assert!(
         text.contains("UnknownIssuer") || text.contains("invalid peer certificate"),
@@ -1047,9 +972,7 @@ async fn sslcertmode_require_without_configured_identity_fails_loudly() {
     .expect_err("require without sslcert/sslkey cannot be honoured");
     let text = describe(&err);
     assert!(
-        text.contains("sslcertmode=require")
-            && text.contains("sslcert")
-            && text.contains("sslkey"),
+        text.contains("sslcertmode=require") && text.contains("sslcert") && text.contains("sslkey"),
         "the impossible client-certificate configuration was unclear: {text}"
     );
 }

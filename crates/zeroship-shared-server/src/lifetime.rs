@@ -8,7 +8,7 @@
 //! never in the environment; it reads it with [`child_scope`], joins the
 //! fixture's own recipe at that scope, and calls [`report_container`] once the
 //! fixture has its server. The parent finds the child's container by the scope's
-//! [`DIR_LABEL`](crate::shared::DIR_LABEL) while the child runs - which also
+//! [`DIR_LABEL`](crate::DIR_LABEL) while the child runs - which also
 //! proves, before anything is asserted about an absence, that the query it
 //! reads absences through can see a container that is there - and then requires
 //! the daemon to stop listing it.
@@ -25,7 +25,8 @@ use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::shared::{self, Scope};
+use crate as shared;
+use crate::Scope;
 
 /// The idle grace a child's throwaway scope is started with.
 pub const GRACE: Duration = Duration::from_secs(2);

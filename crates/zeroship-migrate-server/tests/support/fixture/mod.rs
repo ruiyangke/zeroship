@@ -17,7 +17,7 @@ use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, GenericImage, ImageExt};
 use zeroship_testkit::postgres::{Platform, PLATFORM_IDLE_GRACE};
-use zeroship_testkit::shared::Scope;
+use zeroship_shared_server::Scope;
 
 pub use zeroship_testkit::tenant_cluster as tenant;
 pub mod world;

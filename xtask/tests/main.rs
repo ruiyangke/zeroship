@@ -8,14 +8,8 @@
 //!
 //!   cargo test --manifest-path xtask/Cargo.toml --test main repository::
 //!   cargo test --manifest-path xtask/Cargo.toml --test main architecture::
-//!
-//! `common` is the shared owned-PostgreSQL fixture for the database-orchestration
-//! areas, declared once here so both reach one copy.
 
 mod architecture;
-mod common;
-mod live_db;
 mod playwright;
 mod repository;
-mod suite_db;
 mod workflow;

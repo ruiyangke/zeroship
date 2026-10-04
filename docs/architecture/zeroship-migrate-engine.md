@@ -1719,9 +1719,9 @@ vocabulary to cover the closed operation set.
 
 ### 12.5 Live-DB suites and how they are selected
 
-- **Postgres on `:5440`** — the `*_pg.rs` suites connect to a docker Postgres on port 5440 (DSN defaults + overrides differ per file: `MIGRATE_PLATFORM_IR_TEST_DB`, `MIGRATE_TEST_DB`). Selection is **connect-or-panic**, not soft-skip (`compio_postgres::connect(...).expect(...)`). If the container is down, the whole PG suite goes RED. The convention flag `MIGRATE_REQUIRE_DB=1` selects the serialized DB suites. Tests touching shared platform schemas serialize across processes via `test_support::acquire_global_platform_resource_lock` (a `pg_advisory_lock` released on drop). *Operational gotcha (repo memory):* the test DB is docker `appbase-migrate-postgres-1` on `:5440`; a Codex run can tear it down (spurious mass `*_pg` RED) — restart with `docker start appbase-migrate-postgres-1`; the DB-free render/preview/round-trip tests are the clean signal.
+- **PostgreSQL** - the live-PostgreSQL suites join the `postgres:18` server every test process of the worktree shares (`tests/support/server.rs`, leased through `zeroship_shared_server`), and each test takes a database of its own on it (`support::pg_database`); a case that writes cluster-global roles takes a server of its own (`support::private_pg_database`). Docker is the one prerequisite and no environment variable selects a database: a server that cannot start fails every test that asked for it, and nothing skips.
 - **SQLite (in-process, temp-file)** — the `*_sqlite.rs` suites use `tempfile` per-test SQLite files against the hardened `rusqlite` backend. Always run.
-- **MySQL via the JsDriver (`mysql_jsdriver_e2e.rs`, 119 KB)** — the only **soft-skip** backend. Default DSN `mysql://root:zeroship@127.0.0.1:3307/zeroship_e2e` (override `MYSQL_JS_DRIVER_E2E_DSN`). `live_mysql_or_skip()`: prints `SKIPPED` if MySQL is unreachable and `MIGRATE_REQUIRE_MYSQL=1` is NOT set; with it, the same condition **panics** (CI can't silently skip). The `mysql2 3.14.1` driver bundle is committed and regenerated (not fetched) via `scripts/vendor-mysql2.sh`.
+- **MySQL** - the live-MySQL suites dial the MySQL server `zeroship_testkit::mysql::server` shares across the worktree's test processes, through `support::mysql::mysql_url`; the DSN never comes from the environment, and an unavailable server fails the test. The `mysql2 3.14.1` driver bundle the TypeScript host drives is committed and regenerated (not fetched) via `scripts/vendor-mysql2.sh`.
 
 ### 12.6 Sandboxed-child corpus parity + the recorder sandbox
 
@@ -1779,7 +1779,6 @@ pnpm --filter @zeroship/migrate test
 
 ### 12.11 Caveats
 
-- `MIGRATE_REQUIRE_DB` is a documented CI/runner convention (referenced in test headers), not a universal in-test soft-skip: the PG helpers connect-or-`.expect()`-panic unconditionally, so PG suites hard-fail (not skip) when `:5440` is down. Only the MySQL suite has an explicit code-level `*_or_skip`.
 - Op-variant counts: `op_round_trip.rs:236` and the `op_ir_schema.rs` list (37 core + 16 vendor) pin the authoritative enumeration ([§8.3](#8-one-ir-three-dialects-render--portability)).
 
 ---

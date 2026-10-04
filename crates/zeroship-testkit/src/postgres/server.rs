@@ -1,7 +1,7 @@
 //! The bare PostgreSQL server every data test process of a worktree shares.
 //!
 //! [`Postgres::start`] joins the one bare server a worktree boots through
-//! [`crate::shared`] and hands the caller a database cloned from the server's
+//! [`zeroship_shared_server`] and hands the caller a database cloned from the server's
 //! pristine template. The first process elects itself, installs the template's
 //! extensions, seals the template and records the boot; every other process
 //! joins the ready server. Each case works in its own clone, so it may drop an
@@ -15,7 +15,7 @@ use std::sync::OnceLock;
 use zeroship_id::DatabaseId;
 
 use crate::postgres::image;
-use crate::shared::{self, Scope};
+use zeroship_shared_server::{self as shared, Scope};
 
 /// The pristine database every case database is cloned from.
 const TEMPLATE: &str = "zeroship_bare_template";
@@ -178,10 +178,8 @@ fn boot_bare(boot: &shared::Boot) -> Result<(), String> {
 /// The recipe the bare server runs under, its identity keyed to every input
 /// that changes what a case database holds.
 fn spec() -> Result<shared::Spec, String> {
-    let _ = image::build().map_err(|error| {
-        format!("could not build the test PostgreSQL image (run `pnpm build` first): {error}")
-    })?;
-    let image = image::reference();
+    let image = image::reference()
+        .map_err(|error| format!("could not build the test PostgreSQL image: {error}"))?;
     let environment = vec![
         ("POSTGRES_PASSWORD".to_owned(), PASSWORD.to_owned()),
         ("POSTGRES_DB".to_owned(), TEMPLATE.to_owned()),

@@ -209,14 +209,14 @@ impl Drop for Catalog {
         // alive here. `pg_shdepend` tracks every one of those grants across
         // the whole cluster, so `DROP ROLE` refuses until `DROP OWNED` has
         // revoked them from the database that holds them.
-        let _ = zeroship_testkit::shared::psql(
+        let _ = zeroship_shared_server::psql(
             &minted.container_id,
             &minted.database,
             &format!("DROP OWNED BY \"{}\"", minted.role),
         );
         // "postgres" is the shared server's own always-connectable
         // maintenance database, not this case's database.
-        let _ = zeroship_testkit::shared::psql(
+        let _ = zeroship_shared_server::psql(
             &minted.container_id,
             "postgres",
             &format!("DROP ROLE IF EXISTS \"{}\"", minted.role),

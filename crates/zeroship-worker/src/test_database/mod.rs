@@ -187,7 +187,7 @@ async fn failed_cases_remove_their_server_without_touching_another_cases_roles()
             Some(&"intentional worker fixture failure")
         );
         assert_eq!(
-            zeroship_testkit::shared::container_status(failed_id.borrow().as_str()),
+            zeroship_shared_server::container_status(failed_id.borrow().as_str()),
             None,
             "failed case leaked its server"
         );

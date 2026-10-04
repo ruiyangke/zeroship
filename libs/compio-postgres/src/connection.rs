@@ -643,7 +643,7 @@ where
     /// the session directly and splits the socket (rustls state itself can
     /// be shared; what blocked splitting was an adapter that owned the
     /// socket and could never give it back).
-    /// `a_notification_reaches_an_idle_tls_connection` in `tests/tls_live.rs`
+    /// `a_notification_reaches_an_idle_tls_connection` in `tests/integration/tls_live.rs`
     /// fails if that regresses.
     ///
     /// A custom `TlsConnect` whose stream answers `Err` to `try_into_split`

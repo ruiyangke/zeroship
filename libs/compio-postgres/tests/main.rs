@@ -11,9 +11,6 @@
 //!   serialized_teardown_logging
 //!                    each installs a process-global `log::set_logger`, and only
 //!                    the first install in a process takes effect.
-//!   tls_live, unix_socket_live
-//!                    `required-features` has to be able to not build them at
-//!                    all.
 //!
 //! A crate-level inner attribute belongs here rather than in a module:
 //! `#![recursion_limit]` inside a module is ignored.

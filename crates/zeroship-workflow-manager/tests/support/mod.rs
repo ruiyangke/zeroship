@@ -437,7 +437,7 @@ impl Drop for Fixture {
         if let (Some(role), Some(container_id)) = (self.role.take(), container_id) {
             // "postgres" is the shared server's own always-connectable
             // maintenance database, not this case's now-removed clone.
-            let _ = zeroship_testkit::shared::psql(
+            let _ = zeroship_shared_server::psql(
                 &container_id,
                 "postgres",
                 &format!("DROP ROLE IF EXISTS \"{role}\""),

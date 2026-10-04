@@ -22,7 +22,6 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
 
-
 const SOCKET_WATCHDOG: Duration = Duration::from_secs(2);
 const THREAD_WATCHDOG: Duration = Duration::from_secs(3);
 const ASYNC_WATCHDOG: Duration = Duration::from_secs(5);
@@ -497,6 +496,7 @@ fn serve_copy_in(stream: &mut TcpStream, tags: &std::sync::mpsc::Sender<(u8, Vec
         match tag {
             b'P' => pending.extend_from_slice(&backend_frame(b'1', b"")),
             b'B' => pending.extend_from_slice(&backend_frame(b'2', b"")),
+            b'C' => pending.extend_from_slice(&backend_frame(b'3', b"")),
             b'D' => {
                 let mut p = Vec::new();
                 p.extend_from_slice(&0u16.to_be_bytes());
@@ -538,29 +538,22 @@ fn serve_copy_in(stream: &mut TcpStream, tags: &std::sync::mpsc::Sender<(u8, Vec
 
 /// A completed COPY IN ends with `CopyData`, `CopyDone`, Sync.
 ///
-/// MEASURED: `P D S B E S d c S`. The prepare and the execute are separate
-/// Sync round trips, as for any query, and only then does the sink stream.
+/// `P D S B E S d c S`: the prepare and the execute are separate Sync round
+/// trips, as for any query, and only then does the sink stream.
 ///
-/// OBSERVED FAILING ONCE UNDER CONTENTION, 2026-09-02, as
-/// `got PDSBESdcSCS` - the expected sequence plus a trailing Close and Sync.
-/// That pair is NOT a shape change: `copy_in` with a `&str` prepares an
-/// internal statement, and `Statement::drop` sends its own Close + Sync
-/// (`dropping_a_statement_sends_its_own_close_and_sync` asserts exactly that
-/// frame pair). Whether it reaches the wire before the connection tears down
-/// is a race, so it is normally absent and occasionally present.
-///
-/// Left as an equality assertion deliberately. The sibling makes its Close
-/// deterministic by issuing a query after the drop - "the drop is its own
-/// trip" - and doing that here would change what this test measures. Filtering
-/// a trailing `CS` was considered and rejected: the race could not be forced
-/// (a 50ms sleep after `drop(client)` does not reproduce it, because the
-/// flush-versus-teardown decision is already made by then), so the fix could
-/// not be shown to fail before it.
+/// `copy_in` with a `&str` prepares an internal statement, and dropping it
+/// sends its own Close + Sync (`dropping_a_statement_sends_its_own_close_and_sync`
+/// asserts that pair). Dropping the client straight after the sink raced that
+/// pair against the connection's teardown, so the sequence ended with or
+/// without `C S` depending on scheduling. A request after the sink is what
+/// settles it: the drop is its own trip and is written before any later
+/// request, so `copy_in_frames` follows a completed COPY with a prepare, and
+/// the Close + Sync is always on the wire, between the COPY and that prepare.
 #[compio::test]
 async fn a_completed_copy_in_ends_with_copy_done_and_sync() {
     let (seq, _) = Box::pin(copy_in_frames(631, false)).await;
     assert_eq!(
-        seq, "PDSBESdcS",
+        seq, "PDSBESdcSCSPDS",
         "the COPY IN success sequence changed shape (got {seq})"
     );
 }
@@ -619,6 +612,12 @@ async fn copy_in_frames(process_id: i32, abandon: bool) -> (String, Option<Vec<u
                 let _ = sink.send(bytes::Bytes::from_static(b"1\n")).await;
                 let _ = sink.close().await;
             }
+        }
+        if !abandon {
+            // A later request, so the internal statement's Close + Sync is
+            // written before the connection can tear down; see
+            // `a_completed_copy_in_ends_with_copy_done_and_sync`.
+            let _ = client.prepare("SELECT 1").await;
         }
         drop(client);
     }))

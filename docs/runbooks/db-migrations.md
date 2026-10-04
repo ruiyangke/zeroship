@@ -281,8 +281,9 @@ itself:
 
 ## Tests
 
-The control/auth integration tests connect to a **pre-migrated** database
-(the generated test overlay or `PG_TEST_URL`) — they no longer self-migrate. Bring the
-schema up once before running them: the compose `migrate` service does this for
-the compose DB, or set `ZEROSHIP_MIGRATE_DSN` and run
-`deploy/ops/db-migrate.sh` against your test DB.
+The control and auth integration tests connect to a **pre-migrated** database
+and never migrate it themselves. Their fixture (`zeroship_testkit::postgres`)
+boots the shared platform server, applies the committed corpus to a pristine
+template with the `zero-migrate` CLI and clones the working database from it,
+so a test run needs Docker and the built migration host
+(`cargo xtask test migrations`), and no database of its own.

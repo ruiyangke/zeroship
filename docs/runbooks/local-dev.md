@@ -215,18 +215,12 @@ Then open `http://localhost:8000/apps/db-todos/`.
 
 ## Tests
 
-The remaining shared PostgreSQL suites use the provisioner:
+Every suite that needs PostgreSQL starts or joins its own server through
+testcontainers. Docker is the one prerequisite; no environment variable or
+generated file selects a database. Database verification is part of ordinary
+`cargo test`; it has no opt-in feature, and a suite whose server cannot start
+fails. The suite runners below prepare the required migrations.
 
-```bash
-tests/provision_test_backends.sh
-```
-
-Database verification is part of ordinary `cargo test`; it has no opt-in
-feature. Libtest runs serially by default because platform fixtures share
-fleet-wide state. The suite runners below prepare the required migrations.
-
-The provisioner writes the PostgreSQL test overlay. `PG_TEST_URL` redirects
-suites that still use this shared database.
 Auth, authn and mailer tests run on the migrated platform server every test
 process of the worktree shares. Mailer owns its Mailpit SMTP sink and inspects captured messages through its API;
 these tests require Docker and accept no external database or SMTP address.
@@ -235,6 +229,9 @@ Run `cargo xtask test migrations` to build their migration host, then
 KV and Redis driver tests provision their required servers with Testcontainers;
 they need Docker and do not read shared Redis URLs. See the
 [KV test commands](../../crates/zeroship-kv/README.md).
+The compio-postgres suites and live benches dial the PostgreSQL server
+`compio_postgres_testkit::server` starts, which every test process of the
+worktree shares the same way.
 
 ```bash
 cargo test -p zeroship-core
@@ -242,7 +239,7 @@ cargo test -p zeroship-gateway
 cargo xtask test billing
 cargo xtask test worker
 cargo test -p zeroship-runtime --lib
-cargo test -p compio-postgres -- --test-threads=1
+cargo nextest run -p compio-postgres
 ```
 
 The Playwright suites launch the browsers `nix develop` exports as
@@ -256,7 +253,7 @@ the release those browsers were built for; `xtask/README.md` lists what it needs
 authn, authz, mailer and gateway packages. Their Rust fixtures join the migrated
 platform server every test process of the worktree shares, and own SMTP
 listeners, HTTP servers and temporary files. Docker must be
-available; no `PG_TEST_URL` or generated test overlay selects their databases.
+available; no external address selects their databases.
 Ordinary `cargo test -p <package>` runs the same required cases once the
 migration host has been built.
 
@@ -270,15 +267,12 @@ isolates and temporary storage when the case ends, including on failure.
 cargo xtask test auth
 cargo xtask test billing
 cargo xtask test worker
-cargo xtask platform-db sweep          # inspect reclaimable shared databases
-cargo xtask platform-db sweep --apply  # reclaim them
 ```
 
 `cargo xtask test billing` builds the migration host and runs control,
 migration-service, metering, and stream tests. Their Rust fixtures join the
 PostgreSQL servers and the Redpanda broker every test process of the worktree
-shares; neither an external test URL nor a generated overlay selects those
-services.
+shares; no external address selects those services.
 `cargo xtask test workflow` runs against the same shared platform server. Its
 control plane tests clone private databases from a migrated, quiescent template.
 

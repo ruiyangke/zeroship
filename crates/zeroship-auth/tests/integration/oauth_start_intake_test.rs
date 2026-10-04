@@ -26,9 +26,12 @@ fn test_config() -> Arc<AuthConfig> {
         "--public-url",
         "http://auth.test",
     ]);
+    // The intake refuses these requests before any database access, so the
+    // address names a port nothing listens on: a regression that reached the
+    // database would fail to connect rather than land on a server it found.
     cfg.settings.database_url = Secret::supplied(
         SourceKind::Env,
-        Some("postgres://postgres:zeroship@localhost:5440/zeroship_p5d_test".to_owned()),
+        Some("postgres://postgres:unused@127.0.0.1:1/oauth_intake".to_owned()),
     );
     cfg.settings.stash_signing_key = Secret::supplied(
         SourceKind::Env,

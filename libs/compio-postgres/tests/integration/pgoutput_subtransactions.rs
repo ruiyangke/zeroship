@@ -30,10 +30,10 @@ use std::time::Duration;
 use crate::support;
 
 const WATCHDOG: Duration = Duration::from_secs(120);
-const DECODING_WORK_MEM: &str = "64kB";
-/// Enough rows on each side of the savepoint to spill past the work mem, so
-/// the transaction really streams rather than arriving whole at commit.
-const ROWS_PER_HALF: i32 = 2000;
+/// Rows on each side of the savepoint. The walsender streams every change as it
+/// is decoded (`support::STREAM_EVERY_CHANGE`), so a few dozen give both
+/// halves chunks of their own before the transaction ends.
+const ROWS_PER_HALF: i32 = 20;
 
 async fn client() -> Client {
     let url = support::test_url();
@@ -83,7 +83,7 @@ async fn a_streamed_transaction_with_a_savepoint_decodes() {
         // it live; reading a committed transaction back afterwards can discard
         // a rolled-back subtransaction without ever streaming it.
         let mut config = support::replication_config("cpg_subtxn");
-        config.options(format!("-c logical_decoding_work_mem={DECODING_WORK_MEM}"));
+        config.options(support::STREAM_EVERY_CHANGE);
         let replication =
             compio_postgres::replication::connect_replication(support::suite_tls(), &config)
                 .await
@@ -123,7 +123,7 @@ async fn a_streamed_transaction_with_a_savepoint_decodes() {
         let mut decoder = pgoutput::Decoder::new();
         let mut inserts = 0usize;
         let mut chunks = 0usize;
-        let mut ours = false;
+        let mut ownership = support::StreamOwnership::new(xid);
         loop {
             match stream.next().await.expect("replication stream failed") {
                 Some(ReplicationMessage::XLogData { body, .. }) => {
@@ -137,22 +137,7 @@ async fn a_streamed_transaction_with_a_savepoint_decodes() {
                              equal the chunk's: {error:?}"
                         )
                     });
-                    let (keep, terminal) = match &message {
-                        PgOutputMessage::Begin {
-                            xid: message_xid, ..
-                        }
-                        | PgOutputMessage::StreamStart {
-                            xid: message_xid, ..
-                        } => {
-                            ours = *message_xid == xid;
-                            (ours, false)
-                        }
-                        PgOutputMessage::Commit { .. } => (ours, ours),
-                        PgOutputMessage::StreamCommit {
-                            xid: message_xid, ..
-                        } => (ours, ours && *message_xid == xid),
-                        _ => (ours, false),
-                    };
+                    let (keep, terminal) = ownership.classify(&message);
                     if keep {
                         match message {
                             PgOutputMessage::Insert { .. } => inserts += 1,
@@ -243,14 +228,15 @@ async fn a_stream_abort_never_lands_inside_an_open_chunk() {
             .await
             .expect("slot setup failed");
 
-        // Both halves spill, then the second half is ABORTED. The transaction
+        // Both halves stream, then the second half is ABORTED. The transaction
         // still commits, so the stream carries a subtransaction abort rather
-        // than a whole-transaction one. The write happens after the stream
-        // starts, below, so the walsender decodes it live; a committed
-        // transaction read back afterwards can discard the rolled-back
-        // subtransaction without ever streaming it.
+        // than a whole-transaction one. The child is rolled back only once its
+        // rows are on the stream: a change PostgreSQL decodes after its
+        // subtransaction aborted is dropped rather than streamed (see
+        // `collect_child_abort` in pgoutput_streaming.rs), and a child that
+        // never streamed is aborted without a StreamAbort at all.
         let mut config = support::replication_config("cpg_subabort");
-        config.options(format!("-c logical_decoding_work_mem={DECODING_WORK_MEM}"));
+        config.options(support::STREAM_EVERY_CHANGE);
         let replication =
             compio_postgres::replication::connect_replication(support::suite_tls(), &config)
                 .await
@@ -281,52 +267,33 @@ async fn a_stream_abort_never_lands_inside_an_open_chunk() {
                    FROM generate_series(1, {ROWS_PER_HALF}) g;
                  SAVEPOINT sp1;
                  INSERT INTO {table} SELECT g + 100000, repeat('w', 200)
-                   FROM generate_series(1, {ROWS_PER_HALF}) g;
-                 ROLLBACK TO SAVEPOINT sp1;
-                 COMMIT;"
+                   FROM generate_series(1, {ROWS_PER_HALF}) g;"
             ))
             .await
             .expect("the aborted-savepoint transaction failed");
+        // A logical walsender decodes only flushed WAL, so the open
+        // transaction's records are flushed from another session.
+        client()
+            .await
+            .batch_execute("SELECT pg_logical_emit_message(true, 'compio-postgres-flush', '')")
+            .await
+            .expect("flush the open transaction's WAL from another session");
+        let child_rows = usize::try_from(ROWS_PER_HALF).expect("a positive row count");
+        let mut child_rows_seen = 0usize;
+        let mut rolled_back = false;
 
         let mut decoder = pgoutput::Decoder::new();
         let mut aborts = 0usize;
         let mut aborts_inside_a_chunk = 0usize;
         let mut chunks = 0usize;
-        let mut ours = false;
+        let mut ownership = support::StreamOwnership::new(xid);
         loop {
             match stream.next().await.expect("replication stream failed") {
                 Some(ReplicationMessage::XLogData { body, .. }) => {
                     // Sampled BEFORE decoding, because decode is what clears it.
                     let open_before = decoder.stream_xid().is_some();
                     let message = decoder.decode(&body).expect("decode failed");
-                    let (keep, terminal) = match &message {
-                        PgOutputMessage::Begin {
-                            xid: message_xid, ..
-                        }
-                        | PgOutputMessage::StreamStart {
-                            xid: message_xid, ..
-                        } => {
-                            ours = *message_xid == xid;
-                            (ours, false)
-                        }
-                        PgOutputMessage::Commit { .. } => (ours, ours),
-                        PgOutputMessage::StreamCommit {
-                            xid: message_xid, ..
-                        } => (ours, ours && *message_xid == xid),
-                        PgOutputMessage::StreamAbort {
-                            xid: message_xid,
-                            subxid,
-                            ..
-                        } => {
-                            // The abort sits outside an open chunk, after a
-                            // StreamStop, so a concurrent transaction's
-                            // StreamStart can slip between our chunk and our
-                            // abort; the xid names the transaction directly.
-                            let belongs = *message_xid == xid || *subxid == xid;
-                            (belongs, belongs && message_xid == subxid)
-                        }
-                        _ => (ours, false),
-                    };
+                    let (keep, terminal) = ownership.classify(&message);
                     if keep {
                         match message {
                             PgOutputMessage::StreamStart { .. } => chunks += 1,
@@ -336,11 +303,23 @@ async fn a_stream_abort_never_lands_inside_an_open_chunk() {
                                     aborts_inside_a_chunk += 1;
                                 }
                             }
+                            PgOutputMessage::Insert {
+                                xid: Some(row_xid), ..
+                            } if row_xid != xid => {
+                                child_rows_seen += 1;
+                            }
                             _ => {}
                         }
                     }
                     if terminal {
                         break;
+                    }
+                    if !rolled_back && child_rows_seen == child_rows {
+                        setup
+                            .batch_execute("ROLLBACK TO SAVEPOINT sp1; COMMIT;")
+                            .await
+                            .expect("rolling back the child and committing failed");
+                        rolled_back = true;
                     }
                 }
                 Some(ReplicationMessage::PrimaryKeepalive { .. }) => continue,

@@ -1,13 +1,19 @@
 //! One server shared by every test process of a worktree.
 //!
 //! Every test binary of a run - nextest's process-per-test, several `cargo test`
-//! binaries, an xtask-held run - joins the same server through this module. The
+//! binaries, an xtask-held run - joins the same server through this crate. The
 //! processes elect one booter with an exclusive `flock` on a per-worktree
 //! directory under `target/`, then every process holds a shared lock on the same
 //! directory as its lease. A container-side watchdog watches that lease and
 //! removes the container once no process has held it for the idle grace. The
 //! server is whatever [`Spec`] describes: the platform database, a bare
-//! PostgreSQL server, or a Redpanda broker.
+//! PostgreSQL server, a Redpanda broker, or a driver suite's own server.
+//!
+//! The crate names no database driver, so a driver's own tests can lease a
+//! server through it without linking a second copy of the driver under test.
+//! [`image`] builds a stock image with the watchdog on top, and [`lifetime`]
+//! measures that a fixture's container is removed once the process holding it
+//! exits or is killed while it starts.
 //!
 //! There is no environment variable anywhere in the protocol: a process learns
 //! the directory from the repository it was compiled in and the scope it is
@@ -31,6 +37,9 @@
 //!   others wait rather than race;
 //! - `state.json`, written by atomic rename, naming the container, its port and
 //!   whether the boot is `booting`, `ready` or `failed`.
+
+pub mod image;
+pub mod lifetime;
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -356,6 +365,10 @@ pub struct Lease {
     pub nonce: String,
     /// Whether this process started the server rather than joining one.
     pub booted: bool,
+    /// The scope's canonical lease directory on this host, which the
+    /// container has bind-mounted at `/run/zeroship-testkit`. A server that
+    /// writes into that mount - a Unix socket, say - is reached here.
+    pub dir: PathBuf,
     _session: Arc<File>,
 }
 
@@ -474,6 +487,7 @@ fn ready(dir: &Path, spec: &Spec, session: &Arc<File>) -> Result<Ready, String> 
             port: port as u16,
             nonce: nonce.to_owned(),
             booted: false,
+            dir: dir.to_path_buf(),
             _session: Arc::clone(session),
         }));
     }
@@ -601,6 +615,7 @@ fn boot_server(
             port,
             nonce: nonce.clone(),
             booted: true,
+            dir: dir.to_path_buf(),
             _session: Arc::clone(session),
         })
     }));
@@ -1109,6 +1124,57 @@ pub fn create_unstarted(image: &str, name: &str) -> Result<String, String> {
         .map_err(|error| format!("the daemon did not create {name}: {error}"))
 }
 
+/// A running container, as the daemon lists it.
+#[derive(Debug, Clone)]
+pub struct Listed {
+    /// The container's full id.
+    pub id: String,
+    /// Every label the container was created with.
+    pub labels: HashMap<String, String>,
+}
+
+/// The running container that publishes `host_port` on the host, if any.
+///
+/// This is how a test asks who serves an address it was handed: the daemon's
+/// own port table names the container behind a host port, whichever process
+/// started it.
+///
+/// # Errors
+/// When the daemon cannot list containers, or more than one running container
+/// claims the port.
+pub fn container_publishing(host_port: u16) -> Result<Option<Listed>, String> {
+    use testcontainers::bollard::query_parameters::ListContainersOptionsBuilder;
+    let options = ListContainersOptionsBuilder::new().all(false).build();
+    let docker = docker();
+    let containers = block_on(docker.list_containers(Some(options)))
+        .map_err(|error| format!("list running containers failed: {error}"))?;
+    let mut publishing: Vec<Listed> = containers
+        .into_iter()
+        .filter(|container| {
+            container.ports.as_ref().is_some_and(|ports| {
+                ports
+                    .iter()
+                    .any(|port| port.public_port == Some(host_port))
+            })
+        })
+        .filter_map(|container| {
+            Some(Listed {
+                id: container.id?,
+                labels: container.labels.unwrap_or_default(),
+            })
+        })
+        .collect();
+    match publishing.len() {
+        0 => Ok(None),
+        1 => Ok(publishing.pop()),
+        _ => Err(format!(
+            "{} running containers publish host port {host_port}: {:?}",
+            publishing.len(),
+            publishing.iter().map(|listed| &listed.id).collect::<Vec<_>>()
+        )),
+    }
+}
+
 /// The full ids of the containers carrying `DIR_LABEL=dir`, running or not.
 ///
 /// # Errors
@@ -1333,12 +1399,12 @@ pub fn uid() -> u32 {
     fs::metadata("/proc/self").map_or(0, |metadata| metadata.uid())
 }
 
-/// The repository root, two directories above the testkit crate.
+/// The repository root, two directories above this crate.
 pub(crate) fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)
-        .expect("the testkit lives under crates/")
+        .expect("the shared-server crate lives under crates/")
         .to_owned()
 }
 
@@ -1435,6 +1501,23 @@ fn write_state(dir: &Path, state: &serde_json::Value) -> Result<(), String> {
 pub fn image_exists(reference: &str) -> bool {
     let docker = docker();
     block_on(docker.inspect_image(reference)).is_ok()
+}
+
+/// The content-addressed id (`sha256:...`) of the image the daemon holds under
+/// `reference`.
+///
+/// A tag names a recipe; the id names one build of it. Two builds of a recipe
+/// that generates material at build time - keys, say - carry one tag and two
+/// ids, so a derived image keyed by the id cannot outlive the build it copied.
+///
+/// # Errors
+/// When the daemon does not hold `reference` or cannot be asked.
+pub fn image_id(reference: &str) -> Result<String, String> {
+    let docker = docker();
+    block_on(docker.inspect_image(reference))
+        .map_err(|error| format!("inspect image {reference} failed: {error}"))?
+        .id
+        .ok_or_else(|| format!("the daemon reported no id for image {reference}"))
 }
 
 /// The multi-threaded runtime every bollard call blocks on.

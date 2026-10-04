@@ -110,7 +110,10 @@ async fn two_phase_start_option_enables_a_plain_slot_before_commit() {
             let mut begin = None;
             loop {
                 match stream.next().await.map_err(|error| {
-                    format!("replication stream failed: {}", support::error_chain(&error))
+                    format!(
+                        "replication stream failed: {}",
+                        support::error_chain(&error)
+                    )
                 })? {
                     Some(ReplicationMessage::XLogData { body, .. }) => {
                         match decoder
@@ -190,17 +193,287 @@ async fn two_phase_start_option_enables_a_plain_slot_before_commit() {
     .expect("two-phase early-delivery test exceeded its watchdog");
 }
 
+/// How a walsender session decides when to stream a transaction, fixed by the
+/// session setting rather than by memory pressure (see
+/// `support::STREAM_EVERY_CHANGE`).
+#[derive(Clone, Copy)]
+enum Decoding {
+    /// Every transaction arrives whole: `BeginPrepare` ... `Prepare`.
+    Buffered,
+    /// Every transaction arrives in chunks: `StreamStart` ... `StreamPrepare`.
+    Immediate,
+}
+
+impl Decoding {
+    /// The walsender session's startup options.
+    const fn options(self) -> &'static str {
+        match self {
+            Self::Buffered => support::STREAM_NOTHING,
+            Self::Immediate => support::STREAM_EVERY_CHANGE,
+        }
+    }
+}
+
+/// Start a two-phase, parallel-streaming pgoutput stream on `slot`.
+async fn start_stream(
+    slot: &str,
+    publication: &str,
+    decoding: Decoding,
+) -> compio_postgres::replication::ReplicationStream<
+    compio_postgres::Socket,
+    impl compio::io::AsyncRead + compio::io::AsyncWrite + Unpin,
+> {
+    let mut config = support::replication_config("cpg_two_phase_observe");
+    config.options(decoding.options());
+    let replication =
+        compio_postgres::replication::connect_replication(support::suite_tls(), &config)
+            .await
+            .expect("replication connect failed");
+    replication
+        .start_logical_replication(StartReplicationOptions {
+            slot_name: slot,
+            proto_version: 4,
+            publication_names: &[publication],
+            streaming: Streaming::Parallel,
+            two_phase: true,
+            ..Default::default()
+        })
+        .await
+        .expect("START_REPLICATION with two_phase failed")
+}
+
+/// What one stream delivered for this test's gids.
+struct Observed {
+    messages: Vec<PgOutputMessage>,
+    decode_error: Option<(u8, pgoutput::DecodeError)>,
+    stream_prepares_inside_a_chunk: usize,
+}
+
+/// Read `stream` until every gid in `expected_gids` has reached its commit or
+/// rollback.
+///
+/// A prepared transaction is delivered to a `two_phase` slot WITHOUT regard to
+/// the slot's publication filter, so a concurrent test that runs `PREPARE
+/// TRANSACTION` puts its gid on this stream. Only the gids this test produced
+/// are its own; a prepare family frame naming anything else belongs to another
+/// session and is dropped, exactly as the sibling two-phase test ignores a
+/// prepare it did not ask for. The stream is read until every one of this
+/// test's gids has finished, not until the first `C` on the wire, because that
+/// `C` can be another session's ordinary commit.
+async fn observe<T>(
+    stream: &mut compio_postgres::replication::ReplicationStream<compio_postgres::Socket, T>,
+    expected_gids: &[&str],
+) -> Observed
+where
+    T: compio::io::AsyncRead + compio::io::AsyncWrite + Unpin,
+{
+    let mut decoder = pgoutput::Decoder::new();
+    let mut observed = Observed {
+        messages: Vec::new(),
+        decode_error: None,
+        stream_prepares_inside_a_chunk: 0,
+    };
+    let mut finished: BTreeSet<String> = BTreeSet::new();
+    loop {
+        match stream.next().await.expect("replication stream failed") {
+            Some(ReplicationMessage::XLogData { body, .. }) => {
+                // Sampled BEFORE decoding, because decode is what clears it.
+                // See the StreamPrepare placement assertion for why this is
+                // worth recording.
+                let chunk_open_before = decoder.stream_xid().is_some();
+                match decoder.decode(&body) {
+                    Ok(message) => {
+                        let foreign = match &message {
+                            PgOutputMessage::BeginPrepare { gid, .. }
+                            | PgOutputMessage::Prepare { gid, .. }
+                            | PgOutputMessage::StreamPrepare { gid, .. }
+                            | PgOutputMessage::CommitPrepared { gid, .. }
+                            | PgOutputMessage::RollbackPrepared { gid, .. } => {
+                                !expected_gids.contains(&gid.as_str())
+                            }
+                            _ => false,
+                        };
+                        if !foreign {
+                            if chunk_open_before
+                                && matches!(message, PgOutputMessage::StreamPrepare { .. })
+                            {
+                                observed.stream_prepares_inside_a_chunk += 1;
+                            }
+                            match &message {
+                                PgOutputMessage::CommitPrepared { gid, .. }
+                                | PgOutputMessage::RollbackPrepared { gid, .. } => {
+                                    finished.insert(gid.clone());
+                                }
+                                _ => {}
+                            }
+                            observed.messages.push(message);
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "OBSERVED two-phase tag 0x{:02x} ({:?}), len={}, error={error:?}",
+                            body[0],
+                            body[0] as char,
+                            body.len()
+                        );
+                        if observed.decode_error.is_none() {
+                            observed.decode_error = Some((body[0], error));
+                        }
+                    }
+                }
+                if finished.len() == expected_gids.len() {
+                    return observed;
+                }
+            }
+            Some(ReplicationMessage::PrimaryKeepalive { .. }) => {}
+            None => return observed,
+        }
+    }
+}
+
+/// The two-phase frames one stream carried, keyed by gid, each checked for
+/// the fields every frame of its kind must carry.
+#[derive(Default)]
+struct Frames {
+    begins: BTreeMap<String, (u64, u64, i64, u32)>,
+    prepares: BTreeMap<String, (u64, u64, i64, u32)>,
+    stream_prepares: BTreeMap<String, (u64, u64, i64, u32)>,
+    commits: BTreeSet<String>,
+    rollbacks: BTreeSet<String>,
+    streamed_xids: BTreeSet<u32>,
+}
+
+fn frames(messages: &[PgOutputMessage], expected: &BTreeMap<&str, u32>) -> Frames {
+    let mut frames = Frames::default();
+    for message in messages {
+        match message {
+            PgOutputMessage::BeginPrepare {
+                prepare_lsn,
+                end_lsn,
+                prepare_timestamp,
+                xid,
+                gid,
+            } => {
+                assert_eq!(expected.get(gid.as_str()), Some(xid));
+                assert!(*prepare_lsn > 0 && prepare_lsn <= end_lsn);
+                assert!(*prepare_timestamp > 0);
+                assert!(
+                    frames
+                        .begins
+                        .insert(
+                            gid.clone(),
+                            (*prepare_lsn, *end_lsn, *prepare_timestamp, *xid)
+                        )
+                        .is_none(),
+                    "duplicate BeginPrepare for {gid}"
+                );
+            }
+            PgOutputMessage::Prepare {
+                flags,
+                prepare_lsn,
+                end_lsn,
+                prepare_timestamp,
+                xid,
+                gid,
+            } => {
+                assert_eq!(*flags, 0);
+                assert_eq!(expected.get(gid.as_str()), Some(xid));
+                assert!(*prepare_lsn > 0 && prepare_lsn <= end_lsn);
+                assert!(*prepare_timestamp > 0);
+                assert!(
+                    frames
+                        .prepares
+                        .insert(
+                            gid.clone(),
+                            (*prepare_lsn, *end_lsn, *prepare_timestamp, *xid)
+                        )
+                        .is_none(),
+                    "duplicate Prepare for {gid}"
+                );
+            }
+            PgOutputMessage::StreamPrepare {
+                flags,
+                prepare_lsn,
+                end_lsn,
+                prepare_timestamp,
+                xid,
+                gid,
+            } => {
+                assert_eq!(*flags, 0);
+                assert_eq!(expected.get(gid.as_str()), Some(xid));
+                assert!(*prepare_lsn > 0 && prepare_lsn <= end_lsn);
+                assert!(*prepare_timestamp > 0);
+                assert!(
+                    frames
+                        .stream_prepares
+                        .insert(
+                            gid.clone(),
+                            (*prepare_lsn, *end_lsn, *prepare_timestamp, *xid)
+                        )
+                        .is_none(),
+                    "duplicate StreamPrepare for {gid}"
+                );
+            }
+            PgOutputMessage::CommitPrepared {
+                flags,
+                commit_lsn,
+                end_lsn,
+                commit_timestamp,
+                xid,
+                gid,
+            } => {
+                assert_eq!(*flags, 0);
+                assert_eq!(expected.get(gid.as_str()), Some(xid));
+                assert!(*commit_lsn > 0 && commit_lsn <= end_lsn);
+                assert!(*commit_timestamp > 0);
+                assert!(
+                    frames.commits.insert(gid.clone()),
+                    "duplicate CommitPrepared for {gid}"
+                );
+            }
+            PgOutputMessage::RollbackPrepared {
+                flags,
+                prepare_end_lsn,
+                rollback_end_lsn,
+                prepare_timestamp,
+                rollback_timestamp,
+                xid,
+                gid,
+            } => {
+                assert_eq!(*flags, 0);
+                assert_eq!(expected.get(gid.as_str()), Some(xid));
+                assert!(*prepare_end_lsn > 0 && prepare_end_lsn <= rollback_end_lsn);
+                assert!(*prepare_timestamp > 0 && prepare_timestamp <= rollback_timestamp);
+                assert!(
+                    frames.rollbacks.insert(gid.clone()),
+                    "duplicate RollbackPrepared for {gid}"
+                );
+            }
+            PgOutputMessage::StreamStart { xid, .. } => {
+                frames.streamed_xids.insert(*xid);
+            }
+            _ => {}
+        }
+    }
+    frames
+}
+
+/// One prepared transaction committed and one rolled back, read by two slots:
+/// one whose walsender never streams and one whose walsender streams every
+/// change. The pair is the whole two-phase vocabulary - `BeginPrepare`,
+/// `Prepare`, `StreamPrepare`, `CommitPrepared`, `RollbackPrepared` - and
+/// which half arrives on which stream is fixed by the session setting rather
+/// than by how much else the server was decoding at the time.
 #[compio::test]
 async fn prepared_transactions_expose_every_two_phase_frame() {
     compio::time::timeout(WATCHDOG, async {
         let base = support::test_object_name("cpg two phase observe");
         let table = format!("{base}_t");
         let publication = format!("{base}_p");
-        let slot = format!("{base}_s");
+        let buffered_slot = format!("{base}_b");
+        let immediate_slot = format!("{base}_i");
         let commit_gid = format!("{base}_commit");
         let rollback_gid = format!("{base}_rollback");
-        let stream_commit_gid = format!("{base}_stream_commit");
-        let stream_rollback_gid = format!("{base}_stream_rollback");
         let setup = client().await;
         support::sweep_stale_replication_slots(&setup).await;
 
@@ -215,9 +488,11 @@ async fn prepared_transactions_expose_every_two_phase_frame() {
              max_prepared_transactions={configured}"
         );
 
-        support::drop_replication_slot(&setup, &slot)
-            .await
-            .unwrap_or_else(|error| panic!("fixture setup failed: {error}"));
+        for slot in [&buffered_slot, &immediate_slot] {
+            support::drop_replication_slot(&setup, slot)
+                .await
+                .unwrap_or_else(|error| panic!("fixture setup failed: {error}"));
+        }
         setup
             .batch_execute(&format!(
                 "DROP PUBLICATION IF EXISTS {publication};
@@ -227,46 +502,18 @@ async fn prepared_transactions_expose_every_two_phase_frame() {
             ))
             .await
             .expect("fixture setup failed");
-        setup
-            .batch_execute(&format!(
-                "SELECT pg_create_logical_replication_slot(
-                    '{slot}', 'pgoutput', false, true);"
-            ))
-            .await
-            .expect("TWO_PHASE slot setup failed");
-
-        let mut config = support::replication_config("cpg_two_phase_observe");
-        config.options("-c logical_decoding_work_mem=64kB");
-        let replication =
-            compio_postgres::replication::connect_replication(support::suite_tls(), &config)
+        for slot in [&buffered_slot, &immediate_slot] {
+            setup
+                .batch_execute(&format!(
+                    "SELECT pg_create_logical_replication_slot('{slot}', 'pgoutput', false, true);"
+                ))
                 .await
-                .expect("replication connect failed");
-        let mut stream = replication
-            .start_logical_replication(StartReplicationOptions {
-                slot_name: &slot,
-                proto_version: 4,
-                publication_names: &[&publication],
-                streaming: Streaming::Parallel,
-                two_phase: true,
-                ..Default::default()
-            })
-            .await
-            .expect("START_REPLICATION with two_phase failed");
+                .expect("TWO_PHASE slot setup failed");
+        }
 
-        let large_commit = format!(
-            "INSERT INTO {table}
-             SELECT n,
-                    (SELECT string_agg(md5((n * 1000 + part)::text), '')
-                       FROM generate_series(1, 64) AS part)
-               FROM generate_series(100, 299) AS n;"
-        );
-        let large_rollback = format!(
-            "INSERT INTO {table}
-             SELECT n,
-                    (SELECT string_agg(md5((n * 1000 + part)::text), '')
-                       FROM generate_series(1, 64) AS part)
-               FROM generate_series(300, 499) AS n;"
-        );
+        let mut buffered = start_stream(&buffered_slot, &publication, Decoding::Buffered).await;
+        let mut immediate = start_stream(&immediate_slot, &publication, Decoding::Immediate).await;
+
         let produce = async {
             setup.batch_execute("BEGIN").await?;
             let commit_xid = current_xid(&setup).await;
@@ -292,123 +539,24 @@ async fn prepared_transactions_expose_every_two_phase_frame() {
                 .batch_execute(&format!("ROLLBACK PREPARED '{rollback_gid}'"))
                 .await?;
 
-            setup.batch_execute("BEGIN").await?;
-            let stream_commit_xid = current_xid(&setup).await;
-            setup.batch_execute(&large_commit).await?;
-            setup
-                .batch_execute(&format!("PREPARE TRANSACTION '{stream_commit_gid}'"))
-                .await?;
-            setup
-                .batch_execute(&format!("COMMIT PREPARED '{stream_commit_gid}'"))
-                .await?;
-
-            setup.batch_execute("BEGIN").await?;
-            let stream_rollback_xid = current_xid(&setup).await;
-            setup.batch_execute(&large_rollback).await?;
-            setup
-                .batch_execute(&format!("PREPARE TRANSACTION '{stream_rollback_gid}'"))
-                .await?;
-            setup
-                .batch_execute(&format!("ROLLBACK PREPARED '{stream_rollback_gid}'"))
-                .await?;
-
-            setup
-                .batch_execute(&format!("INSERT INTO {table} VALUES (1000, 'sentinel')"))
-                .await?;
-
-            Ok::<_, compio_postgres::Error>((
-                commit_xid,
-                rollback_xid,
-                stream_commit_xid,
-                stream_rollback_xid,
-            ))
+            Ok::<_, compio_postgres::Error>((commit_xid, rollback_xid))
         };
-        let observe = async {
-            let mut decoder = pgoutput::Decoder::new();
-            let mut messages = Vec::new();
-            let mut first_error = None;
-            let mut stream_prepares_inside_a_chunk = 0usize;
-            // A prepared transaction is delivered to a `two_phase` slot
-            // WITHOUT regard to the slot's publication filter, so a concurrent
-            // test that runs `PREPARE TRANSACTION` puts its gid on this
-            // stream. Only the gids this test produced are its own; a prepare
-            // family frame naming anything else belongs to another session and
-            // is dropped, exactly as the sibling two-phase test ignores a
-            // prepare it did not ask for. The stream is otherwise read until
-            // every one of this test's gids has reached its commit or
-            // rollback, not until the first `C` on the wire, because that `C`
-            // can be another session's ordinary commit.
-            let expected_gids = [
-                commit_gid.as_str(),
-                rollback_gid.as_str(),
-                stream_commit_gid.as_str(),
-                stream_rollback_gid.as_str(),
-            ];
-            let mut finished: BTreeSet<String> = BTreeSet::new();
-            loop {
-                match stream.next().await.expect("replication stream failed") {
-                    Some(ReplicationMessage::XLogData { body, .. }) => {
-                        // Sampled BEFORE decoding, because decode is what
-                        // clears it. See the StreamPrepare placement assertion
-                        // below for why this is worth recording.
-                        let chunk_open_before = decoder.stream_xid().is_some();
-                        match decoder.decode(&body) {
-                            Ok(message) => {
-                                let foreign = match &message {
-                                    PgOutputMessage::BeginPrepare { gid, .. }
-                                    | PgOutputMessage::Prepare { gid, .. }
-                                    | PgOutputMessage::StreamPrepare { gid, .. }
-                                    | PgOutputMessage::CommitPrepared { gid, .. }
-                                    | PgOutputMessage::RollbackPrepared { gid, .. } => {
-                                        !expected_gids.contains(&gid.as_str())
-                                    }
-                                    _ => false,
-                                };
-                                if !foreign {
-                                    if chunk_open_before
-                                        && matches!(message, PgOutputMessage::StreamPrepare { .. })
-                                    {
-                                        stream_prepares_inside_a_chunk += 1;
-                                    }
-                                    match &message {
-                                        PgOutputMessage::CommitPrepared { gid, .. }
-                                        | PgOutputMessage::RollbackPrepared { gid, .. } => {
-                                            finished.insert(gid.clone());
-                                        }
-                                        _ => {}
-                                    }
-                                    messages.push(message);
-                                }
-                            }
-                            Err(error) => {
-                                eprintln!(
-                                    "OBSERVED two-phase tag 0x{:02x} ({:?}), len={}, \
-                                     error={error:?}",
-                                    body[0],
-                                    body[0] as char,
-                                    body.len()
-                                );
-                                if first_error.is_none() {
-                                    first_error = Some((body[0], error));
-                                }
-                            }
-                        }
-                        if finished.len() == expected_gids.len() {
-                            return (messages, first_error, stream_prepares_inside_a_chunk);
-                        }
-                    }
-                    Some(ReplicationMessage::PrimaryKeepalive { .. }) => {}
-                    None => return (messages, first_error, stream_prepares_inside_a_chunk),
-                }
-            }
-        };
-
-        let (produced, observed) = futures_util::future::join(produce, observe).await;
-        let (commit_xid, rollback_xid, stream_commit_xid, stream_rollback_xid) =
-            produced.expect("two-phase transaction sequence failed");
-        let (messages, decode_error, stream_prepares_inside_a_chunk) = observed;
-        drop(stream);
-        let slot_dropped = support::drop_replication_slot(&setup, &slot).await;
+        let expected_gids = [commit_gid.as_str(), rollback_gid.as_str()];
+        let (produced, (from_buffered, from_immediate)) = futures_util::future::join(
+            produce,
+            futures_util::future::join(
+                observe(&mut buffered, &expected_gids),
+                observe(&mut immediate, &expected_gids),
+            ),
+        )
+        .await;
+        let (commit_xid, rollback_xid) = produced.expect("two-phase transaction sequence failed");
+        drop(buffered);
+        drop(immediate);
+        let mut slots_dropped = Vec::new();
+        for slot in [&buffered_slot, &immediate_slot] {
+            slots_dropped.push(support::drop_replication_slot(&setup, slot).await);
+        }
         setup
             .batch_execute(&format!(
                 "DROP PUBLICATION {publication};
@@ -416,145 +564,58 @@ async fn prepared_transactions_expose_every_two_phase_frame() {
             ))
             .await
             .expect("fixture cleanup failed");
-        slot_dropped.unwrap_or_else(|error| panic!("slot cleanup failed: {error}"));
+        for dropped in slots_dropped {
+            dropped.unwrap_or_else(|error| panic!("slot cleanup failed: {error}"));
+        }
 
-        if let Some((tag, error)) = decode_error {
-            panic!("two-phase frame 0x{tag:02x} did not decode: {error:?}");
+        for observed in [&from_buffered, &from_immediate] {
+            if let Some((tag, error)) = &observed.decode_error {
+                panic!("two-phase frame 0x{tag:02x} did not decode: {error:?}");
+            }
         }
 
         let expected = BTreeMap::from([
             (commit_gid.as_str(), commit_xid),
             (rollback_gid.as_str(), rollback_xid),
-            (stream_commit_gid.as_str(), stream_commit_xid),
-            (stream_rollback_gid.as_str(), stream_rollback_xid),
         ]);
-        let mut begins = BTreeMap::new();
-        let mut prepares = BTreeMap::new();
-        let mut stream_prepares = BTreeMap::new();
-        let mut commits = BTreeSet::new();
-        let mut rollbacks = BTreeSet::new();
-        let mut streamed_xids = BTreeSet::new();
+        let ours = BTreeSet::from([commit_gid.clone(), rollback_gid.clone()]);
+        let our_xids = BTreeSet::from([commit_xid, rollback_xid]);
+        let whole = frames(&from_buffered.messages, &expected);
+        let streamed = frames(&from_immediate.messages, &expected);
 
-        for message in &messages {
-            match message {
-                PgOutputMessage::BeginPrepare {
-                    prepare_lsn,
-                    end_lsn,
-                    prepare_timestamp,
-                    xid,
-                    gid,
-                } => {
-                    assert_eq!(expected.get(gid.as_str()), Some(xid));
-                    assert!(*prepare_lsn > 0 && prepare_lsn <= end_lsn);
-                    assert!(*prepare_timestamp > 0);
-                    assert!(
-                        begins
-                            .insert(
-                                gid.clone(),
-                                (*prepare_lsn, *end_lsn, *prepare_timestamp, *xid),
-                            )
-                            .is_none(),
-                        "duplicate BeginPrepare for {gid}"
-                    );
-                }
-                PgOutputMessage::Prepare {
-                    flags,
-                    prepare_lsn,
-                    end_lsn,
-                    prepare_timestamp,
-                    xid,
-                    gid,
-                } => {
-                    assert_eq!(*flags, 0);
-                    assert_eq!(expected.get(gid.as_str()), Some(xid));
-                    assert!(*prepare_lsn > 0 && prepare_lsn <= end_lsn);
-                    assert!(*prepare_timestamp > 0);
-                    assert!(
-                        prepares
-                            .insert(
-                                gid.clone(),
-                                (*prepare_lsn, *end_lsn, *prepare_timestamp, *xid),
-                            )
-                            .is_none(),
-                        "duplicate Prepare for {gid}"
-                    );
-                }
-                PgOutputMessage::StreamPrepare {
-                    flags,
-                    prepare_lsn,
-                    end_lsn,
-                    prepare_timestamp,
-                    xid,
-                    gid,
-                } => {
-                    assert_eq!(*flags, 0);
-                    assert_eq!(expected.get(gid.as_str()), Some(xid));
-                    assert!(*prepare_lsn > 0 && prepare_lsn <= end_lsn);
-                    assert!(*prepare_timestamp > 0);
-                    assert!(
-                        stream_prepares
-                            .insert(
-                                gid.clone(),
-                                (*prepare_lsn, *end_lsn, *prepare_timestamp, *xid),
-                            )
-                            .is_none(),
-                        "duplicate StreamPrepare for {gid}"
-                    );
-                }
-                PgOutputMessage::CommitPrepared {
-                    flags,
-                    commit_lsn,
-                    end_lsn,
-                    commit_timestamp,
-                    xid,
-                    gid,
-                } => {
-                    assert_eq!(*flags, 0);
-                    assert_eq!(expected.get(gid.as_str()), Some(xid));
-                    assert!(*commit_lsn > 0 && commit_lsn <= end_lsn);
-                    assert!(*commit_timestamp > 0);
-                    assert!(
-                        commits.insert(gid.clone()),
-                        "duplicate CommitPrepared for {gid}"
-                    );
-                }
-                PgOutputMessage::RollbackPrepared {
-                    flags,
-                    prepare_end_lsn,
-                    rollback_end_lsn,
-                    prepare_timestamp,
-                    rollback_timestamp,
-                    xid,
-                    gid,
-                } => {
-                    assert_eq!(*flags, 0);
-                    assert_eq!(expected.get(gid.as_str()), Some(xid));
-                    assert!(*prepare_end_lsn > 0 && prepare_end_lsn <= rollback_end_lsn);
-                    assert!(*prepare_timestamp > 0 && prepare_timestamp <= rollback_timestamp);
-                    assert!(
-                        rollbacks.insert(gid.clone()),
-                        "duplicate RollbackPrepared for {gid}"
-                    );
-                }
-                PgOutputMessage::StreamStart { xid, .. } => {
-                    streamed_xids.insert(*xid);
-                }
-                _ => {}
-            }
+        // The buffered walsender delivers each transaction whole.
+        assert_eq!(whole.begins.keys().cloned().collect::<BTreeSet<_>>(), ours);
+        assert_eq!(
+            whole.prepares.keys().cloned().collect::<BTreeSet<_>>(),
+            ours
+        );
+        assert!(
+            whole.stream_prepares.is_empty() && whole.streamed_xids.is_disjoint(&our_xids),
+            "the buffered walsender streamed a transaction it had room to hold"
+        );
+        for gid in &ours {
+            assert_eq!(
+                whole.begins.get(gid),
+                whole.prepares.get(gid),
+                "BeginPrepare and Prepare disagree for {gid}"
+            );
         }
 
-        let small_gids = BTreeSet::from([commit_gid.clone(), rollback_gid.clone()]);
-        let streamed_gids =
-            BTreeSet::from([stream_commit_gid.clone(), stream_rollback_gid.clone()]);
-        assert_eq!(begins.keys().cloned().collect::<BTreeSet<_>>(), small_gids);
+        // The immediate walsender delivers each transaction in chunks.
         assert_eq!(
-            prepares.keys().cloned().collect::<BTreeSet<_>>(),
-            small_gids
+            streamed
+                .stream_prepares
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            ours
         );
-        assert_eq!(
-            stream_prepares.keys().cloned().collect::<BTreeSet<_>>(),
-            streamed_gids
+        assert!(
+            streamed.begins.is_empty() && streamed.prepares.is_empty(),
+            "the immediate walsender delivered a transaction whole, so the session \
+             setting did not reach it"
         );
+        assert!(streamed.streamed_xids.is_superset(&our_xids));
 
         // WHERE a StreamPrepare lands, not just what it carries. `decode`
         // clears `stream_xid` on StreamPrepare, and `stream_xid` decides a
@@ -566,33 +627,22 @@ async fn prepared_transactions_expose_every_two_phase_frame() {
         // error, which is why the field assertions above cannot see it.
         //
         // The `stream_prepares` check above is the floor: it already requires
-        // every streamed gid to have produced one, so this cannot pass by
-        // observing nothing. MEASURED on 16.14, 2026-08-26: 0 inside a chunk, and
-        // inverting the condition counts 2, so the detector demonstrably fires
-        // and the zero is a verdict rather than a counter that never ran.
+        // every gid to have produced one on the immediate stream, so this
+        // cannot pass by observing nothing. MEASURED on 16.14, 2026-08-26: 0
+        // inside a chunk, and inverting the condition counts 2, so the
+        // detector demonstrably fires and the zero is a verdict rather than a
+        // counter that never ran.
         assert_eq!(
-            stream_prepares_inside_a_chunk, 0,
-            "{stream_prepares_inside_a_chunk} StreamPrepare messages arrived \
-             between StreamStart and StreamStop, so every frame after one is \
-             parsed without its leading xid"
+            from_immediate.stream_prepares_inside_a_chunk, 0,
+            "{} StreamPrepare messages arrived between StreamStart and StreamStop, so \
+             every frame after one is parsed without its leading xid",
+            from_immediate.stream_prepares_inside_a_chunk
         );
-        for gid in [&commit_gid, &rollback_gid] {
-            assert_eq!(
-                begins.get(gid),
-                prepares.get(gid),
-                "BeginPrepare and Prepare disagree for {gid}"
-            );
+
+        for frames in [&whole, &streamed] {
+            assert_eq!(frames.commits, BTreeSet::from([commit_gid.clone()]));
+            assert_eq!(frames.rollbacks, BTreeSet::from([rollback_gid.clone()]));
         }
-        assert_eq!(
-            commits,
-            BTreeSet::from([commit_gid.clone(), stream_commit_gid.clone()])
-        );
-        assert_eq!(
-            rollbacks,
-            BTreeSet::from([rollback_gid.clone(), stream_rollback_gid.clone()])
-        );
-        assert!(streamed_xids.contains(&stream_commit_xid));
-        assert!(streamed_xids.contains(&stream_rollback_xid));
     })
     .await
     .expect("two-phase live test exceeded its watchdog");

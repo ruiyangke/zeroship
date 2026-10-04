@@ -59,8 +59,9 @@ async-trait = { workspace = true }
 toml = { workspace = true }
 # Rust fixtures own PostgreSQL, Redis and temporary storage.
 tempfile = { workspace = true }
-# The testkit owns the daemon client the fixtures query container state through.
-zeroship-testkit = { workspace = true }
+# The shared-server crate owns the daemon client the fixtures query container
+# state through.
+zeroship-shared-server = { workspace = true }
 testcontainers = { workspace = true }
 # The peer-boot fixture derives deterministic Ed25519 public keys for the
 # JWKS-shaped peer documents.

@@ -90,45 +90,10 @@ jobs:
       # directory exists before `cargo test` runs and no fetch step or cache
       # entry is needed here. Nix resolves the tree from flake.lock.
       #
-      # PROVISION BEFORE TESTING, and this step is what makes the deletion of
-      # `ZEROSHIP_REQUIRE_LIVE_BACKENDS` safe here rather than merely correct.
+      # Every suite that needs PostgreSQL starts or joins its own server through
+      # testcontainers, so the runner's Docker daemon is the one service the
+      # test steps below need.
       #
-      # The PostgreSQL suites still require the shared provisioner. Redis
-      # driver and KV tests start their own servers through Testcontainers.
-      #
-      # Mailer owns its PostgreSQL and SMTP fixtures through Testcontainers.
-      #
-      # The SAME script a developer runs, not a `services:` block that would be a
-      # second definition of the same servers. `services:` also cannot pass
-      # `-c wal_level=logical`. The native data job configures its owned
-      # testcontainers separately; this job uses the compose definition.
-      - name: Provision the shared PostgreSQL test backend
-        run: bash tests/provision_test_backends.sh
-      - name: Install the extensions required by ordinary database tests
-        run: |
-          set -euo pipefail
-          pg_container="$(docker ps --filter label=com.docker.compose.service=postgres --format '{{.ID}}')"
-          test -n "$pg_container"
-          docker exec "$pg_container" bash -c \
-            'apt-get update && apt-get install -y --no-install-recommends postgresql-16-pgvector postgresql-16-postgis-3'
-          docker exec "$pg_container" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 \
-            -c 'CREATE EXTENSION IF NOT EXISTS vector' \
-            -c 'CREATE EXTENSION IF NOT EXISTS postgis'
-      # The provisioner stands the servers up and writes the overlay; it does
-      # not apply the platform corpus, and says so in its own "what it does not
-      # provision" header. A target without a migrated database REFUSES, so an
-      # unmigrated server takes this job red rather than green over tests that
-      # never ran. The corpus is a prerequisite of the suite, so it is
-      # provisioned like one.
-      #
-      # The DSN is the provisioner's own default (`PG_DSN` there, from PG_HOST /
-      # PG_PORT / PG_USER / PG_PASS / PG_DB). If those defaults move, this moves
-      # with them - which is why the applier is named rather than open-coded.
-      - name: Apply the platform corpus to the provisioned database
-        run: |
-          set -o pipefail
-          ZEROSHIP_MIGRATE_DSN='postgres://postgres:zeroship@127.0.0.1:5440/zeroship' \
-            bash deploy/ops/db-migrate.sh
       # The control workflow process suites start the real service binaries and
       # the workflow-test-environment example. Build them here, once, so each
       # nextest process locates a fresh artifact instead of running a nested
@@ -230,38 +195,26 @@ jobs:
           cargo test -p zeroship-data-v8 --lib tests::sqlite::
           cargo test -p zeroship-data-orm
       # compio-postgres' `tls` feature is absent from the default feature set,
-      # so `cargo test --workspace` above builds none of it - the rustls
-      # connector, the certificate-verification policy and its unit tests are
-      # otherwise only type-checked by the all-features rustdoc invocation
-      # above.
-      #
-      # This is the step that runs the certificate-verifier proofs. They need no
-      # server: they drive the real verifiers, through the real mode-to-verifier
-      # selection, against certificates committed under tests/data/. That is
-      # deliberate - the live suite below needs Docker and its containers, and
-      # the one thing that must never regress unnoticed is which verifier
-      # `verify-full` gets.
+      # so the workspace run above builds none of it: the rustls connector, the
+      # certificate-verification policy and the live TLS suite, which drives
+      # the six servers `compio_postgres_testkit::tls` starts in Docker and
+      # checks with libpq as each boots, reading `pg_stat_ssl` to find out what
+      # transport the SERVER thinks it is serving. This step builds and runs
+      # all of them. The certificate-verifier proofs need no server: they drive
+      # the real verifiers, through the real mode-to-verifier selection, against
+      # certificates committed under tests/data/. nextest runs no doctests, so
+      # the feature's doctests are their own command.
       - run: |
           set -o pipefail
-          cargo test -p compio-postgres --features tls
-      # The live half: the servers `tls_live_setup.sh` stands up, and the checks
-      # that read `pg_stat_ssl` to find out what transport the SERVER thinks it
-      # is serving. `--features live-tls-tests` is what builds the target at
-      # all; without it cargo skips it silently, which is why it is named here
-      # rather than left to the feature unification above.
-      #
-      # `sudo` is used by the setup script to chmod the server keys to
-      # root:<postgres gid> 0640, which PostgreSQL insists on. GitHub runners
-      # have passwordless sudo and Docker.
-      - name: Provision the TLS test servers
-        run: bash libs/compio-postgres/tests/tls_live_setup.sh
+          cargo nextest run --profile ci -p compio-postgres --features tls
+          cargo test -p compio-postgres --features tls --doc
+      # The same suite against PostgreSQL 18, the second major the driver
+      # supports. Every protocol claim the suite makes was measured on the
+      # server it ran against; this is the run that notices a test pinning
+      # behaviour only PostgreSQL 16 has.
       - run: |
           set -o pipefail
-          cargo test -p compio-postgres --features tls,live-tls-tests --test tls_live \
-            -- --test-threads=1
-      - name: Tear down the TLS test servers
-        if: always()
-        run: bash libs/compio-postgres/tests/tls_live_setup.sh --down
+          cargo nextest run --profile ci -p compio-postgres --features suite-on-postgres-18
       # Cargo propagates lint and compilation failures using workspace lint levels.
       - name: Clippy across workspace targets and features
         if: ${{ !cancelled() }}

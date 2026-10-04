@@ -99,12 +99,13 @@ impl Fixture {
             Ok(pg) => pg,
             Err(err) => crate::support::refuse_missing_backend(
                 "a connection to the control test database",
-                &format!("the database preflighted clean but refused this connection: {err}"),
+                &format!("the shared platform server refused this connection: {err}"),
                 "If the server is up, this is usually its connection ceiling; look\n\
                  \x20   for a test in this binary holding clients open across bodies\n\
                  \x20   (a live case fails naming any it could not close). If it is\n\
-                 \x20   down, bring the backends up and rewrite the overlay from them:\n\
-                 \x20     tests/provision_test_backends.sh",
+                 \x20   down, its container exited: `docker ps -a --filter\n\
+                 \x20   label=zeroship.testkit.dir` names it, and a re-run boots a\n\
+                 \x20   fresh one.",
             ),
         };
         crate::support::live::spawn(async move {
@@ -119,8 +120,9 @@ impl Fixture {
                 "If the server is up, this is usually its connection ceiling; look\n\
                  \x20   for a test in this binary holding clients open across bodies\n\
                  \x20   (a live case fails naming any it could not close). If it is\n\
-                 \x20   down, bring the backends up and rewrite the overlay from them:\n\
-                 \x20     tests/provision_test_backends.sh",
+                 \x20   down, its container exited: `docker ps -a --filter\n\
+                 \x20   label=zeroship.testkit.dir` names it, and a re-run boots a\n\
+                 \x20   fresh one.",
             ),
         };
         zeroship_control::plan_catalog::seed_plans(&registry)

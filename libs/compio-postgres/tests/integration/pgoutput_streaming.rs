@@ -1,18 +1,17 @@
-//! Streaming of large transactions, against a real walsender.
+//! Streaming of in-progress transactions, against a real walsender.
 //!
-//! With `streaming` on, a transaction that outgrows
-//! `logical_decoding_work_mem` is sent BEFORE it commits, and the framing
-//! changes shape: `Begin`/`Commit` are replaced, not supplemented. The same
-//! 4000-row transaction, measured on 16.14:
+//! With `streaming` on, a transaction the walsender decides to stream is sent
+//! BEFORE it commits, and the framing changes shape: `Begin`/`Commit` are
+//! replaced, not supplemented - `StreamStart`/`StreamStop` around each chunk
+//! and one `StreamCommit` at the end. A consumer written against the
+//! non-streaming shape therefore waits for a `Commit` that never arrives. That
+//! is why this is not merely an extra option: turning it on changes the
+//! contract.
 //!
-//! ```text
-//! streaming off -> B:1     C:1  I:4000 R:1
-//! streaming on  -> S:21 E:21 c:1 I:4000 R:1
-//! ```
-//!
-//! A consumer written against the non-streaming shape therefore waits for a
-//! `Commit` that never arrives. That is why this is not merely an extra
-//! option: turning it on changes the contract.
+//! Every walsender here runs with `support::STREAM_EVERY_CHANGE`, so the
+//! decision to stream is the session's rather than memory pressure's: each
+//! change is streamed as it is decoded, every transaction arrives in chunks,
+//! and a subtransaction's changes reach the stream before its abort does.
 //!
 //! Payload layouts, all read off the wire rather than from a document
 //! (xid 689737 = 0x000a8649):
@@ -42,13 +41,9 @@ use crate::support;
 const WATCHDOG: Duration = Duration::from_secs(120);
 const ABORT_OBSERVATION: Duration = Duration::from_secs(3);
 
-/// Small enough that a few thousand rows spill, so the test does not have to
-/// write the 64 MB the default would demand. This is the server's minimum.
-const DECODING_WORK_MEM: &str = "64kB";
-
-/// Rows in the streamed transaction. At ~200 bytes of payload each this is
-/// comfortably past `DECODING_WORK_MEM` and produced 21 chunks when measured.
-const ROWS: i32 = 4000;
+/// Rows in the streamed transaction. Each is streamed as it is decoded, so a
+/// few dozen give every transaction many chunks.
+const ROWS: i32 = 40;
 
 async fn client() -> Client {
     let url = support::test_url();
@@ -112,11 +107,33 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = u32>,
 {
+    let mut stream = start_stream(slot, streaming, publication, fast_keepalives).await?;
+
+    // The write runs while the stream is live, so the walsender decodes the
+    // transaction as it is written.
+    let xid = write().await;
+
+    let mut read = Read::new(xid);
+    read.until(&mut stream, |_| false).await?;
+    Ok(read.messages)
+}
+
+/// Open a replication stream on `slot` whose walsender streams every change
+/// as it is decoded.
+async fn start_stream(
+    slot: &str,
+    streaming: Streaming,
+    publication: &str,
+    fast_keepalives: bool,
+) -> Result<
+    compio_postgres::replication::ReplicationStream<
+        compio_postgres::Socket,
+        impl compio::io::AsyncRead + compio::io::AsyncWrite + Unpin,
+    >,
+    String,
+> {
     let mut config = support::replication_config("cpg_streaming");
-    // The walsender is the process that decodes, so the limit has to be set
-    // on ITS session. Startup options are the only channel a replication
-    // connection has for that - it never runs a `SET`.
-    let mut options = format!("-c logical_decoding_work_mem={DECODING_WORK_MEM}");
+    let mut options = support::STREAM_EVERY_CHANGE.to_owned();
     if fast_keepalives {
         options.push_str(" -c wal_sender_timeout=1s");
     }
@@ -137,7 +154,7 @@ where
         Streaming::Off | Streaming::On => 2,
     };
 
-    let mut stream = replication
+    replication
         .start_logical_replication(StartReplicationOptions {
             slot_name: slot,
             publication_names: &[publication],
@@ -146,69 +163,147 @@ where
             ..Default::default()
         })
         .await
-        .map_err(|error| format!("START_REPLICATION failed: {}", support::error_chain(&error)))?;
+        .map_err(|error| format!("START_REPLICATION failed: {}", support::error_chain(&error)))
+}
 
-    // The write runs while the stream is live, so a rolled-back
-    // subtransaction is streamed and then aborted rather than discarded
-    // unstreamed at commit time.
-    let xid = write().await;
+/// The frames one transaction has delivered so far.
+struct Read {
+    decoder: pgoutput::Decoder,
+    // A concurrent transaction's frames reach this slot too; they are dropped
+    // instead of being allowed to end the read (`support::StreamOwnership`).
+    ownership: support::StreamOwnership,
+    messages: Vec<PgOutputMessage>,
+}
 
-    let mut decoder = pgoutput::Decoder::new();
-    let mut messages = Vec::new();
-    // Whether the frames currently being read belong to the fixture's own
-    // transaction. `PostgreSQL` 16 streams a large concurrent transaction's
-    // `StreamStart`/`StreamStop`/`StreamCommit` framing to this slot even when
-    // this slot's publication filters out every one of its rows, so a frame
-    // that is not ours is dropped instead of being allowed to end the read.
-    let mut ours = false;
-    loop {
-        match stream.next().await.map_err(|error| {
-            format!("replication stream failed: {}", support::error_chain(&error))
-        })? {
-            Some(ReplicationMessage::XLogData { body, .. }) => {
-                let message = decoder
-                    .decode(&body)
-                    .map_err(|error| format!("{error:?}"))?;
-                let (keep, terminal) = match &message {
-                    PgOutputMessage::Begin {
-                        xid: message_xid, ..
-                    }
-                    | PgOutputMessage::StreamStart {
-                        xid: message_xid, ..
-                    } => {
-                        ours = *message_xid == xid;
-                        (ours, false)
-                    }
-                    PgOutputMessage::Commit { .. } => (ours, ours),
-                    PgOutputMessage::StreamCommit {
-                        xid: message_xid, ..
-                    } => (ours, ours && *message_xid == xid),
-                    PgOutputMessage::StreamAbort {
-                        xid: message_xid,
-                        subxid,
-                        ..
-                    } => {
-                        // An abort arrives OUTSIDE an open chunk, after a
-                        // StreamStop, so a concurrent transaction's StreamStart
-                        // can sit between our chunk and our abort and clear
-                        // `ours`. The xid names the transaction directly, so
-                        // ownership is taken from it instead.
-                        let belongs = *message_xid == xid || *subxid == xid;
-                        (belongs, belongs && message_xid == subxid)
-                    }
-                    _ => (ours, false),
-                };
-                if keep {
-                    messages.push(message);
-                }
-                if terminal {
-                    return Ok(messages);
-                }
-            }
-            Some(ReplicationMessage::PrimaryKeepalive { .. }) => continue,
-            None => return Ok(messages),
+impl Read {
+    fn new(xid: u32) -> Self {
+        Self {
+            decoder: pgoutput::Decoder::new(),
+            ownership: support::StreamOwnership::new(xid),
+            messages: Vec::new(),
         }
     }
+
+    /// Read until the transaction ends or `enough` holds for what it has
+    /// delivered. Returns whether the transaction ended.
+    async fn until<T>(
+        &mut self,
+        stream: &mut compio_postgres::replication::ReplicationStream<compio_postgres::Socket, T>,
+        enough: impl Fn(&[PgOutputMessage]) -> bool,
+    ) -> Result<bool, String>
+    where
+        T: compio::io::AsyncRead + compio::io::AsyncWrite + Unpin,
+    {
+        loop {
+            match stream.next().await.map_err(|error| {
+                format!(
+                    "replication stream failed: {}",
+                    support::error_chain(&error)
+                )
+            })? {
+                Some(ReplicationMessage::XLogData { body, .. }) => {
+                    let message = self
+                        .decoder
+                        .decode(&body)
+                        .map_err(|error| format!("{error:?}"))?;
+                    let (keep, terminal) = self.ownership.classify(&message);
+                    if keep {
+                        self.messages.push(message);
+                    }
+                    if terminal {
+                        return Ok(true);
+                    }
+                    if keep && enough(&self.messages) {
+                        return Ok(false);
+                    }
+                }
+                Some(ReplicationMessage::PrimaryKeepalive { .. }) => continue,
+                None => return Ok(true),
+            }
+        }
+    }
+}
+
+/// Read a transaction whose child subtransaction is rolled back only once
+/// every row the child inserted has arrived on the stream.
+///
+/// The order is the subject, and PostgreSQL decides it two ways. A logical
+/// walsender decodes only flushed WAL (`WalSndWaitForWal` waits on
+/// `GetFlushRecPtr`), and an open transaction's records stay unflushed until
+/// something flushes past them. And a change decoded after its subtransaction
+/// has aborted is dropped from the stream rather than sent: streaming sets
+/// `CheckXidAlive` to the change's xid, any catalog scan the decode needs then
+/// raises `ERRCODE_TRANSACTION_ROLLBACK` for an aborted xid
+/// (`HandleConcurrentAbort`), and `ReorderBufferProcessTXN` handles that by
+/// discarding the rest of the (sub)transaction's changes. Whether a scan is
+/// needed depends on the walsender's caches, which other sessions' catalog
+/// changes invalidate. A child rolled back in the same batch that wrote it
+/// therefore reached the stream only when the walsender happened to decode it
+/// first - and otherwise arrived as an abort with no rows of its own.
+///
+/// So the child stays open until its rows are on the stream. Its WAL is
+/// flushed from another session, whose transactional logical message makes its
+/// commit flush the WAL through its own commit record. The parent alters the
+/// table's catalog entry before the savepoint, so decoding the child's first
+/// row always needs a catalog scan: rolled back before the walsender reaches
+/// it, the child loses every row on every run, not only when other sessions'
+/// catalog changes happen to have emptied the walsender's caches.
+async fn collect_child_abort(fixture: &Fixture) -> Result<Vec<PgOutputMessage>, String> {
+    let mut stream =
+        start_stream(&fixture.slot, Streaming::On, &fixture.publication, false).await?;
+    let top = fixture.begin_and_xid().await;
+    fixture
+        .setup
+        .batch_execute(&format!(
+            "INSERT INTO {t} VALUES (1, 'top before');
+             ALTER TABLE {t} ALTER COLUMN pad SET STATISTICS 100;
+             SAVEPOINT streamed_child;
+             INSERT INTO {t}
+                SELECT g, repeat('x', 200)
+                  FROM generate_series(2, {ROWS}) g;",
+            t = fixture.table,
+        ))
+        .await
+        .expect("the child subtransaction's inserts failed");
+    client()
+        .await
+        .batch_execute("SELECT pg_logical_emit_message(true, 'compio-postgres-flush', '')")
+        .await
+        .expect("flush the open transaction's WAL from another session");
+
+    let mut read = Read::new(top);
+    let child_rows = usize::try_from(ROWS - 1).expect("the child inserts a positive row count");
+    let ended = read
+        .until(&mut stream, |messages| {
+            messages
+                .iter()
+                .filter(|message| {
+                    matches!(message, PgOutputMessage::Insert { xid: Some(xid), .. } if *xid != top)
+                })
+                .count()
+                == child_rows
+        })
+        .await?;
+    if ended {
+        return Err(format!(
+            "the transaction ended before the child's rows arrived: {:?}",
+            read.messages
+        ));
+    }
+
+    fixture
+        .setup
+        .batch_execute(&format!(
+            "ROLLBACK TO SAVEPOINT streamed_child;
+             INSERT INTO {t} VALUES ({after}, 'top after');
+             COMMIT;",
+            t = fixture.table,
+            after = ROWS + 1,
+        ))
+        .await
+        .expect("rolling back the child and committing the parent failed");
+    read.until(&mut stream, |_| false).await?;
+    Ok(read.messages)
 }
 
 struct Fixture {
@@ -253,9 +348,9 @@ impl Fixture {
 
     /// Open an explicit transaction and return the xid `PostgreSQL` assigned.
     ///
-    /// THE XID IS WHAT TELLS A TEST'S TRANSACTION FROM A CONCURRENT ONE. Under
-    /// protocol 2 a transaction large enough to spill `logical_decoding_work_mem`
-    /// is streamed, and `PostgreSQL` 16 sends the `StreamStart`/`StreamCommit`
+    /// THE XID IS WHAT TELLS A TEST'S TRANSACTION FROM A CONCURRENT ONE. A
+    /// walsender that streams every change streams every concurrent
+    /// transaction too, and `PostgreSQL` 16 sends the `StreamStart`/`StreamCommit`
     /// framing for it to every slot whose stream is reading that LSN - including
     /// slots whose publication filters out every row it contains. A reader that
     /// stopped at the first `StreamCommit` could therefore stop on another
@@ -306,26 +401,6 @@ impl Fixture {
             ))
             .await
             .expect("bulk subtransaction failed");
-        xid
-    }
-
-    async fn write_rolled_back_big_subtransaction(&self) -> u32 {
-        let xid = self.begin_and_xid().await;
-        self.setup
-            .batch_execute(&format!(
-                "INSERT INTO {t} VALUES (1, 'top before');
-                 SAVEPOINT streamed_child;
-                 INSERT INTO {t}
-                    SELECT g, repeat('x', 200)
-                      FROM generate_series(2, {ROWS}) g;
-                 ROLLBACK TO SAVEPOINT streamed_child;
-                 INSERT INTO {t} VALUES ({after}, 'top after');
-                 COMMIT;",
-                t = self.table,
-                after = ROWS + 1,
-            ))
-            .await
-            .expect("rolled-back bulk subtransaction failed");
         xid
     }
 
@@ -439,9 +514,9 @@ async fn a_streamed_transaction_arrives_in_chunks_and_commits_as_a_stream() {
 
         assert!(
             starts > 1,
-            "a transaction past logical_decoding_work_mem must arrive in MORE than one \
-             chunk, got {starts}; if it is 1 the walsender ignored the \
-             logical_decoding_work_mem sent in startup options and this test proves nothing"
+            "a walsender streaming every change must deliver the transaction in MORE \
+             than one chunk, got {starts}; if it is 1 the walsender ignored the streaming \
+             mode sent in its startup options and this test proves nothing"
         );
         assert_eq!(stops, starts, "every StreamStart must be closed by a StreamStop");
         assert_eq!(inserts, ROWS as usize, "every row must still arrive");
@@ -533,10 +608,7 @@ async fn a_streamed_subtransaction_preserves_its_own_xid() {
 async fn a_child_stream_abort_does_not_end_its_parent_transaction() {
     compio::time::timeout(WATCHDOG, async {
         let fixture = Fixture::create("cpg stream child abort").await;
-        let decoded = try_collect(&fixture.slot, Streaming::On, &fixture.publication, || {
-            fixture.write_rolled_back_big_subtransaction()
-        })
-        .await;
+        let decoded = collect_child_abort(&fixture).await;
         fixture.drop_all().await;
 
         let messages = decoded
@@ -555,9 +627,18 @@ async fn a_child_stream_abort_does_not_end_its_parent_transaction() {
         assert!(messages[abort_index + 1..].iter().any(
             |message| matches!(message, PgOutputMessage::StreamCommit { xid, .. } if *xid == top_xid)
         ));
-        assert!(messages.iter().any(|message| {
-            matches!(message, PgOutputMessage::Insert { xid: Some(xid), .. } if *xid == child_xid)
-        }));
+        let child_rows_before_abort = messages[..abort_index]
+            .iter()
+            .filter(|message| {
+                matches!(message, PgOutputMessage::Insert { xid: Some(xid), .. } if *xid == child_xid)
+            })
+            .count();
+        assert_eq!(
+            child_rows_before_abort,
+            usize::try_from(ROWS - 1).expect("the child inserts a positive row count"),
+            "every row the child inserted must arrive, carrying the child's xid, before \
+             the abort that invalidates them"
+        );
         assert!(messages.iter().any(|message| {
             matches!(message, PgOutputMessage::Insert { xid: Some(xid), .. } if *xid == top_xid)
         }));
@@ -631,8 +712,13 @@ async fn a_parallel_stream_abort_preserves_protocol_four_metadata() {
     compio::time::timeout(WATCHDOG, async {
         let fixture = Fixture::create("cpg parallel abort").await;
         let xid = fixture.write_big_transaction("ROLLBACK").await;
-        let outcome =
-            observe_abort(&fixture.slot, Streaming::Parallel, &fixture.publication, xid).await;
+        let outcome = observe_abort(
+            &fixture.slot,
+            Streaming::Parallel,
+            &fixture.publication,
+            xid,
+        )
+        .await;
         fixture.drop_all().await;
 
         assert!(

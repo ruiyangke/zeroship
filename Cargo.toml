@@ -242,6 +242,7 @@ zeroship-bundle = { path = "crates/zeroship-bundle" }
 # `class = "test-dev-tool"`, so no shipped binary may carry one in its normal
 # closure; `xtask/tests/architecture` and the tokio boundary checks prove it.
 zeroship-testkit = { path = "crates/zeroship-testkit" }
+zeroship-shared-server = { path = "crates/zeroship-shared-server" }
 zeroship-data-testkit = { path = "crates/zeroship-data-testkit" }
 zeroship-workflow-testkit = { path = "crates/zeroship-workflow-testkit" }
 zeroship-workflow-fixtures = { path = "crates/zeroship-workflow-fixtures" }

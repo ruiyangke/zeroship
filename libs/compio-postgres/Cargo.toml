@@ -52,21 +52,9 @@ tls = [
     "dep:x509-parser",
     "dep:zeroize",
 ]
-# Opt-in for `tests/tls_live.rs`, which needs the five PostgreSQL servers
-# `tests/tls_live_setup.sh` stands up.
-#
-# It is a FEATURE rather than a runtime check because the two states have to be
-# distinguishable. A runtime check can only choose between "fail" (hostile to
-# anyone who has not run Docker) and "return early" - and Rust cannot mark a
-# test ignored at runtime, so returning early is counted by the harness as a
-# pass. That is what this suite used to do: eight tests reporting green in a
-# process that had never opened a socket. With `required-features`, cargo does
-# not build the target at all unless it is asked for, so its absence is visible
-# and its presence means it really ran.
-live-tls-tests = ["tls"]
 # Run the ORDINARY suite over TLS instead of plaintext.
 #
-# `tls_live.rs` proves the handshake, the verification modes and a couple of
+# `tests/integration/tls_live.rs` proves the handshake, the verification modes and a couple of
 # protocol claims. It does not prove that replication, the pool, portals,
 # COPY, cancellation or two-phase behave the same once encrypted - every one
 # of those tests hardcoded a plaintext transport, so both transports were
@@ -74,9 +62,11 @@ live-tls-tests = ["tls"]
 # `common::suite_tls()` returns a rustls connector and `common::test_url()`
 # names the encrypted server, so the same test bodies run over TLS.
 #
-# A feature rather than an env var for the reason above and one more: the
-# transport has to be chosen at COMPILE time, because the two connectors are
-# different types.
+# A feature rather than an env var because the transport has to be chosen at
+# COMPILE time: the two connectors are different types. And an environment
+# variable that redirects a suite is ambient configuration a run can inherit
+# without anyone deciding it; a feature is named on the command line that
+# selects the variant.
 suite-over-tls = ["tls"]
 # Run the ORDINARY suite with the implicit raw-SQL prepared-statement cache.
 #
@@ -89,14 +79,19 @@ suite-over-tls = ["tls"]
 # lets the common helper keep the crate-only parameter away from the
 # tokio-postgres oracle, which rejects it.
 suite-with-statement-cache = []
-# Opt-in for `tests/unix_socket_live.rs`, which needs the server
-# `tests/unix_socket_setup.sh` stands up on a SHORT socket path.
+# Run the ORDINARY suite against PostgreSQL 18 instead of 16.
 #
-# A feature for the reason `live-tls-tests` gives above: a runtime check for a
-# missing socket could only fail or return early, and an early return is
-# counted as a pass, so an absent fixture would be indistinguishable from a
-# working one.
-live-unix-socket = []
+# Every protocol claim the suite makes was measured on the server it ran
+# against, so a test can pin behaviour only one major has and nothing says so:
+# 16 streams a rolled-back transaction and then sends `StreamAbort`, while 18
+# sends no pgoutput messages for the same workload. With this feature
+# `common::test_url()` names the fixture's PostgreSQL 18 server, with the same
+# settings, and with `suite-over-tls` as well it names the TLS fixture's
+# PostgreSQL 18 server, so the same test bodies cross the second major in both
+# transports.
+#
+# A feature rather than an env var for the reason `suite-over-tls` gives.
+suite-on-postgres-18 = []
 
 [dependencies]
 async-trait = "0.1"
@@ -185,11 +180,15 @@ workspace = true
 optional = true
 
 [dev-dependencies]
-# The dev-only sealed environment accessor the integration tests and the live
-# benchmark share. It carries no runtime dependency: one enum, one accessor, and
-# the default `PG_TEST_URL`, so a bench links it without compiling any of the
-# crate's private sources.
+# The dev-only fixtures the integration tests and the live benchmarks share:
+# the PostgreSQL server they dial, started in Docker, and the sealed accessor
+# for the one environment key a target reads. It names no type of this crate,
+# so a bench links it without compiling any of the crate's private sources.
 compio-postgres-testkit = { path = "testkit" }
+# The lease protocol and Docker queries the fixture-ownership and lifetime
+# tests ask about the suite's server. It links no database driver, so this
+# edge cannot put a second copy of this crate into a test binary.
+zeroship-shared-server = { workspace = true }
 # Differential oracle. tokio-postgres is the crate this one was ported from,
 # so running both against the same server and comparing answers is the
 # strongest check available for a port. Permitted here and ONLY here: the
@@ -263,14 +262,6 @@ tempfile = { workspace = true }
 # tests. Driving a real handshake is the only way to reach rustls' post-
 # close_notify behaviour, which needs live keys.
 rcgen = { workspace = true }
-
-[[test]]
-name = "tls_live"
-required-features = ["tls", "live-tls-tests"]
-
-[[test]]
-name = "unix_socket_live"
-required-features = ["live-unix-socket"]
 
 [[bench]]
 name = "large_read"

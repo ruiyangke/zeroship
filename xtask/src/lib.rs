@@ -1,3 +1,2 @@
-//! Repository database test orchestration.
+//! The repository build facts the harness and its tests share.
 pub mod build_chain;
-pub mod platform_db;

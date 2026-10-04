@@ -10,7 +10,7 @@ its own on the bare PostgreSQL server every test process of the worktree shares,
 cloned from the server's template and dropped with the case's guard. The server
 supplies logical WAL, pgvector and PostGIS, with a dynamically assigned host port. SQLite tests use
 explicit temporary files. Startup failure fails the test; no external database
-URL or test overlay is needed.
+URL is needed.
 
 The development shell supplies `cargo-nextest`, the `xtask` command and the rest
 of the Rust toolchain. Make Docker available, since it stays a host service.
@@ -44,12 +44,6 @@ Nextest owns reporting, timeouts and process isolation. Its `data` profile write
 JUnit results under the Cargo target directory. The database group bounds
 concurrent container startup and V8 memory use. Pure SQL and wire tests can run
 concurrently. Retries are disabled so a failing first attempt remains a failure.
-
-Platform database orchestration lives in this package. The `zs-testkit` binary
-is the suite-database provisioner, spawned as a child process by
-`tests/suite_db/mod.rs`; the live-database preflight lives in
-`src/platform_db/`. Its integration tests own PostgreSQL containers
-and generated overlays. No helper package or optional test feature is required.
 
 ## Playwright and the development shell's browsers
 

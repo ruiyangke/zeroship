@@ -117,6 +117,7 @@ jsonwebtoken = { workspace = true }
 # The platform database and the Redpanda broker every test process of the
 # worktree shares, and the lifetime measurements of the broker's recipe.
 zeroship-testkit = { workspace = true }
+zeroship-shared-server = { workspace = true }
 zeroship-workflow-testkit = { workspace = true }
 zeroship-workflow-server = { path = "../zeroship-workflow-server" }
 # The workflow lane holds a payload store, so composing one in a test names the

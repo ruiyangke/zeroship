@@ -1,7 +1,7 @@
 //! The platform database every test process of a worktree shares.
 //!
 //! [`platform()`] joins the one migrated server a worktree boots through
-//! [`crate::shared`]: the first process elects itself, runs the platform
+//! [`zeroship_shared_server`]: the first process elects itself, runs the platform
 //! migration into a pristine template and clones the working database from it,
 //! and every other process joins the ready server. A process holds its lease for
 //! as long as it runs; the container's watchdog removes the server once no
@@ -17,20 +17,20 @@ use compio_postgres::{Client, NoTls};
 use zeroship_id::DatabaseId;
 
 use crate::fingerprint;
-use crate::shared::{self, Scope};
+use zeroship_shared_server::{self as shared, Scope};
 
 mod case;
 mod image;
 pub mod server;
 
 pub use case::{run, run_fresh, Case, CaseFixture};
-pub use image::{build, reference as image_ref};
+pub use image::reference as image;
 
 /// The database the shared platform migration is applied to.
 const DATABASE: &str = "zeroship_testkit";
 
 /// The watchdog baked into the PostgreSQL image.
-const WATCHDOG: &str = "/usr/local/bin/zeroship-watchdog";
+const WATCHDOG: &str = zeroship_shared_server::image::WATCHDOG;
 
 /// The port PostgreSQL listens on in the image.
 const POSTGRES_PORT: u16 = 5432;
@@ -233,10 +233,8 @@ pub fn platform() -> &'static Platform {
 /// The recipe the shared server runs under, its identity keyed to every input
 /// that changes what a ready server contains.
 fn spec() -> Result<shared::Spec, String> {
-    let _ = image::build().map_err(|error| {
-        format!("could not build the shared PostgreSQL image (run `pnpm build` first): {error}")
-    })?;
-    let image = image_ref();
+    let image = image()
+        .map_err(|error| format!("could not build the shared PostgreSQL image: {error}"))?;
     let environment = vec![
         ("POSTGRES_PASSWORD".to_owned(), "fixture".to_owned()),
         ("POSTGRES_DB".to_owned(), TEMPLATE_DATABASE.to_owned()),

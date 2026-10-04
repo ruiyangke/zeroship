@@ -24,8 +24,9 @@
 //! back. Reading the stale version, one would conclude that running the suite
 //! over TLS exercises this loop. It does not - `suite-over-tls` runs on the
 //! multiplexed loop too, and `a_notification_reaches_an_idle_tls_connection`
-//! in `tests/tls_live.rs` passes precisely because TLS is now multiplexed
-//! (the serialized idle step reads no socket, so that test cannot pass on it).
+//! in `tests/integration/tls_live.rs` passes precisely because TLS is now
+//! multiplexed (the serialized idle step reads no socket, so that test cannot
+//! pass on it).
 //!
 //! The loops are not equivalent, and they once diverged with nothing going red
 //! (task #49). `test_utils::connect_serialized` makes the serialized loop

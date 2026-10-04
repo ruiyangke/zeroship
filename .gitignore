@@ -63,11 +63,6 @@ nomad-driver-ch/bin/
 # Pilot notes: local working artifacts, deliberately never committed.
 docs/pilot/
 
-# The test backends' overlay, written by tests/provision_test_backends.sh.
-#
-# Generated rather than committed because it contains live test credentials and
-# belongs to the local backend instance that the provisioner owns.
-deploy/ops/zeroship.test.toml
 __pycache__/
 
 # Excluded dev-only crates resolve on their own when a command names their

@@ -7,28 +7,27 @@
 //! `fill` through the same code a production row does. This measures that
 //! operation against the configured server.
 //!
-//! `PG_TEST_URL` selects the server; absent, the suites' default is used
-//! (`DEFAULT_TEST_URL` in `libs/compio-postgres/testkit`). Nothing here creates
-//! or drops schemas.
+//! The server is the one the suites dial, `compio_postgres_testkit::server`,
+//! started in Docker and shared with every test process of the worktree.
+//! Nothing here creates or drops schemas.
 
 use std::hint::black_box;
 use std::time::Duration;
 
 use compio_postgres::{Client, Config, NoTls};
-use compio_postgres_testkit::{DEFAULT_TEST_URL, TestEnvKey, get};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 /// The row sizes, in bytes, the server renders with `repeat`.
 const SIZES: [usize; 2] = [1024 * 1024, 16 * 1024 * 1024];
 
 fn test_url() -> String {
-    get(TestEnvKey::PgTestUrl).unwrap_or_else(|| DEFAULT_TEST_URL.to_owned())
+    compio_postgres_testkit::server::server().url()
 }
 
 /// Open a client and drive its connection for the life of the bench.
 fn connect(rt: &compio::runtime::Runtime, url: &str) -> Client {
     rt.block_on(async {
-        let config: Config = url.parse().expect("PG_TEST_URL is not a valid DSN");
+        let config: Config = url.parse().expect("the fixture server URL is a valid DSN");
         let (client, connection) = config
             .connect(NoTls)
             .await

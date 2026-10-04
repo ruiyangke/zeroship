@@ -6,21 +6,21 @@
 //!
 //! ```text
 //!   sample .ts migration  (createTable notes(title, body) + addColumn tag)
-//!        │
-//!        ▼  zeroship-runtime V8 isolate
+//!        |
+//!        v  zeroship-runtime V8 isolate
 //!   @zeroship/migrate recorder (dist/embedded-recorder.js, the v1 DSL)
-//!        │      run schema() under __begin/__drain, emit { ir_version:1, name, ops }
-//!        ▼
-//!   ir_version-1 envelope JSON  (authored in V8 — NOT hand-built)
-//!        │
-//!        ▼  zeroship-migrate engine (Rust)
-//!   fail-closed load gate → IrAuthor::load_and_lower (Postgres)
-//!        │
-//!        ▼
+//!        |      run schema() under __begin/__drain, emit { ir_version:1, name, ops }
+//!        v
+//!   ir_version-1 envelope JSON  (authored in V8 - NOT hand-built)
+//!        |
+//!        v  zeroship-migrate engine (Rust)
+//!   fail-closed load gate -> IrAuthor::load_and_lower (Postgres)
+//!        |
+//!        v
 //!   PostgresBackend::new_generic(&CompioPgSession)
-//!        │
-//!        ▼  compio io_uring, live PG :5440
-//!   engine.apply → real DDL + journal
+//!        |
+//!        v  compio io_uring, live PostgreSQL
+//!   engine.apply -> real DDL + journal
 //! ```
 //!
 //! The envelope is AUTHORED by running the package recorder in

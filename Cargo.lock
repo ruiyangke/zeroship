@@ -1271,11 +1271,15 @@ dependencies = [
  "whoami",
  "x509-parser",
  "zeroize",
+ "zeroship-shared-server",
 ]
 
 [[package]]
 name = "compio-postgres-testkit"
 version = "0.1.0"
+dependencies = [
+ "zeroship-shared-server",
+]
 
 [[package]]
 name = "compio-quic"
@@ -8032,6 +8036,7 @@ dependencies = [
  "zeroship-metering",
  "zeroship-migrate-server",
  "zeroship-runtime",
+ "zeroship-shared-server",
  "zeroship-storage",
  "zeroship-stream",
  "zeroship-testkit",
@@ -8336,6 +8341,7 @@ dependencies = [
  "url",
  "uuid",
  "x509-parser",
+ "zeroship-shared-server",
  "zeroship-testkit",
 ]
 
@@ -8384,6 +8390,7 @@ dependencies = [
  "zeroship-migrate-postgres",
  "zeroship-migrate-postgres-recording",
  "zeroship-migrate-sqlite",
+ "zeroship-shared-server",
  "zeroship-testkit",
 ]
 
@@ -8574,6 +8581,7 @@ dependencies = [
  "zeroship-migrate-policy",
  "zeroship-migrate-postgres",
  "zeroship-runtime",
+ "zeroship-shared-server",
  "zeroship-testkit",
 ]
 
@@ -8651,6 +8659,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroship-shared-server"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "libc",
+ "serde_json",
+ "sha2 0.10.9",
+ "testcontainers",
+ "tokio",
+]
+
+[[package]]
 name = "zeroship-storage"
 version = "0.1.0"
 dependencies = [
@@ -8699,6 +8719,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tracing",
+ "zeroship-shared-server",
  "zeroship-testkit",
 ]
 
@@ -8710,15 +8731,14 @@ dependencies = [
  "compio-postgres",
  "compio-redis",
  "futures",
- "libc",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "testcontainers",
- "tokio",
  "toml 0.8.23",
  "url",
  "zeroship-id",
+ "zeroship-shared-server",
 ]
 
 [[package]]
@@ -8754,9 +8774,9 @@ dependencies = [
  "zeroship-kv-v8",
  "zeroship-metering",
  "zeroship-runtime",
+ "zeroship-shared-server",
  "zeroship-storage",
  "zeroship-storage-v8",
- "zeroship-testkit",
  "zeroship-workflow",
  "zeroship-workflow-client",
  "zeroship-workflow-fixtures",
@@ -8850,6 +8870,7 @@ dependencies = [
  "zeroship-bundle",
  "zeroship-core",
  "zeroship-data-orm",
+ "zeroship-shared-server",
  "zeroship-testkit",
  "zeroship-workflow-calendar",
 ]

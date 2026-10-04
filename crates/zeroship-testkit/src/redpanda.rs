@@ -1,6 +1,6 @@
 //! The Redpanda broker every stream test process of a worktree shares.
 //!
-//! [`broker()`] joins the one broker a worktree boots through [`crate::shared`]:
+//! [`broker()`] joins the one broker a worktree boots through [`zeroship_shared_server`]:
 //! the first process elects itself, the image is built, the container starts,
 //! and every other process joins the ready broker. A process holds its lease for
 //! as long as it runs; the container's watchdog removes the broker once no
@@ -10,17 +10,17 @@
 
 use std::sync::OnceLock;
 
-use crate::shared::{self, HostPort, Port, Readiness, Scope, Spec};
+use zeroship_shared_server::{self as shared, HostPort, Port, Readiness, Scope, Spec};
 
 mod image;
 
-use image::{build, reference as image_ref};
+use image::reference as image;
 
 /// The port Redpanda's Kafka API listens on in the image.
 const KAFKA_PORT: u16 = 19092;
 
 /// The watchdog baked into the broker image.
-const WATCHDOG: &str = "/usr/local/bin/zeroship-watchdog";
+const WATCHDOG: &str = zeroship_shared_server::image::WATCHDOG;
 
 /// The line Redpanda logs once its Kafka API is up.
 const READY_MARKER: &str = "Successfully started Redpanda!";
@@ -78,9 +78,8 @@ pub fn broker() -> &'static Broker {
 /// # Errors
 /// When the image cannot be built.
 pub fn spec() -> Result<Spec, String> {
-    let _ = build()
-        .map_err(|error| format!("could not build the shared Redpanda image: {error}"))?;
-    let image = image_ref();
+    let image =
+        image().map_err(|error| format!("could not build the shared Redpanda image: {error}"))?;
     let args = vec![
         "rpk".to_owned(),
         "redpanda".to_owned(),

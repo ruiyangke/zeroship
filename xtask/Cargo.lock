@@ -3475,8 +3475,6 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "clap",
- "compio",
- "compio-postgres",
  "ctrlc",
  "nix",
  "proc-macro2",
@@ -3484,7 +3482,6 @@ dependencies = [
  "regex",
  "serde_json",
  "serde_yaml",
- "sha2 0.10.9",
  "syn 2.0.119",
  "tempfile",
  "testcontainers",
@@ -3552,21 +3549,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroship-shared-server"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "libc",
+ "serde_json",
+ "sha2 0.10.9",
+ "testcontainers",
+ "tokio",
+]
+
+[[package]]
 name = "zeroship-testkit"
 version = "0.1.0"
 dependencies = [
  "compio",
  "compio-postgres",
  "futures",
- "libc",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "testcontainers",
- "tokio",
  "toml",
  "url",
  "zeroship-id",
+ "zeroship-shared-server",
 ]
 
 [[package]]

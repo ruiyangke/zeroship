@@ -27,6 +27,8 @@
 # the real `zeroship` DB; the table is created in `public` and dropped after.
 set -euo pipefail
 
+# The default is the compose stack's PostgreSQL (deploy/compose, port 5440): a manual
+# load probe aimed at a development database, which no test or gate runs.
 DB_URL="${METERING_LOAD_DB:-postgres://postgres:zeroship@localhost:5440/zeroship_metering_load}"
 PSQL="${PSQL:-psql}"
 PGBENCH="${PGBENCH:-pgbench}"

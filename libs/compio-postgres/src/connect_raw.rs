@@ -4509,7 +4509,7 @@ mod tests {
     ///
     /// Two separate guards reject a channel-binding downgrade: the server not
     /// advertising the PLUS mechanism, and the TLS backend being unable to
-    /// export `tls-server-end-point`. `tests/tls_live.rs`'s
+    /// export `tls-server-end-point`. `tests/integration/tls_live.rs`'s
     /// `channel_binding_require_fails_without_tls` reaches this code, but its
     /// assertion is `contains("channel binding")` -- which BOTH refusals
     /// satisfy. Over plaintext the second guard fires too, so deleting the

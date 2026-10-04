@@ -7,9 +7,10 @@
 //! to check against (`pg_stat_activity` has no such column, `pg_settings`
 //! carries only the TLS versions).
 //!
-//! These run against whatever `PG_TEST_URL` names, so the EXPECTATION comes
-//! from the server's own version rather than being hardcoded. That is what
-//! lets one test body assert the fallback on 15/16 and the negotiation on 18.
+//! These run against whichever major the suite variant selects, so the
+//! EXPECTATION comes from the server's own version rather than being
+//! hardcoded. That is what lets one test body assert the fallback on 16 and the
+//! negotiation on 18.
 
 use crate::support;
 use support::{suite_tls, test_url};

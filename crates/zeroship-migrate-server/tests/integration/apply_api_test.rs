@@ -164,7 +164,7 @@ impl Authenticator for StaticAuthenticator {
 async fn admin_conn() -> Client {
     let (client, conn) = compio_postgres::connect(&dsn(), NoTls)
         .await
-        .expect("connect to zeroship_control_test on :5440");
+        .expect("connect to the migrated control database");
     compio::runtime::spawn(async move {
         let _ = conn.run().await;
     })
@@ -204,10 +204,11 @@ async fn assert_platform_schema_present(conn: &Client) {
     assert!(
         missing.is_empty(),
         "the target database has no platform schema - missing zeroship.{}.\n\
-         This target needs a database the PLATFORM migrations have been applied to; \
-         it no longer creates any table of its own.\n\
-         Run `tests/provision_test_backends.sh`, then:\n  \
-         cargo test -p zeroship-migrate-server",
+         This target needs a database the PLATFORM migrations have been applied to, \
+         and creates no table of its own. Its fixture server migrates from \
+         db/migrations-ts when it boots, so a server without these tables booted \
+         from a migration host that did not produce them: rebuild it with\n  \
+         cargo xtask test migrations",
         missing.join(", zeroship."),
     );
 }

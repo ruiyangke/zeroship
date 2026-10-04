@@ -4,9 +4,9 @@
 //! watchdog's once the run's last lease is gone. These cases measure that
 //! against real child processes: a child joins the broker recipe at a throwaway
 //! scope and exits, or is `SIGKILL`ed while the broker is still starting, and
-//! the broker must be removed either way; see `zeroship_testkit::lifetime`.
+//! the broker must be removed either way; see `zeroship_shared_server::lifetime`.
 
-use zeroship_testkit::lifetime;
+use zeroship_shared_server::lifetime;
 use zeroship_testkit::redpanda::Broker;
 
 /// The child test the broker's lifetime measurements run, by its full path in

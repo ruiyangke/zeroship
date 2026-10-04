@@ -60,7 +60,7 @@ async fn connect(url: &str) -> Result<Client, Error> {
 }
 
 fn tcp_endpoint(url: &str) -> (String, u16) {
-    let config: Config = url.parse().expect("parse PG_TEST_URL");
+    let config: Config = url.parse().expect("parse the suite DSN");
     let port = config.get_ports().first().copied().unwrap_or(5432);
 
     if let Some(Some(address)) = config.get_hostaddrs().first() {
@@ -71,7 +71,7 @@ fn tcp_endpoint(url: &str) -> (String, u16) {
         Some(Host::Tcp(host)) => (host.clone(), port),
         #[cfg(unix)]
         Some(Host::Unix(path)) => panic!(
-            "the live cancel_query_raw test requires a TCP PG_TEST_URL, got {}",
+            "the live cancel_query_raw test requires a TCP suite DSN, got {}",
             path.display()
         ),
         None => ("localhost".to_string(), port),

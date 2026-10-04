@@ -2,7 +2,7 @@
 //! AND that the platform's native `compio-postgres` driver applies a real IR
 //! envelope END-TO-END through the [`SqlSession`] seam.
 //!
-//! The flow, over a REAL Postgres on :5440:
+//! The flow, over a REAL PostgreSQL the suite's fixture starts:
 //!   1. open a live `compio_postgres::Client` and wrap it in [`CompioPgSession`]
 //!      (this crate's `driver::SqlSession` adapter);
 //!   2. author a `zeroship_migrate` IR envelope (`createTable` + `addColumn`) and run

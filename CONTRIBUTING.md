@@ -174,7 +174,7 @@ The native auth suite builds the platform migration host and runs the complete
 auth, authn, authz, mailer and gateway packages. Tests join the migrated
 platform server every test process of the worktree shares and own their SMTP
 and HTTP fixtures through Rust; Docker is required. No external test
-database URL or generated backend overlay is needed.
+database address is needed.
 
 ```bash
 cargo xtask test auth
@@ -189,11 +189,10 @@ the PostgreSQL servers and the Redpanda broker every test process shares:
 cargo xtask test billing
 ```
 
-The remaining system suites use their configured development backends:
+The compio-postgres suites start their own PostgreSQL server the same way:
 
 ```bash
-cargo xtask platform-db sweep   # reclaim the test databases no branch can ask
-                                # for. Dry run unless --apply; never FORCE.
+cargo nextest run -p compio-postgres
 ```
 
 ## Key invariants

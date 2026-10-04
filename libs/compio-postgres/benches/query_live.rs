@@ -43,8 +43,8 @@
 //! measure each in a separate process and leave the comparison to whoever read
 //! the numbers.
 //!
-//! `PG_TEST_URL` selects the server; absent, the test suites' default is used
-//! (`DEFAULT_TEST_URL` in `libs/compio-postgres/testkit`).
+//! The server is the one the suites dial, `compio_postgres_testkit::server`,
+//! started in Docker and shared with every test process of the worktree.
 //! Nothing here creates or drops schemas: the statement `SELECT 1` needs none,
 //! and a benchmark that mutates the database measures the mutation.
 
@@ -52,11 +52,10 @@ use std::hint::black_box;
 use std::time::Duration;
 
 use compio_postgres::{Client, Config, NoTls};
-use compio_postgres_testkit::{DEFAULT_TEST_URL, TestEnvKey, get};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 fn test_url() -> String {
-    get(TestEnvKey::PgTestUrl).unwrap_or_else(|| DEFAULT_TEST_URL.to_owned())
+    compio_postgres_testkit::server::server().url()
 }
 
 /// What a case turns on. Each isolates one feature's per-operation cost
@@ -90,7 +89,7 @@ impl Mode {
     }
 
     fn config(self, url: &str) -> Config {
-        let mut config: Config = url.parse().expect("PG_TEST_URL is not a valid DSN");
+        let mut config: Config = url.parse().expect("the fixture server URL is a valid DSN");
         match self {
             // The observer is installed on the Client after connecting, not
             // configured here, so its case leaves Config at the default.

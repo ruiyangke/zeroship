@@ -11,8 +11,6 @@
 //! `compio-postgres` is a standalone, publishable driver with no zeroship
 //! dependency, so this helper is local rather than shared.
 
-pub use compio_postgres_testkit as env;
-
 /// Longest identifier `PostgreSQL` stores (`NAMEDATALEN - 1`).
 const MAX_POSTGRES_IDENTIFIER_LEN: usize = 63;
 
@@ -73,9 +71,9 @@ pub fn test_object_name(logical: &str) -> String {
 /// Hide the password in a `postgres://user:pass@host/db` DSN.
 ///
 /// The whole point of the message below is that it prints the address that was
-/// actually dialled, and the default DSN carries a password. Printing it into a
-/// CI log to save a developer one guess is a bad trade, and `PG_TEST_URL` can
-/// carry a real credential.
+/// actually dialled, and every DSN the fixtures hand out carries a password.
+/// Printing one into a CI log to save a developer one guess is a bad habit, and
+/// a DSN a test builds for its own case can carry any credential.
 ///
 /// Only the userinfo between `://` and the LAST `@` before the first `/` of the
 /// authority is touched, so a password containing `@` cannot leak a tail: the
@@ -344,27 +342,27 @@ pub fn postgres_unreachable(dsn: &str, error: &(dyn std::error::Error + 'static)
 /// server that is fine:
 ///
 /// * `PostgreSQL` replied ([`server_answered`]): the server is up and objected,
-///   and its SQLSTATE says to what. Provisioning cannot help.
+///   and its SQLSTATE says to what. A fresh server cannot help.
 /// * A bound expired ([`timed_out`]): nothing says whether a server answered,
 ///   so the report asks for the check that tells a missing server from a
 ///   loaded machine instead of prescribing either remedy.
 /// * Something answered, unintelligibly ([`peer_answered_unintelligibly`]):
 ///   the address is served, by something the driver cannot talk to or behind
-///   TLS material it does not trust. Provisioning cannot help.
+///   TLS material it does not trust. A fresh server cannot help.
 /// * Refused as invalid ([`refused_as_invalid`]): a peer sent a message the
 ///   protocol does not define, or the client side refused an argument; the
 ///   kind cannot say which, and the report does not guess. Neither is a
 ///   missing server.
 /// * Nothing answered ([`nothing_answered`]): no reply came from the address
-///   dialled, so provisioning is the remedy.
+///   dialled. The fixture started a server there, so that server is gone and
+///   a fresh one is the remedy.
 /// * None of those: the attempt stopped on the client side - a configuration
 ///   the driver will not use, a TLS setting its connector cannot honour, an
 ///   authentication requirement, or a name that does not resolve. The DSN or
 ///   the code that built the `Config` is what needs fixing.
 ///
-/// The remedies name where the DSN came from and what stands its server up,
-/// which differ under `suite-over-tls`: that mode reads the TLS fixture's
-/// descriptor instead of `PG_TEST_URL`.
+/// The remedies name the fixture the DSN came from, which differs under
+/// `suite-over-tls`: that mode dials the TLS fixture's server instead.
 #[allow(
     clippy::too_many_lines,
     reason = "one message per cause, kept side by side so their remedies can be compared"
@@ -382,7 +380,7 @@ pub fn connection_failure_report(dsn: &str, error: &(dyn std::error::Error + 'st
              \x20 server:  {cause}\n\
              \n\
              The server ANSWERED, so it is running and reachable and this is\n\
-             not a provisioning problem. The SQLSTATE above says what it\n\
+             not a missing server. The SQLSTATE above says what it\n\
              objected to. `53300` is the `max_connections` ceiling: something\n\
              in this process is holding connections open across tests - see\n\
              `libs/compio-postgres/src/release.rs` - and raising the ceiling\n\
@@ -404,9 +402,9 @@ pub fn connection_failure_report(dsn: &str, error: &(dyn std::error::Error + 'st
              A timeout does not say whether anything answered: a server that\n\
              is down behind a port that drops packets, and a server that is up\n\
              but did not finish the handshake inside the bound named above,\n\
-             both end here. If {HEALTH_CHECK} shows the server\n\
-             up, the server is fine and the bound expired on a machine too\n\
-             loaded to meet it.\n\
+             both end here. If the container {SERVER_SOURCE} started is up\n\
+             (`docker ps --filter label=zeroship.testkit.dir`), the server is\n\
+             fine and the bound expired on a machine too loaded to meet it.\n\
              \n\
              There is no environment variable that makes this a skip. A database\n\
              this suite cannot reach in time is a failed run, not a green one."
@@ -422,14 +420,13 @@ pub fn connection_failure_report(dsn: &str, error: &(dyn std::error::Error + 'st
              \x20 dialled: {dialled}\n\
              \x20 error:   {cause}\n\
              \n\
-             A reply arrived, so the address is served and provisioning will not\n\
-             help. The driver refused what the reply carried: a frame too large\n\
-             or malformed to be PostgreSQL's, an unknown message tag, or a TLS\n\
-             handshake that failed on the peer's bytes. Check what listens there\n\
-             - another service on this port speaks another protocol - and, for a\n\
-             TLS failure, whether the server's certificate is one this checkout\n\
-             trusts: libs/compio-postgres/tests/tls_live_setup.sh run from\n\
-             another checkout regenerates the CA its servers share.\n\
+             A reply arrived, so the address is served and a fresh server will\n\
+             not help. The driver refused what the reply carried: a frame too\n\
+             large or malformed to be PostgreSQL's, an unknown message tag, or a\n\
+             TLS handshake that failed on the peer's bytes. Check what listens\n\
+             there - another service on this port speaks another protocol - and,\n\
+             for a TLS failure, whether the certificate the server presents is\n\
+             signed by the CA the DSN trusts.\n\
              \n\
              There is no environment variable that makes this a skip. A database\n\
              this suite cannot use is a failed run, not a green one."
@@ -449,7 +446,7 @@ pub fn connection_failure_report(dsn: &str, error: &(dyn std::error::Error + 'st
              define, or the client side may have refused an argument of this\n\
              attempt - an over-long Unix socket path, a name that resolved to no\n\
              address, a link-local address without a zone. The error names\n\
-             which. Neither is a missing server, so provisioning will not help:\n\
+             which. Neither is a missing server, so a fresh server will not help:\n\
              check what listens at the address, or fix the DSN ({DSN_SOURCE}).\n\
              \n\
              There is no environment variable that makes this a skip. A database\n\
@@ -465,10 +462,11 @@ pub fn connection_failure_report(dsn: &str, error: &(dyn std::error::Error + 'st
              \x20 dialled: {dialled}\n\
              \x20 error:   {cause}\n\
              \n\
-             Nothing replied at that address, so provision it and re-run:\n\
-             \x20 {PROVISION_COMMAND}\n\
-             \n\
-             {PROVISION_NOTE}\n\
+             Nothing replied at that address. {SERVER_SOURCE} handed it out\n\
+             for a server it started in Docker, so that server is gone: re-run,\n\
+             and the fixture boots a fresh one. A server that stops answering\n\
+             mid-run is a container that exited or was removed; its log names\n\
+             why (`docker ps -a --filter label=zeroship.testkit.dir`).\n\
              \n\
              There is no environment variable that makes this a skip. A database\n\
              this suite cannot reach is a failed run, not a green one."
@@ -482,7 +480,7 @@ pub fn connection_failure_report(dsn: &str, error: &(dyn std::error::Error + 'st
          \x20 dialled: {dialled}\n\
          \x20 error:   {cause}\n\
          \n\
-         Nothing in the error says a server is missing, so provisioning one\n\
+         Nothing in the error says a server is missing, so a fresh server\n\
          will not help. The error names what stopped the attempt: a\n\
          configuration the driver will not use, a TLS setting its connector\n\
          cannot honour, an authentication requirement the server did not meet,\n\
@@ -494,48 +492,32 @@ pub fn connection_failure_report(dsn: &str, error: &(dyn std::error::Error + 'st
     )
 }
 
-/// Where the DSN a failing test dialled came from.
+/// The fixture the DSN a failing test dialled came from.
 #[cfg(not(feature = "suite-over-tls"))]
-const DSN_SOURCE: &str =
-    "PG_TEST_URL, or `DEFAULT_TEST_URL` in libs/compio-postgres/testkit";
+const SERVER_SOURCE: &str = "compio_postgres_testkit::server";
 #[cfg(feature = "suite-over-tls")]
-const DSN_SOURCE: &str = "libs/compio-postgres/tests/data/live/tls_live.conf, which \
-                          suite-over-tls reads in place of PG_TEST_URL";
+const SERVER_SOURCE: &str = "compio_postgres_testkit::tls";
 
-/// The command that stands the dialled server up.
+/// Where the DSN a failing test dialled is built.
 #[cfg(not(feature = "suite-over-tls"))]
-const PROVISION_COMMAND: &str = "tests/provision_test_backends.sh";
+const DSN_SOURCE: &str = "compio_postgres_testkit::server::Server::url";
 #[cfg(feature = "suite-over-tls")]
-const PROVISION_COMMAND: &str = "libs/compio-postgres/tests/tls_live_setup.sh";
+const DSN_SOURCE: &str = "`test_url` in tests/support, from compio_postgres_testkit::tls";
 
-/// What that command does, and what to know before running it.
-#[cfg(not(feature = "suite-over-tls"))]
-const PROVISION_NOTE: &str = "That brings up the `postgres` service from\n\
-                              deploy/compose/docker-compose.yml and waits for it to be healthy.\n\
-                              Point the tests somewhere else with PG_TEST_URL.";
-#[cfg(feature = "suite-over-tls")]
-const PROVISION_NOTE: &str = "That brings up the TLS servers and writes tls_live.conf, which\n\
-                              suite-over-tls reads in place of PG_TEST_URL. Read its header\n\
-                              first: it regenerates a CA that other checkouts' TLS fixtures\n\
-                              share, so running it from a second checkout breaks the first.";
-
-/// How to tell whether the dialled server is up.
-#[cfg(not(feature = "suite-over-tls"))]
-const HEALTH_CHECK: &str = "`tests/provision_test_backends.sh --check`";
-#[cfg(feature = "suite-over-tls")]
-const HEALTH_CHECK: &str = "`docker ps` (the servers tls_live_setup.sh starts)";
-
-/// `PG_TEST_URL`, or `env::DEFAULT_TEST_URL` when it is unset.
+/// The URL of the server this process's fixture started.
 ///
-/// Every test target that honours `PG_TEST_URL` resolves its server through
-/// [`test_url`] or [`plaintext_url`], both of which read this, so the
-/// coordinates cannot drift apart between targets.
-///
-/// Absent is NOT "do not run" - see `TestEnvKey::PgTestUrl`. A target that
-/// cannot reach this server must fail, not skip.
+/// Every test target resolves its server through [`test_url`] or
+/// [`plaintext_url`], both of which read this, so the coordinates cannot drift
+/// apart between targets. A target that cannot reach this server fails; there
+/// is no address that points it anywhere else. `suite-on-postgres-18` selects
+/// the fixture's `PostgreSQL` 18 server.
 #[cfg(not(feature = "suite-over-tls"))]
 fn plaintext_test_url() -> String {
-    env::get(env::TestEnvKey::PgTestUrl).unwrap_or_else(|| env::DEFAULT_TEST_URL.to_string())
+    #[cfg(not(feature = "suite-on-postgres-18"))]
+    let server = compio_postgres_testkit::server::server();
+    #[cfg(feature = "suite-on-postgres-18")]
+    let server = compio_postgres_testkit::server::server_on_postgres_18();
+    server.url()
 }
 
 #[cfg(not(feature = "suite-over-tls"))]
@@ -543,38 +525,33 @@ pub fn test_url() -> String {
     suite_test_url(plaintext_test_url())
 }
 
-/// Under `--features suite-over-tls` the whole suite runs against the
-/// encrypted server instead, and `PG_TEST_URL` is deliberately ignored.
+/// Under `--features suite-over-tls` the whole suite runs against the TLS
+/// fixture's `tls` server instead, or its `PostgreSQL` 18 `directtls` server
+/// under `suite-on-postgres-18` as well.
 ///
-/// The point of the mode is to run the EXISTING tests over TLS, so the DSN
-/// has to name a server this crate's own setup script configured for both
-/// jobs - certificates AND logical decoding / prepared transactions. Honouring
-/// `PG_TEST_URL` here would silently run the mode against a plaintext server
-/// and report the transports as identical without having tested one of them.
+/// The point of the mode is to run the EXISTING tests over TLS, so the DSN has
+/// to name a server the fixture configured for both jobs - certificates AND
+/// logical decoding / prepared transactions. Pointing the mode at a plaintext
+/// server would report the transports as identical without having tested one
+/// of them.
 #[cfg(feature = "suite-over-tls")]
 pub fn test_url() -> String {
-    let descriptor = tls_descriptor();
-    let ca = descriptor_field(&descriptor, "ca");
-    // URL form, NOT the descriptor's key=value form. Callers append their own
+    let servers = compio_postgres_testkit::tls::servers();
+    let server = suite_tls_server();
+    // URL form, NOT the fixture's key=value form. Callers append their own
     // parameters (`schema_scoped_url` adds `options=-c search_path=...`) and
     // they choose `?` or `&` by looking for a `?`. A key=value DSN has no `?`,
     // so every one of those appends landed INSIDE the last value: the
     // sslrootcert path became `/path/ca.crt?options=-c%20search_path%3D...`
     // and 20 tests failed with "cannot read PEM: No such file or directory".
-    let base = descriptor_field(&descriptor, "tls_url");
-    let field = |key: &str| {
-        base.split_whitespace()
-            .find_map(|pair| pair.strip_prefix(&format!("{key}=")))
-            .unwrap_or_else(|| panic!("the TLS descriptor's tls_url has no `{key}`"))
-            .to_string()
-    };
     suite_test_url(format!(
-        "postgres://{}:{}@{}:{}/{}?sslmode=verify-full&sslrootcert={ca}",
-        field("user"),
-        field("password"),
-        field("host"),
-        field("port"),
-        field("dbname"),
+        "postgres://{}:{}@{}:{}/{}?sslmode=verify-full&sslrootcert={}",
+        keyword(server, "user"),
+        keyword(server, "password"),
+        keyword(server, "host"),
+        keyword(server, "port"),
+        keyword(server, "dbname"),
+        servers.ca,
     ))
 }
 
@@ -603,33 +580,34 @@ pub fn suite_tls() -> compio_postgres::NoTls {
 pub fn suite_tls() -> compio_postgres::MakeRustlsConnect {
     static TLS: std::sync::OnceLock<compio_postgres::MakeRustlsConnect> =
         std::sync::OnceLock::new();
-    TLS.get_or_init(|| {
-        let config: compio_postgres::Config = test_url()
-            .parse()
-            .expect("the suite-over-tls DSN did not parse");
-        compio_postgres::MakeRustlsConnect::from_config(&config)
-            .expect("could not build the suite TLS connector")
-    })
-    .clone()
+    TLS.get_or_init(|| suite_tls_for(&test_url())).clone()
+}
+
+/// The transport [`suite_tls`] builds, for a DSN the caller already holds.
+///
+/// [`suite_tls`] reads [`test_url`], which joins the fixture's servers on
+/// first use. A process that must not open anything of its own beyond the
+/// connections it measures - the descriptor probe's child, handed its DSN by
+/// its parent - builds the transport from that DSN instead.
+#[cfg(not(feature = "suite-over-tls"))]
+pub fn suite_tls_for(_url: &str) -> compio_postgres::NoTls {
+    compio_postgres::NoTls
 }
 
 #[cfg(feature = "suite-over-tls")]
-fn tls_descriptor() -> String {
-    const DESCRIPTOR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/live/tls_live.conf");
-    std::fs::read_to_string(DESCRIPTOR).unwrap_or_else(|error| {
-        panic!(
-            "suite-over-tls needs the TLS servers. Run \
-             libs/compio-postgres/tests/tls_live_setup.sh first ({DESCRIPTOR}: {error})"
-        )
-    })
+pub fn suite_tls_for(url: &str) -> compio_postgres::MakeRustlsConnect {
+    let config: compio_postgres::Config =
+        url.parse().expect("the suite-over-tls DSN did not parse");
+    compio_postgres::MakeRustlsConnect::from_config(&config)
+        .expect("could not build the suite TLS connector")
 }
 
+/// One `key=value` of a fixture DSN.
 #[cfg(feature = "suite-over-tls")]
-fn descriptor_field(descriptor: &str, key: &str) -> String {
-    descriptor
-        .lines()
-        .find_map(|line| line.strip_prefix(&format!("{key}=")))
-        .unwrap_or_else(|| panic!("the TLS descriptor has no `{key}` line"))
+fn keyword(dsn: &str, key: &str) -> String {
+    dsn.split_whitespace()
+        .find_map(|pair| pair.strip_prefix(&format!("{key}=")))
+        .unwrap_or_else(|| panic!("the TLS fixture's DSN {dsn:?} has no `{key}`"))
         .to_string()
 }
 
@@ -861,7 +839,18 @@ pub fn replication_config(application_name: &str) -> compio_postgres::Config {
 /// [`test_url`] and fail to connect at all.
 #[cfg(feature = "suite-over-tls")]
 pub fn plaintext_url() -> String {
-    descriptor_field(&tls_descriptor(), "tls_url")
+    suite_tls_server().to_owned()
+}
+
+/// The TLS fixture server the suite runs on, in its `key=value` form.
+#[cfg(feature = "suite-over-tls")]
+fn suite_tls_server() -> &'static str {
+    let servers = compio_postgres_testkit::tls::servers();
+    if cfg!(feature = "suite-on-postgres-18") {
+        &servers.directtls_url
+    } else {
+        &servers.tls_url
+    }
 }
 
 #[cfg(not(feature = "suite-over-tls"))]
@@ -909,35 +898,104 @@ pub fn with_password(dsn: &str, password: &str) -> Option<String> {
 /// Distinct from [`plaintext_url`], which names the same encrypted server
 /// without asking for encryption - fine for an unencrypted client, useless to
 /// a test whose subject is what happens when the server answers `N` to
-/// `SSLRequest`. Under `--features suite-over-tls` that is the descriptor's
-/// `plain_url` (the setup script's `plain` server, `ssl` off), and outside it
-/// the ordinary test server, which has no TLS either.
+/// `SSLRequest`. Under `--features suite-over-tls` that is the TLS fixture's
+/// `plain` server (`ssl` off), and outside it the ordinary test server, which
+/// has no TLS either.
 ///
 /// `sslmode_require_fails_closed_over_a_plaintext_server` needs this or its
 /// name stops being true: pointed at a TLS-capable server, `sslmode=require`
 /// is SATISFIED and the test measures nothing.
 #[cfg(feature = "suite-over-tls")]
 pub fn tls_disabled_url() -> String {
-    let base = descriptor_field(&tls_descriptor(), "plain_url");
-    let field = |key: &str| {
-        base.split_whitespace()
-            .find_map(|pair| pair.strip_prefix(&format!("{key}=")))
-            .unwrap_or_else(|| panic!("the TLS descriptor's plain_url has no `{key}`"))
-            .to_string()
-    };
+    let base = &compio_postgres_testkit::tls::servers().plain_url;
     format!(
         "postgres://{}:{}@{}:{}/{}",
-        field("user"),
-        field("password"),
-        field("host"),
-        field("port"),
-        field("dbname"),
+        keyword(base, "user"),
+        keyword(base, "password"),
+        keyword(base, "host"),
+        keyword(base, "port"),
+        keyword(base, "dbname"),
     )
 }
 
 #[cfg(not(feature = "suite-over-tls"))]
 pub fn tls_disabled_url() -> String {
     test_url()
+}
+
+/// Walsender startup options that stream every change of every transaction
+/// the moment it is decoded.
+///
+/// Without them, whether a transaction reaches a streaming slot in chunks is
+/// decided by memory pressure in the walsender's reorder buffer. That buffer
+/// holds every transaction in the WAL the walsender reads - every concurrent
+/// test's included - and on each pressure point it streams the largest
+/// streamable transaction or spills the largest one to disk. A test that sizes
+/// its transaction past `logical_decoding_work_mem` therefore sees its changes
+/// streamed, spilled or both depending on what else the server was writing: a
+/// subtransaction's rows spilled rather than streamed are discarded at its
+/// `ROLLBACK TO SAVEPOINT` without ever reaching the stream, while its abort
+/// still does. The developer setting `debug_logical_replication_streaming`
+/// (user context on PostgreSQL 16 and later) takes that choice away from
+/// memory, and a walsender takes it, like any setting, only from its startup
+/// options: a replication connection never runs a `SET`.
+pub const STREAM_EVERY_CHANGE: &str = "-c debug_logical_replication_streaming=immediate";
+
+/// Walsender startup options under which no transaction is streamed: buffered
+/// decoding with a work-memory budget no test reaches, so every transaction
+/// arrives whole at its commit or prepare whatever else the server is decoding.
+pub const STREAM_NOTHING: &str =
+    "-c debug_logical_replication_streaming=buffered -c logical_decoding_work_mem=1GB";
+
+/// Which frames of a logical stream belong to one transaction, and where that
+/// transaction ends.
+///
+/// `PostgreSQL` 16 streams a large concurrent transaction's
+/// `StreamStart`/`StreamStop`/`StreamCommit` framing to every slot whose stream
+/// is reading that LSN, including slots whose publication filters out every row
+/// it carries, so a reader scoped to its own transaction has to tell its frames
+/// from a neighbour's. Inside a chunk the `StreamStart`'s xid says whose frames
+/// follow. `StreamCommit` and `StreamAbort` arrive OUTSIDE a chunk, after its
+/// `StreamStop`, so a neighbour's chunk can sit between this transaction's last
+/// chunk and its end: both carry their own xid, and ownership is taken from it
+/// rather than from the chunk that happened to come before. A non-streamed
+/// transaction arrives whole between its `Begin` and its `Commit`, which carries
+/// no xid, so the `Begin` decides.
+pub struct StreamOwnership {
+    xid: u32,
+    ours: bool,
+}
+
+impl StreamOwnership {
+    /// Frames of the transaction `xid`.
+    pub const fn new(xid: u32) -> Self {
+        Self { xid, ours: false }
+    }
+
+    /// Whether `message` belongs to the transaction, and whether it ends it:
+    /// `(keep, terminal)`.
+    pub fn classify(
+        &mut self,
+        message: &compio_postgres::replication::pgoutput::PgOutputMessage,
+    ) -> (bool, bool) {
+        use compio_postgres::replication::pgoutput::PgOutputMessage;
+        match message {
+            PgOutputMessage::Begin { xid, .. } | PgOutputMessage::StreamStart { xid, .. } => {
+                self.ours = *xid == self.xid;
+                (self.ours, false)
+            }
+            PgOutputMessage::Commit { .. } => (self.ours, self.ours),
+            PgOutputMessage::StreamCommit { xid, .. } => {
+                let belongs = *xid == self.xid;
+                (belongs, belongs)
+            }
+            PgOutputMessage::StreamAbort { xid, subxid, .. } => {
+                let belongs = *xid == self.xid || *subxid == self.xid;
+                (belongs, belongs && xid == subxid)
+            }
+            _ => (self.ours, false),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1082,8 +1140,8 @@ mod tests {
     #[test]
     fn redaction_removes_the_password_and_keeps_everything_else() {
         assert_eq!(
-            redact_dsn("postgres://postgres:zeroship@localhost:5440/zeroship"),
-            "postgres://postgres:***@localhost:5440/zeroship"
+            redact_dsn("postgres://postgres:zeroship@localhost:5432/zeroship"),
+            "postgres://postgres:***@localhost:5432/zeroship"
         );
     }
 
@@ -1092,12 +1150,12 @@ mod tests {
     #[test]
     fn redaction_leaves_a_dsn_without_a_password_alone() {
         assert_eq!(
-            redact_dsn("postgres://localhost:5440/zeroship"),
-            "postgres://localhost:5440/zeroship"
+            redact_dsn("postgres://localhost:5432/zeroship"),
+            "postgres://localhost:5432/zeroship"
         );
         assert_eq!(
-            redact_dsn("postgres://postgres@localhost:5440/zeroship"),
-            "postgres://postgres@localhost:5440/zeroship"
+            redact_dsn("postgres://postgres@localhost:5432/zeroship"),
+            "postgres://postgres@localhost:5432/zeroship"
         );
     }
 
@@ -1106,8 +1164,8 @@ mod tests {
     #[test]
     fn redaction_handles_an_at_sign_inside_the_password() {
         assert_eq!(
-            redact_dsn("postgres://user:p@ss@localhost:5440/db"),
-            "postgres://user:***@localhost:5440/db"
+            redact_dsn("postgres://user:p@ss@localhost:5432/db"),
+            "postgres://user:***@localhost:5432/db"
         );
     }
 
@@ -1143,8 +1201,8 @@ mod tests {
     #[test]
     fn a_password_containing_an_at_sign_is_replaced_whole() {
         assert_eq!(
-            with_password("postgres://user:p@ss@localhost:5440/db", "wrong").as_deref(),
-            Some("postgres://user:wrong@localhost:5440/db")
+            with_password("postgres://user:p@ss@localhost:5432/db", "wrong").as_deref(),
+            Some("postgres://user:wrong@localhost:5432/db")
         );
     }
 
@@ -1157,7 +1215,7 @@ mod tests {
     fn a_dsn_without_a_password_is_refused_rather_than_returned_unchanged() {
         assert_eq!(with_password("postgres://user@localhost/db", "wrong"), None);
         assert_eq!(
-            with_password("host=localhost port=5440 user=postgres", "wrong"),
+            with_password("host=localhost port=5432 user=postgres", "wrong"),
             None
         );
     }
@@ -1166,11 +1224,11 @@ mod tests {
     /// produced by a real driver call rather than by a hand-built error, so
     /// the classification is measured on the chains the drivers return.
     ///
-    /// Each case that must NOT prescribe provisioning sits beside one that
+    /// Each case that must NOT prescribe a fresh server sits beside one that
     /// must, so a classifier that answers the same for everything fails here.
     mod connection_failure_report {
         use super::super::{
-            PROVISION_COMMAND, connection_failure_report, error_chain, server_answered,
+            SERVER_SOURCE, connection_failure_report, error_chain, server_answered,
         };
         use std::io::{Read, Write};
         use std::net::TcpStream;
@@ -1289,37 +1347,37 @@ mod tests {
             }
         }
 
-        /// The words that prescribe provisioning. The timeout report names the
-        /// provisioning script too, as the way to CHECK the server, so the
-        /// command alone does not say whether provisioning was prescribed.
-        const PRESCRIPTION: &str = "provision it and re-run";
+        /// The words that prescribe a fresh server. The timeout report names the
+        /// fixture too, as the way to CHECK the server, so the fixture's name
+        /// alone does not say whether a fresh server was prescribed.
+        const PRESCRIPTION: &str = "so that server is gone";
 
-        fn assert_classified(report: &str, heading: &str, provisions: bool) {
+        fn assert_classified(report: &str, heading: &str, fresh_server: bool) {
             assert!(
                 report.starts_with(heading),
                 "expected a report beginning {heading:?}, got:\n{report}"
             );
             assert_eq!(
                 report.contains(PRESCRIPTION),
-                provisions,
-                "provisioning was {} this report:\n{report}",
-                if provisions {
+                fresh_server,
+                "a fresh server was {} this report:\n{report}",
+                if fresh_server {
                     "not prescribed by"
                 } else {
                     "prescribed by"
                 }
             );
-            if provisions {
+            if fresh_server {
                 assert!(
-                    report.contains(PROVISION_COMMAND),
-                    "the report prescribed provisioning without naming {PROVISION_COMMAND}:\n{report}"
+                    report.contains(SERVER_SOURCE),
+                    "the report prescribed a fresh server without naming {SERVER_SOURCE}:\n{report}"
                 );
             }
         }
 
-        /// A dial nothing accepts: provisioning is the remedy.
+        /// A dial nothing accepts: a fresh server is the remedy.
         #[compio::test]
-        async fn a_dial_nothing_answers_prescribes_provisioning() {
+        async fn a_dial_nothing_answers_prescribes_a_fresh_server() {
             let (_held, port) = refusing_port();
             let dsn = format!("postgres://u:p@127.0.0.1:{port}/d?sslmode=disable");
             let error = dial(&dsn).await;
@@ -1335,7 +1393,7 @@ mod tests {
         /// A peer that hangs up before sending a byte produced no reply
         /// either, so it is reported the same way as a refused dial.
         #[compio::test]
-        async fn a_peer_that_hangs_up_before_replying_prescribes_provisioning() {
+        async fn a_peer_that_hangs_up_before_replying_prescribes_a_fresh_server() {
             let (port, peer) = scripted_peer(|mut stream| read_startup(&mut stream));
             let dsn = format!("postgres://u@127.0.0.1:{port}/d?sslmode=disable");
             let error = dial(&dsn).await;
@@ -1393,7 +1451,7 @@ mod tests {
         /// An argument the operating system refuses before anything is dialled:
         /// a Unix socket path past `sun_path`. The same kind as the unknown tag
         /// above, and this time nothing answered - so a report that claimed a
-        /// peer answered, or prescribed provisioning, would be wrong here.
+        /// peer answered, or prescribed a fresh server, would be wrong here.
         #[cfg(unix)]
         #[compio::test]
         async fn an_argument_the_client_side_refuses_is_not_reported_as_an_answer() {
@@ -1444,7 +1502,7 @@ mod tests {
         /// A real refusal by the driver after it reached a peer: the DSN
         /// demands TLS and the connector cannot provide it.
         #[compio::test]
-        async fn a_refusal_by_the_driver_itself_prescribes_no_provisioning() {
+        async fn a_refusal_by_the_driver_itself_prescribes_no_fresh_server() {
             let (port, peer) = scripted_peer(hold);
             let dsn = format!("postgres://u@127.0.0.1:{port}/d?sslmode=require");
             let error = dial(&dsn).await;
@@ -1466,7 +1524,7 @@ mod tests {
         /// TCP handshake into its backlog and nothing ever replies, so the pool
         /// warm-up bound expires every time. That is also the shape a loaded
         /// machine produces against a healthy server - a pool bound expiring
-        /// mid-handshake - so "unreachable", with the provisioning remedy,
+        /// mid-handshake - so "unreachable", with the fresh-server remedy,
         /// would be the wrong diagnosis for it.
         #[compio::test]
         async fn an_expired_bound_is_reported_as_a_timeout_not_a_missing_server() {
@@ -1571,6 +1629,122 @@ mod tests {
                 error_chain(&ours).contains("SQLSTATE 28P01"),
                 "the refusal's SQLSTATE was not rendered: {}",
                 error_chain(&ours)
+            );
+        }
+    }
+
+    /// The frames [`super::super::StreamOwnership`] keeps and the frame it ends
+    /// on, over the shapes a live stream delivers when two streamed
+    /// transactions run at once.
+    mod stream_ownership {
+        use super::super::StreamOwnership;
+        use compio_postgres::replication::pgoutput::PgOutputMessage;
+
+        fn start(xid: u32) -> PgOutputMessage {
+            PgOutputMessage::StreamStart {
+                xid,
+                first_segment: false,
+            }
+        }
+
+        fn commit(xid: u32) -> PgOutputMessage {
+            PgOutputMessage::StreamCommit {
+                xid,
+                flags: 0,
+                commit_lsn: 0,
+                end_lsn: 0,
+                commit_timestamp: 0,
+            }
+        }
+
+        fn abort(xid: u32, subxid: u32) -> PgOutputMessage {
+            PgOutputMessage::StreamAbort {
+                xid,
+                subxid,
+                abort_lsn: None,
+                abort_timestamp: None,
+            }
+        }
+
+        fn classify_all(xid: u32, frames: &[PgOutputMessage]) -> Vec<(bool, bool)> {
+            let mut ownership = StreamOwnership::new(xid);
+            frames
+                .iter()
+                .map(|frame| ownership.classify(frame))
+                .collect()
+        }
+
+        /// The order a live walsender delivered: this transaction's last
+        /// chunk, a neighbour's chunk, then this transaction's subtransaction
+        /// abort and its commit, both outside any chunk. A reader that took
+        /// the commit's ownership from the chunk before it read past its own
+        /// end and waited for a frame that had already arrived.
+        #[test]
+        fn a_commit_after_a_neighbours_chunk_still_ends_the_transaction() {
+            let frames = [
+                start(1668),
+                PgOutputMessage::StreamStop,
+                start(1669),
+                PgOutputMessage::StreamStop,
+                abort(1668, 1670),
+                commit(1668),
+            ];
+            assert_eq!(
+                classify_all(1668, &frames),
+                [
+                    (true, false),
+                    (true, false),
+                    (false, false),
+                    (false, false),
+                    (true, false),
+                    (true, true),
+                ]
+            );
+        }
+
+        /// The rejection control: a neighbour's commit and abort arriving
+        /// straight after one of this transaction's chunks are neither kept
+        /// nor taken as this transaction's end, while its own whole-transaction
+        /// abort is.
+        #[test]
+        fn a_neighbours_end_after_our_chunk_is_not_ours() {
+            let frames = [
+                start(1668),
+                PgOutputMessage::StreamStop,
+                commit(1669),
+                abort(1669, 1669),
+                abort(1668, 1668),
+            ];
+            assert_eq!(
+                classify_all(1668, &frames),
+                [
+                    (true, false),
+                    (true, false),
+                    (false, false),
+                    (false, false),
+                    (true, true),
+                ]
+            );
+        }
+
+        /// A non-streamed transaction arrives whole between its `Begin` and a
+        /// `Commit` that carries no xid, so the `Begin` decides.
+        #[test]
+        fn a_non_streamed_transaction_is_owned_by_its_begin() {
+            let begin = |xid| PgOutputMessage::Begin {
+                final_lsn: 0,
+                commit_timestamp: 0,
+                xid,
+            };
+            let done = PgOutputMessage::Commit {
+                flags: 0,
+                commit_lsn: 0,
+                end_lsn: 0,
+                commit_timestamp: 0,
+            };
+            assert_eq!(
+                classify_all(1668, &[begin(1669), done.clone(), begin(1668), done]),
+                [(false, false), (false, false), (true, false), (true, true)]
             );
         }
     }

@@ -6,13 +6,12 @@
 //! moves. Consumers reach this crate through `[dev-dependencies]`, so nothing
 //! here touches a shipped binary.
 //!
-//! - [`fingerprint`] hashes the platform migration corpus a working tree or a
-//!   git tree would apply.
-//! - [`shared`] elects one migrated server across every test process of a
-//!   worktree and leases it, driving the daemon through `testcontainers::bollard`.
-//! - [`lifetime`] measures that a shared-server fixture's container is removed
-//!   once the process holding it exits or is killed while it starts.
-//! - [`image`] builds a stock image with the shared-server watchdog on top.
+//! The lease protocol every server below is shared through, the watchdog image
+//! builder and the lifetime measurements live in `zeroship-shared-server`, which
+//! names no database driver.
+//!
+//! - [`fingerprint`] hashes the platform migration corpus a working tree would
+//!   apply.
 //! - [`postgres`] is the platform and bare servers every test process of a
 //!   worktree shares, and the case databases cloned from them.
 //! - [`redpanda`] is the broker every stream test process of a worktree shares.
@@ -29,8 +28,6 @@
 //!   run, refusing when one is absent or older than its build record.
 
 pub mod fingerprint;
-pub mod image;
-pub mod lifetime;
 pub mod mysql;
 pub mod nested_cargo;
 pub mod prebuilt;
@@ -40,6 +37,5 @@ pub mod redpanda;
 pub mod redis;
 pub mod s3;
 pub mod session_keys;
-pub mod shared;
 pub mod tenant;
 pub mod tenant_cluster;

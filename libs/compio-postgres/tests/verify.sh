@@ -43,11 +43,9 @@ set -uo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$repo_root"
 
-# PG_TEST_URL reaches cargo only if the caller exported it; unset, the suites
-# dial DEFAULT_TEST_URL in libs/compio-postgres/testkit, the
-# server tests/provision_test_backends.sh provisions. No default is set here,
-# so this script cannot name a different server from the suites it runs.
-tls_descriptor="libs/compio-postgres/tests/data/live/tls_live.conf"
+# Every mode dials the servers compio_postgres_testkit starts in Docker for
+# it, so this script names no server and cannot point a mode at a different one
+# from the suites it runs.
 failures=0
 
 # Count the test binaries and tests cargo says a configuration HAS, without
@@ -111,22 +109,14 @@ run_mode() {
 }
 
 echo "compio-postgres verification matrix"
-echo "server: ${PG_TEST_URL:-PG_TEST_URL unset, so DEFAULT_TEST_URL in libs/compio-postgres/testkit}"
+echo "servers: compio_postgres_testkit::{server, tls, unix}, in Docker"
 echo
 
 run_mode "default"          -p compio-postgres
 run_mode "statement-cache"  -p compio-postgres --features suite-with-statement-cache
-
-if [ -f "$tls_descriptor" ]; then
-    run_mode "suite-over-tls" -p compio-postgres --features suite-over-tls
-    run_mode "tls_live"       -p compio-postgres --features tls,live-tls-tests --test tls_live
-else
-    echo "REFUSED: $tls_descriptor is absent, so the two TLS modes cannot run."
-    echo "  Run libs/compio-postgres/tests/tls_live_setup.sh first - but read its"
-    echo "  header: it regenerates a CA into SHARED containers and will break"
-    echo "  another checkout's fixtures."
-    failures=$((failures + 1))
-fi
+run_mode "tls"              -p compio-postgres --features tls
+run_mode "suite-over-tls"   -p compio-postgres --features suite-over-tls
+run_mode "postgres-18"      -p compio-postgres --features suite-on-postgres-18
 
 # The RSS growth vectors decide whether a soak run is a leak or a plateau. They
 # live in a `harness = false` bench, so NO `cargo test -p compio-postgres` run
@@ -173,9 +163,7 @@ fi
 
 echo
 echo "NOT covered by this script, and each is its own runbook under docs/runbooks:"
-echo "  - a second server version (compio-postgres-cross-version-check.md)"
-echo "  - a transaction pooler   (compio-postgres-transaction-pooler-check.md)"
 echo "  - sustained load + chaos (compio-postgres-soak.md)"
-echo "  - workspace checks: cargo clippy --workspace --all-targets --all-features; ./tests/run_doc_gate.sh"
+echo "  - workspace checks: cargo clippy --workspace --all-targets --all-features"
 
 exit $([ "$failures" -eq 0 ] && echo 0 || echo 1)

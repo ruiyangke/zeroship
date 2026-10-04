@@ -126,11 +126,11 @@ async fn batch_execute_of_copy_from_stdin_leaves_the_session_usable() {
 /// temp table into an unrelated missing-table error. That is what lets the same
 /// test body run against a transaction-mode pooler.
 ///
-/// WHAT IT DOES NOT CATCH: it connects to whatever `PG_TEST_URL` names, and
-/// that is normally a DIRECT server, so a plain run does not exercise a pooler
-/// at all - the name of the hazard is not the same as measuring it. Restoring
-/// the redundant `Sync` fails this test on a direct server, which is what makes
-/// it a regression guard; the pooler claim needs `PG_TEST_URL` pointed at one.
+/// WHAT IT DOES NOT CATCH: it connects to the suite's fixture server, which is
+/// a DIRECT server, so a run does not exercise a pooler at all - the name of
+/// the hazard is not the same as measuring it. Restoring the redundant `Sync`
+/// fails this test on a direct server, which is what makes it a regression
+/// guard; the pooler claim needs the suite run through one.
 #[compio::test]
 async fn batch_copy_abort_settles_before_the_follow_up_query() {
     let url = test_url();

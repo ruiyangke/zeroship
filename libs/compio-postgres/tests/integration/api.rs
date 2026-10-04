@@ -10,12 +10,11 @@
 //! Run with:
 //!
 //! ```text
-//! tests/provision_test_backends.sh
-//! cargo test -p compio-postgres --test main -- integration::api::
+//! cargo nextest run -p compio-postgres --test main -E 'test(/^integration::api::/)'
 //! ```
 //!
-//! Nothing needs exporting for the provisioned server; `PG_TEST_URL` points
-//! the run at another one (see `support::test_url`).
+//! The server is the one the suite's fixture starts (see `support::test_url`);
+//! nothing needs exporting.
 
 use compio_postgres::error::{PoolBudget, SqlState};
 use compio_postgres::types::{IsNull, ToSql, Type, to_sql_checked};
@@ -357,9 +356,7 @@ async fn connect_with_statement_cache_threshold(
 /// It returns a `TestUrl` rather than an `Option` on purpose. An `Option` here
 /// advertises that a test may skip, and an `else { return }` branch is a
 /// standing invitation to make `None` reachable again - at which point those
-/// tests become silent no-ops that still report green. That is the exact
-/// failure this crate's `live-tls-tests` feature exists to prevent, described
-/// in its `Cargo.toml` comment.
+/// tests become silent no-ops that still report green.
 async fn require_pg() -> TestUrl {
     let url = test_url();
     let client = match compio::time::timeout(ADMIN_CONNECT_TIMEOUT, connect(&url)).await {
@@ -4750,10 +4747,12 @@ fn fd_probe_test_filter() -> String {
 ///
 /// The spelling lives in the sealed key enum, not here. `clippy.toml` denies
 /// `std::env::var_os`, and the one place in this crate permitted to read the
-/// environment is `support::env::get`, which takes the key rather than a name -
-/// so the read below cannot use a local `&str` constant, and keeping one for
-/// the WRITE side alone would be the same literal in two files.
-const FD_PROBE_CHILD: support::env::TestEnvKey = support::env::TestEnvKey::FdProbeChild;
+/// environment is `compio_postgres_testkit::env::get`, which takes the key
+/// rather than a name - so the read below cannot use a local `&str` constant,
+/// and keeping one for the WRITE side alone would be the same literal in two
+/// files.
+const FD_PROBE_CHILD: compio_postgres_testkit::env::TestEnvKey =
+    compio_postgres_testkit::env::TestEnvKey::FdProbeChild;
 
 /// Marks the child's machine-readable result lines: `<marker><arm> <csv>`.
 const FD_PROBE_MARKER: &str = "FD-PROBE-SERIES ";
@@ -4857,15 +4856,30 @@ const ONE_CONNECTION_ABRUPT_FDS: i64 = 2;
 /// remove it, by doing the measuring in a child process that runs this test and
 /// nothing else. That is isolated by construction rather than by a convention
 /// the next runner has to know.
+///
+/// The child is handed the server's URL on standard input rather than joining
+/// the fixture itself. Joining talks to the Docker daemon from a background
+/// runtime whose pooled connections close on their own schedule, so a child
+/// that joined would count a descriptor it never opened closing under the loop.
 #[test]
 fn a_torn_down_runtime_leaks_two_descriptors_plus_one_per_live_connection() {
-    if support::env::get(FD_PROBE_CHILD).is_some() {
-        measure_and_report_fd_series();
+    if compio_postgres_testkit::env::get(FD_PROBE_CHILD).is_some() {
+        let mut url = String::new();
+        std::io::stdin()
+            .read_line(&mut url)
+            .expect("read the server URL the parent hands the child");
+        let url = url.trim();
+        assert!(
+            !url.is_empty(),
+            "the descriptor probe's child is spawned by its parent with the server URL on \
+             standard input; it is not runnable on its own"
+        );
+        measure_and_report_fd_series(url);
         return;
     }
 
     let exe = std::env::current_exe().expect("current_exe");
-    let output = std::process::Command::new(&exe)
+    let mut child = std::process::Command::new(&exe)
         .args([
             "--exact",
             &fd_probe_test_filter(),
@@ -4873,8 +4887,19 @@ fn a_torn_down_runtime_leaks_two_descriptors_plus_one_per_live_connection() {
             "--test-threads=1",
         ])
         .env(FD_PROBE_CHILD.name(), "1")
-        .output()
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .expect("re-exec the test binary");
+    {
+        use std::io::Write as _;
+        let mut stdin = child.stdin.take().expect("the child's piped stdin");
+        writeln!(stdin, "{}", test_url()).expect("hand the child the server URL");
+    }
+    let output = child
+        .wait_with_output()
+        .expect("wait for the re-executed test binary");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -4949,14 +4974,13 @@ fn assert_leak_per_runtime(stdout: &str, arm: &str, expected: i64) {
 /// already used and `drain_connections` waits out its whole timeout on
 /// connections that no longer exist. Threads run one
 /// at a time here; `/proc/self/fd` is per-process, so the counts still compose.
-fn measure_and_report_fd_series() {
-    let url = test_url();
+fn measure_and_report_fd_series(url: &str) {
     for (arm, connections, teardown) in [
         ("one-connection", 1, Teardown::Abrupt),
         ("two-connections", 2, Teardown::Abrupt),
         ("drained", 1, Teardown::Drained),
     ] {
-        let url = url.clone();
+        let url = url.to_owned();
         let fds = std::thread::spawn(move || fd_series(&url, connections, teardown))
             .join()
             .expect("fd probe arm panicked");
@@ -4986,6 +5010,9 @@ fn fd_series(url: &str, connections: usize, teardown: Teardown) -> Vec<usize> {
     let sep = if url.contains('?') { '&' } else { '?' };
     let tag = support::test_object_name("cpg_fd_probe");
     let tagged = format!("{url}{sep}application_name={tag}");
+    // Built before the baseline, from the DSN this process was handed, so the
+    // first cycle opens nothing the later ones do not.
+    let tls = support::suite_tls_for(&tagged);
 
     let mut fds = Vec::with_capacity(FD_PROBE_ITERATIONS + 1);
     fds.push(open_fds());
@@ -4994,10 +5021,17 @@ fn fd_series(url: &str, connections: usize, teardown: Teardown) -> Vec<usize> {
         rt.block_on(async {
             let mut clients = Vec::with_capacity(connections);
             for _ in 0..connections {
-                let client = match connect(&tagged).await {
-                    Ok(client) => client,
-                    Err(e) => support::postgres_unreachable(&tagged, &e),
-                };
+                let (client, connection) =
+                    match compio_postgres::connect(&tagged, tls.clone()).await {
+                        Ok(pair) => pair,
+                        Err(e) => support::postgres_unreachable(&tagged, &e),
+                    };
+                compio::runtime::spawn(async move {
+                    if let Err(e) = connection.run().await {
+                        eprintln!("connection error: {e}");
+                    }
+                })
+                .detach();
                 let rows = client.query("SELECT 1::int4 AS one", &[]).await.unwrap();
                 assert_eq!(rows[0].get::<_, i32>("one"), 1);
                 clients.push(client);

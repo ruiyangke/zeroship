@@ -20,7 +20,7 @@ fn test_url() -> String {
 
 async fn connect_pool(command_timeout: Duration) -> Pool {
     let url = test_url();
-    let connection_config: Config = url.parse().expect("parse PG_TEST_URL");
+    let connection_config: Config = url.parse().expect("parse the suite DSN");
     let mut pool_config = PoolConfig::new();
     pool_config
         .max_size(1)

@@ -35,11 +35,13 @@ without `tls` remains supported for plaintext-only use.
   scopes its own sessions, but competing work changes latency and RSS pressure
   and makes comparisons harder to interpret.
 
-NEVER run `libs/compio-postgres/tests/tls_live_setup.sh` for this soak. That
-script regenerates a CA used by shared containers. Running it from this
-worktree can invalidate the main worktree's live TLS fixtures. Use only an
-already-running TLS fixture and its seeded certificate. The default plaintext
-run uses the existing server on port 5455.
+A TLS soak can borrow the `tls` server `compio_postgres_testkit::tls` starts
+for the TLS suites while a run of those suites holds it: its published port is
+in `docker ps`, and the CA that signed its certificate is `ca.crt` under
+`target/zeroship-testkit/compio-postgres-tls-material-<id>/` in the worktree
+that started it. The fixture removes the server once no test process has held
+it for its idle grace, so a soak longer than that needs a server of its own.
+The default plaintext run uses the existing server on port 5455.
 
 The harness does not create or drop a database, schema, table, or other
 persistent PostgreSQL object. Its scope is a unique `application_name` and
@@ -54,7 +56,7 @@ The values are written explicitly here so a saved command records the server
 and measurement window rather than relying on ambient defaults:
 
 ```bash
-PG_TEST_URL=postgres://postgres:zeroship@127.0.0.1:5455/zeroship \
+SOAK_PG_URL=postgres://postgres:zeroship@127.0.0.1:5455/zeroship \
 SOAK_DURATION_SECS=180 \
 SOAK_SAMPLE_INTERVAL_SECS=5 \
   libs/compio-postgres/tests/soak.sh
@@ -70,7 +72,7 @@ separate transport flag; the wrapper uses the same configuration policy as the
 pool and direct driver connections:
 
 ```bash
-PG_TEST_URL="host=localhost port=5447 user=postgres password=PASSWORD dbname=postgres sslmode=require sslrootcert=/path/to/ca.crt" \
+SOAK_PG_URL="host=localhost port=PORT user=postgres password=PASSWORD dbname=postgres sslmode=require sslrootcert=/path/to/ca.crt" \
 SOAK_DURATION_SECS=180 \
 SOAK_SAMPLE_INTERVAL_SECS=5 \
   libs/compio-postgres/tests/soak.sh
@@ -80,7 +82,7 @@ For a short wiring and server-availability check, run the minimum 30-second
 window:
 
 ```bash
-PG_TEST_URL=postgres://postgres:zeroship@127.0.0.1:5455/zeroship \
+SOAK_PG_URL=postgres://postgres:zeroship@127.0.0.1:5455/zeroship \
 SOAK_DURATION_SECS=30 \
 SOAK_SAMPLE_INTERVAL_SECS=5 \
   libs/compio-postgres/tests/soak.sh
@@ -361,7 +363,7 @@ a server other tests are using.
 Do it by hand:
 
 ```bash
-PG_TEST_URL=postgres://postgres:zeroship@127.0.0.1:5455/zeroship \
+SOAK_PG_URL=postgres://postgres:zeroship@127.0.0.1:5455/zeroship \
   SOAK_DURATION_SECS=180 SOAK_SAMPLE_INTERVAL_SECS=10 \
   libs/compio-postgres/tests/soak.sh &
 # once `phase=measure` is running:
@@ -458,7 +460,7 @@ that peer is still a live local socket choosing to withhold bytes.
 # Build the probe first: an example that fails to COMPILE pauses the container
 # around nothing and prints a plausible-looking log.
 #   cargo build --release -p compio-postgres --example chaos_probe
-#   ./target/release/examples/chaos_probe "$PG_TEST_URL" &
+#   ./target/release/examples/chaos_probe "$SOAK_PG_URL" &
 docker pause zs-cpg-types-5475      # freeze mid-query
 # ... observe ...
 docker unpause zs-cpg-types-5475    # ALWAYS, including on failure (use a trap)

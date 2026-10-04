@@ -2,10 +2,11 @@
 # Run the compio-postgres soak harness against an existing PostgreSQL server.
 #
 # This is deliberately opt-in: neither `cargo test` nor any default gate calls
-# it. The defaults target the crate's usual live fixture and run long enough to
-# produce a useful memory series. Override them through the variables below:
+# it. The default URL names a long-lived server an operator runs on port 5455
+# for soaking, and the default window is long enough to produce a useful memory
+# series. Override them through the variables below:
 #
-#   PG_TEST_URL=postgres://... \
+#   SOAK_PG_URL=postgres://... \
 #   SOAK_DURATION_SECS=180 \
 #   SOAK_SAMPLE_INTERVAL_SECS=5 \
 #   SOAK_BUILD_WATCHDOG_SECS=600 \
@@ -19,7 +20,7 @@
 
 set -euo pipefail
 
-pg_test_url="${PG_TEST_URL:-postgres://postgres:zeroship@127.0.0.1:5455/zeroship}"
+soak_pg_url="${SOAK_PG_URL:-postgres://postgres:zeroship@127.0.0.1:5455/zeroship}"
 duration_secs="${SOAK_DURATION_SECS:-180}"
 sample_interval_secs="${SOAK_SAMPLE_INTERVAL_SECS:-5}"
 build_watchdog_secs="${SOAK_BUILD_WATCHDOG_SECS:-600}"
@@ -28,7 +29,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../../.." && pwd)"
 
 if [ "$#" -ne 0 ]; then
-    echo "usage: PG_TEST_URL=... SOAK_DURATION_SECS=..." >&2
+    echo "usage: SOAK_PG_URL=... SOAK_DURATION_SECS=..." >&2
     echo "  SOAK_SAMPLE_INTERVAL_SECS=... SOAK_BUILD_WATCHDOG_SECS=... $0" >&2
     exit 2
 fi
@@ -62,8 +63,8 @@ if [ "$sample_slots" -lt 6 ]; then
     exit 2
 fi
 
-if [ -z "$pg_test_url" ]; then
-    echo "PG_TEST_URL must not be empty" >&2
+if [ -z "$soak_pg_url" ]; then
+    echo "SOAK_PG_URL must not be empty" >&2
     exit 2
 fi
 if ! command -v cargo > /dev/null 2>&1; then
@@ -83,7 +84,7 @@ run_watchdog_secs=$((duration_secs + 180))
 cd "$repo_root"
 
 echo "compio-postgres soak (opt-in)"
-echo "url=$pg_test_url"
+echo "url=$soak_pg_url"
 echo "duration_secs=$duration_secs sample_interval_secs=$sample_interval_secs"
 echo "build_watchdog_secs=$build_watchdog_secs run_watchdog_secs=$run_watchdog_secs"
 
@@ -112,7 +113,7 @@ echo "phase 2/2: run the soak"
 if timeout --foreground --signal=TERM --kill-after=10s "${run_watchdog_secs}s" \
     cargo bench -p compio-postgres --bench soak --features tls \
     --manifest-path "$repo_root/Cargo.toml" -- \
-    --url "$pg_test_url" \
+    --url "$soak_pg_url" \
     --duration-secs "$duration_secs" \
     --sample-interval-secs "$sample_interval_secs"; then
     echo "phase 2/2 complete"

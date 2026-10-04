@@ -94,24 +94,24 @@ The executor and socket lifecycle remain compio-native.
 Everything needs a live server; nothing skips. A missing database is a FAILED
 run, not a green one - see the header of `tests/support/mod.rs` for why.
 
+The servers are the suite's own. `compio_postgres_testkit::server` starts the
+PostgreSQL server every suite and live bench dials, in Docker, the first time a
+test process of the worktree asks for it; every other process joins it, and
+its watchdog removes it once no process has held it for its idle grace. Docker
+is the one prerequisite, and no environment variable or file points the suite
+at any other server. `tests/integration/fixture_server.rs` holds the suite to
+that: the server it dials must be a container this checkout's fixture started.
+
 ```bash
-# The server the suites use by default, from the repository root.
-tests/provision_test_backends.sh
+# The ordinary suite. nextest runs each test in a process of its own against
+# the one shared server; every test scopes its objects to itself.
+cargo nextest run -p compio-postgres
 
-# The ordinary suite. Nothing needs exporting for the provisioned server.
-cargo test -p compio-postgres -- --test-threads=1
-
-# Any other server.
-PG_TEST_URL=postgres://user:password@host:port/dbname \
-  cargo test -p compio-postgres -- --test-threads=1
+# The rustls transport, its certificate verifiers and the live TLS suite
+# (negotiation, verification modes, CRLs, client certificates, channel
+# binding, direct SSL), which exist only with the `tls` feature.
+cargo nextest run -p compio-postgres --features tls
 ```
-
-With `PG_TEST_URL` unset the suites dial `DEFAULT_TEST_URL` in
-`libs/compio-postgres/testkit`, the address that script provisions.
-
-`--test-threads=1` is not superstition: several tests measure server-visible
-state (backend counts, replication slots, prepared statements) that concurrent
-tests would perturb.
 
 ### The suite MODES
 
@@ -119,16 +119,16 @@ The same test bodies, run against a different shape. Each exists because a
 whole class of behaviour was otherwise measured on exactly one configuration.
 
 ```bash
-# Over TLS. Needs tests/tls_live_setup.sh first (see below).
-cargo test -p compio-postgres --features suite-over-tls -- --test-threads=1
+# Over TLS, against the TLS fixture's `tls` server.
+cargo nextest run -p compio-postgres --features suite-over-tls
 
 # With the implicit prepared-statement cache on (it is OFF by default, so its
 # eviction and stale-plan retry are otherwise barely exercised).
-cargo test -p compio-postgres --features suite-with-statement-cache -- --test-threads=1
+cargo nextest run -p compio-postgres --features suite-with-statement-cache
 
-# The TLS-specific suite: negotiation, verification modes, CRLs, client
-# certificates, channel binding, direct SSL. Not built without the feature.
-cargo test -p compio-postgres --features tls,live-tls-tests --test tls_live -- --test-threads=1
+# Against PostgreSQL 18 instead of 16; with suite-over-tls as well, over TLS
+# against the TLS fixture's PostgreSQL 18 server.
+cargo nextest run -p compio-postgres --features suite-on-postgres-18
 ```
 
 `suite-over-tls` deliberately excludes `serialized_loop.rs` and
@@ -138,45 +138,30 @@ claim.
 
 ### The fixtures
 
-```bash
-# Six PostgreSQL servers for the TLS suites, ports 5447-5452.
-libs/compio-postgres/tests/tls_live_setup.sh
-libs/compio-postgres/tests/tls_live_setup.sh --down
-```
+`compio_postgres_testkit::tls` starts the six servers the TLS suites dial -
+`tls`, `plain`, `mismatch`, `sslonly`, `clientcert` and the PostgreSQL 18
+`directtls` - each the control for one claim, and checks each with libpq as it
+boots. The CA, the server and client certificates, the CRL and the encrypted
+client key are generated when the fixture's image is built and never leave it
+except as the client-side copies the fixture takes into this worktree's
+`target`; nothing is committed and no setup step runs by hand.
 
-ONE CHECKOUT AT A TIME unless you pass different ports. The script generates a
-fresh CA into the tree it runs from and mounts it into containers with FIXED
-names, so running it from a second worktree makes every TLS connection from the
-first fail `InvalidCertificate(BadSignature)` - which reads exactly like a
-driver defect. The script's own header says this at more length.
+`compio_postgres_testkit::unix` starts the server
+`tests/integration/unix_socket_live.rs` reaches through a socket file on this
+host. The socket path has to be SHORT: `sun_path` is 108 bytes and the server
+appends `/.s.PGSQL.<port>`, so the fixture hands out a short link to the
+directory its container shares with the host, and refuses a path that would
+not fit rather than serving a socket nothing can reach.
 
-```bash
-# A server whose Unix socket is reachable, for tests/unix_socket_live.rs.
-libs/compio-postgres/tests/unix_socket_setup.sh
-libs/compio-postgres/tests/unix_socket_setup.sh --down
+The PostgreSQL 18 run is gated like the other modes: CI and `verify.sh` run
+`suite-on-postgres-18`. `docs/runbooks/compio-postgres-cross-version-check.md`
+says why a second version matters - a protocol claim measured on one version is
+a claim about that version, and the versions differ in what some transactions
+put on the replication stream - and records the feedback-timeout trap.
 
-cargo test -p compio-postgres --features live-unix-socket --test unix_socket_live -- --test-threads=1
-```
+One more shape has a runbook rather than a script, because it answers a
+question rather than gates a change:
 
-The socket directory has to be SHORT. `sun_path` is 108 bytes and the server
-appends `/.s.PGSQL.<port>`, so a fixture under an ordinary scratch path is
-unreachable - which is what the previous one was, 110 bytes deep, leaving
-`Host::Unix` reaching a real server asserted nowhere. The script refuses a
-directory that would not fit rather than creating another unusable fixture.
-
-Three more shapes have runbooks rather than scripts, because they answer a
-question rather than gate a change:
-
-- `docs/runbooks/compio-postgres-transaction-pooler-check.md` - the suite
-  through PgBouncer in transaction mode. Read the `IGNORE_STARTUP_PARAMETERS`
-  note first, or you will measure pgbouncer refusing this suite's
-  schema-isolation `options` rather than measuring the driver.
-- `docs/runbooks/compio-postgres-cross-version-check.md` - a second server
-  version. The runbook exists because a protocol claim measured on one version
-  is a claim about that version: 16.14 streams a rolled-back transaction and
-  sends `StreamAbort`, while 18.4 sends no pgoutput messages and keeps the
-  walsender open. Both are green as of 2026-08-26; the runbook records the
-  feedback-timeout trap and says to re-measure rather than trust its totals.
 - `docs/runbooks/compio-postgres-tls-teardown-noise.md` - what this driver
   leaves in a server log when a TLS session ends. Read it before touching
   `release.rs` or `tls_sansio.rs`: the teardown has three separate paths, and

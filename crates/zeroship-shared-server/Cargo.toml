@@ -1,0 +1,30 @@
+[package]
+name = "zeroship-shared-server"
+version = "0.1.0"
+edition = "2021"
+description = "Dev-only: one container server shared by every test process of a worktree, leased by flock and removed by its watchdog"
+publish = false
+
+# A leaf of the test fixtures: it drives the Docker daemon and the lease
+# protocol and names no database driver, so a driver's own tests can reach it
+# without linking a second copy of that driver. It is classified
+# `class = "test-dev-tool"`: consumers reach it through a `[dev-dependencies]`
+# entry or another test-dev-tool package, so the testcontainers it carries stays
+# off every shipped normal edge. `xtask/tests/architecture` and the tokio
+# boundary checks prove that.
+
+[[package.metadata.zeroship-config.targets]]
+target = "zeroship-shared-server"
+class = "test-dev-tool"
+reason = "Dev-only test fixture; reached only through dev-dependencies and other test fixtures."
+
+[dependencies]
+futures = { workspace = true }
+libc = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+testcontainers = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+
+[lints]
+workspace = true

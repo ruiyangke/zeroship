@@ -836,7 +836,7 @@ async fn a_complete_response_is_delivered_before_the_peers_eof() {
 async fn a_normal_live_query_inside_the_deadline_is_untouched() {
     compio::time::timeout(ASYNC_WATCHDOG, async {
         let url = live_url();
-        let mut config: Config = url.parse().expect("parse PG_TEST_URL");
+        let mut config: Config = url.parse().expect("parse the suite DSN");
         config.read_timeout(Duration::from_secs(1));
         let (client, connection) = config
             .connect(support::suite_tls())
@@ -916,7 +916,7 @@ async fn copy_input_time_is_not_charged_as_server_read_silence() {
 
     compio::time::timeout(COPY_WATCHDOG, async {
         let url = live_url();
-        let mut config: Config = url.parse().expect("parse PG_TEST_URL");
+        let mut config: Config = url.parse().expect("parse the suite DSN");
         config.read_timeout(COPY_READ_DEADLINE);
         let (client, connection) = config
             .connect(support::suite_tls())

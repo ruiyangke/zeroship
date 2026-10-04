@@ -1,22 +1,12 @@
-// The 12-hex fingerprint the branch-keyed suite database is named after.
+// The 12-hex fingerprint of the platform migration set a working tree would
+// apply.
 //
-// ONE CONSTRUCTION, TWO SOURCES, and they MUST agree byte for byte. [`of_dir`]
-// reads a working tree; [`of_ref`] reads a git tree. The suite-database
-// provisioner names a database with the first and the sweeper decides whether
-// that database is still reachable with the second. If they ever disagree,
-// every database on the server matches no reachable branch, the sweeper calls
-// the lot dead, and one `--apply` deletes every agent's work at once. That is
-// the single most destructive bug this design admits, which is why the pair is
-// pinned against the REAL repository rather than a fixture. A fixture would
-// pin the two implementations to each other and prove nothing about the files
-// the sweeper actually reasons over.
-//
-// THAT ARGUMENT IS ABOUT THE AGREEMENT, and the fixtures below are not trying
-// to take it over. They cover what the real repository cannot be asked to
-// demonstrate on command: that the hash MOVES when the migration set does and
-// HOLDS when anything else does. Sampling that pair from history instead would
-// make the harness's verdict a function of how recently somebody touched
-// `db/migrations-ts`, reading as a broken fingerprint during every quiet spell.
+// `crate::postgres::server_inputs` folds it into the identity of the shared
+// platform server, so a branch that edits a migration boots a server of its own
+// rather than joining one migrated from another corpus. The hash has to MOVE
+// when the migration set does and HOLD when anything else does; the shared
+// server contract in `tests/integration/testkit_shared_server.rs` drives both
+// directions over constructed trees.
 //
 // WHY THE BASENAME GOES INTO THE HASH BESIDE THE BYTES. The platform runner
 // orders by filename and journals under it, so `20260101_a.ts` and
@@ -29,24 +19,21 @@
 // bytes -- so a name-only hash would hand that branch a database whose journal
 // refuses every later run with `ChecksumMismatch`.
 //
-// THE WIRE FORMAT IS `sha256sum`'s, deliberately. Each entry is
-// `<basename> <64 hex>  -\n`: the two spaces and the `-` are what GNU
-// `sha256sum` prints when it reads stdin, and the shell built the digest by
-// piping `sha256sum <file` and `git cat-file blob | sha256sum` into `sort`.
-// Reproducing it here is what lets the ported and unported halves of the
-// harness agree during the migration, and it costs nothing to keep afterwards.
+// THE LINE FORMAT IS `sha256sum`'s. Each entry is `<basename> <64 hex>  -\n`:
+// the two spaces and the `-` are what GNU `sha256sum` prints when it reads
+// stdin, so the digest can be reproduced from a shell with `sha256sum` and
+// `LC_ALL=C sort` when a fingerprint needs checking by hand.
 
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// The directory holding the platform migration set.
 ///
 /// The set is the one `discover` in `packages/zero-migrate-cli/src/cli.ts`
 /// selects: every file named `*.{ts,mts,cts,js,mjs,cjs}` (case-insensitively)
-/// except `*.d.ts`, ordered by filename. [`files_in`] and [`of_ref`] apply that
-/// same rule, so a migration written under any of the six extensions moves the
-/// hash the same way it moves the set an apply runs.
+/// except `*.d.ts`, ordered by filename. [`of_dir`] applies that same rule, so a
+/// migration written under any of the six extensions moves the hash the same
+/// way it moves the set an apply runs.
 pub const MIGRATIONS_DIR: &str = "db/migrations-ts";
 
 /// Whether `name` is a file `discover` admits, to the letter of its filter.
@@ -65,20 +52,15 @@ fn is_migration_name(name: &str) -> bool {
 
 /// The migration files a working tree would apply, by basename.
 ///
-/// ONE FILTER, TWO CONSUMERS: [`of_dir`] hashes this set, and the suite-database
-/// provisioner counts it against the journal of a live database. They have to
-/// agree on membership or the two answers describe different corpora, so the
-/// selection rule lives here and neither caller restates it.
-///
 /// The order is `discover`'s: filenames sorted, the migration order contract
 /// the CLI applies in.
-pub fn files_in(root: &Path) -> Result<Vec<PathBuf>, String> {
+fn files_in(root: &Path) -> Result<Vec<PathBuf>, String> {
     let dir = root.join(MIGRATIONS_DIR);
     if !dir.is_dir() {
         return Err(format!(
             "FATAL: no platform migrations directory at {}\n\
-             \x20      The suite database is named after the migration set; without\n\
-             \x20      one there is nothing to name it after.\n",
+             \x20      The shared platform server is keyed to the migration set;\n\
+             \x20      without one there is nothing to key it to.\n",
             dir.display()
         ));
     }
@@ -101,7 +83,7 @@ pub fn files_in(root: &Path) -> Result<Vec<PathBuf>, String> {
         return Err(format!(
             "FATAL: {} holds no migrations\n\
              \x20      An empty set would hash to a fixed value, so every broken\n\
-             \x20      checkout would share one database and call it fresh.\n",
+             \x20      checkout would share one server and call it fresh.\n",
             dir.display()
         ));
     }
@@ -111,9 +93,9 @@ pub fn files_in(root: &Path) -> Result<Vec<PathBuf>, String> {
 
 /// Hash the migration set a working tree would apply.
 ///
-/// `Err` is the refusal text; the caller exits 2. Never a fingerprint of
-/// nothing -- an empty set hashes to a FIXED value, so every broken checkout
-/// would share one database and call it schema-fresh.
+/// `Err` is the refusal text. Never a fingerprint of nothing -- an empty set
+/// hashes to a FIXED value, so every broken checkout would share one server and
+/// call it schema-fresh.
 pub fn of_dir(root: &Path) -> Result<String, String> {
     let mut lines: Vec<String> = Vec::new();
     for file in files_in(root)? {
@@ -130,78 +112,6 @@ pub fn of_dir(root: &Path) -> Result<String, String> {
     Ok(digest_of(lines))
 }
 
-/// Hash the migration set a git tree carries.
-///
-/// `None` rather than an error message, and that is the shell's contract
-/// preserved rather than an omission: `zs_fingerprint_of_ref` printed nothing
-/// and returned 1, and the sweeper's loop is `fp="$(...)" || continue`. "This
-/// ref carries no migrations" is an ordinary answer about a ref -- most tags
-/// and many old branches -- not a failure worth narrating 21 times.
-///
-/// What it must never do is return a VALUE for such a tree. A fingerprint of
-/// nothing is a legitimate-looking hash no working tree can ever produce, so
-/// every database keyed to it would look reachable forever.
-///
-/// WHY `repo` IS AN ARGUMENT. Taking it from the process's working directory
-/// would make this the one function here with an ambient input -- and the
-/// sweeper's ref list comes from a `git for-each-ref` run somewhere else, so
-/// "which repository" would be agreed by coincidence rather than stated. Naming it
-/// also makes the discrimination control constructible: a test can build two
-/// trees that differ by exactly one migration and ask about THEM, instead of
-/// sampling this repository's history and hoping a migration changed recently.
-pub fn of_ref(repo: &Path, reference: &str) -> Option<String> {
-    let listing = Command::new("git")
-        .current_dir(repo)
-        .args(["ls-tree", reference, "--", &format!("{MIGRATIONS_DIR}/")])
-        .output()
-        .ok()?;
-    if !listing.status.success() {
-        return None;
-    }
-    let listing = String::from_utf8_lossy(&listing.stdout);
-    if listing.trim().is_empty() {
-        return None;
-    }
-
-    let mut lines: Vec<String> = Vec::new();
-    for entry in listing.lines() {
-        // `<mode> SP <type> SP <sha> TAB <path>`. Split on the TAB rather than
-        // on whitespace: bash's `read -r _mode type sha name` treated both the
-        // same, which quietly meant a path with a space in it landed intact in
-        // `name` only because it was the last field. Naming the separator makes
-        // that deliberate instead of lucky.
-        let Some((meta, path)) = entry.split_once('\t') else {
-            continue;
-        };
-        let mut fields = meta.split_whitespace();
-        let (Some(_mode), Some(kind), Some(sha)) = (fields.next(), fields.next(), fields.next())
-        else {
-            continue;
-        };
-        if kind != "blob" {
-            continue;
-        }
-        let basename = path.rsplit('/').next().unwrap_or(path);
-        if !is_migration_name(basename) {
-            continue;
-        }
-        let blob = Command::new("git")
-            .current_dir(repo)
-            .args(["cat-file", "blob", sha])
-            .output()
-            .ok()?;
-        if !blob.status.success() {
-            return None;
-        }
-        lines.push(sha256sum_line(basename, &blob.stdout));
-    }
-
-    if lines.is_empty() {
-        return None;
-    }
-    Some(digest_of(lines))
-}
-
 /// One line of what `printf '%s ' <name>; sha256sum < file` emits.
 fn sha256sum_line(basename: &str, bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
@@ -213,8 +123,8 @@ fn sha256sum_line(basename: &str, bytes: &[u8]) -> String {
 ///
 /// The sort is a byte sort, which is what `LC_ALL=C` buys: under a locale that
 /// folds case or ignores punctuation two checkouts could order the same files
-/// differently and fingerprint differently, and no two agents would ever share
-/// a database.
+/// differently and fingerprint differently, and no two checkouts would ever
+/// share a server.
 fn digest_of(mut lines: Vec<String>) -> String {
     lines.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
     let mut hasher = Sha256::new();

@@ -66,6 +66,7 @@ fn platform_database_tests_are_mandatory() {
     }
     for name in [
         "zeroship-testkit",
+        "zeroship-shared-server",
         "zeroship-data-testkit",
         "zeroship-workflow-testkit",
     ] {
