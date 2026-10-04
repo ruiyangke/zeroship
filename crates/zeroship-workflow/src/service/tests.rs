@@ -1589,6 +1589,106 @@ async fn postgres_heartbeat_write_that_outlives_its_lease_rolls_back() {
     delayed_lease_write("tasks", "UPDATE", true).await;
 }
 
+/// The advisory lock a delayed write's trigger waits on. Advisory locks are
+/// scoped to their database, and every case owns its own.
+const DELAYED_WRITE_GATE: i64 = 7_301_042;
+
+/// The lease of a case whose subject is a journal write that outlives it.
+///
+/// Generous, because the poll that leases the task and every operation the case
+/// needs to succeed are journal I/O that must finish inside it; the gate, not
+/// this lease, is what makes the delayed write late. The gate holds that write
+/// for at most one lease, so a lease of half the database's lock timeout keeps
+/// the held write inside it.
+pub(super) fn delayed_write_lease() -> (i64, std::time::Duration) {
+    let lease = super::delivery::ATTEMPT_IO_CEILING;
+    assert!(
+        lease * 2
+            <= std::time::Duration::from_millis(u64::from(
+                zeroship_data_orm::budgets::DB_LOCK_TIMEOUT_MS
+            )),
+        "the premise: a write held for one lease waits inside the lock timeout"
+    );
+    (i64::try_from(lease.as_millis()).unwrap(), lease)
+}
+
+/// Close the gate and install a trigger that counts each `operation` on the
+/// journal `table` in `sequence`, then holds it at the gate.
+///
+/// The count is a sequence because sequences survive the rollback the held
+/// write ends in, so a case can prove the write was reached.
+pub(super) async fn hold_journal_writes(
+    admin: &compio_postgres::Client,
+    sequence: &str,
+    table: &str,
+    operation: &str,
+) {
+    admin.batch_execute(&format!("SELECT pg_advisory_lock({DELAYED_WRITE_GATE}); CREATE SEQUENCE workflow_manager.{sequence}; GRANT USAGE ON SEQUENCE workflow_manager.{sequence} TO zeroship_workflow; CREATE FUNCTION workflow_manager.hold_{sequence}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('workflow_manager.{sequence}'); PERFORM pg_advisory_xact_lock({DELAYED_WRITE_GATE}); RETURN NEW; END $$; CREATE TRIGGER hold_{sequence} BEFORE {operation} ON workflow_manager.__zeroship_workflow_{table} FOR EACH ROW EXECUTE FUNCTION workflow_manager.hold_{sequence}();")).await.unwrap();
+}
+
+/// Whether a write reached the trigger [`hold_journal_writes`] installed.
+pub(super) async fn held_write_reached(admin: &compio_postgres::Client, sequence: &str) -> bool {
+    admin
+        .query_one(
+            &format!("SELECT is_called FROM workflow_manager.{sequence}"),
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0)
+}
+
+/// Open the gate once a write is held at it and the database clock has passed
+/// `deadline`, the instant the held write is checked against.
+///
+/// Bounded polling on those two observed events, each within `bound` of the
+/// call: a write that never reaches the gate inside its lease, or a clock that
+/// never passes the deadline, fails the case by name.
+pub(super) async fn open_after_deadline(
+    admin: &compio_postgres::Client,
+    sequence: &str,
+    deadline: i64,
+    bound: std::time::Duration,
+) {
+    let until = std::time::Instant::now() + bound;
+    while !held_write_reached(admin, sequence).await {
+        assert!(
+            std::time::Instant::now() < until,
+            "the operation never reached the held write inside its lease"
+        );
+        compio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    loop {
+        let now: i64 = admin
+            .query_one(
+                "SELECT floor(extract(epoch FROM clock_timestamp())*1000)::bigint",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        if now > deadline {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < until,
+            "the database clock never passed the deadline the held write is checked against"
+        );
+        compio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    admin
+        .batch_execute(&format!("SELECT pg_advisory_unlock({DELAYED_WRITE_GATE})"))
+        .await
+        .unwrap();
+}
+
+/// A delayed journal write that outlives its task lease rolls back.
+///
+/// The operation under test - a completion or a heartbeat - starts inside the
+/// lease and reaches a write that a trigger holds at a gate, which the case
+/// opens only once the database clock has passed the task's deadline. The write
+/// therefore always finishes after the lease, and the operation must refuse
+/// rather than commit.
 async fn delayed_lease_write(table: &str, operation: &str, heartbeat: bool) {
     let fixture = PostgresFixture::start().await;
     let store: Rc<OrmStore> = Rc::new(fixture.store.clone());
@@ -1598,42 +1698,46 @@ async fn delayed_lease_write(table: &str, operation: &str, heartbeat: bool) {
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
+    let (lease_ms, lease) = delayed_write_lease();
     service
         .fixture_register(
             &app,
             leased_policy(
                 2,
                 AppPolicy {
-                    lease_ms: 300,
+                    lease_ms,
                     ..Default::default()
                 },
             ),
         )
         .await
         .unwrap();
-    let admin = connect(&fixture.admin_url).await;
-    admin.batch_execute(&format!("CREATE SEQUENCE workflow_manager.delayed_write_calls; GRANT USAGE ON SEQUENCE workflow_manager.delayed_write_calls TO zeroship_workflow; CREATE FUNCTION workflow_manager.delay_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('workflow_manager.delayed_write_calls'); PERFORM pg_sleep(0.5); RETURN NEW; END $$; CREATE TRIGGER delay_write BEFORE {operation} ON workflow_manager.__zeroship_workflow_{table} FOR EACH ROW EXECUTE FUNCTION workflow_manager.delay_write();")).await.unwrap();
     let worker = super::WorkerIdentity::new("worker".into()).unwrap();
     let task = service.poll(&worker).await.unwrap().unwrap();
-    if heartbeat {
-        let result = service.heartbeat(&worker, &task.id, &task.token).await;
-        assert!(
-            matches!(result, Err(WorkflowServiceError::Conflict(_))),
-            "{result:?}"
-        );
-    } else {
-        let result = service.complete(&worker,&task.id,&task.token,execution(json!([{"kind":"StepCompleted","ordinal":0,"name":"slow","output":"must roll back"},{"kind":"RunCompleted"}]))).await;
-        assert!(
-            matches!(result, Err(WorkflowServiceError::Conflict(_))),
-            "{result:?}"
-        );
-    }
+    // Installed once the task is leased, so only the operation under test can
+    // reach the held write.
+    let admin = connect(&fixture.admin_url).await;
+    hold_journal_writes(&admin, "delayed_write_calls", table, operation).await;
+    let attempt = async {
+        if heartbeat {
+            service
+                .heartbeat(&worker, &task.id, &task.token)
+                .await
+                .map(drop)
+        } else {
+            service.complete(&worker,&task.id,&task.token,execution(json!([{"kind":"StepCompleted","ordinal":0,"name":"slow","output":"must roll back"},{"kind":"RunCompleted"}]))).await.map(drop)
+        }
+    };
+    let (result, ()) = futures::join!(
+        attempt,
+        open_after_deadline(&admin, "delayed_write_calls", task.deadline, lease * 2)
+    );
+    assert!(
+        matches!(result, Err(WorkflowServiceError::Conflict(_))),
+        "{result:?}"
+    );
     // Sequences survive rollback, proving this reached the delayed database write.
-    assert!(admin
-        .query_one("SELECT is_called FROM workflow_manager.delayed_write_calls", &[])
-        .await
-        .unwrap()
-        .get::<_, bool>(0));
+    assert!(held_write_reached(&admin, "delayed_write_calls").await);
     let tx = store.begin().await.unwrap();
     assert!(journal_rows(
         &tx,
@@ -1664,7 +1768,7 @@ async fn delayed_lease_write(table: &str, operation: &str, heartbeat: bool) {
     );
     admin
         .batch_execute(&format!(
-            "DROP TRIGGER delay_write ON workflow_manager.__zeroship_workflow_{table};"
+            "DROP TRIGGER hold_delayed_write_calls ON workflow_manager.__zeroship_workflow_{table};"
         ))
         .await
         .unwrap();

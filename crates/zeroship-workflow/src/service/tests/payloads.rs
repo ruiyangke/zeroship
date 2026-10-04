@@ -136,6 +136,11 @@ async fn postgres_payload_confirmation_write_that_outlives_its_lease_rolls_back(
     delayed_payload_write("UPDATE").await;
 }
 
+/// A delayed payload write that outlives its task lease rolls back.
+///
+/// Staging starts inside the lease and reaches a payload write that a trigger
+/// holds at a gate, which the case opens only once the database clock has
+/// passed the task's deadline, so the write always finishes after the lease.
 async fn delayed_payload_write(operation: &str) {
     let fixture = PostgresFixture::start().await;
     let store: Rc<OrmStore> = Rc::new(fixture.store.clone());
@@ -146,42 +151,43 @@ async fn delayed_payload_write(operation: &str) {
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
+    let (lease_ms, lease) = delayed_write_lease();
     service
         .fixture_register(
             &app,
             leased_policy(
                 2,
                 AppPolicy {
-                    lease_ms: 300,
+                    lease_ms,
                     ..Default::default()
                 },
             ),
         )
         .await
         .unwrap();
-    let admin = connect(&fixture.admin_url).await;
-    admin.batch_execute(&format!("CREATE SEQUENCE workflow_manager.delayed_payload_writes; GRANT USAGE ON SEQUENCE workflow_manager.delayed_payload_writes TO zeroship_workflow; CREATE FUNCTION workflow_manager.delay_payload_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('workflow_manager.delayed_payload_writes'); PERFORM pg_sleep(0.5); RETURN NEW; END $$; CREATE TRIGGER delay_payload_write BEFORE {operation} ON workflow_manager.__zeroship_workflow_payloads FOR EACH ROW EXECUTE FUNCTION workflow_manager.delay_payload_write();")).await.unwrap();
     let worker = WorkerIdentity::new("payload-worker".into()).unwrap();
     let task = service.poll(&worker).await.unwrap().unwrap();
-    let result = service
-        .stage_payload(
+    // Installed once the task is leased, so only the staging under test can
+    // reach the held write.
+    let admin = connect(&fixture.admin_url).await;
+    hold_journal_writes(&admin, "delayed_payload_writes", "payloads", operation).await;
+    let request = RequestId::mint();
+    let (result, ()) = futures::join!(
+        service.stage_payload(
             &worker,
             &task.id,
             &task.token,
-            &RequestId::mint(),
+            &request,
             reference(b"delayed"),
             objects.upload(b"delayed"),
-        )
-        .await;
+        ),
+        open_after_deadline(&admin, "delayed_payload_writes", task.deadline, lease * 2)
+    );
     assert!(
         matches!(result, Err(WorkflowServiceError::Conflict(_))),
         "{result:?}"
     );
-    assert!(admin
-        .query_one("SELECT is_called FROM workflow_manager.delayed_payload_writes", &[])
-        .await
-        .unwrap()
-        .get::<_, bool>(0));
+    assert!(held_write_reached(&admin, "delayed_payload_writes").await);
     let tx = store.begin().await.unwrap();
     let rows = journal_rows(
         &tx,
@@ -199,7 +205,7 @@ async fn delayed_payload_write(operation: &str) {
         assert_eq!(rows[0].text("state").unwrap(), "uploading");
     }
     tx.commit().await.unwrap();
-    admin.batch_execute("DROP TRIGGER delay_payload_write ON workflow_manager.__zeroship_workflow_payloads; UPDATE workflow_manager.__zeroship_workflow_payloads SET expires_at=0;").await.unwrap();
+    admin.batch_execute("DROP TRIGGER hold_delayed_payload_writes ON workflow_manager.__zeroship_workflow_payloads; UPDATE workflow_manager.__zeroship_workflow_payloads SET expires_at=0;").await.unwrap();
     assert_eq!(
         service.collect_payloads(1, &objects).await.unwrap(),
         usize::from(operation == "UPDATE")
