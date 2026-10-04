@@ -1,4 +1,4 @@
-#![allow(unused_imports)]
+#![expect(unused_imports)]
 
 //! A flag control's default is false and an optional control's is None.
 //!

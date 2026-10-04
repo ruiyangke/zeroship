@@ -85,7 +85,6 @@ pub(crate) struct PendingEvent {
 #[derive(Debug)]
 pub(crate) struct CommitPacket {
     pub(crate) events: Vec<DispositionedEvent>,
-    #[allow(dead_code)] // Stamped but no downstream consumer yet.
     pub(crate) commit_id: u64,
 }
 
@@ -129,22 +128,6 @@ impl CommitSender {
     }
 }
 
-/// Hook-captured dispatcher state. **Not exported across crate
-/// boundaries** — the session actor owns one of these (kept alive on
-/// the worker stack frame so the hooks' captures outlive the
-/// `Connection`), and the publisher task owns the matching
-/// `flume::Receiver<CommitPacket>` end.
-#[allow(dead_code)]
-pub(crate) struct SqliteCdcDispatcher {
-    /// Per-tx buffer shared with all three hook closures.
-    buffer: Arc<Mutex<CdcTxBuffer>>,
-    /// Monotonic commit-id source — stamped on each `CommitPacket`.
-    commit_id: Arc<AtomicU64>,
-    /// Sender half of the worker→compio channel, paired with the delivery
-    /// policy the commit hook samples.
-    packet_tx: CommitSender,
-}
-
 /// Install the CDC hook triplet on a freshly opened `rusqlite::Connection`.
 ///
 /// Called from the session worker thread before [`SqliteSession`]
@@ -154,18 +137,9 @@ pub(crate) struct SqliteCdcDispatcher {
 /// automatically (rusqlite stores the boxed closures in
 /// `InnerConnection` and frees them in `Drop`).
 ///
-pub(crate) fn install(
-    conn: &Connection,
-    packet_tx: CommitSender,
-) -> Result<SqliteCdcDispatcher, DbError> {
+pub(crate) fn install(conn: &Connection, packet_tx: CommitSender) -> Result<(), DbError> {
     let buffer = Arc::new(Mutex::new(CdcTxBuffer::new()));
     let commit_id = Arc::new(AtomicU64::new(0));
-
-    let dispatcher = SqliteCdcDispatcher {
-        buffer: buffer.clone(),
-        commit_id: commit_id.clone(),
-        packet_tx: packet_tx.clone(),
-    };
 
     // preupdate hook: capture buffer.
     let buffer_pre = buffer.clone();
@@ -193,7 +167,7 @@ pub(crate) fn install(
     }))
     .map_err(crate::backend::sqlite::error::from_sqlite)?;
 
-    Ok(dispatcher)
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

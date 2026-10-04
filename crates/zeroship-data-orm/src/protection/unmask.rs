@@ -387,7 +387,6 @@ fn meter_audit_write(usage: Option<&dyn crate::metrics::UsageSink>) {
 
 /// Read ciphertext on the captured route, reconstruct row-bound AAD and decrypt.
 /// Decode the plaintext according to its declared field type.
-#[allow(unused_variables)]
 async fn fetch_and_decrypt(
     raw_column: &str,
     route: &crate::tx_route::TxRoute,

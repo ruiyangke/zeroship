@@ -14,8 +14,6 @@ use std::collections::HashMap;
 
 use zeroship_runtime::state::{OpError, OpResult, ResolveValue, SharedState};
 use zeroship_runtime_macros::v8_class;
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{v8_constructor, v8_method};
 
 use crate::op_error::ToOpError;
 use crate::transaction::{

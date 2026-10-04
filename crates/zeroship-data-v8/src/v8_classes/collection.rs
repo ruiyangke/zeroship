@@ -10,8 +10,7 @@
 
 use zeroship_data_orm::value::Value;
 use zeroship_runtime::state::OpError;
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{v8_class, v8_constructor, v8_getter, v8_method, v8_name};
+use zeroship_runtime_macros::v8_class;
 
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::transaction::scope::TransactionScope;

@@ -6,10 +6,8 @@
 //! PostgreSQL and its required extensions come from an owned testcontainer.
 
 use crate::tests::fixtures;
-#[allow(unused_imports)]
 use crate::tests::fixtures::schema::fixture_table_sql;
 use crate::tests::fixtures::Host;
-#[allow(unused_imports)]
 use zeroship_migrate::schema::query::FkEmission;
 
 use std::rc::Rc;

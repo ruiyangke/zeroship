@@ -42,7 +42,6 @@ pub use sqlite::SqliteBackend;
 mod tests {
 
     use super::*;
-    use crate::error::DbError;
     fn assert_postgres_backend_impls_backend() {
         fn assert_impl<T: Backend>() {}
         assert_impl::<PostgresBackend>();
@@ -62,26 +61,6 @@ mod tests {
     fn assert_postgres_backend_impls_pg_lock_manager() {
         fn assert_impl<T: PgLockManager>() {}
         assert_impl::<PostgresBackend>();
-    }
-    #[cfg(test)]
-    #[allow(dead_code)]
-    fn _assert_backup<T: Backup>() {}
-    #[allow(dead_code)]
-    fn _assert_key_store_is_dialect_neutral() {
-        fn assert_store<T: Fn(&BackendHandle) -> &crate::encryption::KeyStore>(_: T) {}
-        assert_store(|handle: &BackendHandle| handle.key_store());
-    }
-    #[cfg(test)]
-    #[allow(dead_code)]
-    fn _assert_postgres_backend_impls_backup() {
-        fn assert_impl<T: Backup>() {}
-        assert_impl::<PostgresBackend>();
-    }
-    #[cfg(test)]
-    #[allow(dead_code)]
-    fn _assert_sqlite_backend_impls_backup() {
-        fn assert_impl<T: Backup>() {}
-        assert_impl::<SqliteBackend>();
     }
     fn assert_associated_types_pinned() {
         fn pinned_client<T: DatabaseFixture<Client = compio_postgres::PoolConnection>>() {}
@@ -134,28 +113,6 @@ mod tests {
         assert_eq!(scope.app_id(), "app_99");
         assert_eq!(scope.name(), "mig:add_archived_flag");
     }
-    #[allow(dead_code)]
-    async fn assert_lock_scope_dispatches_through_try_acquire(
-        backend: &PostgresBackend,
-        client: &compio_postgres::PoolConnection,
-    ) -> Result<bool, DbError> {
-        let global = LockScope::GlobalApp {
-            app_id: "app_t".into(),
-            name: "snapshot_restore".into(),
-        };
-        let _ = backend.try_acquire(client, &global).await?;
-        {
-            use crate::lock_policy::BoundedLockAcquire;
-            backend.acquire(client, &global).await?;
-        }
-        backend.release(client, &global).await?;
-        let local = LockScope::LocalApp {
-            app_id: "app_t".into(),
-            name: "mig:add_archived_flag".into(),
-        };
-        backend.try_acquire(client, &local).await
-    }
-
     #[test]
     fn compile_time_assertions_link() {
         let _ = assert_postgres_backend_impls_backend as fn();

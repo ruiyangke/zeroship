@@ -221,7 +221,10 @@ struct TokenResponse {
     #[serde(default)]
     scope: String,
     #[serde(default)]
-    #[allow(dead_code)] // captured for completeness; not consumed
+    #[expect(
+        dead_code,
+        reason = "the access-token response carries token_type for wire completeness; only access_token and scope are consumed"
+    )]
     token_type: String,
 }
 

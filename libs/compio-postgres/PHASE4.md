@@ -22,13 +22,13 @@
 
 3. **`CancelToken` has no uses of `pub(crate) fn new(...)`.** The struct fields are `pub(crate)`, matching the source. `Client::cancel_token()` constructs it directly.
 
-4. **`query::query_portal` under `#[allow(dead_code)]`.** No Portal-driving code path in Phase 4 - `bind.rs` returns a `Portal` but the only caller is in `generic_client` + Phase 5 transaction surface. Kept the function so Phase 5's `Transaction::bind`/`query_portal` port is a drop-in.
+4. **`query::query_portal` has no in-crate caller.** No Portal-driving code path in Phase 4 - `bind.rs` returns a `Portal` but the only caller is in `generic_client` + Phase 5 transaction surface. Kept the function so Phase 5's `Transaction::bind`/`query_portal` port is a drop-in.
 
-5. **`query::sync` under `#[allow(dead_code)]`.** Used only by `Client::check_connection`, which is a user-facing method - lint fires because the internal function is crate-private while the caller doesn't itself emit diagnostics. Harmless.
+5. **`query::sync` is reached only through `Client::check_connection`.** That is a user-facing method, and the internal function is crate-private; the call keeps it live.
 
-## Statement cache mutators dropped `#[allow(dead_code)]`
+## Statement cache mutators are live
 
-Phase 3 placed `#[allow(dead_code)]` on every `InnerClient::typeinfo*` method because the callers hadn't landed yet. Phase 4's `prepare.rs` uses all of them, so the allows come off and the lint stays quiet.
+Phase 4's `prepare.rs` calls every `InnerClient::typeinfo*` method, so the statement cache path keeps them all in use.
 
 ## Verification
 

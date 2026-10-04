@@ -5,11 +5,9 @@
 //! verify that filtering cannot reveal a protected value without unmask authorization.
 //! PostgreSQL and its required extensions come from an owned testcontainer.
 
-#[allow(unused_imports)]
 use crate::tests::fixtures::schema::fixture_table_sql;
 use crate::tests::fixtures::Host;
 use crate::tests::fixtures::{self, schema};
-#[allow(unused_imports)]
 use zeroship_migrate::schema::query::FkEmission;
 
 use std::collections::{BTreeMap, BTreeSet};

@@ -1,4 +1,4 @@
-#![allow(unused_imports)]
+#![expect(unused_imports)]
 
 //! A compiled default for a secret would put credential material in the binary.
 

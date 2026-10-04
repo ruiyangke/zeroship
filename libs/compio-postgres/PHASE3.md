@@ -52,7 +52,7 @@ Symbols Phase 4 (`query.rs`, `prepare.rs`, `simple_query.rs`, `cancel_query.rs`)
 
 - `InnerClient::send(RequestMessages) -> Result<Responses, Error>`    **real, ready**
 - `InnerClient::with_buf(|buf: &mut BytesMut| ...) -> R`            **real, ready**
-- `InnerClient::typeinfo()`, `set_typeinfo()`, `typeinfo_composite()`, `set_typeinfo_composite()`, `typeinfo_enum()`, `set_typeinfo_enum()`, `type_(Oid)`, `set_type(Oid, &Type)`, `clear_type_cache()`    **real, ready (all under `#[allow(dead_code)]`)**
+- `InnerClient::typeinfo()`, `set_typeinfo()`, `typeinfo_composite()`, `set_typeinfo_composite()`, `typeinfo_enum()`, `set_typeinfo_enum()`, `type_(Oid)`, `set_type(Oid, &Type)`, `clear_type_cache()`    **real, ready**
 - `Responses::next() -> Result<Message, Error>`    **real, ready**
 - `Client::inner() -> &Arc<InnerClient>`    **real, ready**
 - `Client::simple_query` / `::simple_query_raw`    **Phase 4 scope** - when available, `connect.rs` should drop the `target_session_attrs` guard and call through

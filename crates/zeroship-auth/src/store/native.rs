@@ -98,6 +98,13 @@ pub(crate) fn optional_instant(
 }
 
 /// The inverse, for a value auth binds back into a predicate or an assignment.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the inverse timestamp conversion has no production caller yet; only the round-trip test exercises it"
+    )
+)]
 pub(crate) fn instant_value(value: DateTime<Utc>) -> Result<UtcInstant, DbError> {
     UtcInstant::from_unix_micros(value.timestamp_micros())
 }

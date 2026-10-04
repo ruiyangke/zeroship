@@ -94,7 +94,6 @@ fn register_sqlite_vec_once() {
 /// string so the result is `Send` (rusqlite's native value types
 /// borrow from the statement; we materialise to owned `Option<String>`
 /// here so the reply can cross the actor / future boundary).
-#[allow(dead_code)]
 pub(crate) type Row = Vec<Option<String>>;
 
 /// A SQLite cell that preserves its storage class across the actor boundary.
@@ -816,7 +815,13 @@ impl SqliteSession {
         recv_reply(reply_rx).await?
     }
 
-    #[allow(dead_code)]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "SQLite snapshot and file-swap restore are driven only by the backend's test fixture; production has no caller yet"
+        )
+    )]
     pub(crate) async fn vacuum_into(
         &self,
         app_id: Option<&str>,
@@ -832,9 +837,15 @@ impl SqliteSession {
         recv_reply(reply_rx).await?
     }
 
-    /// Send a `ReattachFile` command and await the reply. `#[allow(dead_code)]`
-    /// matches `vacuum_into` above.
-    #[allow(dead_code)]
+    /// Send a `ReattachFile` command and await the reply, matching `vacuum_into`
+    /// above.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "SQLite snapshot and file-swap restore are driven only by the backend's test fixture; production has no caller yet"
+        )
+    )]
     pub(crate) async fn reattach_file(
         &self,
         app_id: &str,
@@ -920,7 +931,10 @@ pub(crate) struct TxLease {
     /// strong count is exactly "is this lease alive" - which is the question
     /// `reserve_transaction` asks and the reservation's own count cannot
     /// answer.
-    #[allow(dead_code)] // never read: the Arc reference count IS the value
+    #[expect(
+        dead_code,
+        reason = "the Arc reference count is the lease liveness token; the field is held, never read"
+    )]
     alive: Arc<TxLeaseAlive>,
     reservation: Arc<Reservation>,
     tx: flume::Sender<Command>,
@@ -1040,7 +1054,6 @@ impl std::fmt::Debug for SqliteSessionHandle {
 
 impl SqliteSessionHandle {
     /// Wrap an existing session in an autocommit-lane handle.
-    #[allow(dead_code)]
     pub(crate) fn new(session: Rc<SqliteSession>) -> Self {
         Self {
             session,
@@ -1225,8 +1238,6 @@ struct LaneConn {
     /// reservation touches it - keeping it would hand an unproved transaction
     /// to the next caller.
     quarantined: bool,
-    /// Kept alive so the CDC hooks' captured `Arc`s outlive the connection.
-    _dispatcher: Option<crate::backend::sqlite::cdc::SqliteCdcDispatcher>,
 }
 
 /// One app's transaction connection, plus the bookkeeping that decides who may
@@ -1450,13 +1461,7 @@ fn open_lane_connection(
     db_path: &Path,
     packet_tx: Option<&CommitSender>,
     lane: Lane,
-) -> Result<
-    (
-        Connection,
-        Option<crate::backend::sqlite::cdc::SqliteCdcDispatcher>,
-    ),
-    DbError,
-> {
+) -> Result<Connection, DbError> {
     register_sqlite_vec_once();
     let conn = Connection::open(db_path).map_err(from_sqlite)?;
     // The platform's budget, chosen here rather than left at whatever the
@@ -1471,24 +1476,21 @@ fn open_lane_connection(
     conn.execute_batch(BOOT_PRAGMAS).map_err(from_sqlite)?;
     conn.busy_timeout(lane_busy_timeout(lane))
         .map_err(from_sqlite)?;
-    let dispatcher = match packet_tx {
-        Some(tx) => Some(crate::backend::sqlite::cdc::install(&conn, tx.clone())?),
-        None => None,
-    };
-    Ok((conn, dispatcher))
+    if let Some(tx) = packet_tx {
+        crate::backend::sqlite::cdc::install(&conn, tx.clone())?;
+    }
+    Ok(conn)
 }
 
 impl Actor {
     fn open(db_path: PathBuf, packet_tx: Option<CommitSender>) -> Result<Self, DbError> {
-        let (op_conn, op_dispatcher) =
-            open_lane_connection(&db_path, packet_tx.as_ref(), Lane::Op)?;
+        let op_conn = open_lane_connection(&db_path, packet_tx.as_ref(), Lane::Op)?;
         let interrupts = Arc::new(Interrupts::new(op_conn.get_interrupt_handle()));
         Ok(Self {
             op: LaneConn {
                 conn: op_conn,
                 generation: 0,
                 quarantined: false,
-                _dispatcher: op_dispatcher,
             },
             tx: HashMap::new(),
             interrupts,
@@ -1592,7 +1594,7 @@ impl Actor {
         };
         let generation = entry.generation + 1;
         match open_lane_connection(&db_path, packet_tx.as_ref(), lane) {
-            Ok((conn, dispatcher)) => {
+            Ok(conn) => {
                 for (alias, path) in &attachments {
                     if let Err(e) = run_attach(&conn, alias, path) {
                         tracing::error!(
@@ -1605,7 +1607,6 @@ impl Actor {
                 }
                 let handle = conn.get_interrupt_handle();
                 entry.conn = conn;
-                entry._dispatcher = dispatcher;
                 entry.generation = generation;
                 entry.quarantined = false;
                 interrupts.replace(lane, generation, handle);
@@ -1697,8 +1698,7 @@ impl Actor {
             .iter()
             .find(|(alias, _)| alias == app_id)
             .map(|(_, path)| path.clone());
-        let (conn, dispatcher) =
-            open_lane_connection(&self.db_path, self.packet_tx.as_ref(), Lane::Tx(id))?;
+        let conn = open_lane_connection(&self.db_path, self.packet_tx.as_ref(), Lane::Tx(id))?;
         if let Some(path) = &path {
             run_attach(&conn, app_id, path)?;
         }
@@ -1716,7 +1716,6 @@ impl Actor {
                     conn,
                     generation,
                     quarantined: false,
-                    _dispatcher: dispatcher,
                 },
                 app_id: app_id.to_string(),
                 bound: None,

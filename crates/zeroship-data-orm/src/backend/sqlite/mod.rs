@@ -47,7 +47,6 @@ use lock::InProcessLockRegistry;
 use session::{SqliteSession, SqliteSessionHandle};
 
 /// File-backed SQLite backend with one actor-owned connection.
-#[allow(dead_code)]
 pub struct SqliteBackend {
     session: Rc<SqliteSession>,
     lock_registry: Rc<InProcessLockRegistry>,
@@ -103,7 +102,6 @@ impl SqliteBackend {
         Ok(Self::finish_open(opened, sink, key_source))
     }
 
-    #[allow(dead_code)]
     pub fn new(
         db_dir: PathBuf,
         sink: Arc<dyn ChangeSink>,

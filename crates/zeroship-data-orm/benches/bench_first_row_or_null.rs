@@ -10,7 +10,11 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 use zeroship_data_orm::{error, sql, value};
 #[path = "../src/backend/postgres/pg_row_json.rs"]
-#[allow(dead_code, unused_imports)]
+#[expect(
+    dead_code,
+    unused_imports,
+    reason = "the bench drives one row-codec entry point; the rest of the module, including its test modules, is unused in the bench crate"
+)]
 mod pg_row_json;
 
 // ---------------------------------------------------------------------------

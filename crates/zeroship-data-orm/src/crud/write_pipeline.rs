@@ -7,9 +7,6 @@ use crate::tx_route::TxRoute;
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
 
-#[cfg(test)]
-use std::cell::RefCell;
-
 pub enum ApplyMode<'a> {
     Insert {
         actor_id: Option<&'a str>,
@@ -511,7 +508,6 @@ pub async fn resolve_target_row_ids(
     limit: i64,
     schema: &FieldMap,
 ) -> Result<Vec<TargetRowId>, DbError> {
-    note_target_row_resolution_for_tests();
     let built = compile_target_probe(
         route.schema(),
         collection,
@@ -521,7 +517,6 @@ pub async fn resolve_target_row_ids(
         route.sql_registration(),
     )
     .map_err(DbError::from)?;
-    note_target_row_resolution_sql_for_tests(&built.sql);
     let rows = exec_query(route, built).await?;
     Ok(rows
         .into_iter()
@@ -645,7 +640,6 @@ async fn rewrite_upsert_doc_id_to_existing_row_id(
     }
 
     let filter = Value::Object(filter_obj);
-    note_upsert_conflict_probe_for_tests();
     let built = compile_target_probe(
         route.schema(),
         collection,
@@ -666,67 +660,6 @@ async fn rewrite_upsert_doc_id_to_existing_row_id(
     }
     Ok(())
 }
-
-#[cfg(test)]
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct WritePathCounters {
-    pub target_row_resolution_calls: usize,
-    pub upsert_conflict_probe_calls: usize,
-    pub target_row_resolution_sql: Vec<String>,
-}
-
-#[cfg(test)]
-thread_local! {
-    static WRITE_PATH_COUNTERS: RefCell<WritePathCounters> =
-        RefCell::new(WritePathCounters::default());
-}
-
-#[cfg(test)]
-#[cfg_attr(test, allow(dead_code))]
-pub fn reset_write_path_counters_for_tests() {
-    WRITE_PATH_COUNTERS.with(|counters| {
-        *counters.borrow_mut() = WritePathCounters::default();
-    });
-}
-
-#[cfg(test)]
-#[cfg_attr(test, allow(dead_code))]
-pub fn write_path_counters_for_tests() -> WritePathCounters {
-    WRITE_PATH_COUNTERS.with(|counters| counters.borrow().clone())
-}
-
-#[cfg(test)]
-fn note_target_row_resolution_for_tests() {
-    WRITE_PATH_COUNTERS.with(|counters| {
-        counters.borrow_mut().target_row_resolution_calls += 1;
-    });
-}
-
-#[cfg(not(test))]
-fn note_target_row_resolution_for_tests() {}
-
-#[cfg(test)]
-fn note_target_row_resolution_sql_for_tests(sql: &str) {
-    WRITE_PATH_COUNTERS.with(|counters| {
-        counters
-            .borrow_mut()
-            .target_row_resolution_sql
-            .push(sql.to_string());
-    });
-}
-
-#[cfg(not(test))]
-fn note_target_row_resolution_sql_for_tests(_sql: &str) {}
-
-#[cfg(test)]
-fn note_upsert_conflict_probe_for_tests() {
-    WRITE_PATH_COUNTERS.with(|counters| {
-        counters.borrow_mut().upsert_conflict_probe_calls += 1;
-    });
-}
-
-#[cfg(not(test))]
-fn note_upsert_conflict_probe_for_tests() {}
 
 #[cfg(test)]
 mod tests {

@@ -36,11 +36,6 @@ mod update_validation;
 pub mod upsert;
 mod write_pipeline;
 
-#[cfg(test)]
-pub use write_pipeline::{
-    reset_write_path_counters_for_tests, write_path_counters_for_tests, WritePathCounters,
-};
-
 /// Execute a row-returning mutation, emit its change event and process the result.
 /// Owned arguments let the returned future outlive the dispatch closure.
 pub async fn exec_mutation_then_read(

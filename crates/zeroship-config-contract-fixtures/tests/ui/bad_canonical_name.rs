@@ -1,4 +1,4 @@
-#![allow(unused_imports)]
+#![expect(unused_imports)]
 
 //! A declaration whose canonical identity is not the ASCII lowercase grammar.
 //!

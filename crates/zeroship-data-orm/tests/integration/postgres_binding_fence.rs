@@ -55,7 +55,7 @@ const MINIMUM_SERVER_VERSION_NUM: i32 = 160_000;
 /// one cluster at a time. Cases sharing the worktree's server must not alter
 /// the same role row at once, or PostgreSQL reports `tuple concurrently
 /// updated`.
-const ROLE_PROVISIONING_LOCK: i64 = 0x7a73_5f72_6f6c_65_5f;
+const ROLE_PROVISIONING_LOCK: i64 = 0x7a73_5f72_6f6c_655f;
 
 async fn lock_role_provisioning(case_url: &str) -> Client {
     let mut url = url::Url::parse(case_url).expect("the fixture URL parses");

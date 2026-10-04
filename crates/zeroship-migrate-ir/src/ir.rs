@@ -59,8 +59,7 @@ use crate::attribute::{
     CreateTableAttributes, SetTableOptionsAttributes,
 };
 use crate::expr::Expr;
-#[allow(unused_imports)]
-use crate::migration::{Checksum, MigrationFlags, OnlinePhase};
+use crate::migration::OnlinePhase;
 use crate::precondition::PreconditionCheck;
 
 #[cfg(doc)]
@@ -381,7 +380,7 @@ pub struct MigrationIr {
     /// and so unpredictable to the builder). The engine RECOMPUTES and is
     /// authoritative; when this hint is present the loader compares its
     /// recomputed hint-domain checksum to it (a mismatch is genuine drift). The
-    /// hint is **EXCLUDED from [`Checksum::of_ir`]** (exactly like `owner_app` is
+    /// hint is **EXCLUDED from [`Checksum::of_ir`](crate::migration::Checksum::of_ir)** (exactly like `owner_app` is
     /// excluded from the hint domain) - folding the artifact's own checksum into
     /// the artifact's checksum would be circular. `deny_unknown_fields` would
     /// otherwise reject an IR envelope carrying this advisory hint at
@@ -415,7 +414,7 @@ impl MigrationIr {
     }
 }
 
-/// All-`Option` mirror of [`MigrationFlags`] - the override carrier in the IR.
+/// All-`Option` mirror of [`MigrationFlags`](crate::migration::MigrationFlags) - the override carrier in the IR.
 ///
 /// An absent key and an explicit `null` both mean "no override" here;
 /// the derive-then-override MERGE happens elsewhere, NOT this type's job.
@@ -4785,6 +4784,7 @@ fn jcs_write_string(s: &str, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::migration::{Checksum, MigrationFlags};
     use std::collections::BTreeMap;
 
     #[test]
