@@ -28,12 +28,10 @@ publish_packages=(
   "packages/create-zeroship-app"
 )
 
-# This list is hand-maintained and does not track the tree. When
-# `chore(reorg): retire @zeroship/migrations SDK` (4feee8f64) deleted
-# sdks/migrations it left the entry here, and the next run of
-# tests/external_chain.sh died mid-publish with a bare
-# `ENOENT: .../sdks/migrations/package.json` thrown from inside json_field --
-# the path but not the reason. Fail up front, naming the stale entry.
+# This list is hand-maintained and does not track the tree. A listed directory
+# without a package.json would stop the publish partway with a bare `ENOENT`
+# thrown from inside json_field, which names the path but not the reason, so
+# fail up front, naming the stale entry.
 #
 # This checks only that a listed directory EXISTS. It cannot see the other
 # direction: a publishable package present in packages/ and absent from this list
@@ -55,11 +53,9 @@ fi
 # version of a package that exists nowhere the installer can reach. Inside the
 # monorepo it resolves by workspace linking and looks fine.
 #
-# This is not hypothetical. Measured 2026-08-10 via tests/external_chain.sh:
-# published @zeroship/vite-plugin@0.3.0 once declared two unpublished workspace
-# dependencies, so `npm install` in a scaffolded app died with E404. The list
-# above now includes @zeroship/migrate; zeroship-migrate-node remains a separate
-# publication dependency that this check refuses to hide.
+# Such a dependency makes `npm install` in a scaffolded app fail with E404, the
+# install deploy/scripts/external-chain.sh runs. zeroship-migrate-node is a
+# separate publication dependency that this check refuses to hide.
 #
 # Optional peers are exempt: npm 7+ does not auto-install them.
 node -e '

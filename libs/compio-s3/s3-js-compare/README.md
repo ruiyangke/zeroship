@@ -16,7 +16,7 @@ multipart path on two axes:
 Not a workspace member — install + run standalone:
 
 ```bash
-cd tests/s3-js-compare
+cd libs/compio-s3/s3-js-compare
 npm install                      # @aws-sdk/client-s3 + lib-storage (gitignored node_modules)
 
 # point at a running S3-compatible endpoint (the e2e harnesses spin up the

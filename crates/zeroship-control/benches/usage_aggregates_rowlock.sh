@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# metering_rowlock_pgbench.sh — ISOLATE the usage_aggregates hot-row UPSERT
+# usage_aggregates_rowlock.sh - ISOLATE the usage_aggregates hot-row UPSERT
 # contention at the DB level, with PERSISTENT POOLED connections.
 #
 # This exists because measuring the same contention THROUGH the control plane
@@ -18,7 +18,7 @@
 #
 # Usage:
 #   METERING_LOAD_DB='postgres://postgres:zeroship@localhost:5440/zeroship_metering_load' \
-#     tests/metering_rowlock_pgbench.sh
+#     crates/zeroship-control/benches/usage_aggregates_rowlock.sh
 #
 #   PSQL=/path/to/psql PGBENCH=/path/to/pgbench  # override tool paths
 #   DURATION=5  CLIENTS="1 4 8 16 32 48"          # override sweep
