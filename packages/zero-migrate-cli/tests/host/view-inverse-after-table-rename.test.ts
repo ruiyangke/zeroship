@@ -191,11 +191,9 @@ test("a table rename reaches the view body a rollback re-creates from", async (c
         const priors = ALL.slice(0, index);
         await apply({
           ...base,
-          migration: ALL[index]!,
-          priorMigrations: priors,
-          priorNameFallbacks: priors.map((prior) => prior.name),
+          migrations: [...priors, ALL[index]!],
+          nameFallbacks: [...priors.map((prior) => prior.name), ALL[index]!.name],
           registry,
-          nameFallback: ALL[index]!.name,
         });
 
         if (index === 1) {

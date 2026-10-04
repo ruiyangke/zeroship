@@ -68,9 +68,8 @@ test("a bounded string cannot be case-insensitive, and the refusal names the fac
 
   const applyOne = (migration: NamedMigration) =>
     apply({
-      migration,
-      priorMigrations: [],
-      priorNameFallbacks: [],
+      migrations: [migration],
+      nameFallbacks: [migration.name],
       ownerApp: OWNER_APP,
       projectSchema,
       driver,
@@ -78,7 +77,6 @@ test("a bounded string cannot be case-insensitive, and the refusal names the fac
       policy: [noInjectPolicy(projectSchema)],
       approved: true,
       appliedBy: "bounded-ci-refusal",
-      nameFallback: migration.name,
     });
 
   const tableExists = async (): Promise<boolean> => {

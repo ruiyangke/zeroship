@@ -136,7 +136,8 @@ test("PostgreSQL binds literal values, and refuses a NUL byte rather than trunca
   const applyValue = async (value: string, schema: string) => {
     const applyOne = (migration: MigrationModule, nameFallback: string) =>
       apply({
-        migration,
+        migrations: [migration],
+        nameFallbacks: [nameFallback],
         ownerApp: OWNER_APP,
         projectSchema: schema,
         driver,
@@ -144,7 +145,6 @@ test("PostgreSQL binds literal values, and refuses a NUL byte rather than trunca
         policy: [charter(schema)],
         approved: true,
         appliedBy: "literal-value-binding",
-        nameFallback,
       });
 
     await applyOne(schemaMigration(), "create_items");
@@ -194,7 +194,8 @@ test("MySQL binds literal values and stores a NUL byte exactly", async (ctx) => 
       await admin.query(`CREATE TABLE \`${database}\`.bystander (id int) ENGINE=InnoDB`);
       const applyOne = (migration: MigrationModule, nameFallback: string) =>
         apply({
-          migration,
+          migrations: [migration],
+          nameFallbacks: [nameFallback],
           ownerApp: OWNER_APP,
           projectSchema: database,
           driver: { kind: "mysql", url: MYSQL_URL },
@@ -202,7 +203,6 @@ test("MySQL binds literal values and stores a NUL byte exactly", async (ctx) => 
           policy: [charter(database)],
           approved: true,
           appliedBy: "literal-value-binding",
-          nameFallback,
         });
       await applyOne(schemaMigration(), "create_items");
       await applyOne(insertingMigration(value), "insert_it");
@@ -249,7 +249,8 @@ test("SQLite binds literal values and stores a NUL byte exactly", async () => {
 
       const applyOne = (migration: MigrationModule, nameFallback: string) =>
         apply({
-          migration,
+          migrations: [migration],
+          nameFallbacks: [nameFallback],
           ownerApp: OWNER_APP,
           projectSchema: "main",
           driver: { kind: "sqlite", appPath: dbPath },
@@ -257,7 +258,6 @@ test("SQLite binds literal values and stores a NUL byte exactly", async () => {
           policy: [charter("main")],
           approved: true,
           appliedBy: "literal-value-binding",
-          nameFallback,
         });
       await applyOne(schemaMigration(), "create_items");
       await applyOne(insertingMigration(value), "insert_it");

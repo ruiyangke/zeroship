@@ -153,9 +153,8 @@ test("a backfill visits every row exactly once, whatever its cursor values sort 
         priors: (MigrationModule & { name: string })[],
       ) =>
         apply({
-          migration,
-          priorMigrations: priors,
-          priorNameFallbacks: priors.map((p) => p.name),
+          migrations: [...priors, migration],
+          nameFallbacks: [...priors.map((p) => p.name), migration.name],
           ownerApp: OWNER_APP,
           projectSchema,
           driver,
@@ -163,7 +162,6 @@ test("a backfill visits every row exactly once, whatever its cursor values sort 
           policy: [charter(projectSchema)],
           approved: true,
           appliedBy: "backfill-cursor-ordering",
-          nameFallback: migration.name,
         });
 
       try {
@@ -309,9 +307,8 @@ test("a composite cursor visits every row exactly once under the same inversions
         priors: (MigrationModule & { name: string })[],
       ) =>
         apply({
-          migration,
-          priorMigrations: priors,
-          priorNameFallbacks: priors.map((p) => p.name),
+          migrations: [...priors, migration],
+          nameFallbacks: [...priors.map((p) => p.name), migration.name],
           ownerApp: OWNER_APP,
           projectSchema,
           driver,
@@ -319,7 +316,6 @@ test("a composite cursor visits every row exactly once under the same inversions
           policy: [charter(projectSchema)],
           approved: true,
           appliedBy: "backfill-cursor-ordering",
-          nameFallback: migration.name,
         });
 
       try {

@@ -100,7 +100,8 @@ async function applyInitial(
   driver: DriverConfig,
 ) {
   return apply({
-    migration,
+    migrations: [migration],
+    nameFallbacks: [migration.name],
     ownerApp: OWNER_APP,
     projectSchema,
     driver,
@@ -108,7 +109,6 @@ async function applyInitial(
     policy: [noInjectPolicy(projectSchema)],
     approved: true,
     appliedBy: "inline-index-e2e",
-    nameFallback: migration.name,
   });
 }
 
@@ -119,9 +119,8 @@ async function applyAfter(
   driver: DriverConfig,
 ) {
   return apply({
-    migration,
-    priorMigrations: [prior],
-    priorNameFallbacks: [prior.name],
+    migrations: [prior, migration],
+    nameFallbacks: [prior.name, migration.name],
     ownerApp: OWNER_APP,
     projectSchema,
     driver,
@@ -129,7 +128,6 @@ async function applyAfter(
     policy: [noInjectPolicy(projectSchema)],
     approved: true,
     appliedBy: "inline-index-e2e",
-    nameFallback: migration.name,
   });
 }
 

@@ -95,9 +95,8 @@ test("PostgreSQL renders ON ONLY for every partitioned-parent index, so the flag
     await admin.query(`CREATE SCHEMA ${pgIdent(projectSchema)}`);
 
     await apply({
-      migration: twoParentsOneAskingForOnly(),
-      priorMigrations: [],
-      priorNameFallbacks: [],
+      migrations: [twoParentsOneAskingForOnly()],
+      nameFallbacks: ["partition_index_only"],
       ownerApp: OWNER_APP,
       projectSchema,
       driver,
@@ -105,7 +104,6 @@ test("PostgreSQL renders ON ONLY for every partitioned-parent index, so the flag
       policy: [partitionPolicy(projectSchema)],
       approved: true,
       appliedBy: "partitioned-index-only-e2e",
-      nameFallback: "partition_index_only",
     });
 
     const asked = await indexDef(`${ASKED_ONLY}_payload_idx`);

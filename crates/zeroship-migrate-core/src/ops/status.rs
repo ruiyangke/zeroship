@@ -977,65 +977,116 @@ async fn status_plans_via_backend_locked_inner<B: crate::apply::backend::Migrati
     manifests: &[PlanStatusManifest],
     read_only: bool,
 ) -> Result<AppliedPlanStatus, StatusError> {
-    // Every apply/rollback/progress/obligation mutation uses this same project
-    // lock. Holding it across all readers makes their combined result one coherent
-    // backend snapshot even on dialects without a shared read transaction seam.
-    let journal_exists = !read_only || backend.journal_exists(cfg).await?;
-    let (entries, rolled_back, backfill_progress, outstanding, resolved, superseded) =
-        if journal_exists {
-            let entries = backend.applied(cfg).await?;
-            let rolled_back = backend.net_rolled_back_versions(cfg).await?;
-            let backfill_progress = backend.backfill_progress(cfg).await?;
-            // Read inside the same lock bracket as the journal itself: the
-            // supersession net state decides which journal rows are ACCOUNTED FOR,
-            // so reading it against a different snapshot would report a row as
-            // unexpected that the very same journal explains.
-            let superseded = backend.superseded_versions(cfg).await?;
-            let (outstanding, resolved) =
-                if let Some(pending_contracts) = backend.pending_contracts() {
-                    let outstanding = pending_contracts.outstanding_pending_contracts(cfg).await?;
-                    let resolved = pending_contracts
-                        .resolved_pending_contracts(cfg)
-                        .await?
-                        .into_iter()
-                        .map(|terminal| ResolvedPendingContract {
-                            pending_version: terminal.contract.pending_version,
-                            plan_version: terminal.contract.plan_version,
-                            contract_versions: terminal.contract.contract_versions,
-                            resolution: terminal.resolution,
-                        })
-                        .collect();
-                    (outstanding, resolved)
-                } else {
-                    (Vec::new(), Vec::new())
-                };
+    PlanStatusEvidence::read_locked(backend, cfg, read_only)
+        .await?
+        .reconcile(manifests)
+}
+
+/// Everything plan reconciliation reads from a backend, read once while the
+/// caller holds the project lock.
+///
+/// Every apply/rollback/progress/obligation mutation takes that same lock, so the
+/// reads together are one coherent backend snapshot even on dialects without a
+/// shared read transaction seam, and any number of reconciliations - of different
+/// manifest sets - can be answered from it without reading again.
+#[derive(Debug, Clone, Default)]
+pub struct PlanStatusEvidence {
+    entries: Vec<AppliedEntry>,
+    rolled_back: Vec<String>,
+    backfill_progress: Vec<BackfillProgressEntry>,
+    superseded: Vec<String>,
+    outstanding: Vec<journal::PendingContract>,
+    resolved: Vec<journal::ResolvedPendingContract>,
+}
+
+impl PlanStatusEvidence {
+    /// Read the evidence. The caller holds the project lock and has bootstrapped
+    /// the journal; with `read_only` an absent journal reads as empty evidence
+    /// instead of being created.
+    ///
+    /// # Errors
+    /// The journal and contract read errors of the backend.
+    #[doc(hidden)]
+    pub async fn read_locked<B: crate::apply::backend::MigrationBackend>(
+        backend: &B,
+        cfg: &ExecutorConfig,
+        read_only: bool,
+    ) -> Result<Self, StatusError> {
+        if read_only && !backend.journal_exists(cfg).await? {
+            return Ok(Self::default());
+        }
+        let entries = backend.applied(cfg).await?;
+        let rolled_back = backend.net_rolled_back_versions(cfg).await?;
+        let backfill_progress = backend.backfill_progress(cfg).await?;
+        // Read inside the same lock bracket as the journal itself: the supersession
+        // net state decides which journal rows are ACCOUNTED FOR, so reading it
+        // against a different snapshot would report a row as unexpected that the
+        // very same journal explains.
+        let superseded = backend.superseded_versions(cfg).await?;
+        let (outstanding, resolved) = if let Some(pending_contracts) = backend.pending_contracts() {
             (
-                entries,
-                rolled_back,
-                backfill_progress,
-                outstanding,
-                resolved,
-                superseded,
+                pending_contracts.outstanding_pending_contracts(cfg).await?,
+                pending_contracts.resolved_pending_contracts(cfg).await?,
             )
         } else {
-            (
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-            )
+            (Vec::new(), Vec::new())
         };
-    reconcile_applied_plans_with_resolutions(
-        manifests,
-        &entries,
-        &backfill_progress,
-        &outstanding,
-        &resolved,
-        &rolled_back,
-        &superseded,
-    )
+        Ok(Self {
+            entries,
+            rolled_back,
+            backfill_progress,
+            superseded,
+            outstanding,
+            resolved,
+        })
+    }
+
+    /// Reconcile `manifests` against this evidence.
+    ///
+    /// # Errors
+    /// The reconciliation errors documented by [`reconcile_applied_plans`].
+    pub fn reconcile(
+        &self,
+        manifests: &[PlanStatusManifest],
+    ) -> Result<AppliedPlanStatus, StatusError> {
+        let resolved: Vec<ResolvedPendingContract> = self
+            .resolved
+            .iter()
+            .map(|terminal| ResolvedPendingContract {
+                pending_version: terminal.contract.pending_version.clone(),
+                plan_version: terminal.contract.plan_version.clone(),
+                contract_versions: terminal.contract.contract_versions.clone(),
+                resolution: terminal.resolution,
+            })
+            .collect();
+        reconcile_applied_plans_with_resolutions(
+            manifests,
+            &self.entries,
+            &self.backfill_progress,
+            &self.outstanding,
+            &resolved,
+            &self.rolled_back,
+            &self.superseded,
+        )
+    }
+
+    /// The net-applied journal entries and lone `started` markers read.
+    #[must_use]
+    pub fn journal(&self) -> &[AppliedEntry] {
+        &self.entries
+    }
+
+    /// The online contracts outstanding when the evidence was read.
+    #[must_use]
+    pub fn outstanding(&self) -> &[journal::PendingContract] {
+        &self.outstanding
+    }
+
+    /// The terminally resolved online contracts read.
+    #[must_use]
+    pub fn resolved(&self) -> &[journal::ResolvedPendingContract] {
+        &self.resolved
+    }
 }
 
 /// Stable topological ordering of supplied plans. Among plans whose supplied

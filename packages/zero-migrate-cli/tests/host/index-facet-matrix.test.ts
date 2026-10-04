@@ -116,7 +116,8 @@ function applyFacet(
   driver: DriverConfig,
 ): Promise<unknown> {
   return apply({
-    migration: facetMigration(facet, options),
+    migrations: [facetMigration(facet, options)],
+    nameFallbacks: [`facet_${facet}`],
     ownerApp: OWNER_APP,
     projectSchema,
     driver,
@@ -124,7 +125,6 @@ function applyFacet(
     policy: [charter(projectSchema)],
     approved: true,
     appliedBy: "index-facet-matrix",
-    nameFallback: `facet_${facet}`,
   });
 }
 

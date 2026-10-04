@@ -118,7 +118,8 @@ test("a failed journal append takes the teardown down with it", async (ctx) => {
   try {
     await client.query(`CREATE SCHEMA "${projectSchema}"`);
     await apply({
-      migration,
+      migrations: [migration],
+      nameFallbacks: [migration.name!],
       ownerApp: OWNER_APP,
       projectSchema,
       driver,
@@ -126,7 +127,6 @@ test("a failed journal append takes the teardown down with it", async (ctx) => {
       policy,
       approved: true,
       appliedBy: "rollback-atomicity",
-      nameFallback: migration.name!,
     });
     assert.equal(await widgetsExists(), true, "the migration must have created its table");
 
@@ -190,7 +190,7 @@ test("an authored down() is refused, not silently ignored", async () => {
   await assert.rejects(
     () =>
       apply({
-        migration: {
+        migrations: [{
           name: "with_down",
           default: {
             schema() {
@@ -203,7 +203,8 @@ test("an authored down() is refused, not silently ignored", async () => {
               table("widgets").drop();
             },
           },
-        } as MigrationModule,
+        } as MigrationModule],
+        nameFallbacks: ["with_down"],
         ownerApp: OWNER_APP,
         projectSchema: "public",
         driver: { kind: "postgres", url: pgUrl() },
@@ -211,7 +212,6 @@ test("an authored down() is refused, not silently ignored", async () => {
         policy: [charter("public")],
         approved: true,
         appliedBy: "rollback-atomicity",
-        nameFallback: "with_down",
       }),
     /down\(\) function, which the recorder does not capture/,
     "an authored down() must be refused with the reason, before any connection is opened",

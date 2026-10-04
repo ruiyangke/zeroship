@@ -67,14 +67,14 @@ function uniqueName(prefix: string): string {
 }
 
 function applyOptions(
-  migration: MigrationModule,
-  nameFallback: string,
+  migrations: readonly MigrationModule[],
   projectSchema: string,
   driver: DriverConfig,
   approved = true,
 ) {
   return {
-    migration,
+    migrations,
+    nameFallbacks: migrations.map((_, index) => MIGRATION_NAMES[index] ?? `migration_${index}`),
     ownerApp: OWNER_APP,
     projectSchema,
     driver,
@@ -82,34 +82,21 @@ function applyOptions(
     policy: [noInjectPolicy(projectSchema)],
     approved,
     appliedBy: "dml-e2e",
-    nameFallback,
   } as const;
 }
 
+/** Apply the ordered pair in one call, the way the CLI applies a directory. */
 async function applyPair(
   migrations: readonly MigrationModule[],
   projectSchema: string,
   driver: DriverConfig,
   approved = true,
 ): Promise<{ applied: string[]; skipped: string[]; recovered: string[] }> {
-  const outcomes = [];
-  for (let index = 0; index < migrations.length; index += 1) {
-    outcomes.push(
-      await apply(
-        applyOptions(
-          migrations[index],
-          MIGRATION_NAMES[index] ?? `migration_${index}`,
-          projectSchema,
-          driver,
-          approved,
-        ),
-      ),
-    );
-  }
+  const outcome = await apply(applyOptions(migrations, projectSchema, driver, approved));
   return {
-    applied: outcomes.flatMap((outcome) => outcome.applied),
-    skipped: outcomes.flatMap((outcome) => outcome.skipped),
-    recovered: outcomes.flatMap((outcome) => outcome.recovered),
+    applied: outcome.applied,
+    skipped: outcome.skipped,
+    recovered: outcome.recovered,
   };
 }
 

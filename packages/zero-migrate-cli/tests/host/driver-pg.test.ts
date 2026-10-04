@@ -322,7 +322,8 @@ test("apply survives a fully poisoned global pg.types map", async (t) => {
 
     const mig = await import("./mig/20260711000001_create_widgets.ts");
     const outcome = await apply({
-      migration: mig as never,
+      migrations: [mig as never],
+      nameFallbacks: ["create_widgets"],
       ownerApp: "app_widgets",
       projectSchema: schema,
       driver: { kind: "postgres", url: PG_URL },
@@ -330,7 +331,6 @@ test("apply survives a fully poisoned global pg.types map", async (t) => {
       policy: [noInjectPolicy(schema)],
       approved: false,
       appliedBy: "deploy",
-      nameFallback: "create_widgets",
     });
     assert.ok(outcome.applied.length > 0, "at least one migration id applied");
 

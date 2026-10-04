@@ -2,6 +2,12 @@
 // rollback marker says that `down` may have only partially landed. PostgreSQL
 // has transactional rollback and no such marker; its ordinary re-apply remains
 // a silent, successful skip.
+//
+// A set of one takes the lone path, which always hands its migration to the
+// engine. A set of two reports a fully applied migration as skipped without the
+// engine when nothing can refuse it, so the two-file arms are what pin the marker
+// as one of the things that can: the marked file goes through the engine and the
+// run refuses there.
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -32,7 +38,16 @@ function uniqueNamespace(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6).toString(36)}`;
 }
 
-function project(schema: string): string {
+const SECOND_MIGRATION = `import { table, t } from "@zeroship/migrate";
+export const name = "create_child";
+export default {
+  schema() {
+    table("child").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
+  },
+};
+`;
+
+function project(schema: string, files: "one" | "two" = "one"): string {
   const work = mkdtempSync(join(HERE, "apply-unwind-"));
   mkdirSync(join(work, "migrations"));
   writeFileSync(
@@ -50,8 +65,14 @@ value = true
 scope = { include = [${JSON.stringify(schema)}] }
 `,
   );
-  writeFileSync(join(work, "registry.json"), JSON.stringify({ parent: OWNER_APP }));
+  writeFileSync(
+    join(work, "registry.json"),
+    JSON.stringify({ parent: OWNER_APP, child: OWNER_APP }),
+  );
   writeFileSync(join(work, "migrations", "20260101000000_create_parent.ts"), MIGRATION);
+  if (files === "two") {
+    writeFileSync(join(work, "migrations", "20260102000000_create_child.ts"), SECOND_MIGRATION);
+  }
   return work;
 }
 
@@ -252,6 +273,129 @@ test("status reports the interrupted unwind that apply refuses over", async (ctx
     await connection.query(`DROP DATABASE IF EXISTS \`${database}\``).catch(() => {});
     await connection.query(`DROP DATABASE IF EXISTS \`${meta}\``).catch(() => {});
     await connection.end().catch(() => {});
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+/** Every per-file report line, in order, as [label, outcome]. */
+function applyReports(text: string): Array<[string, { applied: string[]; skipped: string[] }]> {
+  return text
+    .split("\n")
+    .filter((line) => line.startsWith("apply "))
+    .map((line) => {
+      const separator = line.indexOf(": ");
+      return [line.slice("apply ".length, separator), JSON.parse(line.slice(separator + 2))];
+    });
+}
+
+test("MySQL: a two-file apply refuses a marked file instead of reporting it skipped", async (ctx) => {
+  const mysql = (await import("mysql2/promise")).default;
+  const connection = await mysql.createConnection({ uri: MYSQL_URL });
+  const database = uniqueNamespace("apply_unwind_two_my");
+  const meta = `${database}_migrations`;
+  const base = MYSQL_URL.replace(/\/[^/]*$/, "");
+  const work = project(database, "two");
+  const url = `${base}/${database}`;
+  const versions = async (): Promise<string[]> => {
+    const [rows] = await connection.query(
+      `SELECT version FROM \`${meta}\`.schema_migrations
+        WHERE event_kind = 'applied' ORDER BY event_seq`,
+    );
+    return (rows as Array<{ version: string }>).map((row) => row.version);
+  };
+  const mark = async (version: string) => {
+    await connection.query(
+      `INSERT INTO \`${meta}\`.schema_migrations_rollback_inflight
+         (version, name, checksum, started_at, applied_by)
+       SELECT version, name, checksum, \`at\`, \`by\`
+         FROM \`${meta}\`.schema_migrations
+        WHERE event_kind = 'applied' AND version = ?
+        ORDER BY event_seq DESC LIMIT 1`,
+      [version],
+    );
+  };
+
+  try {
+    await connection.query(`CREATE DATABASE \`${database}\``);
+    const first = await cli(work, database, url);
+    assert.equal(first.code, 0, `both migrations must apply; ${first.text}`);
+    const journal = await versions();
+    assert.equal(journal.length, 2, "each file journals one step");
+    const [parent, child] = journal;
+
+    // CONTROL: with no marker, the rerun reports both files skipped.
+    const clean = await cli(work, database, url);
+    assert.equal(clean.code, 0, `a marker-free rerun must succeed; ${clean.text}`);
+    assert.deepEqual(
+      applyReports(clean.text).map(([, report]) => report.skipped),
+      [[parent], [child]],
+      "a clean rerun skips both files",
+    );
+
+    await mark(parent);
+    const refused = await cli(work, database, url);
+    assert.equal(refused.code, 1, `a marker on the first file must refuse; ${refused.text}`);
+    assert.match(refused.text, /rollback marker from an interrupted unwind/);
+    assert.match(refused.text, new RegExp(parent));
+    assert.deepEqual(applyReports(refused.text), [], "nothing is reported skipped before the refusal");
+
+    // The marker on the SECOND file: the first is reported skipped, then the run
+    // refuses at the second.
+    await connection.query(`DELETE FROM \`${meta}\`.schema_migrations_rollback_inflight`);
+    await mark(child);
+    const second = await cli(work, database, url);
+    assert.equal(second.code, 1, `a marker on the second file must refuse; ${second.text}`);
+    assert.match(second.text, new RegExp(child));
+    assert.deepEqual(
+      applyReports(second.text).map(([, report]) => report.skipped),
+      [[parent]],
+      "the unmarked first file is reported skipped before the refusal",
+    );
+    assert.deepEqual(await versions(), journal, "no refusal writes a journal row");
+  } finally {
+    await connection.query(`DROP DATABASE IF EXISTS \`${database}\``).catch(() => {});
+    await connection.query(`DROP DATABASE IF EXISTS \`${meta}\``).catch(() => {});
+    await connection.end().catch(() => {});
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test("PostgreSQL: a two-file re-apply reports both files skipped and creates no marker", async (ctx) => {
+  const pg = await import("pg");
+  const client = new pg.Client({ connectionString: PG_URL });
+  await client.connect();
+  const schema = uniqueNamespace("apply_unwind_two_pg");
+  const work = project(schema, "two");
+
+  try {
+    await client.query(`CREATE SCHEMA "${schema}"`);
+    const first = await cli(work, schema, PG_URL);
+    assert.equal(first.code, 0, `both migrations must apply; ${first.text}`);
+    const applied = applyReports(first.text).map(([, report]) => report.applied);
+    assert.equal(applied.length, 2);
+    assert.ok(applied.every((steps) => steps.length === 1), `each file applies one step; ${first.text}`);
+
+    const markerTable = await client.query<{ marker: string | null }>(
+      "SELECT to_regclass($1) AS marker",
+      [`${schema}_migrations.schema_migrations_rollback_inflight`],
+    );
+    assert.equal(markerTable.rows[0].marker, null, "PostgreSQL has no marker to plant");
+
+    const clean = await cli(work, schema, PG_URL);
+    assert.equal(clean.code, 0, `the rerun must succeed; ${clean.text}`);
+    assert.deepEqual(
+      applyReports(clean.text).map(([, report]) => report.skipped),
+      applied,
+      "each file reports exactly the step it applied, skipped",
+    );
+  } finally {
+    await client
+      .query(
+        `DROP SCHEMA IF EXISTS "${schema}" CASCADE;
+         DROP SCHEMA IF EXISTS "${schema}_migrations" CASCADE`,
+      )
+      .catch(() => {});
+    await client.end().catch(() => {});
     rmSync(work, { recursive: true, force: true });
   }
 });

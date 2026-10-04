@@ -92,7 +92,8 @@ test("guarded adoption refuses every column-shape difference it can see", async 
       await client.query(`CREATE SCHEMA "${schema}"`);
       await client.query(`CREATE TABLE "${schema}".items (${liveDdl})`);
       await apply({
-        migration: declared,
+        migrations: [declared],
+        nameFallbacks: [declared.name],
         ownerApp: OWNER_APP,
         projectSchema: schema,
         driver,
@@ -100,7 +101,6 @@ test("guarded adoption refuses every column-shape difference it can see", async 
         policy: [charter(schema)],
         approved: true,
         appliedBy: "guard-adoption-blind-spot",
-        nameFallback: declared.name,
       });
     } finally {
       await client
@@ -161,7 +161,8 @@ test("TODAY guarded adoption ignores a declared constraint the live table lacks"
       await client.query(`CREATE SCHEMA "${schema}"`);
       await client.query(`CREATE TABLE "${schema}".items (${liveDdl})`);
       await apply({
-        migration: declared,
+        migrations: [declared],
+        nameFallbacks: [declared.name],
         ownerApp: OWNER_APP,
         projectSchema: schema,
         driver,
@@ -169,7 +170,6 @@ test("TODAY guarded adoption ignores a declared constraint the live table lacks"
         policy: [charter(schema)],
         approved: true,
         appliedBy: "guard-adoption-blind-spot",
-        nameFallback: declared.name,
       });
       const { rows } = await client.query(
         `SELECT contype FROM pg_constraint

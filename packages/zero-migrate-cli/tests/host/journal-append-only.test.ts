@@ -80,7 +80,8 @@ test("the journal refuses UPDATE, DELETE and TRUNCATE from plain SQL", async (ct
   try {
     await client.query(`CREATE SCHEMA "${projectSchema}"`);
     await apply({
-      migration,
+      migrations: [migration],
+      nameFallbacks: [migration.name],
       ownerApp: OWNER_APP,
       projectSchema,
       driver,
@@ -88,7 +89,6 @@ test("the journal refuses UPDATE, DELETE and TRUNCATE from plain SQL", async (ct
       policy,
       approved: true,
       appliedBy: "journal-append-only",
-      nameFallback: migration.name,
     });
 
     const journalRows = async (): Promise<number> => {

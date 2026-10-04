@@ -103,7 +103,8 @@ test("a half-applied MySQL migration refuses to replay, and the printed repair w
 
   const deploy = () =>
     apply({
-      migration: pair,
+      migrations: [pair],
+      nameFallbacks: [pair.name],
       ownerApp: OWNER_APP,
       projectSchema: database,
       driver,
@@ -111,7 +112,6 @@ test("a half-applied MySQL migration refuses to replay, and the printed repair w
       policy: [charter(database)],
       approved: true,
       appliedBy: "mysql-partial-ddl-recovery",
-      nameFallback: pair.name,
     });
 
   const tablesIn = async (schema: string): Promise<string[]> => {

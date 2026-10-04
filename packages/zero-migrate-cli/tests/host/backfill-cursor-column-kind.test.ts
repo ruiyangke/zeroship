@@ -109,7 +109,8 @@ test("PostgreSQL refuses a generated cursor column and accepts a plain one", asy
       await client.query(`CREATE TABLE "${schema}".rows_t (${ddl})`);
       await client.query(seed.replaceAll("@T", `"${schema}".rows_t`));
       await apply({
-        migration: bump,
+        migrations: [bump],
+        nameFallbacks: ["bump"],
         ownerApp: OWNER_APP,
         projectSchema: schema,
         driver,
@@ -117,7 +118,6 @@ test("PostgreSQL refuses a generated cursor column and accepts a plain one", asy
         policy: [charter(schema)],
         approved: true,
         appliedBy: "backfill-cursor-column-kind",
-        nameFallback: "bump",
       });
     } finally {
       await client
@@ -154,7 +154,8 @@ test("MySQL refuses generated and ON UPDATE cursor columns, and accepts a plain 
       await admin.query(`CREATE TABLE \`${database}\`.rows_t (${ddl}) ENGINE=InnoDB`);
       await admin.query(seed.replaceAll("@T", `\`${database}\`.rows_t`));
       await apply({
-        migration: bump,
+        migrations: [bump],
+        nameFallbacks: ["bump"],
         ownerApp: OWNER_APP,
         projectSchema: database,
         driver: { kind: "mysql", url: MYSQL_URL },
@@ -162,7 +163,6 @@ test("MySQL refuses generated and ON UPDATE cursor columns, and accepts a plain 
         policy: [charter(database)],
         approved: true,
         appliedBy: "backfill-cursor-column-kind",
-        nameFallback: "bump",
       });
     } finally {
       await admin

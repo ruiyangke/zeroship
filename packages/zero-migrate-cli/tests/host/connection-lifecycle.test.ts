@@ -94,9 +94,8 @@ test("repeated apply and status calls leave no database connections behind", asy
     for (let index = 0; index < APPLIES; index += 1) {
       const migration = creates(index);
       await apply({
-        migration,
-        priorMigrations: [...priors],
-        priorNameFallbacks: priors.map((p) => p.name),
+        migrations: [...priors, migration],
+        nameFallbacks: [...priors.map((p) => p.name), migration.name],
         ownerApp: OWNER_APP,
         projectSchema,
         driver,
@@ -104,7 +103,6 @@ test("repeated apply and status calls leave no database connections behind", asy
         policy: [noInjectPolicy(projectSchema)],
         approved: true,
         appliedBy: "connection-lifecycle",
-        nameFallback: migration.name,
       });
       priors.push(migration);
     }

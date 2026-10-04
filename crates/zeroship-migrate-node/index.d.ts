@@ -40,6 +40,22 @@ export interface AdvisoryDto {
   statement: string
 }
 
+/** What one authored migration did in an apply. */
+export interface AppliedMigrationDto {
+  /** The migration's resolved name. */
+  name: string
+  /** Its logical plan id: the identity `statusIr` reports for it. */
+  version: string
+  /** Journal step versions this run applied for it, in apply order. */
+  applied: Array<string>
+  /** Its journal step versions that were already applied (skipped). */
+  skipped: Array<string>
+  /** Its journal step versions recovered via the non-txn recovery path this run. */
+  recovered: Array<string>
+  /** The outstanding online-rename contracts its plan opened. */
+  pendingContracts: Array<ApplyPendingContractDto>
+}
+
 /**
  * `applyIr` - the apply entry: take the ordered pure-JS IR envelope sequence
  * (`{ ir_version, name, ops }` each) as a typed [`ApplyRequest`], run the
@@ -80,7 +96,12 @@ export interface ApplyPendingContractDto {
 }
 
 /**
- * The typed reply for `applyIr` (the projected [`ApplyOutcome`]).
+ * The typed reply for `applyIr` and `resolvePending` (the projected
+ * [`ApplyOutcome`]s).
+ *
+ * The run-wide lists are the per-migration lists of [`Self::migrations`]
+ * concatenated in request order, so a caller that only asks "what did this run
+ * change" reads them and one that reports per file reads `migrations`.
  *
  * [`ApplyOutcome`]: zeroship_migrate::apply::executor::ApplyOutcome
  */
@@ -93,6 +114,19 @@ export interface ApplyReply {
   recovered: Array<string>
   /** Outstanding PostgreSQL online-rename contracts after this operation. */
   pendingContracts: Array<ApplyPendingContractDto>
+  /**
+   * One entry per authored migration the request carried, in request order. A
+   * resolution runs no authored migration and reports none. A run that stopped
+   * part-way lists the migrations it reached before it stopped.
+   */
+  migrations: Array<AppliedMigrationDto>
+  /**
+   * Why a host-driven apply of two or more migrations stopped before the end of
+   * the set. Every migration listed above stays as reported, because each
+   * commits on its own; the `zero-migrate-cli` facade turns a reply carrying
+   * this into a rejection that keeps the reply.
+   */
+  failure?: string
 }
 
 /**
@@ -126,12 +160,13 @@ export interface ApplyRequest {
   /**
    * The ordered authored migration set, oldest first, as real JavaScript values.
    *
-   * The two drivers read it differently, and the difference is the reason it is
-   * ONE field. The in-process driver deploys the whole sequence, applying every
-   * envelope the journal does not already carry. The host driver applies only the
-   * LAST, and uses the prefix solely to reconstruct declared logical column
-   * contracts - accepting that metadata only once those plans are proven fully
-   * applied in the journal, and refusing an empty sequence outright.
+   * Both drivers read it the same way: they lower each envelope once and apply,
+   * in order, every envelope the journal does not already carry, each committing
+   * on its own. The host driver refuses an empty set, which names no migration
+   * to apply; the in-process driver applies nothing for it, which is the dev
+   * tier's project before its first migration. The host driver additionally
+   * checks a set of two or more against the journal's order before it applies
+   * any of it (`verbs::apply_ir_with_locked_backend`).
    */
   envelopes: Array<JsonValue>
   /**
@@ -1002,10 +1037,9 @@ export interface RollbackReply {
 /**
  * The typed request for the `rollback` verb.
  *
- * It carries the complete ordered envelope sequence rather than a prior/current
- * split: a rollback reconstructs the reverse SQL for migrations that are ALREADY
- * applied, so there is no "current" envelope to distinguish. Both drivers read that
- * sequence the same way, which is why - unlike `applyIr`'s - it needs no split.
+ * It carries the complete ordered envelope sequence: a rollback reconstructs the
+ * reverse SQL for migrations that are ALREADY applied from the files that authored
+ * them. Both drivers read that sequence the same way.
  */
 export interface RollbackRequest {
   /**
@@ -1172,10 +1206,9 @@ export interface StatusIrRequest {
   /**
    * The complete ordered authored set to reconcile, oldest first.
    *
-   * ONE field with one meaning, unlike `applyIr`'s: both status drivers hand the
-   * whole sequence to the same reconciliation, so neither a prefix nor a last
-   * envelope is distinguished, and an empty set is the honest question "what does
-   * the journal hold that nothing authored describes".
+   * Both status drivers hand the whole sequence to the same reconciliation, so no
+   * envelope in it is distinguished, and an empty set is the honest question "what
+   * does the journal hold that nothing authored describes".
    */
   envelopes: Array<JsonValue>
   /** Required ordered policy charters, identical to the `applyIr` lowering input. */

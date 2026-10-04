@@ -179,7 +179,8 @@ test("Node-native apply: napi addon lowers + applies the authored IR over the pg
     await probe.query(`CREATE SCHEMA "${schema}"`);
 
     const outcome = await apply({
-      migration: mig as never,
+      migrations: [mig as never],
+      nameFallbacks: ["create_widgets"],
       ownerApp: "app_widgets",
       projectSchema: schema,
       driver: { kind: "postgres", url: PG_URL },
@@ -187,7 +188,6 @@ test("Node-native apply: napi addon lowers + applies the authored IR over the pg
       policy: [noInjectPolicy(schema)],
       approved: false,
       appliedBy: "deploy",
-      nameFallback: "create_widgets",
     });
 
     assert.ok(outcome.applied.length > 0, "at least one migration id applied");
@@ -266,7 +266,8 @@ test("Node-native apply uses live PostgreSQL facts for existing-table changes", 
     };
     await assert.rejects(
       apply({
-        migration: dropUnique,
+        migrations: [dropUnique],
+        nameFallbacks: ["drop_unique_index"],
         ownerApp,
         projectSchema: schema,
         driver,
@@ -274,7 +275,6 @@ test("Node-native apply uses live PostgreSQL facts for existing-table changes", 
         policy: [noInjectPolicy(schema)],
         approved: false,
         appliedBy: "test",
-        nameFallback: "drop_unique_index",
       }),
       /approval/i,
       "a live UNIQUE index drop must require approval even though JavaScript carries no unique hint",
@@ -285,7 +285,8 @@ test("Node-native apply uses live PostgreSQL facts for existing-table changes", 
     assert.equal(stillUnique.rows[0].ex, true, "refused apply keeps the unique index");
 
     await apply({
-      migration: dropUnique,
+      migrations: [dropUnique],
+      nameFallbacks: ["drop_unique_index"],
       ownerApp,
       projectSchema: schema,
       driver,
@@ -293,15 +294,15 @@ test("Node-native apply uses live PostgreSQL facts for existing-table changes", 
       policy: [noInjectPolicy(schema)],
       approved: true,
       appliedBy: "test",
-      nameFallback: "drop_unique_index",
     });
 
     await apply({
-      migration: {
+      migrations: [{
         schema() {
           table("accounts").column("status").setDefault("ready");
         },
-      },
+      }],
+      nameFallbacks: ["set_existing_default"],
       ownerApp,
       projectSchema: schema,
       driver,
@@ -309,7 +310,6 @@ test("Node-native apply uses live PostgreSQL facts for existing-table changes", 
       policy: [noInjectPolicy(schema)],
       approved: false,
       appliedBy: "test",
-      nameFallback: "set_existing_default",
     });
     const defaultValue = await probe.query(
       `SELECT column_default FROM information_schema.columns
@@ -326,7 +326,8 @@ test("Node-native apply uses live PostgreSQL facts for existing-table changes", 
       },
     };
     const renameOutcome = await apply({
-      migration: renameMigration,
+      migrations: [renameMigration],
+      nameFallbacks: ["rename_existing_column"],
       ownerApp,
       projectSchema: schema,
       driver,
@@ -334,7 +335,6 @@ test("Node-native apply uses live PostgreSQL facts for existing-table changes", 
       policy: [noInjectPolicy(schema)],
       approved: true,
       appliedBy: "test",
-      nameFallback: "rename_existing_column",
     });
     assert.equal(renameOutcome.pendingContracts.length, 1);
     const pending = renameOutcome.pendingContracts[0];
@@ -411,7 +411,8 @@ test("Node-native apply uses live PostgreSQL facts for existing-table changes", 
     assert.equal(settled.pendingContracts.length, 0);
     assert.equal(settled.plans?.[0]?.state, "applied");
     const replayed = await apply({
-      migration: renameMigration,
+      migrations: [renameMigration],
+      nameFallbacks: ["rename_existing_column"],
       ownerApp,
       projectSchema: schema,
       driver,
@@ -419,7 +420,6 @@ test("Node-native apply uses live PostgreSQL facts for existing-table changes", 
       policy: [noInjectPolicy(schema)],
       approved: true,
       appliedBy: "test",
-      nameFallback: "rename_existing_column",
     });
     assert.equal(
       replayed.pendingContracts.length,

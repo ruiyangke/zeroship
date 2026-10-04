@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import type { Client } from "pg";
 import type { StatusReply } from "../../src/addon.js";
 import {
+  applyReportLines,
   driverFor,
   formatStatusBusy,
   formatStatusJson,
@@ -437,6 +438,68 @@ test("CLI resolve parses commit and rollback and enforces its guards", () => {
     assert.match(accepted.stderr, /missing policy.*--policy <file>/i);
     assert.doesNotMatch(accepted.stderr, /unknown flag|ECONNREFUSED/i);
   }
+});
+
+test("apply prints one line per file from its own outcome, and every outstanding contract", () => {
+  const contract = (pendingVersion: string) => ({
+    table: "people",
+    fromColumn: "email",
+    toColumn: "email_address",
+    pendingVersion,
+  });
+  const migration = (name: string, applied: string[], skipped: string[], owned: string[]) => ({
+    name,
+    version: `mig_plan_${name}`,
+    applied,
+    skipped,
+    recovered: [],
+    pendingContracts: owned.map(contract),
+  });
+  const files = [{ file: { label: "0001_create" } }, { file: { label: "0002_rename" } }];
+  const outcome = {
+    applied: ["mig_b"],
+    skipped: ["mig_a"],
+    recovered: [],
+    pendingContracts: [contract("mig_b"), contract("mig_gone")],
+    migrations: [
+      migration("create", [], ["mig_a"], []),
+      migration("rename", ["mig_b"], [], ["mig_b"]),
+    ],
+  };
+
+  const lines = applyReportLines(files, outcome);
+  assert.equal(lines.length, 3, lines.join("\n"));
+  assert.deepEqual(JSON.parse(lines[0].slice("apply 0001_create: ".length)), {
+    applied: [],
+    skipped: ["mig_a"],
+    recovered: [],
+    pendingContracts: [],
+  });
+  assert.ok(lines[1].startsWith("apply 0002_rename: "), lines[1]);
+  assert.deepEqual(
+    JSON.parse(lines[1].slice("apply 0002_rename: ".length)).pendingContracts,
+    [contract("mig_b")],
+    "a contract is reported on the line of the migration that opened it",
+  );
+  assert.match(lines[2], /no listed migration owns/, lines[2]);
+  assert.match(lines[2], /mig_gone/, "a contract no listed migration opened still prints");
+  assert.doesNotMatch(lines[2], /"mig_b"/, "an attributed contract is not repeated");
+
+  // CONTROL: every contract attributed leaves no trailing line.
+  const attributed = applyReportLines(files, { ...outcome, pendingContracts: [contract("mig_b")] });
+  assert.equal(attributed.length, 2, attributed.join("\n"));
+
+  // A run that stopped part-way lists the files it reached and nothing else: the
+  // outstanding set belongs to the report of a run that finished.
+  const stopped = applyReportLines(files.slice(0, 1), { ...outcome, migrations: outcome.migrations.slice(0, 1) }, false);
+  assert.equal(stopped.length, 1, stopped.join("\n"));
+  assert.ok(stopped[0].startsWith("apply 0001_create: "), stopped[0]);
+
+  // A reply that does not describe exactly the files handed over is refused.
+  assert.throws(
+    () => applyReportLines(files, { ...outcome, migrations: outcome.migrations.slice(1) }),
+    /apply reported 1 migration outcomes for 2 files/,
+  );
 });
 
 test("rollback demands exactly one target and rejects a bad step count", () => {

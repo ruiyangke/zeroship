@@ -8,21 +8,26 @@
 //! `napi` feature off. That is the configuration the workspace gate builds, so
 //! this logic is covered by tests that execute rather than only type-check.
 
+use std::collections::HashSet;
+
 use zeroship_migrate::apply::backend::{MigrationBackend, ProjectLockAcquisition, ProjectLockHolder};
 use zeroship_migrate::apply::executor::{ApplyOutcome, LockMode, RollbackOptions, RollbackTarget};
 use zeroship_migrate::approval::Approval;
 use zeroship_migrate::conn::ExecutorConfig;
 use zeroship_migrate::model::migration::Migration;
-use zeroship_migrate::ops::status::{AppliedPlanStatus, MigrationStatus, PlanStatusManifest};
+use zeroship_migrate::ops::status::{
+    AppliedPlanStatus, MigrationStatus, PlanStatusEvidence, PlanStatusManifest, ReconciledPlanState,
+};
 use zeroship_migrate::{shipping_backends, DialectId, LiveSchema, MigrationEngine};
 use zeroship_migrate_mysql::DIALECT as MYSQL;
 use zeroship_migrate_postgres::DIALECT as POSTGRES;
 use zeroship_migrate_sqlite::DIALECT as SQLITE;
 
+use crate::lower::{LoweringBase, LoweringRequest, OrderedLowerer};
 use crate::wire::{
-    ApplyPendingContractDto, ApplyReply, BaselineReply, BaselineStepDto, BlockedPlanDto,
-    PendingContractStatusDto, PlanStatusDto, PlanStatusStepDto, ProjectLockHolderDto,
-    RollbackReply, StatusReply, UnexpectedJournalEntryDto,
+    AppliedMigrationDto, ApplyPendingContractDto, ApplyReply, BaselineReply, BaselineStepDto,
+    BlockedPlanDto, PendingContractStatusDto, PlanStatusDto, PlanStatusStepDto,
+    ProjectLockHolderDto, RollbackReply, StatusReply, UnexpectedJournalEntryDto,
 };
 
 /// The dialect a host-driven verb targets over the `SqlSession` seam. Only the
@@ -304,32 +309,6 @@ impl<C: HostCredentials> DriverTarget<C> {
     }
 }
 
-/// Split the ordered authored sequence a request carries into the prefix that must
-/// already be journalled and the one migration a host-driven apply deploys.
-///
-/// The two drivers read the same sequence differently, and this is where that is
-/// stated. The in-process driver hands the whole sequence to the engine's deploy
-/// loop, which applies every envelope the journal does not already carry. The host
-/// driver applies ONLY the last, using the prefix to reconstruct declared logical
-/// column contracts and refusing unless those plans are proven fully applied. So an
-/// empty sequence is a legal no-op deploy for the first and has no migration at all
-/// for the second.
-///
-/// # Errors
-/// Returns a refusal when the sequence is empty.
-pub fn split_host_envelopes<T>(envelopes: &[T]) -> std::result::Result<(&[T], &T), String> {
-    envelopes.split_last().map_or_else(
-        || {
-            Err(
-                "a host-driven apply needs at least one migration envelope; the last entry is \
-                 the migration being applied"
-                    .to_string(),
-            )
-        },
-        |(current, priors)| Ok((priors, current)),
-    )
-}
-
 /// Borrow the ordered charter documents a request carries as the `&str` slice the
 /// policy composer takes.
 pub fn charter_layer_refs(charter_layers: &[String]) -> Vec<&str> {
@@ -356,9 +335,88 @@ pub fn preview_dialect(s: &str) -> std::result::Result<DialectId, String> {
         .ok_or_else(|| format!("unknown dialect {s:?} (expected postgres|sqlite|mysql)"))
 }
 
-/// Project an [`ApplyOutcome`] and the lock-coherent outstanding rename set into
-/// the typed [`ApplyReply`].
+/// Project one outstanding contract into its wire shape.
+fn pending_contract_dto(contract: &zeroship_migrate::PendingContract) -> ApplyPendingContractDto {
+    ApplyPendingContractDto {
+        table: contract.table.clone(),
+        from_column: contract.from_col.clone(),
+        to_column: contract.to_col.clone(),
+        pending_version: contract.pending_version.clone(),
+    }
+}
+
+/// What one authored migration did in an apply, before it is projected to the wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationOutcome {
+    /// The migration's resolved name.
+    pub name: String,
+    /// Its logical plan id. An outstanding contract whose `plan_version` this is
+    /// belongs to it, the same ownership `statusIr` reads orphaned contracts by.
+    pub version: String,
+    /// What the engine reported for it.
+    pub outcome: ApplyOutcome,
+}
+
+impl MigrationOutcome {
+    /// Pair a reconcilable plan with the engine's report for it.
+    #[must_use]
+    pub fn new(manifest: &PlanStatusManifest, outcome: ApplyOutcome) -> Self {
+        Self {
+            name: manifest.name.clone(),
+            version: manifest.version.as_str().to_string(),
+            outcome,
+        }
+    }
+
+    /// Whether this migration committed anything in the run that reported it.
+    const fn committed(&self) -> bool {
+        !self.outcome.applied.is_empty() || !self.outcome.recovered.is_empty()
+    }
+}
+
+/// Project an apply's per-migration outcomes and the lock-coherent outstanding
+/// rename set into the typed [`ApplyReply`].
+///
+/// The run-wide `applied`/`skipped`/`recovered` lists are the per-migration lists
+/// concatenated in request order, and every outstanding contract appears both in
+/// the run-wide list and under the migration whose plan opened it.
 pub fn apply_reply(
+    migrations: Vec<MigrationOutcome>,
+    pending_contracts: &[zeroship_migrate::PendingContract],
+) -> ApplyReply {
+    let mut reply = ApplyReply {
+        applied: Vec::new(),
+        skipped: Vec::new(),
+        recovered: Vec::new(),
+        pending_contracts: pending_contracts.iter().map(pending_contract_dto).collect(),
+        migrations: Vec::with_capacity(migrations.len()),
+        failure: None,
+    };
+    for migration in migrations {
+        let outcome = &migration.outcome;
+        reply.applied.extend(outcome.applied.iter().cloned());
+        reply.skipped.extend(outcome.skipped.iter().cloned());
+        reply.recovered.extend(outcome.recovered.iter().cloned());
+        let owned = pending_contracts
+            .iter()
+            .filter(|contract| contract.plan_version == migration.version)
+            .map(pending_contract_dto)
+            .collect();
+        reply.migrations.push(AppliedMigrationDto {
+            name: migration.name,
+            version: migration.version,
+            applied: migration.outcome.applied,
+            skipped: migration.outcome.skipped,
+            recovered: migration.outcome.recovered,
+            pending_contracts: owned,
+        });
+    }
+    reply
+}
+
+/// Project a resolution's engine outcome into the typed [`ApplyReply`]. A
+/// resolution runs no authored migration, so it reports none.
+pub fn resolution_reply(
     outcome: ApplyOutcome,
     pending_contracts: &[zeroship_migrate::PendingContract],
 ) -> ApplyReply {
@@ -366,16 +424,37 @@ pub fn apply_reply(
         applied: outcome.applied,
         skipped: outcome.skipped,
         recovered: outcome.recovered,
-        pending_contracts: pending_contracts
-            .iter()
-            .map(|contract| ApplyPendingContractDto {
-                table: contract.table.clone(),
-                from_column: contract.from_col.clone(),
-                to_column: contract.to_col.clone(),
-                pending_version: contract.pending_version.clone(),
-            })
-            .collect(),
+        pending_contracts: pending_contracts.iter().map(pending_contract_dto).collect(),
+        migrations: Vec::new(),
+        failure: None,
     }
+}
+
+/// The refusal for a migration an ordered apply reached and could not take,
+/// naming it.
+fn stopped_at(manifest: &PlanStatusManifest, reason: impl std::fmt::Display) -> String {
+    format!(
+        "migration {:?} ({}): {reason}",
+        manifest.name,
+        manifest.version.as_str()
+    )
+}
+
+/// `refusal`, followed by every migration the same run had already committed:
+/// those stay applied, because each migration commits on its own.
+fn with_committed(mut refusal: String, done: &[MigrationOutcome]) -> String {
+    let committed: Vec<String> = done
+        .iter()
+        .filter(|migration| migration.committed())
+        .map(|migration| format!("{:?}", migration.name))
+        .collect();
+    if !committed.is_empty() {
+        refusal = format!(
+            "{refusal}; this run committed {} before it, and they stay applied",
+            committed.join(", ")
+        );
+    }
+    refusal
 }
 
 /// The reply a status verb returns when a peer's deploy holds the project lock.
@@ -545,16 +624,41 @@ pub fn plan_status_reply(status: &AppliedPlanStatus) -> StatusReply {
     }
 }
 
-/// Snapshot, lower, and apply one authored envelope inside one project-lock
-/// bracket. The catalog facts used by lowering must describe the same serialized
-/// database state that the executor mutates; taking the snapshot before the lock
-/// would leave a check-then-use window for a concurrent deploy.
+/// Apply an ordered authored migration set inside one project-lock bracket.
+///
+/// `envelope_json` is the set, oldest first. One call takes the lock, bootstraps
+/// the journal, and walks the set in order, lowering each envelope exactly once and
+/// applying each migration the journal does not already carry through the engine,
+/// which commits and journals it on its own. A failure leaves every earlier
+/// migration of the run applied and journalled, and nothing of the failing one
+/// beyond what its own transaction boundaries committed, so a rerun resumes at the
+/// first migration that is not fully applied.
+///
+/// Every envelope is lowered against the database as it stands when that
+/// migration runs, inside the bracket: the applied migrations and the first
+/// pending one against the catalog snapshot the run starts from, and each later
+/// one against a fresh snapshot and journal read after the migration before it
+/// committed. That is exactly the view an apply handed only the prefix ending at
+/// that envelope would have, without re-lowering the prefix to get it.
+///
+/// A set of two or more is checked against the journal before anything runs, by
+/// [`crate::lower::ordered_apply_start`] over the prefix lowered so far: the
+/// migrations before the first one that is not fully applied must agree with the
+/// journal's own order, and nothing outside them may be in the journal. After every
+/// migration the run commits, the same check runs again over the fresh read, so the
+/// next migration starts only once the one before it is fully applied - an online
+/// rename whose contract is still outstanding stops the run there.
+///
+/// A set of ONE carries no authored context: library callers that apply migrations
+/// one at a time hand over exactly the migration they are applying, so journal rows
+/// it does not own say nothing about deleted files. It is lowered against the live
+/// catalog alone, falling back to the ordered lowering only for a historical
+/// rename, and applied without the order check.
 #[allow(clippy::too_many_arguments)]
 pub async fn apply_ir_with_locked_backend<B: MigrationBackend>(
     backend: &B,
     cfg: &ExecutorConfig,
-    prior_envelope_json: &[String],
-    envelope_json: &str,
+    envelope_json: &[String],
     owner_app: &str,
     project_schema: &str,
     dialect: &str,
@@ -594,121 +698,387 @@ pub async fn apply_ir_with_locked_backend<B: MigrationBackend>(
             .snapshot_schema(cfg)
             .await
             .map_err(|error| format!("live schema introspection failed: {error}"))?;
-        let journal_entries = backend
-            .applied(cfg)
+        let evidence = PlanStatusEvidence::read_locked(backend, cfg, false)
             .await
             .map_err(|error| error.to_string())?;
-        let resolved_contracts = match backend.pending_contracts() {
-            Some(capability) => capability
-                .resolved_pending_contracts(cfg)
-                .await
-                .map_err(|error| error.to_string())?,
-            None => Vec::new(),
+        let request = LoweringRequest {
+            owner_app,
+            project_schema,
+            dialect,
+            registry_json,
+            charter_layers: &charter_refs,
         };
-        let live = LiveSchema::from_catalog_snapshot(snapshot.clone(), owner_app);
-        // No priors means the caller declared NO authored prefix, not that this is the
-        // operator's first migration -- the library `apply()` surface leaves them out
-        // on every call. So there is nothing to reconcile the journal against here,
-        // and a completed step this lone envelope does not own says nothing.
-        let artifact = if prior_envelope_json.is_empty() {
-            match crate::lower::lower_envelope_to_plan_with_live(
-                envelope_json,
-                owner_app,
-                project_schema,
-                dialect,
-                registry_json,
-                &charter_refs,
-                &live,
-            ) {
-                Ok(artifact) => artifact,
-                Err(_) => {
-                    let mut artifacts = crate::lower::lower_ordered_envelopes_to_plans_for_apply(
-                        &[envelope_json.to_string()],
-                        owner_app,
-                        project_schema,
-                        dialect,
-                        registry_json,
-                        &charter_refs,
-                        snapshot,
-                        &journal_entries,
-                        &resolved_contracts,
-                    )?;
-                    artifacts.pop().ok_or_else(|| {
-                        "lowering returned no plan for the migration envelope".to_string()
-                    })?
-                }
+
+        let walk = if let [envelope] = envelope_json {
+            let artifact = lone_artifact(request, envelope, snapshot, &evidence)?;
+            let manifest =
+                PlanStatusManifest::from_applied_plan(&artifact.plan, &artifact.depends_on)
+                    .map_err(|error| error.to_string())?;
+            let outcome = MigrationEngine::new(zeroship_migrate::shipping_vendors())
+                .apply_applied_plan_with_touched_and_depends(
+                    &artifact.plan,
+                    &artifact.touched_tables,
+                    &artifact.depends_on,
+                    approval,
+                    backend,
+                    cfg,
+                    applied_by,
+                    LockMode::AlreadyHeld,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            Walk {
+                done: vec![MigrationOutcome::new(&manifest, outcome.applied)],
+                failure: None,
             }
         } else {
-            let mut ordered_envelopes = prior_envelope_json.to_vec();
-            ordered_envelopes.push(envelope_json.to_string());
-            let mut artifacts = crate::lower::lower_ordered_envelopes_to_plans_for_apply(
-                &ordered_envelopes,
-                owner_app,
-                project_schema,
-                dialect,
-                registry_json,
-                &charter_refs,
+            let base = LoweringBase {
                 snapshot,
-                &journal_entries,
-                &resolved_contracts,
-            )?;
-            let manifests = artifacts
-                .iter()
-                .map(|artifact| {
-                    PlanStatusManifest::from_applied_plan(&artifact.plan, &artifact.depends_on)
-                        .map_err(|error| error.to_string())
-                })
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            let status = zeroship_migrate::ops::status::status_plans_via_backend_locked(
-                backend, cfg, &manifests,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-            // The journal rides along: `event_seq` is what tells a migration the
-            // operator deleted from one this per-file call was not handed yet.
-            crate::lower::require_applied_prefix(
-                &manifests,
-                prior_envelope_json.len(),
-                &status,
-                &journal_entries,
-            )?;
-            artifacts.pop().ok_or_else(|| {
-                "lowering returned no plan for the current migration envelope".to_string()
-            })?
-        };
-        let outcome = MigrationEngine::new(zeroship_migrate::shipping_vendors())
-            .apply_applied_plan_with_touched_and_depends(
-                &artifact.plan,
-                &artifact.touched_tables,
-                &artifact.depends_on,
-                approval,
+                journal_entries: evidence.journal().to_vec(),
+                resolved_contracts: evidence.resolved().to_vec(),
+            };
+            let target = WalkTarget {
                 backend,
                 cfg,
+                approval,
                 applied_by,
-                LockMode::AlreadyHeld,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
+            };
+            let lowerer = OrderedLowerer::new(request, base, true)?;
+            apply_ordered(&target, envelope_json, lowerer, evidence).await
+        };
         let pending_contracts = match backend.pending_contracts() {
             Some(capability) => capability
                 .outstanding_pending_contracts(cfg)
                 .await
-                .map_err(|error| error.to_string())?,
+                .map_err(|error| after_failure(walk.failure.as_deref(), error))?,
             None => Vec::new(),
         };
-        Ok::<ApplyReply, String>(apply_reply(outcome.applied, &pending_contracts))
+        let mut reply = apply_reply(walk.done, &pending_contracts);
+        reply.failure = walk.failure;
+        Ok::<ApplyReply, String>(reply)
     }
     .await;
 
     let release = backend.release_project_lock(cfg).await;
     match (result, release) {
         (Ok(reply), Ok(())) => Ok(reply),
-        (Ok(_), Err(error)) => Err(format!("failed to release project lock: {error}")),
+        (Ok(reply), Err(error)) => Err(after_failure(
+            reply.failure.as_deref(),
+            format!("failed to release project lock: {error}"),
+        )),
         (Err(error), Ok(())) => Err(error),
         (Err(error), Err(release_error)) => Err(format!(
             "{error}; additionally failed to release project lock: {release_error}"
         )),
     }
+}
+
+/// `error`, appended to the failure a walk already stopped on when there is one,
+/// so the later error does not hide why the run stopped.
+fn after_failure(failure: Option<&str>, error: impl std::fmt::Display) -> String {
+    failure.map_or_else(
+        || error.to_string(),
+        |failure| format!("{failure}; additionally {error}"),
+    )
+}
+
+/// Lower a set of one against the live catalog alone. The ordered lowering is
+/// the fallback for the one envelope it can recover: a historical rename whose
+/// source column is absent from the current catalog.
+fn lone_artifact(
+    request: LoweringRequest<'_>,
+    envelope: &str,
+    snapshot: zeroship_migrate::model::snapshot::SchemaSnapshot,
+    evidence: &PlanStatusEvidence,
+) -> std::result::Result<zeroship_migrate::LoweredArtifact, String> {
+    let live = LiveSchema::from_catalog_snapshot(snapshot.clone(), request.owner_app);
+    match crate::lower::lower_envelope_to_plan_with_live(
+        envelope,
+        request.owner_app,
+        request.project_schema,
+        request.dialect,
+        request.registry_json,
+        request.charter_layers,
+        &live,
+    ) {
+        Ok(artifact) => Ok(artifact),
+        Err(_) => crate::lower::lower_ordered_envelopes_to_plans_for_apply(
+            &[envelope.to_string()],
+            request.owner_app,
+            request.project_schema,
+            request.dialect,
+            request.registry_json,
+            request.charter_layers,
+            snapshot,
+            evidence.journal(),
+            evidence.resolved(),
+        )?
+        .pop()
+        .ok_or_else(|| "lowering returned no plan for the migration envelope".to_string()),
+    }
+}
+
+/// Where an ordered walk runs and under which authority: the backend and config
+/// it applies through, the approval its engine calls carry, and the label it
+/// journals under.
+struct WalkTarget<'a, B> {
+    backend: &'a B,
+    cfg: &'a ExecutorConfig,
+    approval: Approval,
+    applied_by: &'a str,
+}
+
+/// What an ordered walk did: every migration it reached, in order, and why it
+/// stopped before the rest, when it did.
+struct Walk {
+    done: Vec<MigrationOutcome>,
+    failure: Option<String>,
+}
+
+/// Walk a set of two or more: lower and apply each migration in order, as
+/// [`apply_ir_with_locked_backend`] describes. A failure keeps what the walk had
+/// already done, so the reply can report it migration by migration.
+async fn apply_ordered<B: MigrationBackend>(
+    target: &WalkTarget<'_, B>,
+    envelope_json: &[String],
+    lowerer: OrderedLowerer<'_>,
+    evidence: PlanStatusEvidence,
+) -> Walk {
+    let mut done = Vec::with_capacity(envelope_json.len());
+    let failure = walk_ordered(target, envelope_json, lowerer, evidence, &mut done)
+        .await
+        .err()
+        .map(|failure| with_committed(failure, &done));
+    Walk { done, failure }
+}
+
+async fn walk_ordered<B: MigrationBackend>(
+    target: &WalkTarget<'_, B>,
+    envelope_json: &[String],
+    mut lowerer: OrderedLowerer<'_>,
+    mut evidence: PlanStatusEvidence,
+    done: &mut Vec<MigrationOutcome>,
+) -> std::result::Result<(), String> {
+    let (backend, cfg) = (target.backend, target.cfg);
+    let mut envelopes = envelope_json.iter();
+    let (mut artifacts, mut manifests) =
+        lower_applied_prefix(&mut lowerer, &mut envelopes, &evidence)?;
+    let status = evidence
+        .reconcile(&manifests)
+        .map_err(|error| error.to_string())?;
+    let start = match crate::lower::ordered_apply_start(&manifests, &status, evidence.journal()) {
+        Ok(start) => start,
+        Err(refusal) => {
+            return Err(
+                name_later_owners(lowerer, envelopes, manifests, &evidence).unwrap_or(refusal)
+            )
+        }
+    };
+
+    // What decides whether a fully applied migration still needs the engine. The
+    // engine has exactly two things to say about a plan whose every step the
+    // journal already carries with its exact checksum: an outstanding online
+    // contract on a table the plan touches refuses it, and an interrupted unwind's
+    // marker on one of its versions refuses it. With neither present every step is
+    // skipped and nothing is written, so the run reports the plan's steps as
+    // skipped from the reconciliation it already holds instead of re-reading the
+    // journal once per plan. While any contract is outstanding, every migration
+    // goes through the engine.
+    let skip_markers: Option<HashSet<String>> = if start > 0 && evidence.outstanding().is_empty() {
+        Some(
+            backend
+                .unresolved_rollback_markers(cfg)
+                .await
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .map(|marker| marker.version)
+                .collect(),
+        )
+    } else {
+        None
+    };
+
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
+    let mut rebase = false;
+    for index in 0.. {
+        if index == artifacts.len() {
+            let Some(envelope) = envelopes.next() else {
+                break;
+            };
+            if rebase {
+                // The migration before this one went through the engine. Lower this
+                // one against what the database holds now, and reconcile against
+                // the journal it left.
+                let snapshot = backend
+                    .snapshot_schema(cfg)
+                    .await
+                    .map_err(|error| format!("live schema introspection failed: {error}"))?;
+                evidence = PlanStatusEvidence::read_locked(backend, cfg, false)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                lowerer.rebase(LoweringBase {
+                    snapshot,
+                    journal_entries: evidence.journal().to_vec(),
+                    resolved_contracts: evidence.resolved().to_vec(),
+                });
+                rebase = false;
+            }
+            let artifact = lowerer.lower_next(envelope)?;
+            let manifest =
+                PlanStatusManifest::from_applied_plan(&artifact.plan, &artifact.depends_on)
+                    .map_err(|error| error.to_string())?;
+            artifacts.push(artifact);
+            manifests.push(manifest);
+            // The migration before this one ran in this run. It has to be fully
+            // applied before this one may start, and the journal it left has to
+            // agree with the authored order, exactly as at the start.
+            let manifest = &manifests[index];
+            let status = evidence
+                .reconcile(&manifests)
+                .map_err(|error| stopped_at(manifest, error))?;
+            let resumed =
+                crate::lower::ordered_apply_start(&manifests, &status, evidence.journal())
+                    .map_err(|error| stopped_at(manifest, error))?;
+            // `resumed` can only fall short of `index`, never pass it, because a
+            // plan's state depends on its own steps alone while the lowerer refuses
+            // plan-level `depends_on` (`validate_ir_plan_execution_metadata`, called
+            // from `assemble_plan`); accepting `depends_on` has to revisit this.
+            if resumed != index {
+                return Err(stopped_at(
+                    manifest,
+                    unfinished_prior(&manifests, &status, resumed, index),
+                ));
+            }
+        }
+        let (artifact, manifest) = (&artifacts[index], &manifests[index]);
+        if let Some(markers) = skip_markers.as_ref().filter(|_| index < start) {
+            if !manifest
+                .steps
+                .iter()
+                .any(|step| markers.contains(step.version.as_str()))
+            {
+                done.push(skipped_whole(manifest));
+                continue;
+            }
+        }
+        let outcome = engine
+            .apply_applied_plan_with_touched_and_depends(
+                &artifact.plan,
+                &artifact.touched_tables,
+                &artifact.depends_on,
+                target.approval,
+                backend,
+                cfg,
+                target.applied_by,
+                LockMode::AlreadyHeld,
+            )
+            .await
+            .map_err(|error| stopped_at(manifest, error))?;
+        done.push(MigrationOutcome::new(manifest, outcome.applied));
+        rebase = true;
+    }
+    Ok(())
+}
+
+/// The order check's refusal again, once the migrations after the start are
+/// lowered too, so a journal row a later file owns is named with that file
+/// instead of as a step no file supplies. The check refuses the same set either
+/// way; only the name changes. `None` when the rest does not lower, which leaves
+/// the first refusal to stand.
+fn name_later_owners<'e>(
+    mut lowerer: OrderedLowerer<'_>,
+    rest: impl Iterator<Item = &'e String>,
+    mut manifests: Vec<PlanStatusManifest>,
+    evidence: &PlanStatusEvidence,
+) -> Option<String> {
+    for envelope in rest {
+        let artifact = lowerer.lower_next(envelope).ok()?;
+        manifests.push(
+            PlanStatusManifest::from_applied_plan(&artifact.plan, &artifact.depends_on).ok()?,
+        );
+    }
+    let status = evidence.reconcile(&manifests).ok()?;
+    crate::lower::ordered_apply_start(&manifests, &status, evidence.journal()).err()
+}
+
+/// Lower the applied prefix and the first migration that is not fully applied,
+/// all against the starting snapshot. Nothing has run yet, so a refusal here
+/// leaves the database as the run found it.
+fn lower_applied_prefix<'e>(
+    lowerer: &mut OrderedLowerer<'_>,
+    envelopes: &mut impl Iterator<Item = &'e String>,
+    evidence: &PlanStatusEvidence,
+) -> std::result::Result<
+    (
+        Vec<zeroship_migrate::LoweredArtifact>,
+        Vec<PlanStatusManifest>,
+    ),
+    String,
+> {
+    let mut artifacts = Vec::new();
+    let mut manifests = Vec::new();
+    for envelope in envelopes {
+        let artifact = lowerer.lower_next(envelope)?;
+        let manifest = PlanStatusManifest::from_applied_plan(&artifact.plan, &artifact.depends_on)
+            .map_err(|error| error.to_string())?;
+        let applied = evidence
+            .reconcile(std::slice::from_ref(&manifest))
+            .map_err(|error| error.to_string())?
+            .plans
+            .first()
+            .is_some_and(|plan| plan.state == ReconciledPlanState::Applied);
+        artifacts.push(artifact);
+        manifests.push(manifest);
+        if !applied {
+            break;
+        }
+    }
+    Ok((artifacts, manifests))
+}
+
+/// A fully applied migration reported from the reconciliation: every step it
+/// owns, skipped.
+fn skipped_whole(manifest: &PlanStatusManifest) -> MigrationOutcome {
+    let skipped = manifest
+        .steps
+        .iter()
+        .map(|step| step.version.as_str().to_string())
+        .collect();
+    MigrationOutcome::new(
+        manifest,
+        ApplyOutcome {
+            applied: Vec::new(),
+            skipped,
+            recovered: Vec::new(),
+        },
+    )
+}
+
+/// Why an ordered apply cannot move from the migration it just ran to the next
+/// one: the reconciliation after it places the first unfinished plan at
+/// `resumed`, not at `index`.
+fn unfinished_prior(
+    manifests: &[PlanStatusManifest],
+    status: &AppliedPlanStatus,
+    resumed: usize,
+    index: usize,
+) -> String {
+    let Some(prior) = manifests.get(resumed).filter(|_| resumed < index) else {
+        return format!(
+            "journal reconciliation places the next migration to apply at position {resumed}, \
+             not at {index}"
+        );
+    };
+    let state = status
+        .plans
+        .iter()
+        .find(|plan| plan.version == prior.version)
+        .map_or("absent", |plan| plan.state.as_str());
+    format!(
+        "authored prior migration {:?} ({}) is not fully applied (state: {state})",
+        prior.name,
+        prior.version.as_str()
+    )
 }
 
 /// Decode the wire spelling of how far a rollback should unwind.
@@ -1373,7 +1743,7 @@ pub async fn resolve_pending_with_locked_backend<B: MigrationBackend>(
             .outstanding_pending_contracts(cfg)
             .await
             .map_err(|error| error.to_string())?;
-        Ok::<ApplyReply, String>(apply_reply(outcome.applied, &pending))
+        Ok::<ApplyReply, String>(resolution_reply(outcome.applied, &pending))
     }
     .await;
 
@@ -2313,27 +2683,6 @@ mod status_projection_tests {
         );
     }
 
-    /// One ordered sequence serves both drivers, and this is the split that makes
-    /// that true: the host driver applies the LAST envelope and treats everything
-    /// before it as a prefix that must already be journalled.
-    #[test]
-    fn the_host_split_keeps_the_last_envelope_as_the_one_being_applied() {
-        let sequence = ["first", "second", "third"];
-        assert_eq!(
-            split_host_envelopes(&sequence),
-            Ok((&sequence[..2], &sequence[2]))
-        );
-
-        let lone = ["only"];
-        assert_eq!(split_host_envelopes(&lone), Ok((&lone[..0], &lone[0])));
-
-        // Legal for the in-process deploy loop (a project with no migrations yet),
-        // and meaningless here: there is no migration to apply.
-        let empty: [&str; 0] = [];
-        let refusal = split_host_envelopes(&empty).expect_err("an empty sequence applies nothing");
-        assert!(refusal.contains("at least one migration envelope"), "{refusal}");
-    }
-
     #[test]
     fn every_rollback_target_shape_decodes_and_carries_only_its_own_operand() {
         assert_eq!(
@@ -2381,5 +2730,103 @@ mod status_projection_tests {
             malformed.contains("invalid rollback target version"),
             "{malformed}"
         );
+    }
+}
+
+#[cfg(test)]
+mod apply_reply_tests {
+    use super::{apply_reply, resolution_reply, ApplyOutcome, MigrationOutcome};
+
+    fn outcome(applied: &[&str], skipped: &[&str], recovered: &[&str]) -> ApplyOutcome {
+        let owned = |versions: &[&str]| versions.iter().map(ToString::to_string).collect();
+        ApplyOutcome {
+            applied: owned(applied),
+            skipped: owned(skipped),
+            recovered: owned(recovered),
+        }
+    }
+
+    fn migration(name: &str, version: &str, outcome: ApplyOutcome) -> MigrationOutcome {
+        MigrationOutcome {
+            name: name.to_string(),
+            version: version.to_string(),
+            outcome,
+        }
+    }
+
+    fn contract(plan_version: &str, pending_version: &str) -> zeroship_migrate::PendingContract {
+        zeroship_migrate::PendingContract {
+            owner_app: Some("app_reply".to_string()),
+            table: "people".to_string(),
+            from_col: "email".to_string(),
+            to_col: "email_address".to_string(),
+            ty: "text".to_string(),
+            pending_version: pending_version.to_string(),
+            plan_version: plan_version.to_string(),
+            contract_versions: Vec::new(),
+        }
+    }
+
+    /// Each migration keeps its own lists, the run-wide lists are theirs in request
+    /// order, and an outstanding contract sits under the migration whose plan
+    /// opened it - and nowhere else among the migrations - while the run-wide list
+    /// keeps every outstanding contract, including one no listed plan opened.
+    #[test]
+    fn the_reply_reports_each_migration_and_attributes_contracts_by_plan() {
+        let reply = apply_reply(
+            vec![
+                migration("create", "mig_plan_a", outcome(&[], &["mig_a1"], &[])),
+                migration(
+                    "rename",
+                    "mig_plan_b",
+                    outcome(&["mig_b1", "mig_b2"], &[], &["mig_b0"]),
+                ),
+                migration("later", "mig_plan_c", outcome(&["mig_c1"], &[], &[])),
+            ],
+            &[
+                contract("mig_plan_b", "mig_b2"),
+                contract("mig_plan_gone", "mig_g1"),
+            ],
+        );
+
+        assert_eq!(reply.applied, ["mig_b1", "mig_b2", "mig_c1"]);
+        assert_eq!(reply.skipped, ["mig_a1"]);
+        assert_eq!(reply.recovered, ["mig_b0"]);
+        assert_eq!(reply.migrations.len(), 3);
+        let names: Vec<&str> = reply.migrations.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["create", "rename", "later"]);
+        assert_eq!(reply.migrations[1].version, "mig_plan_b");
+        assert_eq!(reply.migrations[1].applied, ["mig_b1", "mig_b2"]);
+        assert_eq!(reply.migrations[1].recovered, ["mig_b0"]);
+
+        let owned: Vec<Vec<&str>> = reply
+            .migrations
+            .iter()
+            .map(|m| {
+                m.pending_contracts
+                    .iter()
+                    .map(|c| c.pending_version.as_str())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(owned, [vec![], vec!["mig_b2"], vec![]]);
+        let outstanding: Vec<&str> = reply
+            .pending_contracts
+            .iter()
+            .map(|c| c.pending_version.as_str())
+            .collect();
+        assert_eq!(outstanding, ["mig_b2", "mig_g1"]);
+    }
+
+    /// A resolution runs no authored migration, so it reports none.
+    #[test]
+    fn a_resolution_reports_no_migrations() {
+        let reply = resolution_reply(
+            outcome(&["mig_resolve"], &[], &[]),
+            &[contract("mig_plan_b", "mig_b2")],
+        );
+        assert_eq!(reply.applied, ["mig_resolve"]);
+        assert!(reply.migrations.is_empty());
+        assert_eq!(reply.pending_contracts.len(), 1);
     }
 }

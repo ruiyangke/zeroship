@@ -146,9 +146,8 @@ test("a backfill transforms every selected row and leaves every other row alone"
     priors: (MigrationModule & { name: string })[],
   ) =>
     apply({
-      migration,
-      priorMigrations: priors,
-      priorNameFallbacks: priors.map((prior) => prior.name),
+      migrations: [...priors, migration],
+      nameFallbacks: [...priors.map((prior) => prior.name), migration.name],
       ownerApp: OWNER_APP,
       projectSchema: schema,
       driver,
@@ -156,7 +155,6 @@ test("a backfill transforms every selected row and leaves every other row alone"
       policy: [charter(schema)],
       approved: true,
       appliedBy: "backfill-selective-cohort",
-      nameFallback: migration.name,
     });
 
   try {
@@ -261,9 +259,8 @@ test("a backfill whose predicate matches nothing completes and records nothing",
       [fill, [CREATE_ITEMS, SEED_ITEMS]],
     ] as Array<[MigrationModule & { name: string }, (MigrationModule & { name: string })[]]>) {
       await apply({
-        migration,
-        priorMigrations: priors,
-        priorNameFallbacks: priors.map((prior) => prior.name),
+        migrations: [...priors, migration],
+        nameFallbacks: [...priors.map((prior) => prior.name), migration.name],
         ownerApp: OWNER_APP,
         projectSchema: schema,
         driver,
@@ -271,7 +268,6 @@ test("a backfill whose predicate matches nothing completes and records nothing",
         policy: [charter(schema)],
         approved: true,
         appliedBy: "backfill-selective-cohort",
-        nameFallback: migration.name,
       });
     }
 
@@ -348,9 +344,8 @@ test("MySQL: the same selective backfill reaches the same rows", async (ctx) => 
       [fill, [CREATE_ITEMS, SEED_ITEMS]],
     ] as Array<[MigrationModule & { name: string }, (MigrationModule & { name: string })[]]>) {
       await apply({
-        migration,
-        priorMigrations: priors,
-        priorNameFallbacks: priors.map((prior) => prior.name),
+        migrations: [...priors, migration],
+        nameFallbacks: [...priors.map((prior) => prior.name), migration.name],
         ownerApp: OWNER_APP,
         projectSchema: database,
         driver: { kind: "mysql", url: MYSQL_URL },
@@ -358,7 +353,6 @@ test("MySQL: the same selective backfill reaches the same rows", async (ctx) => 
         policy: [charter(database)],
         approved: true,
         appliedBy: "backfill-selective-cohort",
-        nameFallback: migration.name,
       });
     }
 

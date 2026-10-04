@@ -5,18 +5,19 @@
 // callback:
 //
 //   import { apply, plan, status, history, validate } from "zero-migrate-cli";
-//   await apply({ migration, ownerApp, projectSchema, policy, driver: { kind:"postgres", url } });
+//   await apply({ migrations, ownerApp, projectSchema, policy, driver: { kind:"postgres", url } });
 //
 // The flow for `apply`:
 //   1. the pure-JS RECORDER (`@zeroship/migrate/internal/recorder`, from the DSL package)
-//      drains the migration's explicit `schema()` or `data()` phase into a
+//      drains each migration's explicit `schema()` or `data()` phase into a
 //      `{ ir_version, name, ops }` ENVELOPE —
 //      `ir_version` sourced from the addon's `irVersion()` (single source of truth);
 //      NO `owner_app`, NO checksum;
-//   2. the addon's `applyIr` LOWERS the envelope in Rust (stamps `owner_app`, folds
-//      the authoritative `Checksum::of_ir`), then deploys it over the driver the
-//      request NAMES — the chosen host driver (`driver-pg.ts` / `driver-mysql2.ts`)
-//      over the `SqlSession` seam, or the addon's own bundled rusqlite connections.
+//   2. ONE call to the addon's `applyIr` LOWERS the ordered envelopes in Rust (stamps
+//      `owner_app`, folds the authoritative `Checksum::of_ir`), then applies every one
+//      the journal does not carry, in order, over the driver the request NAMES - the
+//      chosen host driver (`driver-pg.ts` / `driver-mysql2.ts`) over the `SqlSession`
+//      seam, or the addon's own bundled rusqlite connections.
 //
 // NO shadow dry-run verb in v1: the host-side shadow harness is deferred, and no
 // backend implements the `ShadowDryRun` capability, so a shadow dry-run would
@@ -112,17 +113,15 @@ async function openSession(
 
 /** Common inputs to the host verbs. */
 export interface HostApplyOptions {
-  /** The migration module (an imported `.ts`/`.js` exporting `schema()` for DDL
-   *  or `data()` plus its rollback declaration for DML). Resolved to an envelope
-   *  by the recorder. */
-  migration: MigrationModule;
-  /** Ordered authored migrations that precede `migration`. Their declarations
-   *  may seed logical schema contracts only when the addon proves every plan is
-   *  already fully applied with its exact journal checksum. */
-  priorMigrations?: readonly MigrationModule[];
-  /** Optional recorder name fallbacks aligned one-for-one with
-   *  `priorMigrations`. */
-  priorNameFallbacks?: readonly (string | undefined)[];
+  /** The ordered authored migration set, oldest first: modules (an imported
+   *  `.ts`/`.js` exporting `schema()` for DDL or `data()` plus its rollback
+   *  declaration for DML), each resolved to an envelope by the recorder. One call
+   *  applies, in order, every migration the journal does not already carry, each
+   *  committing on its own; a set of two or more is first checked against the
+   *  journal's order. A set of one is applied alone, with no such check. */
+  migrations: readonly MigrationModule[];
+  /** Optional recorder name fallbacks aligned one-for-one with `migrations`. */
+  nameFallbacks?: readonly (string | undefined)[];
   /** The deploying app id (`app_…`) — stamped as `owner_app` + folded into the
    *  checksum by the addon. */
   ownerApp: string;
@@ -142,12 +141,23 @@ export interface HostApplyOptions {
   approved?: boolean;
   /** The audit `applied_by` label recorded in the journal. Default `"host"`. */
   appliedBy?: string;
-  /** Override the migration's declared name (else recorder-resolved). */
-  nameFallback?: string;
 }
 
 /** The typed `applyIr` reply — re-exported from the generated addon DTOs. */
 export type ApplyOutcome = ApplyReply;
+
+/** The rejection of an apply that stopped part-way through its set. `outcome`
+ *  reports, migration by migration, what the run did before it stopped: those
+ *  migrations committed on their own and stay applied. */
+export class ApplyRunError extends Error {
+  readonly outcome: ApplyOutcome;
+
+  constructor(outcome: ApplyOutcome & { failure: string }) {
+    super(outcome.failure);
+    this.name = "ApplyRunError";
+    this.outcome = outcome;
+  }
+}
 
 /** Fail fast at the JavaScript boundary too; TypeScript's required property does
  * not protect plain JavaScript callers. */
@@ -181,25 +191,21 @@ function assertExplicitPolicy(
 export async function apply(opts: HostApplyOptions): Promise<ApplyOutcome> {
   assertExplicitPolicy(opts.policy, "apply");
   const addon = loadAddon();
-  const priorMigrations = opts.priorMigrations ?? [];
   if (
-    opts.priorNameFallbacks !== undefined &&
-    opts.priorNameFallbacks.length !== priorMigrations.length
+    opts.nameFallbacks !== undefined &&
+    opts.nameFallbacks.length !== opts.migrations.length
   ) {
-    throw new Error(
-      "zero-migrate-cli: apply priorNameFallbacks must match priorMigrations length",
-    );
+    throw new Error("zero-migrate-cli: apply nameFallbacks must match migrations length");
   }
-  const priorEnvelopes = priorMigrations.map((migration, index) =>
-    authorEnvelope(addon, migration, opts.priorNameFallbacks?.[index]),
+  if (opts.migrations.length === 0) {
+    throw new Error("zero-migrate-cli: apply needs at least one migration");
+  }
+  // The ordered authored set, oldest first, recorded once. Both drivers read it the
+  // same way: one call lowers it once and applies every envelope the journal does
+  // not already carry, in order.
+  const envelopes = opts.migrations.map((migration, index) =>
+    authorEnvelope(addon, migration, opts.nameFallbacks?.[index]),
   );
-  const envelope = authorEnvelope(addon, opts.migration, opts.nameFallback);
-
-  // The ordered authored set, oldest first. Both drivers take the same sequence;
-  // the in-process deploy loop applies every envelope the journal does not carry,
-  // and the host-driven apply applies the last and requires the prefix to be
-  // journalled already.
-  const envelopes = [...priorEnvelopes, envelope];
 
   if (opts.driver.kind === "sqlite") {
     // No session: the addon opens the application file itself.
@@ -218,8 +224,8 @@ export async function apply(opts: HostApplyOptions): Promise<ApplyOutcome> {
   const { hostDriver, close } = await openSession(opts.driver);
   try {
     // The verb boundary is TYPED: pass an `ApplyRequest`, get an
-    // `ApplyReply` — no JSON stringify/parse. The envelopes cross as JS values.
-    return await addon.applyIr(hostDriver, {
+    // `ApplyReply` - no JSON stringify/parse. The envelopes cross as JS values.
+    const reply = await addon.applyIr(hostDriver, {
       ownerApp: opts.ownerApp,
       projectSchema: opts.projectSchema,
       dialect: dialectOf(opts.driver),
@@ -233,6 +239,12 @@ export async function apply(opts: HostApplyOptions): Promise<ApplyOutcome> {
       charterLayers: [...opts.policy],
       approved: opts.approved ?? false,
     });
+    // A run that stopped part-way still rejects; the reply rides on the error so a
+    // caller can report what committed before the stop.
+    if (reply.failure !== undefined && reply.failure !== null) {
+      throw new ApplyRunError({ ...reply, failure: reply.failure });
+    }
+    return reply;
   } finally {
     await close();
   }
@@ -289,10 +301,9 @@ export type RollbackOutcome = RollbackReply;
  * opens its own files and needs no network session, so there is none to open or
  * close. Network sessions are always closed.
  *
- * Unlike `apply`, this takes the WHOLE authored set rather than one migration and
- * its priors: the versions being unwound are already applied, so there is no
- * current envelope to distinguish, and the engine needs every candidate's `down`
- * in one set to refuse coherently. Both drivers read that set identically.
+ * Like `apply`, this takes the WHOLE authored set: the versions being unwound are
+ * already applied, and the engine needs every candidate's `down` in one set to
+ * refuse coherently. Both drivers read that set identically.
  */
 export async function rollback(opts: HostRollbackOptions): Promise<RollbackOutcome> {
   assertExplicitPolicy(opts.policy, "rollback");

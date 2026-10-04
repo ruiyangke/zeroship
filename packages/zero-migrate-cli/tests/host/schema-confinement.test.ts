@@ -68,7 +68,7 @@ test("a migration cannot reach outside its project schema unless the root charte
     policy: readonly string[],
   ) =>
     apply({
-      migration: {
+      migrations: [{
         name: "create_items",
         default: {
           schema() {
@@ -76,7 +76,8 @@ test("a migration cannot reach outside its project schema unless the root charte
             handle.create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
           },
         },
-      } as MigrationModule,
+      } as MigrationModule],
+      nameFallbacks: ["create_items"],
       ownerApp: OWNER_APP,
       projectSchema,
       driver,
@@ -84,7 +85,6 @@ test("a migration cannot reach outside its project schema unless the root charte
       policy,
       approved: true,
       appliedBy: "schema-confinement",
-      nameFallback: "create_items",
     });
 
   const tablesIn = async (schema: string): Promise<string[]> => {

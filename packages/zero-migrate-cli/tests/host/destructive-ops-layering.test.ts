@@ -103,7 +103,8 @@ test("only the root charter can authorise a destructive operation", async (ctx) 
     schema: string,
   ): Promise<string[]> => {
     await apply({
-      migration: created,
+      migrations: [created],
+      nameFallbacks: [created.name],
       ownerApp: OWNER_APP,
       projectSchema: schema,
       driver,
@@ -111,12 +112,10 @@ test("only the root charter can authorise a destructive operation", async (ctx) 
       policy: [`policy_version = 1\n\n${grants(schema)}${ALLOW_DESTRUCTIVE}`],
       approved: true,
       appliedBy: "destructive-ops-layering",
-      nameFallback: created.name,
     });
     await apply({
-      migration: dropped,
-      priorMigrations: [created],
-      priorNameFallbacks: [created.name],
+      migrations: [created, dropped],
+      nameFallbacks: [created.name, dropped.name],
       ownerApp: OWNER_APP,
       projectSchema: schema,
       driver,
@@ -124,7 +123,6 @@ test("only the root charter can authorise a destructive operation", async (ctx) 
       policy: layers,
       approved,
       appliedBy: "destructive-ops-layering",
-      nameFallback: dropped.name,
     });
     const { rows } = await client.query(
       `SELECT column_name FROM information_schema.columns

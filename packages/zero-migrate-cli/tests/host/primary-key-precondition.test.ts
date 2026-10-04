@@ -128,7 +128,8 @@ test("PostgreSQL refuses a primary-key replacement whose expected key is wrong",
     try {
       await client.query(`CREATE SCHEMA "${schema}"`);
       await apply({
-        migration: created,
+        migrations: [created],
+        nameFallbacks: [created.name],
         ownerApp: OWNER_APP,
         projectSchema: schema,
         driver,
@@ -136,7 +137,6 @@ test("PostgreSQL refuses a primary-key replacement whose expected key is wrong",
         policy: [charter(schema)],
         approved: true,
         appliedBy: "primary-key-precondition",
-        nameFallback: created.name,
       });
       return await run(schema);
     } finally {
@@ -151,9 +151,8 @@ test("PostgreSQL refuses a primary-key replacement whose expected key is wrong",
 
   const replace = (expected: readonly string[], schema: string) =>
     apply({
-      migration: replaceWith(expected),
-      priorMigrations: [created],
-      priorNameFallbacks: [created.name],
+      migrations: [created, replaceWith(expected)],
+      nameFallbacks: [created.name, "replace_pk"],
       ownerApp: OWNER_APP,
       projectSchema: schema,
       driver,
@@ -161,7 +160,6 @@ test("PostgreSQL refuses a primary-key replacement whose expected key is wrong",
       policy: [charter(schema)],
       approved: true,
       appliedBy: "primary-key-precondition",
-      nameFallback: "replace_pk",
     });
 
   try {
@@ -221,7 +219,8 @@ test("MySQL refuses the same mismatches, including column order", async (ctx) =>
     try {
       await admin.query(`CREATE DATABASE \`${database}\``);
       await apply({
-        migration: created,
+        migrations: [created],
+        nameFallbacks: [created.name],
         ownerApp: OWNER_APP,
         projectSchema: database,
         driver: { kind: "mysql", url: MYSQL_URL },
@@ -229,7 +228,6 @@ test("MySQL refuses the same mismatches, including column order", async (ctx) =>
         policy: [charter(database)],
         approved: true,
         appliedBy: "primary-key-precondition",
-        nameFallback: created.name,
       });
       return await run(admin, database);
     } finally {
@@ -257,9 +255,8 @@ test("MySQL refuses the same mismatches, including column order", async (ctx) =>
 
   const replace = (expected: readonly string[], database: string) =>
     apply({
-      migration: replaceWith(expected),
-      priorMigrations: [created],
-      priorNameFallbacks: [created.name],
+      migrations: [created, replaceWith(expected)],
+      nameFallbacks: [created.name, "replace_pk"],
       ownerApp: OWNER_APP,
       projectSchema: database,
       driver: { kind: "mysql", url: MYSQL_URL },
@@ -267,7 +264,6 @@ test("MySQL refuses the same mismatches, including column order", async (ctx) =>
       policy: [charter(database)],
       approved: true,
       appliedBy: "primary-key-precondition",
-      nameFallback: "replace_pk",
     });
 
   // A key the table does not have.

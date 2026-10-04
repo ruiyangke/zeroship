@@ -75,7 +75,8 @@ test("Live MySQL apply: napi addon lowers + applies the authored IR over the mys
     const mig = await loadMigration();
 
     const outcome = await apply({
-      migration: mig as never,
+      migrations: [mig as never],
+      nameFallbacks: ["create_widgets"],
       ownerApp: "app_widgets",
       projectSchema: database,
       driver: { kind: "mysql", url: MYSQL_URL },
@@ -83,7 +84,6 @@ test("Live MySQL apply: napi addon lowers + applies the authored IR over the mys
       policy: [noInjectPolicy(database)],
       approved: false,
       appliedBy: "deploy",
-      nameFallback: "create_widgets",
     });
 
     assert.ok(outcome.applied.length > 0, "at least one migration id applied");
@@ -180,7 +180,7 @@ test("Live MySQL UUIDv4 default generates canonical RFC 9562 version and variant
   try {
     await admin.query(`CREATE DATABASE \`${database}\``);
     await apply({
-      migration,
+      migrations: [migration],
       ownerApp: "app_mysql_uuid_v4",
       projectSchema: database,
       driver: { kind: "mysql", url: MYSQL_URL },
@@ -314,7 +314,8 @@ test("Live MySQL onConflict updates only the authored target and journals only c
 
     const deploy = (migration: typeof schemaMigration | typeof dataMigration) =>
       apply({
-        migration: migration as never,
+        migrations: [migration as never],
+        nameFallbacks: [migration.name],
         ownerApp: "app_mysql_conflict",
         projectSchema: database,
         driver: { kind: "mysql", url: MYSQL_URL },
@@ -322,7 +323,6 @@ test("Live MySQL onConflict updates only the authored target and journals only c
         policy: [noInjectPolicy(database)],
         approved: false,
         appliedBy: "on-conflict-test",
-        nameFallback: migration.name,
       });
 
     await deploy(schemaMigration);
@@ -435,7 +435,8 @@ test("Live MySQL onConflict rejects a non-unique authored target before mutation
 
     const deploy = (migration: typeof schemaMigration | typeof dataMigration) =>
       apply({
-        migration: migration as never,
+        migrations: [migration as never],
+        nameFallbacks: [migration.name],
         ownerApp: "app_mysql_conflict_nonunique",
         projectSchema: database,
         driver: { kind: "mysql", url: MYSQL_URL },
@@ -443,7 +444,6 @@ test("Live MySQL onConflict rejects a non-unique authored target before mutation
         policy: [noInjectPolicy(database)],
         approved: false,
         appliedBy: "on-conflict-target-proof",
-        nameFallback: migration.name,
       });
 
     await deploy(schemaMigration);
@@ -542,7 +542,8 @@ test("Live MySQL applies an expression column default, with a literal default as
 
   const deploy = (migration: { name: string }) =>
     apply({
-      migration,
+      migrations: [migration],
+      nameFallbacks: [migration.name],
       ownerApp,
       projectSchema: database,
       driver: { kind: "mysql", url: MYSQL_URL },
@@ -550,7 +551,6 @@ test("Live MySQL applies an expression column default, with a literal default as
       policy: [noInjectPolicy(database)],
       approved: false,
       appliedBy: "expression-default-test",
-      nameFallback: migration.name,
     });
 
   try {

@@ -11,12 +11,10 @@
 //    added later fails here rather than being noticed by eye;
 //  - each of the three really runs with an in-process driver, against a real file;
 //  - `applyIr` applies the WHOLE ordered sequence on that driver, not just its last
-//    envelope. That is the one behaviour its host-driven arm does differently (it
-//    requires its prefix to be already journalled and applies only the final
-//    envelope), so a single request shape serving both is only correct while this
-//    arm stays green. `statusIr` and `rollback` have no such asymmetry: both of
-//    their drivers read the same complete sequence the same way, which is what lets
-//    each carry one `envelopes` field with one meaning;
+//    envelope, and reports each envelope's own outcome in order. Its host-driven
+//    arm reads the sequence the same way, as `statusIr` and `rollback` do on both of
+//    their drivers, which is what lets each verb carry one `envelopes` field with one
+//    meaning;
 //  - a driver/dialect pairing the addon cannot serve is REFUSED rather than silently
 //    reinterpreted, on every verb;
 //  - and each verb's driver carries only the journal credentials that verb writes
@@ -54,6 +52,7 @@ const addon = createRequire(import.meta.url)(
   applyIr(hostDriver: unknown, req: Record<string, unknown>): Promise<{
     applied: unknown[];
     skipped: unknown[];
+    migrations: Array<{ applied: unknown[] }>;
   }>;
   statusIr(hostDriver: unknown, req: Record<string, unknown>): Promise<{
     applied: string[];
@@ -213,11 +212,19 @@ test("applyIr with an in-process driver deploys the whole ordered sequence to a 
       baseRequest({ driver: { kind: "inProcess", appPath } }),
     );
 
-    // Both envelopes, not just the last one. The host-driven arm applies only the
-    // final envelope and demands the prefix be journalled already; this arm is what
-    // proves the shared request shape did not quietly adopt that rule here.
+    // Both envelopes, not just the last one, each reported on its own.
     assert.equal(reply.applied.length, 2, "both authored envelopes applied");
     assert.equal(reply.skipped.length, 0, "nothing was skipped on a fresh file");
+    assert.deepEqual(
+      reply.migrations.map((migration) => migration.applied.length),
+      [1, 1],
+      "each envelope reports the step it applied",
+    );
+    assert.deepEqual(
+      reply.migrations.flatMap((migration) => migration.applied),
+      reply.applied,
+      "the run-wide list is the per-envelope lists in order",
+    );
 
     const db = new DatabaseSync(appPath);
     try {
@@ -329,6 +336,32 @@ test("the in-process driver refuses a dialect it does not serve, on every verb",
       unserved,
       "and so does rollback",
     );
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test("the host apply driver refuses an empty set, while the in-process driver applies nothing", async () => {
+  assert.throws(
+    () =>
+      addon.applyIr(
+        unreachableHostDriver(),
+        baseRequest({ dialect: "postgres", driver: { kind: "host", appliedBy: "host" }, envelopes: [] }),
+      ),
+    /a host-driven apply needs at least one migration envelope/,
+    "a host apply handed no migration names nothing to apply",
+  );
+
+  // The in-process driver is the dev tier's, whose project has no migration until
+  // its first is written: an empty set is an ordinary no-op there.
+  const work = scratch("driver-empty-");
+  try {
+    const reply = await addon.applyIr(
+      null,
+      baseRequest({ driver: { kind: "inProcess", appPath: join(work, "app.db") }, envelopes: [] }),
+    );
+    assert.deepEqual(reply.applied, [], "nothing applied");
+    assert.deepEqual(reply.migrations, [], "and no migration reported");
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

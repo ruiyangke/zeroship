@@ -1,9 +1,9 @@
 // The pending-schema projection versus an existence guard's SatisfiedNoop verdict.
 //
-// `apply()` takes one of two lowering paths depending ONLY on whether
-// `priorMigrations` is empty. With no priors the guard is evaluated at apply time
-// against the live catalog. With priors, lowering first PROJECTS the pending ops
-// onto the live snapshot, and that fold is guard-blind: a guarded
+// `apply()` takes one of two lowering paths depending ONLY on whether the set it is
+// handed carries one migration or more. With one, the guard is evaluated at apply
+// time against the live catalog. With more, the ordered lowering also PROJECTS each
+// pending migration's ops onto the live snapshot, and that fold is guard-blind: a guarded
 // `createTable ifNotExists` over a table that already exists folds to
 // "table already exists" and the whole plan is refused -- pre-empting the guard
 // whose entire job is to report the object as already present.
@@ -21,9 +21,9 @@
 //     parity arm below is comparing one path with itself;
 //   - parity: the same guarded op with the table ABSENT from the incoming registry --
 //     which is the DEFAULT state, since `--registry` is optional and `loadRegistry`
-//     returns `{}` -- MUST adopt on BOTH lowering paths. Empty priors skip the
-//     projection and adopt (the contract `existence-guard-varchar-adoption.test.ts`
-//     pins); non-empty priors must reach the same verdict, so that migration COUNT
+//     returns `{}` -- MUST adopt on BOTH lowering paths. A set of one skips the
+//     projection and adopts (the contract `existence-guard-varchar-adoption.test.ts`
+//     pins); a set with an applied migration before it must reach the same verdict, so that migration COUNT
 //     cannot decide whether an authored adoption is legal;
 //   - foreign owner: the same guarded op with the registry EXPLICITLY naming another
 //     app -- MUST refuse, and the refusal must be the loader's `ownership violation`,
@@ -50,8 +50,8 @@
 // real `pg`/`mysql2`/`sqlite` driver seams against a live database, and with the
 // pre-existing table created OUT OF BAND. Seeding it through the engine would put it
 // in the migration HISTORY as well as the catalog and would measure a different
-// question. Every arm carries a non-empty `priorMigrations`, so the folding path is the
-// one under test, EXCEPT the two that deliberately run both halves: the branch witness
+// question. Every arm hands `apply()` an applied migration before the one under test,
+// so the folding path is the one under test, EXCEPT the two that deliberately run both halves: the branch witness
 // and the parity arm.
 //
 // SQLite is covered by the last three arms below. It reaches the projection from a
@@ -121,9 +121,9 @@ function mysqlIdent(value: string): string {
   return `\`${value.replaceAll("`", "``")}\``;
 }
 
-/** The prior migration. Its only job is to be an APPLIED prefix, so that the second
- *  apply carries a non-empty `priorMigrations` and takes the folding path. It does
- *  not touch `notes`. */
+/** The earlier migration. Its only job is to be APPLIED before the one under test,
+ *  so that the second apply hands over a set of two and takes the folding path. It
+ *  does not touch `notes`. */
 function baseMigration(): NamedMigration {
   return authoredMigration("guard_fold_base", () => {
     table(BASE_TABLE).create({
@@ -156,9 +156,8 @@ async function applyAfterBase(
 ) {
   const base = baseMigration();
   return apply({
-    migration,
-    priorMigrations: [base],
-    priorNameFallbacks: [base.name],
+    migrations: [base, migration],
+    nameFallbacks: [base.name, migration.name],
     ownerApp: OWNER_APP,
     projectSchema,
     driver,
@@ -166,20 +165,20 @@ async function applyAfterBase(
     policy: [noInjectPolicy(projectSchema)],
     approved: true,
     appliedBy: "guard-fold-projection-e2e",
-    nameFallback: migration.name,
   });
 }
 
-/** The other half of the parity arm: the SAME authored migration applied with NO
- *  priors, which is the branch `verbs.rs` takes on an empty `priorMigrations` and the
- *  branch that never reaches the pending-schema projection. */
-async function applyGuardedWithoutPriors(
+/** The other half of the parity arm: the SAME authored migration applied as a set
+ *  of one, which is the branch `verbs.rs` takes for a single envelope and the branch
+ *  that never reaches the pending-schema projection. */
+async function applyGuardedAlone(
   migration: NamedMigration,
   projectSchema: string,
   driver: DriverConfig,
 ) {
   return apply({
-    migration,
+    migrations: [migration],
+    nameFallbacks: [migration.name],
     ownerApp: OWNER_APP,
     projectSchema,
     driver,
@@ -187,7 +186,6 @@ async function applyGuardedWithoutPriors(
     policy: [noInjectPolicy(projectSchema)],
     approved: true,
     appliedBy: "guard-fold-projection-e2e",
-    nameFallback: migration.name,
   });
 }
 
@@ -245,7 +243,8 @@ async function withAppliedBaseAndSeededTable(
     await client.query(`CREATE SCHEMA ${pgIdent(schema)}`);
     const base = baseMigration();
     await apply({
-      migration: base,
+      migrations: [base],
+      nameFallbacks: [base.name],
       ownerApp: OWNER_APP,
       projectSchema: schema,
       driver,
@@ -253,7 +252,6 @@ async function withAppliedBaseAndSeededTable(
       policy: [noInjectPolicy(schema)],
       approved: true,
       appliedBy: "guard-fold-projection-e2e",
-      nameFallback: base.name,
     });
     await client.query(
       `CREATE TABLE ${pgIdent(schema)}.${pgIdent(TABLE)} (
@@ -274,9 +272,8 @@ async function withAppliedBaseAndSeededTable(
 }
 
 /**
- * The same seeding, WITHOUT the base migration: no prefix is applied, so the migration
- * under test carries empty `priorMigrations` and takes the branch that skips the
- * projection entirely. `varchar(255)` is fixed here because the parity arm is the only
+ * The same seeding, WITHOUT the base migration: the migration under test is applied
+ * as a set of one and takes the branch that skips the projection entirely. `varchar(255)` is fixed here because the parity arm is the only
  * caller and it declares `t.string()`.
  */
 async function withSeededTableOnly(
@@ -383,45 +380,45 @@ async function refusalOf(run: () => Promise<unknown>): Promise<string> {
 
 test("PostgreSQL: the parity arm's two halves take DIFFERENT lowering branches", async (ctx) => {
   // The witness for the arm below. A parity assertion is worth nothing if both halves
-  // happen to run the same code: `apply()` forks on `prior_envelope_json.is_empty()`
-  // alone (`verbs.rs`), and only the non-empty side builds a pending-schema projection.
+  // happen to run the same code: `apply()` forks on whether the set carries one envelope
+  // (`verbs.rs`), and only the ordered side builds a pending-schema projection.
   // Rather than assert that fork in a comment, drive the ONE shape both branches refuse
   // -- an UNGUARDED duplicate create -- down each half and require the refusals to come
   // from different layers. Only the projection can say "failed to project pending
-  // schema"; the empty-priors half never builds one.
+  // schema"; the set-of-one half never builds one.
   const bare = createNotes("guard_fold_witness", { guarded: false, body: () => t.string() });
 
-  let withoutPriors = "";
-  await withSeededTableOnly("guardfold_witness_nopriors_pg", async (_client, schema, driver) => {
-    withoutPriors = await refusalOf(() => applyGuardedWithoutPriors(bare, schema, driver));
+  let alone = "";
+  await withSeededTableOnly("guardfold_witness_alone_pg", async (_client, schema, driver) => {
+    alone = await refusalOf(() => applyGuardedAlone(bare, schema, driver));
   });
 
-  let withPriors = "";
+  let afterBase = "";
   await withAppliedBaseAndSeededTable(
-    "guardfold_witness_priors_pg",
+    "guardfold_witness_after_pg",
     "varchar(255)",
     async (_client, schema, driver) => {
-      withPriors = await refusalOf(() => applyAfterBase(bare, schema, driver, {}));
+      afterBase = await refusalOf(() => applyAfterBase(bare, schema, driver, {}));
     },
   );
 
   assert.match(
-    withPriors,
+    afterBase,
     /failed to project pending schema/,
-    `the priors half must reach the projection (got ${JSON.stringify(withPriors)})`,
+    `the set-of-two half must reach the projection (got ${JSON.stringify(afterBase)})`,
   );
   assert.doesNotMatch(
-    withoutPriors,
+    alone,
     /failed to project pending schema/,
-    `the empty-priors half must NOT reach the projection (got ${JSON.stringify(withoutPriors)})`,
+    `the set-of-one half must NOT reach the projection (got ${JSON.stringify(alone)})`,
   );
 });
 
-test("PostgreSQL: a guarded createTable over an unregistered live table adopts identically with and without priors", async (ctx) => {
+test("PostgreSQL: a guarded createTable over an unregistered live table adopts identically alone and after an applied migration", async (ctx) => {
   // One authored migration, one registry (`{}` -- the default state for every user who
   // never passes `--registry`), one live table seeded out of band, run down BOTH lowering
-  // paths. The empty-priors path is the tested contract of
-  // `existence-guard-varchar-adoption.test.ts`; this arm requires the priors path to
+  // paths. The set-of-one path is the tested contract of
+  // `existence-guard-varchar-adoption.test.ts`; this arm requires the set-of-two path to
   // agree with it. A refusal on either half is the defect, and asserting only one half
   // is how the two paths drifted apart in the first place.
   //
@@ -429,30 +426,30 @@ test("PostgreSQL: a guarded createTable over an unregistered live table adopts i
   // it, and it is the reason this arm is not self-satisfying.
   const guarded = createNotes("guard_fold_parity", { guarded: true, body: () => t.string() });
 
-  await withSeededTableOnly("guardfold_parity_nopriors_pg", async (client, schema, driver) => {
-    await applyGuardedWithoutPriors(guarded, schema, driver);
+  await withSeededTableOnly("guardfold_parity_alone_pg", async (client, schema, driver) => {
+    await applyGuardedAlone(guarded, schema, driver);
     assert.deepEqual(
       await pgColumnType(client, schema, "body"),
       { data_type: "character varying", character_maximum_length: 255 },
-      "empty priors: the guard proved equality, the CREATE was skipped, the table is untouched",
+      "a set of one: the guard proved equality, the CREATE was skipped, the table is untouched",
     );
   });
 
   await withAppliedBaseAndSeededTable(
-    "guardfold_parity_priors_pg",
+    "guardfold_parity_after_pg",
     "varchar(255)",
     async (client, schema, driver, meta) => {
       await applyAfterBase(guarded, schema, driver, {});
       assert.deepEqual(
         await pgColumnType(client, schema, "body"),
         { data_type: "character varying", character_maximum_length: 255 },
-        "non-empty priors: the same authored op reaches the same verdict on the same shape",
+        "a set of two: the same authored op reaches the same verdict on the same shape",
       );
       const completed = await pgCompletedVersions(client, meta);
       assert.equal(
         completed.length,
         2,
-        `both migrations are journaled completed, as on the empty-priors path (got ${JSON.stringify(completed)})`,
+        `both migrations are journaled completed, as on the set-of-one path (got ${JSON.stringify(completed)})`,
       );
     },
   );
@@ -535,7 +532,8 @@ test("MySQL: a guarded createTable over an existing live table is refused by the
     await admin.query(`CREATE DATABASE ${mysqlIdent(database)}`);
     const base = baseMigration();
     await apply({
-      migration: base,
+      migrations: [base],
+      nameFallbacks: [base.name],
       ownerApp: OWNER_APP,
       projectSchema: database,
       driver,
@@ -543,7 +541,6 @@ test("MySQL: a guarded createTable over an existing live table is refused by the
       policy: [noInjectPolicy(database)],
       approved: true,
       appliedBy: "guard-fold-projection-e2e",
-      nameFallback: base.name,
     });
     await admin.query(
       `CREATE TABLE ${mysqlIdent(database)}.${mysqlIdent(TABLE)} (
@@ -647,8 +644,8 @@ async function sqlitePlan(
   });
 }
 
-/** The `apply` half: the base migration, then the migration under test with the base
- *  as a non-empty prior so both verbs see the identical authored set. */
+/** The `apply` half: the base migration, then the migration under test handed over
+ *  after the base, so both verbs see the identical authored set. */
 async function sqliteApply(
   driver: DriverConfig,
   migration: NamedMigration,
@@ -656,26 +653,24 @@ async function sqliteApply(
 ) {
   const base = baseMigration();
   await apply({
-    migration: base,
+    migrations: [base],
+    nameFallbacks: [base.name],
     ownerApp: OWNER_APP,
     projectSchema: SQLITE_PROJECT,
     driver,
     registry,
     policy: [noInjectPolicy(SQLITE_PROJECT)],
     approved: true,
-    nameFallback: base.name,
   });
   return await apply({
-    migration,
-    priorMigrations: [base],
-    priorNameFallbacks: [base.name],
+    migrations: [base, migration],
+    nameFallbacks: [base.name, migration.name],
     ownerApp: OWNER_APP,
     projectSchema: SQLITE_PROJECT,
     driver,
     registry,
     policy: [noInjectPolicy(SQLITE_PROJECT)],
     approved: true,
-    nameFallback: migration.name,
   });
 }
 

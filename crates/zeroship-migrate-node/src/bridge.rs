@@ -87,13 +87,14 @@ use crate::verbs::{
     apply_ir_with_locked_backend, baseline_ir_with_locked_backend, charter_layer_refs,
     effective_policy_from_wire_layers, legacy_status_with_locked_backend, owner_app_project,
     parse_rollback_target, preview_dialect, resolve_pending_with_locked_backend,
-    rollback_with_locked_backend, split_host_envelopes, status_ir_with_locked_backend,
-    ApplyDialect, DriverParts, DriverTarget, NoCredentials, RoleAndLabel, RoleOnly,
+    rollback_with_locked_backend, status_ir_with_locked_backend, ApplyDialect, DriverParts,
+    DriverTarget, NoCredentials, RoleAndLabel, RoleOnly,
 };
 use crate::wire::{
-    AdvisoryDto, ApplyReply, ApplyRequest, BaselineIrRequest, BuildInfo, GenArtifactsReply,
-    GenArtifactsSource, HistoryEventDto, HistoryReply, HistoryRequest, LoadVerifyReply,
-    PreviewSqlSource, ResolvePendingRequest, RollbackRequest, StatusIrRequest, StatusRequest,
+    AdvisoryDto, AppliedMigrationDto, ApplyReply, ApplyRequest, BaselineIrRequest, BuildInfo,
+    GenArtifactsReply, GenArtifactsSource, HistoryEventDto, HistoryReply, HistoryRequest,
+    LoadVerifyReply, PreviewSqlSource, ResolvePendingRequest, RollbackRequest, StatusIrRequest,
+    StatusRequest,
 };
 
 // ---------------------------------------------------------------------------
@@ -639,9 +640,14 @@ pub fn apply_ir(
                     applied_by,
                 },
         } => {
+            if envelopes.is_empty() {
+                return Err(Error::from_reason(
+                    "a host-driven apply needs at least one migration envelope",
+                ));
+            }
             // The host seam takes JSON: the lower gate reads strings, so each
-            // envelope is re-serialized here rather than handed over as a value.
-            let serialized = envelopes
+            // envelope is serialized once here rather than handed over as a value.
+            let envelope_json = envelopes
                 .iter()
                 .map(|envelope| {
                     serde_json::to_string(envelope).map_err(|e| {
@@ -649,10 +655,6 @@ pub fn apply_ir(
                     })
                 })
                 .collect::<Result<Vec<String>>>()?;
-            let (priors, current) =
-                split_host_envelopes(&serialized).map_err(Error::from_reason)?;
-            let prior_envelope_json = priors.to_vec();
-            let envelope_json = current.clone();
             let registry_json = serde_json::to_string(&registry)
                 .map_err(|e| Error::from_reason(format!("registry is not serializable: {e}")))?;
             let host_driver = host_driver
@@ -679,7 +681,6 @@ pub fn apply_ir(
                         apply_ir_with_locked_backend(
                             &backend,
                             &cfg,
-                            &prior_envelope_json,
                             &envelope_json,
                             &owner_app,
                             &project_schema,
@@ -696,7 +697,6 @@ pub fn apply_ir(
                         apply_ir_with_locked_backend(
                             &backend,
                             &cfg,
-                            &prior_envelope_json,
                             &envelope_json,
                             &owner_app,
                             &project_schema,
@@ -773,10 +773,24 @@ pub fn apply_ir(
                     .await
                     .map_err(|error| error.to_string())?;
 
+                let migrations = outcome
+                    .envelopes
+                    .into_iter()
+                    .map(|envelope| AppliedMigrationDto {
+                        name: envelope.name,
+                        version: envelope.version,
+                        applied: envelope.applied,
+                        skipped: envelope.skipped,
+                        recovered: envelope.recovered,
+                        pending_contracts: Vec::new(),
+                    })
+                    .collect();
                 Ok(ApplyReply {
                     applied: outcome.applied,
                     skipped: outcome.skipped,
                     recovered: outcome.recovered,
+                    migrations,
+                    failure: None,
                     // Empty because SQLite HAS no cross-deploy contracts, not because
                     // this path drops them. `SqliteBackend::pending_contracts` returns
                     // `None` (`zeroship-migrate-sqlite`'s `backend/mod.rs`): a rebuild

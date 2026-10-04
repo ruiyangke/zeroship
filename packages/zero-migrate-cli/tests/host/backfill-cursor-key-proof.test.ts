@@ -186,7 +186,8 @@ async function runCase(
     await client!.query(testCase.seed.replaceAll("@T", qualified));
 
     const error = await apply({
-      migration: bump(testCase.cursor),
+      migrations: [bump(testCase.cursor)],
+      nameFallbacks: ["bump"],
       ownerApp: OWNER_APP,
       projectSchema: schema,
       driver,
@@ -194,7 +195,6 @@ async function runCase(
       policy: [charter(schema)],
       approved: true,
       appliedBy: "backfill-cursor-key-proof",
-      nameFallback: "bump",
     }).then(
       () => null,
       (thrown: unknown) => String((thrown as Error)?.message ?? thrown),

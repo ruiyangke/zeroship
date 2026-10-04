@@ -93,7 +93,8 @@ function applyShape(
   driver: DriverConfig,
 ): Promise<unknown> {
   return apply({
-    migration: { name, default: { schema } } as NamedMigration,
+    migrations: [{ name, default: { schema } } as NamedMigration],
+    nameFallbacks: [name],
     ownerApp: OWNER_APP,
     projectSchema,
     driver,
@@ -101,7 +102,6 @@ function applyShape(
     policy: [charter(projectSchema)],
     approved: true,
     appliedBy: "unsupported-constraints-refuse",
-    nameFallback: name,
   });
 }
 

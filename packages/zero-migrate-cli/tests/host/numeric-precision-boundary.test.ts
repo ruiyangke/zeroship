@@ -72,7 +72,8 @@ test("an exact int64 survives the whole stack, and an unsafe JS number is refuse
     // so the fixture applies the table first and the row second.
     const applyOne = (migration: MigrationModule, nameFallback: string) =>
       apply({
-        migration,
+        migrations: [migration],
+        nameFallbacks: [nameFallback],
         ownerApp: OWNER_APP,
         projectSchema: schema,
         driver,
@@ -80,7 +81,6 @@ test("an exact int64 survives the whole stack, and an unsafe JS number is refuse
         policy: [charter(schema)],
         approved: true,
         appliedBy: "numeric-precision-boundary",
-        nameFallback,
       });
 
     await applyOne(

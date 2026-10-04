@@ -203,8 +203,8 @@ pub use conn::{ConfinementConfig, ConnectError, ExecutorConfig};
 pub use driver::{Bind, ColIndex, DbError, FromValue, Row, SqlSession, Value};
 pub use engine::{
     recognizes_contract_apply, AggregateOutcome, DeclarativeApplyError, DeclarativeDeployOutcome,
-    DeclarativeDeployPlan, EngineError, MigrationEngine, MigrationPlan, OnlineError,
-    PlannedMigration, RollbackEngineError,
+    DeclarativeDeployPlan, EngineError, EnvelopeOutcome, MigrationEngine, MigrationPlan,
+    OnlineError, PlannedMigration, RollbackEngineError,
 };
 pub use plan::author::{
     AuthorError, AuthorRequest, Column, DeterministicAuthor, MigrationAuthor, RawSqlAuthor,

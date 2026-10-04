@@ -109,7 +109,8 @@ function deploy(
   driver: DriverConfig,
 ): Promise<unknown> {
   return apply({
-    migration,
+    migrations: [migration],
+    nameFallbacks: ["seq_default"],
     ownerApp: OWNER_APP,
     projectSchema,
     driver,
@@ -117,7 +118,6 @@ function deploy(
     policy: [charter(projectSchema)],
     approved: true,
     appliedBy: "sequence-default-dialects",
-    nameFallback: "seq_default",
   });
 }
 

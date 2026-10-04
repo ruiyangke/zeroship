@@ -107,7 +107,8 @@ function applyShape(
   driver: DriverConfig,
 ): Promise<unknown> {
   return apply({
-    migration: { default: { schema: SHAPES[shape] } } as MigrationModule,
+    migrations: [{ default: { schema: SHAPES[shape] } } as MigrationModule],
+    nameFallbacks: [`op_${shape}`],
     ownerApp: OWNER_APP,
     projectSchema,
     driver,
@@ -115,7 +116,6 @@ function applyShape(
     policy: [charter(projectSchema, shape === "materialized_view")],
     approved: true,
     appliedBy: "pg-only-op-matrix",
-    nameFallback: `op_${shape}`,
   });
 }
 

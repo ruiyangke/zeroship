@@ -84,9 +84,8 @@ test("MySQL: a key over a t.text() column declared in the SAME migration is refu
 
   const applyOne = (migration: NamedMigration) =>
     apply({
-      migration,
-      priorMigrations: [],
-      priorNameFallbacks: [],
+      migrations: [migration],
+      nameFallbacks: [migration.name],
       ownerApp: OWNER_APP,
       projectSchema: database,
       driver,
@@ -94,7 +93,6 @@ test("MySQL: a key over a t.text() column declared in the SAME migration is refu
       policy: [charter(database)],
       approved: true,
       appliedBy: "mysql-text-key-boundary",
-      nameFallback: migration.name,
     });
 
   try {
@@ -187,9 +185,8 @@ test("MySQL: a key over a column an EARLIER migration created is refused at lowe
     registry: Record<string, string>,
   ) =>
     apply({
-      migration,
-      priorMigrations: priors,
-      priorNameFallbacks: priors.map((prior) => prior.name),
+      migrations: [...priors, migration],
+      nameFallbacks: [...priors.map((prior) => prior.name), migration.name],
       ownerApp: OWNER_APP,
       projectSchema: database,
       driver,
@@ -197,7 +194,6 @@ test("MySQL: a key over a column an EARLIER migration created is refused at lowe
       policy: [charter(database)],
       approved: true,
       appliedBy: "mysql-text-key-boundary",
-      nameFallback: migration.name,
     });
 
   try {
@@ -238,11 +234,11 @@ test("MySQL: a key over a column an EARLIER migration created is refused at lowe
     // migration, same standalone createIndex, differing only in that the column is
     // a bounded t.string({ length }). This must still reach the server and apply.
     //
-    // NO PRIORS, deliberately: with priors the authored seed answers for `slug`
-    // and the catalog classifier is never consulted, so the assertion would pass
-    // no matter how wrong that classifier is. The canonical `data_type` folds
-    // `varchar(n)` into `"text"` and so refuses every bounded key, which is the
-    // failure this arm exists to catch.
+    // A SET OF ONE, deliberately: with the earlier migration in the set the authored
+    // seed answers for `slug` and the catalog classifier is never consulted, so the
+    // assertion would pass no matter how wrong that classifier is. The canonical
+    // `data_type` folds `varchar(n)` into `"text"` and so refuses every bounded key,
+    // which is the failure this arm exists to catch.
     await deploy(indexedBounded, [], owned);
     const [afterBounded] = (await admin.query(
       `SELECT COUNT(*) AS n FROM information_schema.STATISTICS

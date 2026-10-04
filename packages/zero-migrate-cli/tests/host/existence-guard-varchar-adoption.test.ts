@@ -103,7 +103,8 @@ async function applyGuarded(
   driver: DriverConfig,
 ) {
   return apply({
-    migration,
+    migrations: [migration],
+    nameFallbacks: [migration.name],
     ownerApp: OWNER_APP,
     projectSchema,
     driver,
@@ -111,7 +112,6 @@ async function applyGuarded(
     policy: [noInjectPolicy(projectSchema)],
     approved: true,
     appliedBy: "guard-varchar-adoption-e2e",
-    nameFallback: migration.name,
   });
 }
 

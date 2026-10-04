@@ -57,7 +57,8 @@ is author-owned.
 ```ts
 import { readFile } from "node:fs/promises";
 import { apply } from "zero-migrate-cli";
-import * as migration from "./migrations/20260715090000_create_orders.js";
+import * as createOrders from "./migrations/20260715090000_create_orders.js";
+import * as addTotals from "./migrations/20260716090000_add_totals.js";
 
 const policy = await Promise.all([
   readFile("./platform-policy.toml", "utf8"),
@@ -65,7 +66,7 @@ const policy = await Promise.all([
 ]);
 
 await apply({
-  migration,
+  migrations: [createOrders, addTotals],
   ownerApp: "app_orders",
   projectSchema: "app_orders",
   driver: { kind: "postgres", url: process.env.DATABASE_URL! },
@@ -73,6 +74,15 @@ await apply({
   approved: false,
 });
 ```
+
+`apply` takes the ordered migration set, oldest first, and applies every
+migration the journal does not already record, in order, in one call. Each
+migration commits on its own, so a failure leaves the earlier ones applied and a
+rerun resumes at the first one that is not. Before it runs anything, a set of two
+or more is checked against the journal: the migrations it skips must agree with
+the order the journal recorded them in, and nothing listed after the first
+pending migration may already be in the journal. `zero-migrate apply` makes one
+such call for the whole directory and prints one result line per file.
 
 ## Database support
 

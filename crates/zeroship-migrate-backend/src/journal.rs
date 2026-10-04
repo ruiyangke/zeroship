@@ -439,6 +439,57 @@ impl From<crate::driver::DbError> for JournalError {
     }
 }
 
+/// The journals one backend instance has bootstrapped, keyed by meta schema.
+///
+/// A backend wraps one database session, and several layers of a single verb ask
+/// it to bootstrap before they touch the journal: the host verb under its project
+/// lock, the engine before each plan, and the executor before each DDL batch. Each
+/// of those layers is also an entry point a caller can reach directly, so each
+/// keeps its own call. What they share is answered here: the first call for a meta
+/// schema runs the backend's whole bootstrap, including the additive upgrades a
+/// journal created by an older build needs, and every later call on the same
+/// instance for that meta schema returns without issuing a statement.
+///
+/// A failed bootstrap records nothing, so the next call runs it again. The record
+/// lives exactly as long as the backend that owns it, which is one session: a new
+/// backend over a new connection bootstraps again.
+#[derive(Debug, Default)]
+pub struct JournalBootstrap {
+    bootstrapped: std::sync::Mutex<std::collections::BTreeSet<String>>,
+}
+
+impl JournalBootstrap {
+    /// Run `bootstrap` unless this instance already completed one for
+    /// `meta_schema`, and remember the meta schema once it succeeds.
+    ///
+    /// `bootstrap` is a future, so it issues nothing until it is awaited; when the
+    /// meta schema is already recorded it is dropped unpolled.
+    ///
+    /// # Errors
+    /// The error `bootstrap` returned. Nothing is recorded in that case.
+    pub async fn ensure(
+        &self,
+        meta_schema: &str,
+        bootstrap: impl std::future::Future<Output = Result<(), JournalError>>,
+    ) -> Result<(), JournalError> {
+        if self.recorded().contains(meta_schema) {
+            return Ok(());
+        }
+        bootstrap.await?;
+        self.recorded().insert(meta_schema.to_string());
+        Ok(())
+    }
+
+    /// The set of bootstrapped meta schemas. A panic while the lock was held cannot
+    /// leave the set half-written - each update is one `insert` - so a poisoned
+    /// lock still guards a coherent value.
+    fn recorded(&self) -> std::sync::MutexGuard<'_, std::collections::BTreeSet<String>> {
+        self.bootstrapped
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 /// A net-rolled-back version: one whose **latest** event (on the native
 /// `event_seq` IDENTITY scale) is a `rolled_back` event. Such a version is pending
 /// again and re-appliable; the status API surfaces it distinctly from net-applied.
@@ -620,5 +671,49 @@ mod tests {
         assert_eq!(PendingState::parse(""), None);
         assert_eq!(Resolution::parse("abort"), None);
         assert_eq!(Resolution::parse(""), None);
+    }
+
+    /// Poll a future that never waits to completion. The bootstrap fixtures below
+    /// resolve on their first poll, so no executor is needed to drive them.
+    fn resolved<T>(future: impl std::future::Future<Output = T>) -> T {
+        let mut future = std::pin::pin!(future);
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        match future.as_mut().poll(&mut context) {
+            std::task::Poll::Ready(value) => value,
+            std::task::Poll::Pending => panic!("a bootstrap fixture waited"),
+        }
+    }
+
+    /// One backend's layers share one bootstrap per meta schema: the first call
+    /// runs it, a later call for the same meta schema does not, a different meta
+    /// schema runs its own, and a bootstrap that failed is run again rather than
+    /// remembered.
+    #[test]
+    fn a_journal_bootstraps_once_per_meta_schema_and_again_after_a_failure() {
+        let record = super::JournalBootstrap::default();
+        let runs = std::cell::Cell::new(0_u32);
+        let bootstrap = |outcome: Result<(), JournalError>| {
+            let runs = &runs;
+            async move {
+                runs.set(runs.get() + 1);
+                outcome
+            }
+        };
+
+        let refused = resolved(record.ensure(
+            "one_migrations",
+            bootstrap(Err(JournalError::Backend("refused".to_string()))),
+        ));
+        assert!(refused.is_err(), "the bootstrap's own error comes back");
+        assert_eq!(runs.get(), 1);
+
+        resolved(record.ensure("one_migrations", bootstrap(Ok(())))).expect("retried");
+        assert_eq!(runs.get(), 2, "a failed bootstrap is not remembered");
+
+        resolved(record.ensure("one_migrations", bootstrap(Ok(())))).expect("skipped");
+        assert_eq!(runs.get(), 2, "a completed bootstrap is not run again");
+
+        resolved(record.ensure("two_migrations", bootstrap(Ok(())))).expect("its own");
+        assert_eq!(runs.get(), 3, "another meta schema bootstraps on its own");
     }
 }

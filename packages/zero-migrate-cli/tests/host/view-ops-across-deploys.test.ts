@@ -112,9 +112,8 @@ function applyOne(
   registry: Record<string, string> = {},
 ) {
   return apply({
-    migration,
-    priorMigrations: priors,
-    priorNameFallbacks: priors.map((prior) => prior.name),
+    migrations: [...priors, migration],
+    nameFallbacks: [...priors.map((prior) => prior.name), migration.name],
     ownerApp: OWNER_APP,
     projectSchema,
     driver,
@@ -122,7 +121,6 @@ function applyOne(
     policy: [noInjectPolicy(projectSchema)],
     approved: true,
     appliedBy: "view-drop-across-deploys-e2e",
-    nameFallback: migration.name,
   });
 }
 
@@ -590,9 +588,9 @@ test("PostgreSQL: the same authored pair drops the view, the parity the MySQL ar
 
 
 /** SQLite apply never builds a pending-schema projection, so an applied prior does not
- *  change which code decides the op - unlike MySQL and PostgreSQL, where a prior is
- *  exactly what turns the projection on (`apply_ir_with_locked_backend` in
- *  `verbs.rs` branches on `prior_envelope_json.is_empty()`).
+ *  change which code decides the op - unlike MySQL and PostgreSQL, where a set of more
+ *  than one migration is exactly what turns the projection on (`apply_ir_with_locked_backend`
+ *  in `verbs.rs` branches on whether it was handed a single envelope).
  *
  *  `apply()` with a sqlite driver calls `applyIr` under an in-process driver, whose
  *  `deploy_envelopes` loop
@@ -648,10 +646,10 @@ test("SQLite: apply refuses an absent view at the database, with or without a pr
 /** The PostgreSQL half of the same question the SQLite arm above answers, and it lands
  *  the other way: here an applied prior DOES decide which layer refuses.
  *
- *  `apply_ir_with_locked_backend` in `verbs.rs` branches on
- *  `prior_envelope_json.is_empty()` - an empty history lowers
- *  through `lower_envelope_to_plan_with_live`, which builds no pending-schema projection,
- *  and any prior lowers through `lower_ordered_envelopes_to_plans_for_apply`, which does.
+ *  `apply_ir_with_locked_backend` in `verbs.rs` branches on whether it was handed a
+ *  single envelope - a set of one lowers through `lower_envelope_to_plan_with_live`,
+ *  which builds no pending-schema projection, and a longer set lowers through the
+ *  ordered lowering, which does.
  *  MySQL was measured following that branch; this arm stops PostgreSQL from being
  *  inferred from it, because a shared branch is not evidence that two backends reach it
  *  the same way - SQLite proves they need not.

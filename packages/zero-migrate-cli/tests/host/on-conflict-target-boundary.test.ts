@@ -108,7 +108,8 @@ test("PostgreSQL: a matched target upserts; an unmatched one fails in the data m
   const run = async (target: readonly string[], schema: string) => {
     const applyOne = (migration: MigrationModule, nameFallback: string) =>
       apply({
-        migration,
+        migrations: [migration],
+        nameFallbacks: [nameFallback],
         ownerApp: OWNER_APP,
         projectSchema: schema,
         driver,
@@ -116,7 +117,6 @@ test("PostgreSQL: a matched target upserts; an unmatched one fails in the data m
         policy: [charter(schema)],
         approved: true,
         appliedBy: "on-conflict-target-boundary",
-        nameFallback,
       });
     await applyOne(schemaMigration(), "create_codes");
     await applyOne(upsertMigration(target), "upsert");
@@ -191,7 +191,8 @@ test("MySQL: the same unmatched target is refused before any data change", async
     await admin.query(`CREATE DATABASE \`${database}\``);
     const applyOne = (migration: MigrationModule, nameFallback: string) =>
       apply({
-        migration,
+        migrations: [migration],
+        nameFallbacks: [nameFallback],
         ownerApp: OWNER_APP,
         projectSchema: database,
         driver: { kind: "mysql", url: MYSQL_URL },
@@ -199,7 +200,6 @@ test("MySQL: the same unmatched target is refused before any data change", async
         policy: [charter(database)],
         approved: true,
         appliedBy: "on-conflict-target-boundary",
-        nameFallback,
       });
     await applyOne(schemaMigration(), "create_codes");
     await assert.rejects(

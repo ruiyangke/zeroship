@@ -138,9 +138,8 @@ test("MySQL refuses a data migration whose target is non-InnoDB or carries a use
     reg: Record<string, string>,
   ) =>
     apply({
-      migration,
-      priorMigrations: priors,
-      priorNameFallbacks: priors.map((p) => p.name),
+      migrations: [...priors, migration],
+      nameFallbacks: [...priors.map((p) => p.name), migration.name],
       ownerApp: OWNER_APP,
       projectSchema: database,
       driver,
@@ -148,7 +147,6 @@ test("MySQL refuses a data migration whose target is non-InnoDB or carries a use
       policy: [charter(database)],
       approved: true,
       appliedBy: "mysql-transactional-dml-target",
-      nameFallback: migration.name,
     });
 
   /** A table's `stage`, as the DATABASE holds it. */

@@ -448,7 +448,7 @@ async fn apply_locked<B: MigrationBackend>(
     // coalesced DDL batch per call, so applying the second of two migrations would
     // name the first -- still present in the operator's directory. No boundary
     // inside the executor knows the difference, so the diagnosis is made where the
-    // supplied set can be attested: `require_applied_prefix` for a host deploy,
+    // supplied set can be attested: `ordered_apply_start` for a host deploy,
     // and `status`, whose `unexpected_journal` is computed against the full
     // supplied manifest set and trips `status --strict`.
 

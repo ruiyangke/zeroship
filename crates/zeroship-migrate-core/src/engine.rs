@@ -347,6 +347,34 @@ pub struct AggregateOutcome {
     pub skipped: Vec<String>,
     /// Non-transactional versions recovered during this invocation.
     pub recovered: Vec<String>,
+    /// The same versions attributed to the envelope whose plan owns them, one
+    /// entry per deployed envelope in deploy order.
+    pub envelopes: Vec<EnvelopeOutcome>,
+}
+
+/// What one envelope of an ordered deploy did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EnvelopeOutcome {
+    /// The envelope's migration name.
+    pub name: String,
+    /// The logical plan id the envelope lowered to.
+    pub version: String,
+    /// Journal versions applied for this envelope, in deploy order.
+    pub applied: Vec<String>,
+    /// Journal versions of this envelope already complete and therefore skipped.
+    pub skipped: Vec<String>,
+    /// Non-transactional versions of this envelope recovered during this invocation.
+    pub recovered: Vec<String>,
+}
+
+impl AggregateOutcome {
+    /// Record one envelope's outcome, extending the run-wide lists with it.
+    fn push(&mut self, envelope: EnvelopeOutcome) {
+        self.applied.extend(envelope.applied.iter().cloned());
+        self.skipped.extend(envelope.skipped.iter().cloned());
+        self.recovered.extend(envelope.recovered.iter().cloned());
+        self.envelopes.push(envelope);
+    }
 }
 
 fn envelope_deploy_error(
@@ -603,10 +631,16 @@ impl MigrationEngine {
                 &guard,
             );
 
+            let skipped_only = |artifact: &LoweredArtifact, skipped: Vec<String>| EnvelopeOutcome {
+                name: migration_name.clone(),
+                version: artifact.plan.version.as_str().to_string(),
+                skipped,
+                ..EnvelopeOutcome::default()
+            };
             let created_tables = match current {
                 Ok(artifact) => {
                     if let Some(skipped) = completed_artifact_steps(&artifact, &journal)? {
-                        aggregate.skipped.extend(skipped);
+                        aggregate.push(skipped_only(&artifact, skipped));
                         artifact.created_tables
                     } else if let Some((historical, skipped)) = lower_completed_historical(
                         preserves_authored_logical_columns,
@@ -618,7 +652,7 @@ impl MigrationEngine {
                         &guard,
                         &journal,
                     )? {
-                        aggregate.skipped.extend(skipped);
+                        aggregate.push(skipped_only(&historical, skipped));
                         historical.created_tables
                     } else {
                         let created_tables = artifact.created_tables.clone();
@@ -635,9 +669,13 @@ impl MigrationEngine {
                             )
                             .await
                             .map_err(|error| declarative_to_engine_error(&migration_name, error))?;
-                        aggregate.applied.extend(outcome.applied.applied);
-                        aggregate.skipped.extend(outcome.applied.skipped);
-                        aggregate.recovered.extend(outcome.applied.recovered);
+                        aggregate.push(EnvelopeOutcome {
+                            name: migration_name.clone(),
+                            version: artifact.plan.version.as_str().to_string(),
+                            applied: outcome.applied.applied,
+                            skipped: outcome.applied.skipped,
+                            recovered: outcome.applied.recovered,
+                        });
                         created_tables
                     }
                 }
@@ -652,7 +690,7 @@ impl MigrationEngine {
                         &guard,
                         &journal,
                     )? {
-                        aggregate.skipped.extend(skipped);
+                        aggregate.push(skipped_only(&historical, skipped));
                         historical.created_tables
                     } else {
                         return Err(envelope_deploy_error(

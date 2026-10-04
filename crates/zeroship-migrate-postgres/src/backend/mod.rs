@@ -116,6 +116,9 @@ const fn minimum_server_version_num(feature: DatabaseFeature) -> i32 {
 #[derive(Debug)]
 pub struct PostgresBackend<'a, D: SqlSession> {
     conn: &'a D,
+    /// The journals this backend has bootstrapped over `conn`, so the layers of
+    /// one verb share a single bootstrap per session.
+    journal: journal::JournalBootstrap,
 }
 
 impl<'a, D: SqlSession> PostgresBackend<'a, D> {
@@ -124,7 +127,10 @@ impl<'a, D: SqlSession> PostgresBackend<'a, D> {
     /// session; only shadow-database provisioning needs a separate harness.
     #[must_use]
     pub fn new_generic(conn: &'a D) -> Self {
-        Self { conn }
+        Self {
+            conn,
+            journal: journal::JournalBootstrap::default(),
+        }
     }
 }
 
@@ -315,7 +321,12 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
     }
 
     async fn ensure_journal(&self, cfg: &ExecutorConfig) -> Result<(), JournalError> {
-        journal_sql::ensure_journal(self.conn, cfg).await
+        self.journal
+            .ensure(
+                &cfg.confinement.meta_schema,
+                journal_sql::ensure_journal(self.conn, cfg),
+            )
+            .await
     }
 
     async fn applied(&self, cfg: &ExecutorConfig) -> Result<Vec<AppliedEntry>, JournalError> {
@@ -1288,6 +1299,57 @@ mod recording_session_genericity {
                     && entry.contains("ADD COLUMN IF NOT EXISTS down TEXT")
             }),
             "legacy journal bootstrap must add nullable down idempotently: {log:?}"
+        );
+    }
+
+    /// One backend bootstraps each journal once: the verb, the engine and the
+    /// executor all ask, and only the first ask reaches the server. A new backend
+    /// over the same session - the next verb - bootstraps again, and a different
+    /// meta schema is its own journal.
+    #[compio::test]
+    async fn one_backend_bootstraps_each_journal_once() {
+        let rec = RecordingSession::new();
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
+        let other =
+            ExecutorConfig::new("prj_y", "proj_y", crate::test_fixtures::no_inject("proj_y"));
+        let bootstraps = |meta: &str| {
+            let needle = format!("CREATE SCHEMA IF NOT EXISTS \"{meta}\"");
+            rec.log
+                .borrow()
+                .iter()
+                .filter(|entry| entry.contains(&needle))
+                .count()
+        };
+
+        let backend = PostgresBackend::<'_, RecordingSession>::new_generic(&rec);
+        for _ in 0..3 {
+            backend
+                .ensure_journal(&cfg)
+                .await
+                .expect("bootstrap succeeds");
+        }
+        assert_eq!(
+            bootstraps("proj_x_migrations"),
+            1,
+            "repeated asks bootstrap once"
+        );
+
+        backend
+            .ensure_journal(&other)
+            .await
+            .expect("bootstrap succeeds");
+        assert_eq!(
+            bootstraps("proj_y_migrations"),
+            1,
+            "another meta schema bootstraps"
+        );
+
+        let next = PostgresBackend::<'_, RecordingSession>::new_generic(&rec);
+        next.ensure_journal(&cfg).await.expect("bootstrap succeeds");
+        assert_eq!(
+            bootstraps("proj_x_migrations"),
+            2,
+            "a new backend bootstraps again"
         );
     }
 

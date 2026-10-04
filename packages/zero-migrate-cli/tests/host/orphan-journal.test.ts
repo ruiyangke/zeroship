@@ -1,19 +1,18 @@
 // The apply-time diagnosis of a journal step whose migration file is gone, driven
 // end to end through the shipped CLI against live PostgreSQL.
 //
-// A deploy applies one file per addon call, each call carrying the authored prefix
-// that ends at the file it is applying. So no single call is handed the operator's
-// whole directory, and a completed journal step missing from ONE call's prefix is
-// two different things: a file the operator deleted, or a later file this call was
-// simply not given yet. The journal's own `event_seq` separates them -- a completed
-// step recorded BEFORE the newest step this call did supply cannot be a later file,
-// so it is a deleted one.
+// A deploy hands the whole directory to one addon call, which checks the journal
+// against the authored order before it applies anything. A completed journal step
+// that no file owns is one of two things: a file the operator deleted, or a later
+// file the caller did not hand over. The journal's own `event_seq` separates them --
+// a completed step recorded BEFORE the newest step the set does supply cannot be a
+// later file, so it is a deleted one.
 //
-// Three one-step files, not two: the rerun makes two per-file calls, so three files
-// are what show the diagnosis firing ONCE for the operator's set instead of once per
-// call, and show it naming only the deleted file. It is the same in-lock refusal the
-// deploy already raises for a pending migration, so it refuses rather than prints:
-// asserting a `tracing::warn!` with no subscriber installed would assert nothing.
+// Three one-step files, not two: deleting the first leaves two applied files whose
+// steps both postdate it, so the diagnosis must fire once for the operator's set
+// and name only the deleted file. It is the same in-lock refusal the deploy raises
+// for a pending migration, so it refuses rather than prints: asserting a
+// `tracing::warn!` with no subscriber installed would assert nothing.
 //
 // GATE: `connectLivePg` (see `live-db.ts`). Runs under `tests/host/run.ts`.
 
@@ -135,12 +134,12 @@ test("CLI apply names a deleted migration's journal step once, and only it", asy
       `expected exactly one diagnosis naming ${deletedStepId}\n${second.stdout}\n${second.stderr}`,
     );
     assert.equal(second.status, 1, "the diagnosis refuses the deploy, it does not just print");
-    // The first call is handed only file 2, which is a prefix and not the operator's
-    // set, so it says nothing. The refusal comes from the call that was handed both
-    // remaining files -- once, not once per call.
+    // The one call is handed both remaining files and checks the journal before it
+    // runs either, so the refusal comes before any migration: nothing is reported
+    // applied or skipped.
     assert.equal(
       second.stdout.split("\n").filter((line) => line.startsWith("apply ")).length,
-      1,
+      0,
       second.stdout,
     );
 

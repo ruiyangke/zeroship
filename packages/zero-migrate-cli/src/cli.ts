@@ -9,7 +9,8 @@
 //   lint   [dir]        DB-free verification for every supported dialect. OFFLINE.
 //   plan   [dir]        Reconcile live status and render pending SQL without apply.
 //   apply  [dir]        Apply every migration in `dir` over the `--database-url`
-//                       driver (`pg`/`mysql2` seam) in filename order.
+//                       driver (`pg`/`mysql2` seam) in filename order, in one
+//                       addon call that lowers the set once.
 //   status [dir]        Reconcile against the live journal over the `--database-url`
 //                       driver.
 //   baseline            Adopt a database the set has already been applied to by
@@ -29,6 +30,7 @@ import { basename, join, resolve, isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   apply,
+  ApplyRunError,
   baseline,
   history,
   previewSql,
@@ -36,6 +38,7 @@ import {
   rollback,
   statusEnvelopes,
   currentIrVersion,
+  type ApplyOutcome,
   type BaselineOutcome,
   type DriverConfig,
   type NetworkSecurityOptions,
@@ -1387,7 +1390,13 @@ function writeAdvisories(advisories: readonly AdvisoryDto[]): void {
   }
 }
 
-/** `apply [dir]` — apply every migration over the `--database-url` driver in order. */
+/** `apply [dir]` - apply every migration over the `--database-url` driver in order.
+ *
+ * ONE addon call carries the whole directory: it lowers the set once and applies
+ * each migration the journal does not carry, in order, each committing on its own.
+ * The per-file report lines are read back from that call's per-migration outcomes,
+ * which arrive in the order the files were handed over; a run that stops part-way
+ * prints the lines of the files it reached before failing. */
 async function runApply(args: Args): Promise<number> {
   if (!args.databaseUrl) {
     throw new CliError(
@@ -1402,23 +1411,73 @@ async function runApply(args: Args): Promise<number> {
   await ensureTsLoader(files);
   const migrations = await importMigrations(files);
   assertUniqueMigrationNames(migrations);
-  for (const [index, { file, migration }] of migrations.entries()) {
-    const prior = migrations.slice(0, index);
-    const outcome = await apply({
-      migration,
-      priorMigrations: prior.map((entry) => entry.migration),
-      priorNameFallbacks: prior.map((entry) => entry.file.label),
+  let outcome: ApplyOutcome;
+  try {
+    outcome = await apply({
+      migrations: migrations.map((entry) => entry.migration),
+      nameFallbacks: migrations.map((entry) => entry.file.label),
       ownerApp: args.ownerApp,
       projectSchema: args.projectSchema,
       driver,
       registry,
       policy: charterLayers,
-      nameFallback: file.label,
       approved: args.approved,
     });
-    process.stdout.write(`apply ${file.label}: ${JSON.stringify(outcome)}\n`);
+  } catch (error) {
+    // A run that stopped part-way reports the files it reached before the stop,
+    // in order, and then fails with the reason.
+    if (error instanceof ApplyRunError) {
+      const reached = migrations.slice(0, error.outcome.migrations.length);
+      for (const line of applyReportLines(reached, error.outcome, false)) {
+        process.stdout.write(`${line}\n`);
+      }
+    }
+    throw error;
+  }
+  for (const line of applyReportLines(migrations, outcome)) {
+    process.stdout.write(`${line}\n`);
   }
   return 0;
+}
+
+/** The per-file lines `apply` prints, one per migration file in directory order,
+ * each carrying that migration's own outcome. For a run that completed, an
+ * outstanding contract whose key no listed migration owns gets a trailing line of
+ * its own, so it is never dropped; a run that stopped part-way lists only the
+ * files it reached, and the stop's own message is what follows them.
+ *
+ * Fails closed when the reply does not describe exactly the files handed over: a
+ * report that silently skipped or misattributed a file would read as a clean run. */
+export function applyReportLines(
+  migrations: readonly { file: { label: string } }[],
+  outcome: ApplyOutcome,
+  completed = true,
+): string[] {
+  if (outcome.migrations.length !== migrations.length) {
+    throw new CliError(
+      `apply reported ${outcome.migrations.length} migration outcomes for ${migrations.length} files`,
+    );
+  }
+  const attributed = new Set<string>();
+  const lines = migrations.map(({ file }, index) => {
+    const migration = outcome.migrations[index];
+    for (const contract of migration.pendingContracts) attributed.add(contract.pendingVersion);
+    return `apply ${file.label}: ${JSON.stringify({
+      applied: migration.applied,
+      skipped: migration.skipped,
+      recovered: migration.recovered,
+      pendingContracts: migration.pendingContracts,
+    })}`;
+  });
+  const unattributed = outcome.pendingContracts.filter(
+    (contract) => !attributed.has(contract.pendingVersion),
+  );
+  if (completed && unattributed.length > 0) {
+    lines.push(
+      `apply: outstanding contracts no listed migration owns: ${JSON.stringify(unattributed)}`,
+    );
+  }
+  return lines;
 }
 
 /**

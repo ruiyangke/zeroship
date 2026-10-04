@@ -125,7 +125,8 @@ test("genArtifacts folds the MySQL target's own dialectal leg (matches the live 
   try {
     await admin.query(`CREATE DATABASE \`${database}\``);
     await apply({
-      migration: migration as never,
+      migrations: [migration as never],
+      nameFallbacks: ["widgets_dialectal"],
       ownerApp: "app_gen_artifacts_dialect",
       projectSchema: database,
       driver: { kind: "mysql", url: MYSQL_URL },
@@ -133,7 +134,6 @@ test("genArtifacts folds the MySQL target's own dialectal leg (matches the live 
       policy: [noInjectPolicy(database)],
       approved: false,
       appliedBy: "gen-artifacts-dialect",
-      nameFallback: "widgets_dialectal",
     });
 
     const [rows] = await admin.query(
@@ -171,7 +171,8 @@ test("genArtifacts folds the Postgres target's own dialectal leg (matches the li
   try {
     await admin.query(`CREATE SCHEMA "${schema}"`);
     await apply({
-      migration: migration as never,
+      migrations: [migration as never],
+      nameFallbacks: ["widgets_dialectal"],
       ownerApp: "app_gen_artifacts_dialect",
       projectSchema: schema,
       driver: { kind: "postgres", url: PG_URL },
@@ -179,7 +180,6 @@ test("genArtifacts folds the Postgres target's own dialectal leg (matches the li
       policy: [noInjectPolicy(schema)],
       approved: false,
       appliedBy: "gen-artifacts-dialect",
-      nameFallback: "widgets_dialectal",
     });
 
     const res = await admin.query<{ column_name: string }>(

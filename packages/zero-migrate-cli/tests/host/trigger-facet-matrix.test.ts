@@ -92,7 +92,8 @@ function triggerMigration(facet: string, args: TriggerArgs): MigrationModule {
 
 function applyTrigger(facet: string, args: TriggerArgs, driver: DriverConfig): Promise<unknown> {
   return apply({
-    migration: triggerMigration(facet, args),
+    migrations: [triggerMigration(facet, args)],
+    nameFallbacks: [`trig_${facet}`],
     ownerApp: OWNER_APP,
     projectSchema: "main",
     driver,
@@ -100,7 +101,6 @@ function applyTrigger(facet: string, args: TriggerArgs, driver: DriverConfig): P
     policy: [charter("main")],
     approved: true,
     appliedBy: "trigger-facet-matrix",
-    nameFallback: `trig_${facet}`,
   });
 }
 
@@ -280,12 +280,13 @@ test("MySQL control: a structured trigger body really applies, so the refusals b
   // declares MySQL Yes; this proves it, by finding the trigger in the catalog.
   await withMysqlDatabase("trig_my_ok", async (admin, database, driver) => {
     await apply({
-      migration: mysqlTriggerMigration("baseline", {
+      migrations: [mysqlTriggerMigration("baseline", {
         timing: "before",
         events: ["insert"],
         forEach: "row",
         body: mysqlBody,
-      }),
+      })],
+      nameFallbacks: ["trig_my_baseline"],
       ownerApp: OWNER_APP,
       projectSchema: database,
       driver,
@@ -293,7 +294,6 @@ test("MySQL control: a structured trigger body really applies, so the refusals b
       policy: [charter(database)],
       approved: true,
       appliedBy: "trigger-facet-matrix",
-      nameFallback: "trig_my_baseline",
     });
     const [rows] = await admin.query(
       "SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ?",
@@ -327,7 +327,8 @@ test("MySQL refuses the trigger facets the matrix declares unsupported", async (
     await withMysqlDatabase(`trig_my_${facet}`, async (admin, database, driver) => {
       await assert.rejects(
         apply({
-          migration: mysqlTriggerMigration(facet, args),
+          migrations: [mysqlTriggerMigration(facet, args)],
+          nameFallbacks: [`trig_my_${facet}`],
           ownerApp: OWNER_APP,
           projectSchema: database,
           driver,
@@ -335,7 +336,6 @@ test("MySQL refuses the trigger facets the matrix declares unsupported", async (
           policy: [charter(database)],
           approved: true,
           appliedBy: "trigger-facet-matrix",
-          nameFallback: `trig_my_${facet}`,
         }),
         /unsupported shape|UNSUPPORTED/,
         `MySQL must refuse the ${facet} facet the matrix declares No`,

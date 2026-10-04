@@ -104,9 +104,8 @@ test("the documented case-insensitive spelling fails at apply when citext is not
 
     await assert.rejects(
       apply({
-        migration: caseInsensitiveMigration(),
-        priorMigrations: [],
-        priorNameFallbacks: [],
+        migrations: [caseInsensitiveMigration()],
+        nameFallbacks: ["case_insensitive_email"],
         ownerApp: OWNER_APP,
         projectSchema,
         driver,
@@ -114,7 +113,6 @@ test("the documented case-insensitive spelling fails at apply when citext is not
         policy: [noInjectPolicy(projectSchema)],
         approved: true,
         appliedBy: "citext-prerequisite",
-        nameFallback: "case_insensitive_email",
       }),
       /type "public\.citext" does not exist/,
       "the recommended spelling currently fails at apply, not at validate",

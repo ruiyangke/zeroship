@@ -108,15 +108,13 @@ test("a rollback removes what a migration added and keeps the rows it did not to
       approved: true,
       appliedBy: "rollback-data-semantics",
     };
-    await apply({ ...base, migration: seed, priorMigrations: [], priorNameFallbacks: [], registry: {}, nameFallback: seed.name });
-    await apply({ ...base, migration: stock, priorMigrations: [seed], priorNameFallbacks: [seed.name], registry: { acct: OWNER_APP }, nameFallback: stock.name });
+    await apply({ ...base, migrations: [seed], nameFallbacks: [seed.name], registry: {} });
+    await apply({ ...base, migrations: [seed, stock], nameFallbacks: [seed.name, stock.name], registry: { acct: OWNER_APP } });
     await apply({
       ...base,
-      migration: added,
-      priorMigrations: [seed, stock],
-      priorNameFallbacks: [seed.name, stock.name],
+      migrations: [seed, stock, added],
+      nameFallbacks: [seed.name, stock.name, added.name],
       registry: { acct: OWNER_APP },
-      nameFallback: added.name,
     });
     assert.deepEqual(await columns(), ["id", "secret", "extra"], "the add landed");
 
@@ -182,15 +180,13 @@ test("a rollback refuses a dropped column rather than handing back an empty one,
       approved: true,
       appliedBy: "rollback-data-semantics",
     };
-    await apply({ ...base, migration: seed, priorMigrations: [], priorNameFallbacks: [], registry: {}, nameFallback: seed.name });
-    await apply({ ...base, migration: stock, priorMigrations: [seed], priorNameFallbacks: [seed.name], registry: { acct: OWNER_APP }, nameFallback: stock.name });
+    await apply({ ...base, migrations: [seed], nameFallbacks: [seed.name], registry: {} });
+    await apply({ ...base, migrations: [seed, stock], nameFallbacks: [seed.name, stock.name], registry: { acct: OWNER_APP } });
     await apply({
       ...base,
-      migration: dropped,
-      priorMigrations: [seed, stock],
-      priorNameFallbacks: [seed.name, stock.name],
+      migrations: [seed, stock, dropped],
+      nameFallbacks: [seed.name, stock.name, dropped.name],
       registry: { acct: OWNER_APP },
-      nameFallback: dropped.name,
     });
     assert.deepEqual(await columns(), ["id"], "the drop landed");
 
@@ -291,9 +287,8 @@ test("only a migration that lowers to ONE journaled step can be rolled back", as
     try {
       await admin.query(`CREATE SCHEMA ${pgIdent(projectSchema)}`);
       await apply({
-        migration,
-        priorMigrations: [],
-        priorNameFallbacks: [],
+        migrations: [migration],
+        nameFallbacks: [migration.name],
         ownerApp: OWNER_APP,
         projectSchema,
         driver,
@@ -301,7 +296,6 @@ test("only a migration that lowers to ONE journaled step can be rolled back", as
         policy: [noInjectPolicy(projectSchema)],
         approved: true,
         appliedBy: "rollback-steps",
-        nameFallback: migration.name,
       });
 
       const unwind = () =>

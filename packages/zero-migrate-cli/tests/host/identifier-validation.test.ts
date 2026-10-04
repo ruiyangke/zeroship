@@ -78,7 +78,8 @@ test("PostgreSQL rejects a non-portable authored identifier before mutation", as
         await assert.rejects(
           () =>
             apply({
-              migration: migrationNaming(payload),
+              migrations: [migrationNaming(payload)],
+              nameFallbacks: ["name_it"],
               ownerApp: OWNER_APP,
               projectSchema: schema,
               driver,
@@ -86,7 +87,6 @@ test("PostgreSQL rejects a non-portable authored identifier before mutation", as
               policy: [charter(schema)],
               approved: true,
               appliedBy: "identifier-validation",
-              nameFallback: "name_it",
             }),
           /invalid identifier:.*ASCII alphanumeric \+ underscore/i,
           `${label}: guarded lowering must reject the identifier`,
@@ -131,7 +131,8 @@ test("MySQL rejects a non-portable authored identifier before mutation", async (
       await assert.rejects(
         () =>
           apply({
-            migration: migrationNaming(payload),
+            migrations: [migrationNaming(payload)],
+            nameFallbacks: ["name_it"],
             ownerApp: OWNER_APP,
             projectSchema: database,
             driver: { kind: "mysql", url: MYSQL_URL },
@@ -139,7 +140,6 @@ test("MySQL rejects a non-portable authored identifier before mutation", async (
             policy: [charter(database)],
             approved: true,
             appliedBy: "identifier-validation",
-            nameFallback: "name_it",
           }),
         /invalid identifier:.*ASCII alphanumeric \+ underscore/i,
         `${label}: guarded lowering must reject the identifier`,
@@ -180,7 +180,8 @@ test("SQLite rejects a non-portable authored identifier before mutation", async 
       await assert.rejects(
         () =>
           apply({
-            migration: migrationNaming(payload),
+            migrations: [migrationNaming(payload)],
+            nameFallbacks: ["name_it"],
             ownerApp: OWNER_APP,
             projectSchema: "main",
             driver: { kind: "sqlite", appPath: dbPath },
@@ -188,7 +189,6 @@ test("SQLite rejects a non-portable authored identifier before mutation", async 
             policy: [charter("main")],
             approved: true,
             appliedBy: "identifier-validation",
-            nameFallback: "name_it",
           }),
         /invalid identifier:.*ASCII alphanumeric \+ underscore/i,
         `${label}: guarded lowering must reject the identifier`,

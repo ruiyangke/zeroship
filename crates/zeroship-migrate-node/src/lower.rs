@@ -20,14 +20,12 @@
 //! changes use authoritative column types and unique-index facts. The DB-free plan
 //! helper intentionally uses an empty live schema and remains a structural preview.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use zeroship_migrate::apply::journal::{AppliedEntry, Phase};
 use zeroship_migrate::model::ir::{MigrationIr, Op};
 use zeroship_migrate::model::migration::Migration;
-use zeroship_migrate::ops::status::{
-    AppliedPlanStatus, PlanStatusManifest, PlanStatusStepState, ReconciledPlanState,
-};
+use zeroship_migrate::ops::status::{AppliedPlanStatus, PlanStatusManifest, ReconciledPlanState};
 use zeroship_migrate::{
     effective_policy_from_charter_layers, fold_ops_onto, resolve_create_table_policy, DialectId,
     EffectivePolicy, FoldError, GuardConfig, IrAuthor, LiveSchema, LoweredArtifact,
@@ -40,124 +38,199 @@ fn parse_sql_dialect(s: &str) -> Result<DialectId, String> {
     crate::verbs::preview_dialect(s)
 }
 
-/// The one spelling of the refusal, so both arms below name the same condition.
-fn prefix_incomplete(version: &str) -> String {
-    format!("authored migration prefix is incomplete: net-applied journal step {version} was not supplied")
+/// One journal row that the reconciliation of some prefix of the authored set
+/// reports as unexpected.
+struct OrderWitness<'a> {
+    version: &'a str,
+    event_seq: i64,
+    completed: bool,
+    /// The supplied plan that owns the row, or `None` when no supplied plan does.
+    owner: Option<usize>,
 }
 
-/// The completed journal step, if any, that the supplied prefix attests is gone.
-///
-/// A deploy hands this boundary the authored prefix ending at the migration it is
-/// applying, never the operator's whole directory, so "completed but supplied by no
-/// plan" alone cannot separate a file the operator deleted from a later file this
-/// call was simply not given. The journal's `event_seq` can: it is the only sound
-/// apply order (`MigrationId::derive` stamps a hash, so version order carries no
-/// authoring order at all), and a step recorded BEFORE the newest step this call DID
-/// supply cannot belong to a later file. Steps at or above that frontier are outside
-/// what the prefix attests, and stay unreported.
-///
-/// The orphan set itself is `status.unexpected_journal` -- the same full-manifest
-/// reconciliation `status` reports -- narrowed to the attested window. Narrowing to
-/// the SUPPLIED ids instead would be vacuous: an orphan is by definition not among
-/// them.
-fn orphan_below_supplied_frontier<'a>(
-    manifests: &[PlanStatusManifest],
-    status: &'a AppliedPlanStatus,
-    journal: &[AppliedEntry],
-) -> Option<&'a str> {
-    let supplied: BTreeSet<&str> = manifests
-        .iter()
-        .flat_map(|manifest| manifest.steps.iter())
-        .map(|step| step.version.as_str())
-        .collect();
-    let frontier = journal
-        .iter()
-        .filter(|entry| {
-            entry.phase == Phase::Completed && supplied.contains(entry.version.as_str())
-        })
-        .map(|entry| entry.event_seq)
-        .max()?;
-    let sequence: BTreeMap<&str, i64> = journal
-        .iter()
-        .map(|entry| (entry.version.as_str(), entry.event_seq))
-        .collect();
-    status
-        .unexpected_journal
-        .iter()
-        .filter(|entry| entry.state == PlanStatusStepState::Applied)
-        .find(|entry| {
-            sequence
-                .get(entry.version.as_str())
-                .is_some_and(|seq| *seq < frontier)
-        })
-        .map(|entry| entry.version.as_str())
+impl OrderWitness<'_> {
+    /// Whether the reconciliation of the prefix ending at plan `last` reports this
+    /// row as unexpected: a row owned by plan `j` is unexpected for every prefix
+    /// ending before `j`, and a row no plan owns is unexpected for every prefix.
+    fn unexpected_through(&self, last: usize) -> bool {
+        self.owner.is_none_or(|owner| last < owner)
+    }
+
+    /// The refusal naming this row as the reason plan `at` cannot stand where the
+    /// request put it. `at_applied` says which window caught it: the newest step of
+    /// an applied plan, or the plan the run would start at.
+    fn refusal(&self, manifests: &[PlanStatusManifest], at: usize, at_applied: bool) -> String {
+        let Some(owner) = self.owner else {
+            return format!(
+                "authored migration set is incomplete: net-applied journal step {} was not \
+                 supplied",
+                self.version
+            );
+        };
+        let (later, earlier) = (&manifests[owner], &manifests[at]);
+        let relation = if at_applied {
+            "was recorded before the newest step of"
+        } else {
+            "is recorded while the journal has not applied"
+        };
+        format!(
+            "journal step {} of migration {:?} ({}) {relation} migration {:?} ({}), which is \
+             authored before it: migrations apply in the order they are listed",
+            self.version,
+            later.name,
+            later.version.as_str(),
+            earlier.name,
+            earlier.version.as_str(),
+        )
+    }
 }
 
-/// Require every authored prefix plan to be fully, exactly applied before its IR
-/// may contribute logical column contracts to the current migration. The status
-/// fold is authoritative for net rollbacks, inflight/partial work, checksum drift,
-/// dependencies, and terminal online-contract resolutions.
-pub(crate) fn require_applied_prefix(
+/// Where an ordered apply begins, once the journal is proven to agree with the
+/// authored order up to that point.
+///
+/// `manifests` is the complete set a request carried, oldest first, and `status`
+/// their reconciliation against `journal` under the project lock. The answer is the
+/// index of the first plan that is not fully applied, or `manifests.len()` when
+/// every plan is: the plans before it are skipped, and the run applies from it on.
+///
+/// Every refusal below reads the request's order as the order the journal must
+/// show. Each is the question an apply of one migration, handed only the prefix
+/// that ends at it, would have to answer, asked for every plan up to the start:
+///
+/// - The plan the run starts at is not fully applied, so under in-order deploy no
+///   journal row may belong to anything authored after it. A row a later plan owns
+///   means the journal ran ahead of the authored order; a row no supplied plan owns
+///   means the set lost a migration. Either refuses.
+/// - Each fully applied plan before it bounds a window: a completed row recorded
+///   BEFORE the newest step of that plan or an earlier one must belong to one of
+///   them. A row no supplied plan owns recorded there is a migration the operator
+///   deleted; a row a later plan owns is a journal whose order contradicts the
+///   authored one. A row recorded after every supplied step is outside what the set
+///   attests and stays unreported: it can be a later migration the caller did not
+///   hand over.
+///
+/// The journal's `event_seq` is the only sound apply order. `MigrationId::derive`
+/// stamps a hash, so version order carries no authoring order at all. Among several
+/// rows that refuse at the same plan, the one named is the lowest version, which is
+/// the order `status` reports unexpected rows in.
+///
+/// # Errors
+/// The refusal for the first plan whose position the journal contradicts, or the
+/// name of a plan absent from `status`.
+pub(crate) fn ordered_apply_start(
     manifests: &[PlanStatusManifest],
-    prior_count: usize,
     status: &AppliedPlanStatus,
     journal: &[AppliedEntry],
-) -> Result<(), String> {
-    let prefix = manifests.get(..prior_count).ok_or_else(|| {
-        format!(
-            "authored migration prefix has {prior_count} entries but lowering returned only {} plans",
-            manifests.len()
-        )
-    })?;
-    let current = manifests.get(prior_count).ok_or_else(|| {
-        "authored migration set did not include a current migration plan".to_string()
-    })?;
-    let current_state = status
-        .plans
-        .iter()
-        .find(|plan| plan.version == current.version)
-        .map(|plan| plan.state)
-        .ok_or_else(|| {
-            format!(
-                "current migration {:?} ({}) is absent from journal reconciliation",
-                current.name,
-                current.version.as_str()
-            )
-        })?;
-    if current_state == ReconciledPlanState::Applied {
-        // The current migration is already applied, so a completed step no supplied
-        // plan owns is only reportable inside the window `event_seq` attests.
-        if let Some(orphan) = orphan_below_supplied_frontier(manifests, status, journal) {
-            return Err(prefix_incomplete(orphan));
-        }
-    } else if let Some(unexpected) = status.unexpected_journal.first() {
-        // The current migration is NOT applied, so under in-order deploy nothing
-        // authored after it can be applied either: the whole unexpected set is
-        // inside the window and needs no `event_seq` narrowing.
-        return Err(prefix_incomplete(&unexpected.version));
-    }
-    for manifest in prefix {
-        let reconciled = status
+) -> Result<usize, String> {
+    let mut start = manifests.len();
+    for (index, manifest) in manifests.iter().enumerate() {
+        let state = status
             .plans
             .iter()
             .find(|plan| plan.version == manifest.version)
+            .map(|plan| plan.state)
             .ok_or_else(|| {
                 format!(
-                    "authored prior migration {:?} ({}) is absent from journal reconciliation",
+                    "migration {:?} ({}) is absent from journal reconciliation",
                     manifest.name,
                     manifest.version.as_str()
                 )
             })?;
-        if reconciled.state != ReconciledPlanState::Applied {
-            return Err(format!(
-                "authored prior migration {:?} ({}) is not fully applied (state: {})",
-                manifest.name,
-                manifest.version.as_str(),
-                reconciled.state.as_str()
-            ));
+        if state != ReconciledPlanState::Applied {
+            start = index;
+            break;
         }
     }
-    Ok(())
+
+    let owner: HashMap<&str, usize> = manifests
+        .iter()
+        .enumerate()
+        .flat_map(|(index, manifest)| {
+            manifest
+                .steps
+                .iter()
+                .map(move |step| (step.version.as_str(), index))
+        })
+        .collect();
+    // The rows reconciliation leaves unexplained against the WHOLE set. A row that
+    // is neither owned nor in here is explained by the journal itself - a resolver
+    // record or a superseded version - and no prefix reports it either.
+    let unowned: HashSet<&str> = status
+        .unexpected_journal
+        .iter()
+        .map(|entry| entry.version.as_str())
+        .collect();
+    let mut newest_completed = vec![None::<i64>; manifests.len()];
+    let mut witnesses = Vec::new();
+    for entry in journal {
+        let completed = entry.phase == Phase::Completed;
+        let owned_by = owner.get(entry.version.as_str()).copied();
+        if let (Some(index), true) = (owned_by, completed) {
+            newest_completed[index] = newest_completed[index].max(Some(entry.event_seq));
+        }
+        if owned_by.is_some() || unowned.contains(entry.version.as_str()) {
+            witnesses.push(OrderWitness {
+                version: entry.version.as_str(),
+                event_seq: entry.event_seq,
+                completed,
+                owner: owned_by,
+            });
+        }
+    }
+
+    // The applied prefix, one window per plan. A window only widens as the plan
+    // index grows while the rows it can catch only shrink, so the oldest completed
+    // row still unexpected at each plan decides it: a suffix minimum over the last
+    // applied plan each row stays unexpected through.
+    if start > 0 {
+        let mut oldest_unexpected = vec![None::<i64>; start];
+        for witness in witnesses.iter().filter(|witness| witness.completed) {
+            let last = match witness.owner {
+                None => start - 1,
+                Some(0) => continue,
+                Some(owner) => (owner - 1).min(start - 1),
+            };
+            let slot = &mut oldest_unexpected[last];
+            *slot = Some(slot.map_or(witness.event_seq, |seq| seq.min(witness.event_seq)));
+        }
+        for index in (0..start - 1).rev() {
+            if let Some(later) = oldest_unexpected[index + 1] {
+                let slot = &mut oldest_unexpected[index];
+                *slot = Some(slot.map_or(later, |seq| seq.min(later)));
+            }
+        }
+        let mut frontier = None::<i64>;
+        for index in 0..start {
+            frontier = frontier.max(newest_completed[index]);
+            let (Some(frontier), Some(oldest)) = (frontier, oldest_unexpected[index]) else {
+                continue;
+            };
+            if oldest < frontier {
+                let named = witnesses
+                    .iter()
+                    .filter(|witness| {
+                        witness.completed
+                            && witness.unexpected_through(index)
+                            && witness.event_seq < frontier
+                    })
+                    .min_by_key(|witness| witness.version)
+                    .ok_or_else(|| "the journal order check lost its witness".to_string())?;
+                return Err(named.refusal(manifests, index, true));
+            }
+        }
+    }
+
+    // The plan the run starts at: nothing authored after it may be in the journal.
+    if start < manifests.len() {
+        if let Some(named) = witnesses
+            .iter()
+            .filter(|witness| witness.unexpected_through(start))
+            .min_by_key(|witness| witness.version)
+        {
+            return Err(named.refusal(manifests, start, false));
+        }
+    }
+    Ok(start)
 }
 
 /// Run the fail-closed IR envelope LOAD GATE + LOWER over an envelope, returning the
@@ -322,8 +395,12 @@ pub fn lower_ordered_envelopes_to_plans(
 /// Status may reconstruct an historical PostgreSQL online rename from related
 /// journal evidence. Apply must additionally prove that every reconstructed
 /// rename has the complete exact resumable or terminal evidence before accepting
-/// its plan. Ordered apply lowering uses this entrypoint so adding authored prefix
+/// its plan. Ordered apply lowering uses this entrypoint, or an
+/// [`OrderedLowerer`] built with the same strictness, so adding authored prefix
 /// envelopes cannot weaken the existing single-envelope replay gate.
+///
+/// # Errors
+/// The first envelope that fails the guarded load/lower gate is returned.
 #[allow(clippy::too_many_arguments)]
 pub fn lower_ordered_envelopes_to_plans_for_apply(
     envelope_json: &[String],
@@ -589,6 +666,8 @@ fn step_ran_under_its_own_checksum(
     })
 }
 
+/// The ordered lowering every entry point shares: lower each envelope in turn
+/// against the live schema the envelopes before it leave behind.
 #[allow(clippy::too_many_arguments)]
 fn lower_ordered_envelopes_to_plans_inner(
     envelope_json: &[String],
@@ -602,51 +681,181 @@ fn lower_ordered_envelopes_to_plans_inner(
     resolved_contracts: &[zeroship_migrate::apply::journal::ResolvedPendingContract],
     strict_historical_apply: bool,
 ) -> Result<Vec<LoweredArtifact>, String> {
-    let dialect = parse_sql_dialect(dialect)?;
-    let effective = effective_policy_from_charter_layers(charter_layers)?;
-    let mut registry: BTreeMap<String, String> = serde_json::from_str(registry_json)
-        .map_err(|e| format!("registry_json is not a string→string map: {e}"))?;
-    let base_snapshot = snapshot;
-    let mut live = live_schema_with_ownership(base_snapshot.clone(), owner_app, &registry);
-    let mut pending_ops = Vec::new();
-    let mut artifacts = Vec::with_capacity(envelope_json.len());
+    let mut lowerer = OrderedLowerer::new(
+        LoweringRequest {
+            owner_app,
+            project_schema,
+            dialect,
+            registry_json,
+            charter_layers,
+        },
+        LoweringBase {
+            snapshot,
+            journal_entries: journal_entries.to_vec(),
+            resolved_contracts: resolved_contracts.to_vec(),
+        },
+        strict_historical_apply,
+    )?;
+    envelope_json
+        .iter()
+        .map(|envelope| lowerer.lower_next(envelope))
+        .collect()
+}
 
-    for envelope in envelope_json {
+/// The parts of a lowering request that hold for every envelope in it: who the
+/// migrations are lowered for, where, for which dialect, and under which
+/// ownership registry and policy.
+#[derive(Debug, Clone, Copy)]
+pub struct LoweringRequest<'a> {
+    /// The deploying app id stamped on every lowered migration.
+    pub owner_app: &'a str,
+    /// The confined project schema the lowering pins ops to.
+    pub project_schema: &'a str,
+    /// The wire dialect spelling.
+    pub dialect: &'a str,
+    /// The project's `{ "table": "owner_app" }` ownership registry.
+    pub registry_json: &'a str,
+    /// The ordered policy charter documents, root first.
+    pub charter_layers: &'a [&'a str],
+}
+
+/// The database an ordered lowering lowers against: one catalog snapshot and
+/// the journal evidence read beside it.
+#[derive(Debug)]
+pub struct LoweringBase {
+    /// The live catalog.
+    pub snapshot: zeroship_migrate::model::snapshot::SchemaSnapshot,
+    /// The net-applied journal entries and lone `started` markers.
+    pub journal_entries: Vec<AppliedEntry>,
+    /// The terminally resolved online contracts.
+    pub resolved_contracts: Vec<zeroship_migrate::apply::journal::ResolvedPendingContract>,
+}
+
+/// The state an ordered lowering carries from one envelope to the next.
+///
+/// Each envelope lowers against the live schema the envelopes before it leave:
+/// the catalog snapshot, plus the projected ops of every earlier envelope the
+/// journal does not carry yet, plus the logical columns every earlier envelope
+/// declared. An apply that has just committed a migration [`rebase`]s it onto a
+/// fresh catalog snapshot and journal, so the next envelope lowers against what
+/// the database now holds rather than against a projection of it - the same view
+/// an apply handed only the prefix that ends at that envelope would lower it
+/// against.
+///
+/// [`rebase`]: Self::rebase
+#[derive(Debug)]
+pub struct OrderedLowerer<'a> {
+    owner_app: &'a str,
+    project_schema: &'a str,
+    charter_layers: &'a [&'a str],
+    dialect: DialectId,
+    effective: EffectivePolicy,
+    /// The ownership registry the request carried, which a rebase returns to.
+    requested_registry: BTreeMap<String, String>,
+    /// That registry advanced by the projected ops lowered since the last base.
+    registry: BTreeMap<String, String>,
+    base_snapshot: zeroship_migrate::model::snapshot::SchemaSnapshot,
+    live: LiveSchema,
+    pending_ops: Vec<Op>,
+    journal_entries: Vec<AppliedEntry>,
+    resolved_contracts: Vec<zeroship_migrate::apply::journal::ResolvedPendingContract>,
+    strict_historical_apply: bool,
+}
+
+impl<'a> OrderedLowerer<'a> {
+    /// Start an ordered lowering for `request` over `base`, whose journal
+    /// evidence the historical-rename recovery and the projection read.
+    ///
+    /// # Errors
+    /// An unknown dialect, a policy that does not compose, or a malformed registry.
+    pub fn new(
+        request: LoweringRequest<'a>,
+        base: LoweringBase,
+        strict_historical_apply: bool,
+    ) -> Result<Self, String> {
+        let dialect = parse_sql_dialect(request.dialect)?;
+        let effective = effective_policy_from_charter_layers(request.charter_layers)?;
+        let registry: BTreeMap<String, String> = serde_json::from_str(request.registry_json)
+            .map_err(|e| format!("registry_json is not a string-to-string map: {e}"))?;
+        let live = live_schema_with_ownership(base.snapshot.clone(), request.owner_app, &registry);
+        Ok(Self {
+            owner_app: request.owner_app,
+            project_schema: request.project_schema,
+            charter_layers: request.charter_layers,
+            dialect,
+            effective,
+            requested_registry: registry.clone(),
+            registry,
+            base_snapshot: base.snapshot,
+            live,
+            pending_ops: Vec::new(),
+            journal_entries: base.journal_entries,
+            resolved_contracts: base.resolved_contracts,
+            strict_historical_apply,
+        })
+    }
+
+    /// Restart from a fresh catalog snapshot and journal, keeping the logical
+    /// columns every envelope lowered so far declared. Nothing is pending against
+    /// the new base, and the registry returns to the one the request carried, as
+    /// it is for an apply that starts here.
+    pub fn rebase(&mut self, base: LoweringBase) {
+        let logical_columns = std::mem::take(&mut self.live.logical_columns);
+        self.registry = self.requested_registry.clone();
+        self.live =
+            live_schema_with_ownership(base.snapshot.clone(), self.owner_app, &self.registry);
+        self.live.logical_columns = logical_columns;
+        self.base_snapshot = base.snapshot;
+        self.pending_ops.clear();
+        self.journal_entries = base.journal_entries;
+        self.resolved_contracts = base.resolved_contracts;
+    }
+
+    /// Lower the next envelope, then advance the state past it.
+    ///
+    /// # Errors
+    /// The guarded load/lower gate's refusal, named after the migration, or the
+    /// projection's refusal of the envelope's pending ops.
+    pub fn lower_next(&mut self, envelope: &str) -> Result<LoweredArtifact, String> {
         let raw: MigrationIr = serde_json::from_str(envelope)
             .map_err(|error| format!("envelope is not a MigrationIr document: {error}"))?;
         let (artifact, resolved) = lower_envelope_recovering_historical_renames(
             envelope,
             &raw.ops,
-            owner_app,
-            project_schema,
-            &dialect,
-            &registry,
-            charter_layers,
-            &live,
-            journal_entries,
-            resolved_contracts,
-            &effective,
-            strict_historical_apply,
-        )?;
+            self.owner_app,
+            self.project_schema,
+            &self.dialect,
+            &self.registry,
+            self.charter_layers,
+            &self.live,
+            &self.journal_entries,
+            &self.resolved_contracts,
+            &self.effective,
+            self.strict_historical_apply,
+        )
+        // One request lowers the whole set, so a refusal has to say which migration
+        // it is about: the gate's own message names the object, not the file.
+        .map_err(|error| format!("migration {:?}: {error}", raw.name))?;
 
-        let projection_ops = ops_without_completed_journal_evidence(&artifact, journal_entries)?;
+        let projection_ops =
+            ops_without_completed_journal_evidence(&artifact, &self.journal_entries)?;
         if !projection_ops.is_empty() {
             for PendingProjectionOp { op, inflight, span } in projection_ops {
-                let mut candidate = pending_ops.clone();
+                let mut candidate = self.pending_ops.clone();
                 candidate.push(op.clone());
                 match fold_ops_onto(
                     zeroship_migrate::shipping_vendors(),
-                    &base_snapshot,
+                    &self.base_snapshot,
                     &candidate,
-                    &dialect,
-                    project_schema,
-                    &effective,
+                    &self.dialect,
+                    self.project_schema,
+                    &self.effective,
                 ) {
-                    Ok(_) => pending_ops = candidate,
+                    Ok(_) => self.pending_ops = candidate,
                     Err(error)
                         if inflight
                             && inflight_projection_already_reflected(
-                                &base_snapshot,
+                                &self.base_snapshot,
                                 &op,
                                 &error,
                             ) =>
@@ -667,13 +876,18 @@ fn lower_ordered_envelopes_to_plans_inner(
                         // NOT MySQL. MySQL evaluates no existence probe at apply time,
                         // so a satisfied verdict here would send bare DDL to a backend
                         // that cannot check anything; its leg keeps refusing.
-                        let verdict = if dialect == MYSQL {
+                        let verdict = if self.dialect == MYSQL {
                             ProjectionGuardVerdict::NotSatisfied
                         } else {
                             let span = artifact.op_spans.get(span).ok_or_else(|| {
                                 format!("lowered operation has no plan-step span at index {span}")
                             })?;
-                            projection_guard_verdict(&artifact, span, &base_snapshot, &dialect)?
+                            projection_guard_verdict(
+                                &artifact,
+                                span,
+                                &self.base_snapshot,
+                                &self.dialect,
+                            )?
                         };
                         match verdict {
                             ProjectionGuardVerdict::AllUnitsSatisfied => {
@@ -733,19 +947,19 @@ fn lower_ordered_envelopes_to_plans_inner(
                     }
                 }
                 advance_ownership_registry(
-                    &mut registry,
+                    &mut self.registry,
                     std::slice::from_ref(&op),
-                    &dialect,
-                    owner_app,
+                    &self.dialect,
+                    self.owner_app,
                 );
             }
             let projected = fold_ops_onto(
                 zeroship_migrate::shipping_vendors(),
-                &base_snapshot,
-                &pending_ops,
-                &dialect,
-                project_schema,
-                &effective,
+                &self.base_snapshot,
+                &self.pending_ops,
+                &self.dialect,
+                self.project_schema,
+                &self.effective,
             )
             .map_err(|error| {
                 format!(
@@ -753,27 +967,26 @@ fn lower_ordered_envelopes_to_plans_inner(
                     resolved.name
                 )
             })?;
-            let logical_columns = live.logical_columns.clone();
-            live = live_schema_with_ownership(projected, owner_app, &registry);
-            live.logical_columns = logical_columns;
+            let logical_columns = self.live.logical_columns.clone();
+            self.live = live_schema_with_ownership(projected, self.owner_app, &self.registry);
+            self.live.logical_columns = logical_columns;
         }
-        live.advance_logical_columns(
-            zeroship_migrate::shipping_vendors(),
-            &resolved,
-            &dialect,
-            project_schema,
-            None,
-        )
-        .map_err(|error| {
-            format!(
-                "failed to advance logical project schema after envelope {:?}: {error}",
-                resolved.name
+        self.live
+            .advance_logical_columns(
+                zeroship_migrate::shipping_vendors(),
+                &resolved,
+                &self.dialect,
+                self.project_schema,
+                None,
             )
-        })?;
-        artifacts.push(artifact);
+            .map_err(|error| {
+                format!(
+                    "failed to advance logical project schema after envelope {:?}: {error}",
+                    resolved.name
+                )
+            })?;
+        Ok(artifact)
     }
-
-    Ok(artifacts)
 }
 
 /// Prove that a historical catalog reconstruction is safe to use for apply.
@@ -3714,10 +3927,12 @@ scope = "all"
         assert_eq!(plans.len(), 2);
     }
 
-    fn prefix_gate_manifests() -> Vec<PlanStatusManifest> {
+    /// Three one-table plans, authored in this order.
+    fn order_gate_manifests() -> Vec<PlanStatusManifest> {
         [
-            ("declare_prefix", "prefix_table"),
-            ("current_change", "current_table"),
+            ("first_change", "first_table"),
+            ("second_change", "second_table"),
+            ("third_change", "third_table"),
         ]
         .into_iter()
         .map(|(name, table)| {
@@ -3736,8 +3951,8 @@ scope = "all"
             .to_string();
             let artifact = lower_envelope_to_plan(
                 &envelope,
-                "app_prefix_gate",
-                "app_prefix_gate",
+                "app_order_gate",
+                "app_order_gate",
                 "postgres",
                 "{}",
                 &[NO_INJECT_CHARTER_TOML],
@@ -3749,7 +3964,8 @@ scope = "all"
         .collect()
     }
 
-    fn prefix_gate_entries(manifest: &PlanStatusManifest, phase: Phase) -> Vec<AppliedEntry> {
+    /// One journal row per step of `manifest`, in the given phase.
+    fn order_gate_entries(manifest: &PlanStatusManifest, phase: Phase) -> Vec<AppliedEntry> {
         manifest
             .steps
             .iter()
@@ -3764,10 +3980,27 @@ scope = "all"
             .collect()
     }
 
+    /// A completed journal row no fixture plan owns: a migration the set lost.
+    fn omitted_entry() -> AppliedEntry {
+        AppliedEntry {
+            down: None,
+            version: zeroship_migrate::model::migration::MigrationId::derive(
+                "omitted_artifact",
+                b"step",
+            )
+            .as_str()
+            .to_string(),
+            checksum: "1".repeat(64),
+            phase: Phase::Completed,
+            kind: None,
+            event_seq: 0,
+        }
+    }
+
     /// Stamp the journal's monotonic order onto a fixture journal, oldest first.
-    /// `event_seq` is what separates a deleted migration from one this call was not
-    /// given, so a fixture that leaves every entry at zero can only assert the arms
-    /// that never consult it.
+    /// `event_seq` is what separates a deleted migration from one the request does
+    /// not carry, so a fixture that leaves every entry at zero can only assert the
+    /// arms that never consult it.
     fn sequenced(entries: Vec<AppliedEntry>) -> Vec<AppliedEntry> {
         entries
             .into_iter()
@@ -3779,89 +4012,246 @@ scope = "all"
             .collect()
     }
 
-    #[test]
-    fn authored_prefix_requires_exact_net_applied_plans() {
-        use zeroship_migrate::ops::status::reconcile_applied_plans;
-
-        let manifests = prefix_gate_manifests();
-        let completed = sequenced(prefix_gate_entries(&manifests[0], Phase::Completed));
-        let applied =
-            reconcile_applied_plans(&manifests, &completed, &[]).expect("prefix reconciles");
-        require_applied_prefix(&manifests, 1, &applied, &completed)
-            .expect("an exact completed prefix is trusted");
-
-        let pending =
-            reconcile_applied_plans(&manifests, &[], &[]).expect("missing prefix reconciles");
-        let error = require_applied_prefix(&manifests, 1, &pending, &[])
-            .expect_err("a missing prefix must not seed declarations");
-        assert!(error.contains("not fully applied"), "got: {error}");
-
-        let inflight_entries = sequenced(prefix_gate_entries(&manifests[0], Phase::Started));
-        let inflight = reconcile_applied_plans(&manifests, &inflight_entries, &[])
-            .expect("inflight prefix reconciles");
-        let error = require_applied_prefix(&manifests, 1, &inflight, &inflight_entries)
-            .expect_err("an inflight prefix must not seed declarations");
-        assert!(error.contains("not fully applied"), "got: {error}");
-
-        let mut drifted_entries = completed;
-        drifted_entries[0].checksum = "0".repeat(64);
-        let drifted = reconcile_applied_plans(&manifests, &drifted_entries, &[])
-            .expect("drifted prefix reconciles");
-        let error = require_applied_prefix(&manifests, 1, &drifted, &drifted_entries)
-            .expect_err("a drifted prefix must not seed declarations");
-        assert!(error.contains("not fully applied"), "got: {error}");
+    fn start_of(
+        manifests: &[PlanStatusManifest],
+        journal: &[AppliedEntry],
+    ) -> Result<usize, String> {
+        let status =
+            zeroship_migrate::ops::status::reconcile_applied_plans(manifests, journal, &[])
+                .expect("fixture journal reconciles");
+        ordered_apply_start(manifests, &status, journal)
     }
 
     #[test]
-    fn incomplete_authored_history_only_allows_an_applied_current_replay() {
-        use zeroship_migrate::model::migration::MigrationId;
-        use zeroship_migrate::ops::status::reconcile_applied_plans;
+    fn the_run_starts_at_the_first_plan_that_is_not_fully_applied() {
+        let manifests = order_gate_manifests();
+        assert_eq!(
+            start_of(&manifests, &[]),
+            Ok(0),
+            "a fresh journal starts at the first"
+        );
 
-        let manifests = prefix_gate_manifests();
-        let omitted = AppliedEntry {
-            down: None,
-            version: MigrationId::derive("omitted_artifact", b"step")
-                .as_str()
-                .to_string(),
-            checksum: "1".repeat(64),
-            phase: Phase::Completed,
-            kind: None,
-            event_seq: 0,
-        };
-        let mut prior_only = prefix_gate_entries(&manifests[0], Phase::Completed);
-        prior_only.push(omitted.clone());
-        let prior_only = sequenced(prior_only);
-        let pending_current = reconcile_applied_plans(&manifests, &prior_only, &[])
-            .expect("incomplete history reconciles");
-        let error = require_applied_prefix(&manifests, 1, &pending_current, &prior_only)
-            .expect_err("a pending current cannot apply from incomplete history");
-        assert!(error.contains("prefix is incomplete"), "got: {error}");
+        let first = sequenced(order_gate_entries(&manifests[0], Phase::Completed));
+        assert_eq!(
+            start_of(&manifests, &first),
+            Ok(1),
+            "an applied prefix is skipped"
+        );
 
-        // The omitted step was recorded BEFORE every step the supplied set owns, so
-        // it is a migration the operator deleted. A rerun that applies nothing still
-        // names it -- this is the diagnosis the per-batch executor loop could never
-        // make, because the batch it saw was never the operator's set.
+        let mut every = order_gate_entries(&manifests[0], Phase::Completed);
+        every.extend(order_gate_entries(&manifests[1], Phase::Completed));
+        every.extend(order_gate_entries(&manifests[2], Phase::Completed));
+        assert_eq!(
+            start_of(&manifests, &sequenced(every)),
+            Ok(3),
+            "a fully applied set applies nothing"
+        );
+
+        // An interrupted plan is where the run resumes, and a drifted one is where
+        // it stops: the engine owns both verdicts once the run reaches the plan.
+        let inflight = sequenced(order_gate_entries(&manifests[0], Phase::Started));
+        assert_eq!(start_of(&manifests, &inflight), Ok(0));
+        let mut drifted = order_gate_entries(&manifests[0], Phase::Completed);
+        drifted[0].checksum = "0".repeat(64);
+        assert_eq!(start_of(&manifests, &sequenced(drifted)), Ok(0));
+    }
+
+    #[test]
+    fn a_later_plan_in_the_journal_ahead_of_an_unapplied_one_refuses() {
+        let manifests = order_gate_manifests();
+        // CONTROL: the same rows in authored order are an ordinary resume.
+        let mut in_order = order_gate_entries(&manifests[0], Phase::Completed);
+        in_order.extend(order_gate_entries(&manifests[1], Phase::Completed));
+        assert_eq!(start_of(&manifests, &sequenced(in_order)), Ok(2));
+
+        let ahead = sequenced(order_gate_entries(&manifests[1], Phase::Completed));
+        let refusal = start_of(&manifests, &ahead).expect_err("the journal ran ahead");
+        assert!(refusal.contains(&ahead[0].version), "{refusal}");
+        assert!(refusal.contains("\"second_change\""), "{refusal}");
+        assert!(
+            refusal.contains("has not applied migration \"first_change\""),
+            "{refusal}"
+        );
+
+        // Applied in the wrong order: both plans complete, the later one first.
+        let mut swapped = order_gate_entries(&manifests[1], Phase::Completed);
+        swapped.extend(order_gate_entries(&manifests[0], Phase::Completed));
+        let swapped = sequenced(swapped);
+        let refusal = start_of(&manifests, &swapped).expect_err("journal order contradicts");
+        assert!(refusal.contains(&swapped[0].version), "{refusal}");
+        assert!(
+            refusal.contains("before the newest step of migration \"first_change\""),
+            "{refusal}"
+        );
+    }
+
+    #[test]
+    fn a_lost_migration_refuses_only_inside_the_window_the_set_attests() {
+        let manifests = order_gate_manifests();
+        let omitted = omitted_entry();
+
+        // Recorded BEFORE the first plan's step: a migration the operator deleted.
         let mut deleted_first = vec![omitted.clone()];
-        deleted_first.extend(prefix_gate_entries(&manifests[0], Phase::Completed));
-        deleted_first.extend(prefix_gate_entries(&manifests[1], Phase::Completed));
-        let deleted_first = sequenced(deleted_first);
-        let applied_current = reconcile_applied_plans(&manifests, &deleted_first, &[])
-            .expect("applied replay reconciles");
-        let error = require_applied_prefix(&manifests, 1, &applied_current, &deleted_first)
-            .expect_err("a deleted migration below the supplied set is named on rerun");
-        assert!(error.contains("prefix is incomplete"), "got: {error}");
-        assert!(error.contains(&omitted.version), "got: {error}");
+        deleted_first.extend(order_gate_entries(&manifests[0], Phase::Completed));
+        let refusal = start_of(&manifests, &sequenced(deleted_first))
+            .expect_err("a deleted migration below the applied plans is named");
+        assert!(refusal.contains("was not supplied"), "{refusal}");
+        assert!(refusal.contains(&omitted.version), "{refusal}");
 
-        // The same step recorded AFTER every supplied step is a LATER migration this
-        // per-file call was simply not handed. Outside the window the prefix
-        // attests, so it stays unreported.
-        let mut not_yet_supplied = prefix_gate_entries(&manifests[0], Phase::Completed);
-        not_yet_supplied.extend(prefix_gate_entries(&manifests[1], Phase::Completed));
-        not_yet_supplied.push(omitted);
-        let not_yet_supplied = sequenced(not_yet_supplied);
-        let applied_current = reconcile_applied_plans(&manifests, &not_yet_supplied, &[])
-            .expect("applied replay reconciles");
-        require_applied_prefix(&manifests, 1, &applied_current, &not_yet_supplied)
-            .expect("an applied current remains a safe no-op during a directory rerun");
+        // Recorded AFTER every supplied step while the whole set is applied: a later
+        // migration the caller did not hand over, outside what the set attests.
+        let mut every = order_gate_entries(&manifests[0], Phase::Completed);
+        every.extend(order_gate_entries(&manifests[1], Phase::Completed));
+        every.extend(order_gate_entries(&manifests[2], Phase::Completed));
+        every.push(omitted.clone());
+        assert_eq!(start_of(&manifests, &sequenced(every)), Ok(3));
+
+        // The same row while something is still to apply refuses: under in-order
+        // deploy nothing may be in the journal beyond the plan the run starts at.
+        let mut pending_tail = order_gate_entries(&manifests[0], Phase::Completed);
+        pending_tail.push(omitted.clone());
+        let refusal = start_of(&manifests, &sequenced(pending_tail))
+            .expect_err("an unowned row refuses a run that still has work");
+        assert!(refusal.contains(&omitted.version), "{refusal}");
+
+        // An inflight marker no plan owns refuses the same way.
+        let mut stray_marker = omitted;
+        stray_marker.phase = Phase::Started;
+        let refusal = start_of(&manifests, &sequenced(vec![stray_marker.clone()]))
+            .expect_err("an unowned marker refuses a fresh run");
+        assert!(refusal.contains(&stray_marker.version), "{refusal}");
+    }
+
+    /// The question an apply of ONE migration, handed only the prefix that ends at
+    /// it, answers for its own position: the oracle `ordered_apply_start` is
+    /// equivalent to when asked for every plan up to where the run starts.
+    fn prefix_verdict(
+        manifests: &[PlanStatusManifest],
+        last: usize,
+        journal: &[AppliedEntry],
+    ) -> Result<(), String> {
+        let prefix = &manifests[..=last];
+        let status = zeroship_migrate::ops::status::reconcile_applied_plans(prefix, journal, &[])
+            .expect("fixture journal reconciles");
+        let applied = |manifest: &PlanStatusManifest| {
+            status.plans.iter().any(|plan| {
+                plan.version == manifest.version && plan.state == ReconciledPlanState::Applied
+            })
+        };
+        if applied(&prefix[last]) {
+            let supplied: HashSet<&str> = prefix
+                .iter()
+                .flat_map(|manifest| manifest.steps.iter().map(|step| step.version.as_str()))
+                .collect();
+            let Some(frontier) = journal
+                .iter()
+                .filter(|entry| {
+                    entry.phase == Phase::Completed && supplied.contains(entry.version.as_str())
+                })
+                .map(|entry| entry.event_seq)
+                .max()
+            else {
+                return Ok(());
+            };
+            let seq: HashMap<&str, i64> = journal
+                .iter()
+                .map(|entry| (entry.version.as_str(), entry.event_seq))
+                .collect();
+            if let Some(orphan) = status.unexpected_journal.iter().find(|entry| {
+                entry.state == zeroship_migrate::ops::status::PlanStatusStepState::Applied
+                    && seq[entry.version.as_str()] < frontier
+            }) {
+                return Err(orphan.version.clone());
+            }
+        } else if let Some(unexpected) = status.unexpected_journal.first() {
+            return Err(unexpected.version.clone());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn the_start_check_asks_every_prefix_its_own_question_in_one_pass() {
+        let manifests = order_gate_manifests();
+        let omitted = omitted_entry();
+        let rows: Vec<(AppliedEntry, &str)> = order_gate_entries(&manifests[0], Phase::Completed)
+            .into_iter()
+            .map(|entry| (entry, "first"))
+            .chain(
+                order_gate_entries(&manifests[1], Phase::Completed)
+                    .into_iter()
+                    .map(|entry| (entry, "second")),
+            )
+            .chain(
+                order_gate_entries(&manifests[2], Phase::Completed)
+                    .into_iter()
+                    .map(|entry| (entry, "third")),
+            )
+            .chain(std::iter::once((omitted, "omitted")))
+            .collect();
+        assert_eq!(rows.len(), 4, "every fixture plan contributes one row");
+
+        // Every subset of the rows, in every order: each journal the four rows can
+        // form. The one-pass check must refuse exactly when some prefix up to the
+        // start refuses, and name the same row the first refusing prefix names.
+        let mut journals = 0usize;
+        let mut refused = 0usize;
+        let mut started_late = 0usize;
+        for mask in 0u32..(1 << rows.len()) {
+            let chosen: Vec<usize> = (0..rows.len())
+                .filter(|bit| mask & (1 << bit) != 0)
+                .collect();
+            for order in permutations(&chosen) {
+                let journal = sequenced(order.iter().map(|&index| rows[index].0.clone()).collect());
+                journals += 1;
+                let status = zeroship_migrate::ops::status::reconcile_applied_plans(
+                    &manifests,
+                    &journal,
+                    &[],
+                )
+                .expect("fixture journal reconciles");
+                let start = status
+                    .plans
+                    .iter()
+                    .position(|plan| plan.state != ReconciledPlanState::Applied)
+                    .unwrap_or(manifests.len());
+                // The applied prefix, plus the plan the run starts at when there is one.
+                let last_asked = start.min(manifests.len() - 1);
+                let expected = (0..=last_asked)
+                    .find_map(|last| prefix_verdict(&manifests, last, &journal).err());
+                let actual = ordered_apply_start(&manifests, &status, &journal);
+                match (&expected, &actual) {
+                    (None, Ok(at)) => {
+                        assert_eq!(*at, start, "{order:?}");
+                        if start > 0 {
+                            started_late += 1;
+                        }
+                    }
+                    (Some(version), Err(refusal)) => {
+                        refused += 1;
+                        assert!(refusal.contains(version.as_str()), "{order:?}: {refusal}");
+                    }
+                    _ => panic!("{order:?}: oracle {expected:?}, one pass {actual:?}"),
+                }
+            }
+        }
+        assert!(journals > 1, "the sweep examined journals");
+        assert!(refused > 0, "some journals refuse");
+        assert!(started_late > 0, "some journals skip an applied prefix");
+    }
+
+    fn permutations(items: &[usize]) -> Vec<Vec<usize>> {
+        if items.is_empty() {
+            return vec![Vec::new()];
+        }
+        let mut all = Vec::new();
+        for (at, &head) in items.iter().enumerate() {
+            let mut rest = items.to_vec();
+            rest.remove(at);
+            for mut tail in permutations(&rest) {
+                tail.insert(0, head);
+                all.push(tail);
+            }
+        }
+        all
     }
 }

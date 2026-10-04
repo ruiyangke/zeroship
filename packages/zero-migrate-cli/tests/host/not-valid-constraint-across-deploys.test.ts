@@ -106,9 +106,8 @@ function applyOne(
   registry: Record<string, string> = {},
 ) {
   return apply({
-    migration,
-    priorMigrations: priors,
-    priorNameFallbacks: priors.map((prior) => prior.name),
+    migrations: [...priors, migration],
+    nameFallbacks: [...priors.map((prior) => prior.name), migration.name],
     ownerApp: OWNER_APP,
     projectSchema,
     driver,
@@ -116,7 +115,6 @@ function applyOne(
     policy: [noInjectPolicy(projectSchema)],
     approved: true,
     appliedBy: "not-valid-adoption-e2e",
-    nameFallback: migration.name,
   });
 }
 

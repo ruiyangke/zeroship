@@ -157,14 +157,15 @@ test("history() returns bigint eventSeq, so plain JSON.stringify throws", async 
   try {
     await client.query(`CREATE SCHEMA "${projectSchema}"`);
     await apply({
-      migration: {
+      migrations: [{
         name: "create_t",
         default: {
           schema() {
             table("t").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
           },
         },
-      } as MigrationModule,
+      } as MigrationModule],
+      nameFallbacks: ["create_t"],
       ownerApp: OWNER_APP,
       projectSchema,
       driver,
@@ -172,7 +173,6 @@ test("history() returns bigint eventSeq, so plain JSON.stringify throws", async 
       policy,
       approved: true,
       appliedBy: "api-failure-channels",
-      nameFallback: "create_t",
     });
 
     const audit = await history({ ownerApp: OWNER_APP, projectSchema, driver, policy });

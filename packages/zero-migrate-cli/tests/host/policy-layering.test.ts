@@ -79,7 +79,8 @@ test("a later policy layer cannot remove, mandate, widen, or contradict the root
   /** Apply `migration` under `layers`, returning the live column list. */
   const applyUnder = async (layers: readonly string[], schema: string): Promise<string[]> => {
     await apply({
-      migration,
+      migrations: [migration],
+      nameFallbacks: [migration.name],
       ownerApp: OWNER_APP,
       projectSchema: schema,
       driver,
@@ -87,7 +88,6 @@ test("a later policy layer cannot remove, mandate, widen, or contradict the root
       policy: layers,
       approved: true,
       appliedBy: "policy-layering",
-      nameFallback: migration.name,
     });
     const { rows } = await client.query(
       `SELECT column_name FROM information_schema.columns

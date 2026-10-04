@@ -123,19 +123,15 @@ test("a recorded inverse is what a rollback runs", async (ctx) => {
       };
       await apply({
         ...base,
-        migration: created,
-        priorMigrations: [],
-        priorNameFallbacks: [],
+        migrations: [created],
+        nameFallbacks: [created.name],
         registry: {},
-        nameFallback: created.name,
       });
       await apply({
         ...base,
-        migration: seeded,
-        priorMigrations: [created],
-        priorNameFallbacks: [created.name],
+        migrations: [created, seeded],
+        nameFallbacks: [created.name, seeded.name],
         registry: { acct: OWNER_APP },
-        nameFallback: seeded.name,
       });
 
       const rows = async (): Promise<unknown[]> =>
@@ -186,11 +182,9 @@ test("a recorded inverse is what a rollback runs", async (ctx) => {
 
       await apply({
         ...base,
-        migration: seeded,
-        priorMigrations: [created],
-        priorNameFallbacks: [created.name],
+        migrations: [created, seeded],
+        nameFallbacks: [created.name, seeded.name],
         registry: { acct: OWNER_APP },
-        nameFallback: seeded.name,
       });
       assert.equal((await rows()).length, 1, "the rolled-back data plan can be re-applied");
     });
@@ -215,19 +209,15 @@ test("CONTROL: a data migration declaring irreversible is still refused", async 
       };
       await apply({
         ...base,
-        migration: created,
-        priorMigrations: [],
-        priorNameFallbacks: [],
+        migrations: [created],
+        nameFallbacks: [created.name],
         registry: {},
-        nameFallback: created.name,
       });
       await apply({
         ...base,
-        migration: unreversible,
-        priorMigrations: [created],
-        priorNameFallbacks: [created.name],
+        migrations: [created, unreversible],
+        nameFallbacks: [created.name, unreversible.name],
         registry: { acct: OWNER_APP },
-        nameFallback: unreversible.name,
       });
 
       // Without this arm, making every data migration reversible would pass the
@@ -279,19 +269,15 @@ test("MySQL: a recorded inverse is what a rollback runs", async (ctx) => {
     };
     await apply({
       ...base,
-      migration: created,
-      priorMigrations: [],
-      priorNameFallbacks: [],
+      migrations: [created],
+      nameFallbacks: [created.name],
       registry: {},
-      nameFallback: created.name,
     });
     await apply({
       ...base,
-      migration: seeded,
-      priorMigrations: [created],
-      priorNameFallbacks: [created.name],
+      migrations: [created, seeded],
+      nameFallbacks: [created.name, seeded.name],
       registry: { acct: OWNER_APP },
-      nameFallback: seeded.name,
     });
 
     const rows = async (): Promise<unknown[]> => {
@@ -344,11 +330,9 @@ test("MySQL: a recorded inverse is what a rollback runs", async (ctx) => {
 
     await apply({
       ...base,
-      migration: seeded,
-      priorMigrations: [created],
-      priorNameFallbacks: [created.name],
+      migrations: [created, seeded],
+      nameFallbacks: [created.name, seeded.name],
       registry: { acct: OWNER_APP },
-      nameFallback: seeded.name,
     });
     assert.equal((await rows()).length, 1, "the MySQL data plan can be re-applied");
   } finally {

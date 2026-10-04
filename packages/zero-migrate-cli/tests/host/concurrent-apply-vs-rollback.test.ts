@@ -7,8 +7,9 @@
 // journal to move in opposite directions.
 //
 // Both take the project lock, so they serialise — the question is whether the
-// SERIALISED OUTCOME IS COHERENT, not whether they overlap. Two orderings are
-// legal and they end in different states:
+// SERIALISED OUTCOME IS COHERENT, not whether they overlap. An apply holds the lock
+// for its whole run, so the rollback lands either wholly before it or wholly after
+// it. Two orderings are legal and they end in different states:
 //
 //   apply first     b applies, then `rollback --steps 1` unwinds the newest
 //                   applied version, which is now b
@@ -24,28 +25,6 @@
 //     without a record or dropped while the record still claims it applied;
 //   * neither process reports success while having left the other's object
 //     half-removed.
-//
-// BOTH ORDERINGS WERE OBSERVED while writing this, over repeated runs:
-//
-//   apply first     journal and schema both carry alpha and beta
-//   rollback first  alpha is unwound, and apply then REFUSES with
-//                   `authored prior migration "create_alpha" (mig_...) is not
-//                   fully applied (state: pending)` - the require_applied_prefix
-//                   gate, naming the migration, its version and its state
-//
-// so the refusal arm below is not hypothetical. Journal and live schema agreed in
-// every observed run under both orderings.
-//
-// BOTH ORDERINGS WERE OBSERVED while writing this, over repeated runs:
-//
-//   apply first     journal and schema both carry alpha and beta
-//   rollback first  alpha is unwound, and apply then REFUSES with
-//                   `authored prior migration "create_alpha" (mig_...) is not
-//                   fully applied (state: pending)` — the require_applied_prefix
-//                   gate, naming the migration, its version and its state
-//
-// so the refusal arm below is not hypothetical. Journal and live schema agreed in
-// every observed run, under both orderings.
 //
 // The failure this is shaped to catch is a journal that records a rollback whose
 // DDL the winner had already undone, or an apply that re-creates a table the
@@ -163,28 +142,17 @@ test("apply racing rollback leaves a journal and a schema that agree", async (ct
       start(work, schema, ["rollback", "--steps", "1", "--approve"]),
     ]);
 
-    // Neither may crash with an unhandled error. A refusal is legal - one racer
-    // can legitimately find nothing to do - but it must be a clean exit path.
+    // Both succeed. The apply holds the lock for its whole run and the rollback
+    // waits for it, so whichever goes second meets a finished state: there is no
+    // point between two of the apply's migrations where the rollback can land and
+    // leave the apply something to refuse.
     for (const [label, r] of [["apply", applied], ["rollback", rolled]] as const) {
-      assert.ok(
-        r.code === 0 || r.code === 1,
-        `${label} must exit cleanly, got ${r.code}: ${r.err}`,
-      );
+      assert.equal(r.code, 0, `${label} must succeed under either ordering: ${r.err}`);
       assert.doesNotMatch(
         r.err,
         /panic|unwrap|RUST_BACKTRACE/i,
         `${label} must not surface a panic: ${r.err}`,
       );
-      // F470 set the standard: a refusal an operator cannot act on is a defect
-      // even when the exit code is clean. The one refusal this race produces is
-      // apply losing to rollback, and it must name what it is waiting on.
-      if (r.code !== 0) {
-        assert.match(
-          r.err,
-          /not fully applied|pending|create_alpha/,
-          `${label} refused without naming a cause an operator can act on: ${r.err}`,
-        );
-      }
     }
 
     // INVARIANT 1: the journal is coherent. Each version's `applied` count may

@@ -78,14 +78,14 @@ async function applyAndAnchors(
   await client.query(`CREATE SCHEMA "${schema}"`);
   try {
     await apply({
-      migration: migration as never,
+      migrations: [migration as never],
+      nameFallbacks: ["create_gadgets"],
       ownerApp: OWNER_APP,
       projectSchema: schema,
       driver: DRIVER,
       registry: {},
       policy: [noInjectPolicy(schema)],
       appliedBy: "deploy",
-      nameFallback: "create_gadgets",
     });
     const r = await client.query(
       `SELECT DISTINCT checksum FROM "${meta}".__zeroship_schema_migrations WHERE event_kind = 'applied'`,
@@ -114,7 +114,8 @@ test("e2e-pg: multi-op apply + journal + status/history + drift, real addon + pg
     // ---- Multi-op apply through the real napi/pg host path -----------------
     await client.query(`CREATE SCHEMA "${schema}"`);
     const outcome = await apply({
-      migration: mig as never,
+      migrations: [mig as never],
+      nameFallbacks: ["create_gadgets"],
       ownerApp: OWNER_APP,
       projectSchema: schema,
       driver: DRIVER,
@@ -122,7 +123,6 @@ test("e2e-pg: multi-op apply + journal + status/history + drift, real addon + pg
       policy: [noInjectPolicy(schema)],
       approved: false,
       appliedBy: "deploy",
-      nameFallback: "create_gadgets",
     });
     assert.ok(outcome.applied.length > 0, "at least one migration id applied");
     assert.equal(outcome.skipped.length, 0, "nothing skipped on a fresh schema");

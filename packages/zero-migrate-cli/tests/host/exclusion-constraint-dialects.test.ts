@@ -93,7 +93,8 @@ const MIGRATION: MigrationModule = {
 
 function deploy(projectSchema: string, driver: DriverConfig): Promise<unknown> {
   return apply({
-    migration: MIGRATION,
+    migrations: [MIGRATION],
+    nameFallbacks: ["exclusion"],
     ownerApp: OWNER_APP,
     projectSchema,
     driver,
@@ -101,7 +102,6 @@ function deploy(projectSchema: string, driver: DriverConfig): Promise<unknown> {
     policy: [charter(projectSchema)],
     approved: true,
     appliedBy: "exclusion-constraint-dialects",
-    nameFallback: "exclusion",
   });
 }
 

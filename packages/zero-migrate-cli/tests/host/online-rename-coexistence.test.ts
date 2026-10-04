@@ -99,9 +99,8 @@ test("during an online rename both names stay aligned, and the destination wins 
 
   const applyOne = (migration: NamedMigration, priors: NamedMigration[], registry = {}) =>
     apply({
-      migration,
-      priorMigrations: priors,
-      priorNameFallbacks: priors.map((p) => p.name),
+      migrations: [...priors, migration],
+      nameFallbacks: [...priors.map((p) => p.name), migration.name],
       ownerApp: OWNER_APP,
       projectSchema,
       driver,
@@ -109,7 +108,6 @@ test("during an online rename both names stay aligned, and the destination wins 
       policy: [noInjectPolicy(projectSchema)],
       approved: true,
       appliedBy: "online-rename-coexistence",
-      nameFallback: migration.name,
     });
 
   /** Both column values as the DATABASE sees them, which is what an application sees. */
@@ -171,11 +169,20 @@ test("during an online rename both names stay aligned, and the destination wins 
     // 5. The guarantee that protects the window: no other change to this table lands
     //    until the rename resolves, so a later schema change cannot race the
     //    application's cutover.
+    //    The run walks the set in order, so the outstanding contract on `users`
+    //    refuses it at the first migration that touches the table, before the
+    //    later one is reached.
     await assert.rejects(
       applyOne(later, [created, seeded, renamed], { users: OWNER_APP }),
-      /is not fully applied \(state: partial\)/,
+      /table `users` has an in-flight online rename/,
       "a later migration touching the renamed table must be blocked until resolution",
     );
+    const { rows: extra } = await admin.query(
+      `SELECT 1 FROM information_schema.columns
+        WHERE table_schema = $1 AND table_name = 'users' AND column_name = 'extra'`,
+      [projectSchema],
+    );
+    assert.equal(extra.length, 0, "the blocked migration must not have added its column");
   } finally {
     await admin
       .query(
@@ -248,9 +255,8 @@ test("during coexistence the source's constraints still bind writes made through
 
   const applyOne = (migration: NamedMigration, priors: NamedMigration[], registry = {}) =>
     apply({
-      migration,
-      priorMigrations: priors,
-      priorNameFallbacks: priors.map((p) => p.name),
+      migrations: [...priors, migration],
+      nameFallbacks: [...priors.map((p) => p.name), migration.name],
       ownerApp: OWNER_APP,
       projectSchema,
       driver,
@@ -258,7 +264,6 @@ test("during coexistence the source's constraints still bind writes made through
       policy: [noInjectPolicy(projectSchema)],
       approved: true,
       appliedBy: "online-rename-coexistence",
-      nameFallback: migration.name,
     });
 
   try {

@@ -133,7 +133,8 @@ test("PostgreSQL: an authored update and delete change only the rows their predi
     await client.query(`CREATE SCHEMA "${schema}"`);
     const applyOne = (migration: MigrationModule, nameFallback: string) =>
       apply({
-        migration,
+        migrations: [migration],
+        nameFallbacks: [nameFallback],
         ownerApp: OWNER_APP,
         projectSchema: schema,
         driver,
@@ -141,7 +142,6 @@ test("PostgreSQL: an authored update and delete change only the rows their predi
         policy: [charter(schema)],
         approved: true,
         appliedBy: "dml-effects-live",
-        nameFallback,
       });
     await applyOne(SCHEMA_MIGRATION, "create_items");
     await applyOne(DML_MIGRATION, "dml_effects");
@@ -175,7 +175,8 @@ test("SQLite: the same authored migration leaves the same rows", async () => {
   try {
     const applyOne = (migration: MigrationModule, nameFallback: string) =>
       apply({
-        migration,
+        migrations: [migration],
+        nameFallbacks: [nameFallback],
         ownerApp: OWNER_APP,
         projectSchema: "main",
         driver: { kind: "sqlite", appPath: dbPath },
@@ -183,7 +184,6 @@ test("SQLite: the same authored migration leaves the same rows", async () => {
         policy: [charter("main")],
         approved: true,
         appliedBy: "dml-effects-live",
-        nameFallback,
       });
     await applyOne(SCHEMA_MIGRATION, "create_items");
     await applyOne(DML_MIGRATION, "dml_effects");
@@ -218,7 +218,8 @@ test("PostgreSQL: a predicate matching nothing changes nothing", async (ctx) => 
     await client.query(`CREATE SCHEMA "${schema}"`);
     const applyOne = (migration: MigrationModule, nameFallback: string) =>
       apply({
-        migration,
+        migrations: [migration],
+        nameFallbacks: [nameFallback],
         ownerApp: OWNER_APP,
         projectSchema: schema,
         driver,
@@ -226,7 +227,6 @@ test("PostgreSQL: a predicate matching nothing changes nothing", async (ctx) => 
         policy: [charter(schema)],
         approved: true,
         appliedBy: "dml-effects-live",
-        nameFallback,
       });
     await applyOne(SCHEMA_MIGRATION, "create_items");
     await applyOne(

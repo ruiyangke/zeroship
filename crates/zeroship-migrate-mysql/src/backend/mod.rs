@@ -58,7 +58,7 @@ use zeroship_migrate_backend::conn::ExecutorConfig;
 use zeroship_migrate_backend::drift::DriftError;
 use zeroship_migrate_backend::driver::{Row, SqlSession};
 use zeroship_migrate_backend::executor::{ApplyError, RollbackError};
-use zeroship_migrate_backend::journal::{AppliedEntry, JournalError};
+use zeroship_migrate_backend::journal::{AppliedEntry, JournalBootstrap, JournalError};
 use zeroship_migrate_backend::requirements::{DatabaseFeature, DatabaseRequirements};
 use zeroship_migrate_backend::snapshot::SchemaSnapshot;
 use zeroship_migrate_backend::step::{
@@ -84,6 +84,9 @@ use crate::DIALECT;
 #[derive(Debug)]
 pub struct MysqlBackend<'a, D: SqlSession> {
     conn: &'a D,
+    /// The journals this backend has bootstrapped over `conn`, so the layers of
+    /// one verb share a single bootstrap per session.
+    journal: JournalBootstrap,
 }
 
 /// MySQL session settings overridden while author SQL runs. The backend restores
@@ -363,7 +366,10 @@ impl<'a, D: SqlSession> MysqlBackend<'a, D> {
     /// Wrap any [`SqlSession`] driver as the MySQL backend.
     #[must_use]
     pub fn new_generic(conn: &'a D) -> Self {
-        Self { conn }
+        Self {
+            conn,
+            journal: JournalBootstrap::default(),
+        }
     }
 
     /// Resolve one ambiguous MySQL DDL marker through a locked, identity-checked,
@@ -813,22 +819,28 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
     }
 
     async fn ensure_journal(&self, cfg: &ExecutorConfig) -> Result<(), JournalError> {
-        session::ensure_idle_for_journal(self.conn).await?;
-        session::acquire_journal_bootstrap_lock(self.conn, cfg, &cfg.project_id).await?;
-        let result = journal_sql::ensure_journal(self.conn, cfg).await;
-        let unlock = session::release_journal_bootstrap_lock(self.conn, &cfg.project_id).await;
-        match (result, unlock) {
-            (Err(error), Err(unlock)) => {
-                tracing::warn!(
-                    error = %unlock,
-                    "zero-migrate: failed to release MySQL journal bootstrap lock after bootstrap error"
-                );
-                Err(error)
-            }
-            (Err(error), Ok(())) => Err(error),
-            (Ok(()), Err(error)) => Err(error),
-            (Ok(()), Ok(())) => Ok(()),
-        }
+        self.journal
+            .ensure(&cfg.confinement.meta_schema, async {
+                session::ensure_idle_for_journal(self.conn).await?;
+                session::acquire_journal_bootstrap_lock(self.conn, cfg, &cfg.project_id)
+                    .await?;
+                let result = journal_sql::ensure_journal(self.conn, cfg).await;
+                let unlock =
+                    session::release_journal_bootstrap_lock(self.conn, &cfg.project_id).await;
+                match (result, unlock) {
+                    (Err(error), Err(unlock)) => {
+                        tracing::warn!(
+                            error = %unlock,
+                            "zero-migrate: failed to release MySQL journal bootstrap lock after bootstrap error"
+                        );
+                        Err(error)
+                    }
+                    (Err(error), Ok(())) => Err(error),
+                    (Ok(()), Err(error)) => Err(error),
+                    (Ok(()), Ok(())) => Ok(()),
+                }
+            })
+            .await
     }
 
     async fn unresolved_rollback_markers(
@@ -1635,6 +1647,45 @@ mod render_tests {
             ProjectLockAcquisition::Busy(Vec::new()),
             "an unidentified holder is reported as no holder, never as an error"
         );
+    }
+
+    /// One backend bootstraps each journal once: the verb, the engine and the
+    /// executor all ask, and only the first ask that succeeds reaches the server.
+    /// A bootstrap the server refused is asked again rather than remembered, and a
+    /// new backend over the same session - the next verb - bootstraps again.
+    #[compio::test]
+    async fn one_backend_bootstraps_each_journal_once_and_retries_a_refused_one() {
+        let rec = RecordingSession::with_failure("CREATE TABLE IF NOT EXISTS `proj_x_migrations`");
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
+        let bootstraps = || {
+            rec.log
+                .borrow()
+                .iter()
+                .filter(|entry| entry.contains("CREATE DATABASE IF NOT EXISTS `proj_x_migrations`"))
+                .count()
+        };
+
+        let backend = MysqlBackend::new_generic(&rec);
+        backend
+            .ensure_journal(&cfg)
+            .await
+            .expect_err("the refused bootstrap surfaces its error");
+        assert_eq!(bootstraps(), 1);
+        for _ in 0..3 {
+            backend
+                .ensure_journal(&cfg)
+                .await
+                .expect("bootstrap succeeds");
+        }
+        assert_eq!(
+            bootstraps(),
+            2,
+            "the refused bootstrap ran again, and only once"
+        );
+
+        let next = MysqlBackend::new_generic(&rec);
+        next.ensure_journal(&cfg).await.expect("bootstrap succeeds");
+        assert_eq!(bootstraps(), 3, "a new backend bootstraps again");
     }
 
     /// `ensure_journal` emits the MySQL journal DDL: `CREATE DATABASE IF NOT
