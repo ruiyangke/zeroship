@@ -15,32 +15,66 @@
 //!
 //! **The role DDL is cluster-shared, and that is not a convenience.**
 //! `pg_authid` and `pg_auth_members` are shared by every database on a server,
-//! so each arm serializes the migrating service's cluster-global convergence
-//! against the worktree's other cases.
+//! so each arm on the worktree's shared bare server serializes the migrating
+//! service's cluster-global convergence against the worktree's other cases, and
+//! an arm on a private server has no sibling's convergence to race.
+//!
+//! **No arm here writes `zeroship_worker`'s own password on a shared server.**
+//! That login is cluster-global, so on the worktree's shared bare server its
+//! password belongs to no single suite: the platform corpus
+//! (`db/migrations-ts/20260702000100_schema_roles_extensions.ts`) and
+//! `zeroship_workflow_testkit::journal_server::ensure_roles` each create it
+//! with the dev password `zeroship_worker` only when it is missing, and a
+//! sibling suite that reaches the role first may write anything else. Every arm
+//! below instead mints a login of its own, a member of `zeroship_worker` and
+//! nothing else, which reaches a live binding's privileges by assuming the
+//! worker login rather than by being it - PostgreSQL 16's `SET ROLE` is
+//! authorized against the CONNECTED role's whole membership graph, so a login
+//! two hops from a binding (through `zeroship_worker`) narrows exactly as the
+//! worker login itself does. The two arms whose subject is that login's own
+//! password or its OWN ambient authority - not a binding reached through it -
+//! take a server of their own instead, where writing or altering that login
+//! cannot reach any other suite.
 
 use zeroship_testkit::postgres::server::Postgres;
 
 use compio_postgres::error::SqlState;
 use compio_postgres::{Client, NoTls};
 
+use futures::FutureExt;
+use std::panic::AssertUnwindSafe;
+use std::time::Duration;
 use zeroship_core::database_derivation;
 use zeroship_core::database_role::DatabaseCapability;
-use zeroship_core::{BindingId, DatabaseId};
+use zeroship_core::{typed_id, BindingId, DatabaseId};
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::encryption::ProjectKeySource;
 use zeroship_data_orm::driver::Session;
 use zeroship_data_orm::error::{BeginIntent, DbError, GRANT_REVOKED};
 use zeroship_data_orm::orm::{Database, Output};
-use zeroship_data_orm::schema::{CollectionSchema, ColumnSchema, LogicalType, Schema};
 use zeroship_data_orm::orm::Value;
+use zeroship_data_orm::schema::{CollectionSchema, ColumnSchema, LogicalType, Schema};
 use zeroship_data_orm::value;
 use zeroship_migrate_server::apply::WORKER_ROLE;
 use zeroship_migrate_server::datastore::cluster;
+use zeroship_shared_server::Scope;
 
-/// The password the fixture gives the worker login. The arm's database is
-/// dropped with the test; the login the corpus shares stays on the worktree's
-/// server for the run.
+/// The password the fixture gives the worker login on the private server the
+/// one ambient-authority arm (`build_isolated`) owns alone. Never used on the
+/// shared bare server: see the module doc.
 const WORKER_PASSWORD: &str = "fixture";
+
+/// The scope kind the private servers boot under. Each is filed separately
+/// from the worktree's shared `bare` scope so a private boot never collides
+/// with - or is mistaken for - the shared server's own lease directory, and
+/// each lease carries its own minted nonce, so the two private cases never
+/// share one directory.
+const PRIVATE_KIND: &str = "binding-fence-worker-identity";
+
+/// How long a private server outlives the one case that leases it: only the
+/// gap between that case's last operation and dropping its lease, not a run's
+/// worth of idle time the way the shared bare server's grace does.
+const PRIVATE_GRACE: Duration = Duration::from_secs(2);
 
 /// The deploy pin is `postgres:16` (`deploy/compose/docker-compose.yml`), and
 /// the grant options the whole ladder rests on do not exist below it.
@@ -151,7 +185,8 @@ async fn converge(
         .expect("the reconciler grants the binding's two edges");
 }
 
-/// The URL the worker login opens, built from the fixture's own.
+/// The URL the worker login opens, built from the fixture's own. Built by
+/// [`Fence::build_isolated`], which leases the server it names.
 fn worker_url(base: &str) -> String {
     let mut url = url::Url::parse(base).expect("the fixture URL parses");
     url.set_username(WORKER_ROLE)
@@ -159,6 +194,40 @@ fn worker_url(base: &str) -> String {
     url.set_password(Some(WORKER_PASSWORD))
         .expect("the fixture URL accepts a password");
     url.to_string()
+}
+
+/// The URL a minted per-case login opens, built from the fixture's own.
+fn login_url(base: &str, login: &str) -> String {
+    let mut url = url::Url::parse(base).expect("the fixture URL parses");
+    url.set_username(login)
+        .expect("the fixture URL accepts a username");
+    url.set_password(Some(login))
+        .expect("the fixture URL accepts a password");
+    url.to_string()
+}
+
+/// Mint a login unique to this case, a member of `role` and of nothing else,
+/// so a session that connects as it reaches `role`'s privileges by assuming
+/// the role rather than by being it. See the module doc for why no arm
+/// connects as `role` itself on the shared bare server.
+async fn mint_assuming_login(admin: &Client, role: &str) -> String {
+    let login = typed_id::generate("wpl");
+    admin
+        .batch_execute(&format!(
+            "CREATE ROLE \"{login}\" LOGIN PASSWORD '{login}'; GRANT \"{role}\" TO \"{login}\";"
+        ))
+        .await
+        .expect("mint a per-case login that assumes the platform login");
+    login
+}
+
+/// Drop a login [`mint_assuming_login`] minted, so it does not linger on the
+/// server after this case ends.
+async fn drop_login(admin: &Client, login: &str) {
+    admin
+        .batch_execute(&format!("DROP ROLE \"{login}\""))
+        .await
+        .expect("drop the per-case login");
 }
 
 /// Read the seeded row through the ORM, under `binding`.
@@ -185,9 +254,27 @@ async fn read_total(url: &str, binding: DbBinding) -> Result<i64, DbError> {
         .ok_or_else(|| DbError::internal("total decoded as something other than an integer"))
 }
 
+/// Bootstrap and converge the two databases and bindings every arm below
+/// starts from, against an admin connection the caller already holds.
+async fn provision(admin: &mut Client) -> (DatabaseId, DatabaseId, BindingId, BindingId) {
+    cluster::apply_bootstrap_corpus(admin)
+        .await
+        .expect("the datastore bootstrap corpus applies");
+
+    let mine = DatabaseId::mint();
+    let theirs = DatabaseId::mint();
+    let my_edge = BindingId::mint();
+    let their_edge = BindingId::mint();
+    converge(admin, &mine, &my_edge).await;
+    converge(admin, &theirs, &their_edge).await;
+    seed_table(admin, &mine, 42).await;
+    seed_table(admin, &theirs, 99).await;
+    (mine, theirs, my_edge, their_edge)
+}
+
 /// Bring a cluster to the state every arm below starts from: bootstrapped, two
 /// converged databases with a seeded table each, two granted bindings, and a
-/// worker login that can authenticate.
+/// login that reaches the worker's privileges.
 struct Fence {
     url: String,
     mine: DatabaseId,
@@ -195,25 +282,49 @@ struct Fence {
     my_edge: BindingId,
     their_edge: BindingId,
     admin: Client,
+    /// The per-case login [`Fence::build`] minted, dropped by [`Fence::teardown`].
+    /// `None` on [`Fence::build_isolated`]'s path, which connects as the
+    /// worker login itself on a server nothing else shares, so there is
+    /// nothing minted to drop.
+    login: Option<String>,
 }
 
 impl Fence {
+    /// The fence every arm that reaches a binding uses: a login minted for
+    /// this case alone, granted the worker login and nothing else. It runs on
+    /// the server its `url` names - the worktree's shared bare server for every
+    /// arm but the ambient-authority and sibling-password ones, which lease a
+    /// private server. See the module doc for why this never connects as the
+    /// worker login itself.
     async fn build(url: String) -> Self {
         let mut admin = connect(&url).await;
         require_pinned_major(&admin).await;
         let lock = lock_role_provisioning(&url).await;
-        cluster::apply_bootstrap_corpus(&admin)
-            .await
-            .expect("the datastore bootstrap corpus applies");
+        let (mine, theirs, my_edge, their_edge) = provision(&mut admin).await;
+        let login = mint_assuming_login(&admin, WORKER_ROLE).await;
+        unlock_role_provisioning(&lock).await;
 
-        let mine = DatabaseId::mint();
-        let theirs = DatabaseId::mint();
-        let my_edge = BindingId::mint();
-        let their_edge = BindingId::mint();
-        converge(&mut admin, &mine, &my_edge).await;
-        converge(&mut admin, &theirs, &their_edge).await;
-        seed_table(&admin, &mine, 42).await;
-        seed_table(&admin, &theirs, 99).await;
+        Self {
+            url: login_url(&url, &login),
+            mine,
+            theirs,
+            my_edge,
+            their_edge,
+            admin,
+            login: Some(login),
+        }
+    }
+
+    /// The one fence that connects as the worker login itself, for the arm
+    /// that measures THAT login's own ambient authority rather than a
+    /// binding's privileges reached through it. `url` must name a server this
+    /// case alone holds the lease to, so altering the worker login's password
+    /// here cannot decide it for any other suite.
+    async fn build_isolated(url: String) -> Self {
+        let mut admin = connect(&url).await;
+        require_pinned_major(&admin).await;
+        // No advisory lock: a private server has no sibling case to race.
+        let (mine, theirs, my_edge, their_edge) = provision(&mut admin).await;
 
         admin
             .batch_execute(&format!(
@@ -221,7 +332,6 @@ impl Fence {
             ))
             .await
             .expect("the operator supplies the worker's authentication material");
-        unlock_role_provisioning(&lock).await;
 
         Self {
             url: worker_url(&url),
@@ -230,6 +340,28 @@ impl Fence {
             my_edge,
             their_edge,
             admin,
+            login: None,
+        }
+    }
+
+    /// Drop the per-case login this fence minted, if any, before the caller
+    /// drops the fence itself. A no-op on [`Fence::build_isolated`]'s path.
+    async fn teardown(&self) {
+        if let Some(login) = &self.login {
+            drop_login(&self.admin, login).await;
+        }
+    }
+
+    /// Run `body` against this fence, always dropping the minted login before
+    /// the fence itself drops - including when `body` panics. The body runs
+    /// under `catch_unwind`, so a failing assertion cannot skip the teardown
+    /// and leave the login on the server.
+    async fn run(self, body: impl AsyncFnOnce(&Self)) {
+        let outcome = AssertUnwindSafe(body(&self)).catch_unwind().await;
+        self.teardown().await;
+        if let Err(panic) = outcome {
+            drop(self);
+            std::panic::resume_unwind(panic);
         }
     }
 
@@ -270,36 +402,36 @@ async fn drain() {
 async fn a_narrowed_session_reaches_its_own_database_and_is_refused_its_neighbours() {
     let postgres = Postgres::start();
     let fence = Fence::build(postgres.url()).await;
+    fence
+        .run(async |fence| {
+            // CONTROL: each binding reads its own database through the ORM.
+            assert_eq!(
+                read_total(&fence.url, fence.mine())
+                    .await
+                    .expect("a live binding reaches its own database"),
+                42
+            );
+            assert_eq!(
+                read_total(&fence.url, fence.theirs())
+                    .await
+                    .expect("the neighbour's binding reaches the neighbour's database"),
+                99
+            );
 
-    // CONTROL: each binding reads its own database through the ORM.
-    assert_eq!(
-        read_total(&fence.url, fence.mine())
-            .await
-            .expect("a live binding reaches its own database"),
-        42
-    );
-    assert_eq!(
-        read_total(&fence.url, fence.theirs())
-            .await
-            .expect("the neighbour's binding reaches the neighbour's database"),
-        99
-    );
-
-    // THE SUBJECT, differing in one variable: the same edge, the neighbour's
-    // database. The session narrows to a role that holds nothing on that
-    // schema, so PostgreSQL refuses the statement.
-    let crossed = read_total(
-        &fence.url,
-        fence.binding_at(&fence.theirs, &fence.my_edge),
-    )
-    .await
-    .expect_err("a binding must not reach a database it does not name");
-    assert!(
-        crossed.message_str().contains("permission denied for schema"),
-        "the refusal must be PostgreSQL's schema denial, not a local check: {crossed}"
-    );
-
-    drop(fence);
+            // THE SUBJECT, differing in one variable: the same edge, the
+            // neighbour's database. The session narrows to a role that holds
+            // nothing on that schema, so PostgreSQL refuses the statement.
+            let crossed = read_total(&fence.url, fence.binding_at(&fence.theirs, &fence.my_edge))
+                .await
+                .expect_err("a binding must not reach a database it does not name");
+            assert!(
+                crossed
+                    .message_str()
+                    .contains("permission denied for schema"),
+                "the refusal must be PostgreSQL's schema denial, not a local check: {crossed}"
+            );
+        })
+        .await;
     drain().await;
 }
 
@@ -314,54 +446,56 @@ async fn a_narrowed_session_reaches_its_own_database_and_is_refused_its_neighbou
 async fn a_revoked_binding_is_reported_as_a_terminal_grant_refusal() {
     let postgres = Postgres::start();
     let fence = Fence::build(postgres.url()).await;
+    fence
+        .run(async |fence| {
+            // CONTROL: the binding reads before anything is revoked.
+            assert_eq!(
+                read_total(&fence.url, fence.mine())
+                    .await
+                    .expect("a live binding reaches its own database"),
+                42
+            );
 
-    // CONTROL: the binding reads before anything is revoked.
-    assert_eq!(
-        read_total(&fence.url, fence.mine())
+            cluster::revoke_binding(
+                &fence.admin,
+                &fence.my_edge,
+                &fence.mine,
+                DatabaseCapability::ReadWrite,
+            )
             .await
-            .expect("a live binding reaches its own database"),
-        42
-    );
+            .expect("the reconciler withdraws both of the binding's edges");
 
-    cluster::revoke_binding(
-        &fence.admin,
-        &fence.my_edge,
-        &fence.mine,
-        DatabaseCapability::ReadWrite,
-    )
-    .await
-    .expect("the reconciler withdraws both of the binding's edges");
+            let refused = read_total(&fence.url, fence.mine())
+                .await
+                .expect_err("a revoked binding must be refused");
+            assert_eq!(
+                refused.code(),
+                GRANT_REVOKED,
+                "a revoked binding is terminal and must be reported as the withdrawn \
+                 membership it is: {refused}"
+            );
 
-    let refused = read_total(&fence.url, fence.mine())
-        .await
-        .expect_err("a revoked binding must be refused");
-    assert_eq!(
-        refused.code(),
-        GRANT_REVOKED,
-        "a revoked binding is terminal and must be reported as the withdrawn \
-         membership it is: {refused}"
-    );
+            // The role survived the revoke, which is what keeps the refusal
+            // `42501`. Read it from the catalog rather than inferring it.
+            let role = database_derivation::binding_role_name(&fence.my_edge)
+                .expect("the fixture role name fits");
+            let rows = fence
+                .admin
+                .query("SELECT 1 FROM pg_roles WHERE rolname = $1", &[&role])
+                .await
+                .expect("read the role catalog");
+            assert_eq!(rows.len(), 1, "revoking must not drop the binding role");
 
-    // The role survived the revoke, which is what keeps the refusal `42501`.
-    // Read it from the catalog rather than inferring it.
-    let role = database_derivation::binding_role_name(&fence.my_edge)
-        .expect("the fixture role name fits");
-    let rows = fence
-        .admin
-        .query("SELECT 1 FROM pg_roles WHERE rolname = $1", &[&role])
-        .await
-        .expect("read the role catalog");
-    assert_eq!(rows.len(), 1, "revoking must not drop the binding role");
-
-    // The neighbour is untouched: the revoke reached one edge, not the login.
-    assert_eq!(
-        read_total(&fence.url, fence.theirs())
-            .await
-            .expect("the neighbour's binding is unaffected by another's revoke"),
-        99
-    );
-
-    drop(fence);
+            // The neighbour is untouched: the revoke reached one edge, not the
+            // login.
+            assert_eq!(
+                read_total(&fence.url, fence.theirs())
+                    .await
+                    .expect("the neighbour's binding is unaffected by another's revoke"),
+                99
+            );
+        })
+        .await;
     drain().await;
 }
 
@@ -371,38 +505,47 @@ async fn a_revoked_binding_is_reported_as_a_terminal_grant_refusal() {
 /// on: a statement that reached the cluster without narrowing fails closed
 /// rather than running with the union of every binding on the shared login. Its
 /// control is the same statement under the binding role.
+///
+/// This is the one arm whose subject is the shared worker login's own ambient
+/// authority over a converged schema, so it connects as that login and runs on
+/// a server this case alone holds the lease to rather than the worktree's
+/// shared bare server: see the module doc and [`Fence::build_isolated`].
 #[compio::test]
 async fn the_shared_worker_login_reaches_no_converged_schema_without_narrowing() {
-    let postgres = Postgres::start();
-    let fence = Fence::build(postgres.url()).await;
-    let schema = database_derivation::schema_name(&fence.mine);
+    let postgres = Postgres::start_in(&Scope::private(PRIVATE_KIND, PRIVATE_GRACE))
+        .expect("a private bare server for the worker login's own ambient-authority arm");
+    let fence = Fence::build_isolated(postgres.url()).await;
+    fence
+        .run(async |fence| {
+            let schema = database_derivation::schema_name(&fence.mine);
 
-    let worker = connect(&fence.url).await;
-    let ambient = worker
-        .query(
-            &format!("SELECT total FROM \"{schema}\".orders WHERE id = 1"),
-            &[],
-        )
-        .await
-        .expect_err("a binding's privileges must not be ambient on the shared login");
-    assert_eq!(
-        ambient
-            .as_db_error()
-            .expect("the server refused rather than the transport")
-            .code(),
-        &SqlState::INSUFFICIENT_PRIVILEGE
-    );
+            let worker = connect(&fence.url).await;
+            let ambient = worker
+                .query(
+                    &format!("SELECT total FROM \"{schema}\".orders WHERE id = 1"),
+                    &[],
+                )
+                .await
+                .expect_err("a binding's privileges must not be ambient on the shared login");
+            assert_eq!(
+                ambient
+                    .as_db_error()
+                    .expect("the server refused rather than the transport")
+                    .code(),
+                &SqlState::INSUFFICIENT_PRIVILEGE
+            );
 
-    // CONTROL: the same row, through the ORM, under the binding.
-    assert_eq!(
-        read_total(&fence.url, fence.mine())
-            .await
-            .expect("the binding reaches what the bare login cannot"),
-        42
-    );
+            // CONTROL: the same row, through the ORM, under the binding.
+            assert_eq!(
+                read_total(&fence.url, fence.mine())
+                    .await
+                    .expect("the binding reaches what the bare login cannot"),
+                42
+            );
 
-    drop(worker);
-    drop(fence);
+            drop(worker);
+        })
+        .await;
     drain().await;
 }
 
@@ -420,79 +563,85 @@ async fn the_shared_worker_login_reaches_no_converged_schema_without_narrowing()
 async fn one_app_holds_a_transaction_on_each_of_its_two_databases() {
     let postgres = Postgres::start();
     let fence = Fence::build(postgres.url()).await;
-
-    let to_mine = Database::connect(
-        fence.mine(),
-        zeroship_data_orm::ConnectOptions::new(&fence.url, ProjectKeySource::unavailable()),
-        orders_schema(),
-    )
-    .await
-    .expect("open the first database");
-    // The SAME app, its second binding. `Fence::binding_at` stamps one tenant
-    // on both, so the only thing separating these handles is the database.
-    // ON THE FIRST HANDLE'S CONTEXT, which is what makes this arm measure the
-    // key. Transaction lanes live on the context, so two handles built through
-    // `Database::connect` would hold two lane maps and never contend at all -
-    // and a worker thread holds ONE context for every database an app reaches.
-    let second_binding = fence.binding_at(&fence.theirs, &fence.their_edge);
-    let second_backend =
-        zeroship_data_orm::ConnectOptions::new(&fence.url, ProjectKeySource::unavailable())
-            .connect()
+    fence
+        .run(async |fence| {
+            let to_mine = Database::connect(
+                fence.mine(),
+                zeroship_data_orm::ConnectOptions::new(&fence.url, ProjectKeySource::unavailable()),
+                orders_schema(),
+            )
             .await
-            .expect("open the second backend");
-    let to_theirs = to_mine
-        .context()
-        .with(|| {
-            zeroship_data_orm::descriptor::install_collections(&second_binding, orders_schema())?;
-            Ok::<_, DbError>(Database::new(
-                to_mine.context().clone(),
-                second_binding,
-                second_backend,
-            ))
-        })
-        .expect("install the second database's schema on the shared context");
-    assert_eq!(
-        to_mine.binding().app_id(),
-        to_theirs.binding().app_id(),
-        "the control for the claim below: one tenant, two databases"
-    );
+            .expect("open the first database");
+            // The SAME app, its second binding. `Fence::binding_at` stamps one
+            // tenant on both, so the only thing separating these handles is the
+            // database. ON THE FIRST HANDLE'S CONTEXT, which is what makes this
+            // arm measure the key. Transaction lanes live on the context, so two
+            // handles built through `Database::connect` would hold two lane maps
+            // and never contend at all - and a worker thread holds ONE context
+            // for every database an app reaches.
+            let second_binding = fence.binding_at(&fence.theirs, &fence.their_edge);
+            let second_backend =
+                zeroship_data_orm::ConnectOptions::new(&fence.url, ProjectKeySource::unavailable())
+                    .connect()
+                    .await
+                    .expect("open the second backend");
+            let to_theirs = to_mine
+                .context()
+                .with(|| {
+                    zeroship_data_orm::descriptor::install_collections(
+                        &second_binding,
+                        orders_schema(),
+                    )?;
+                    Ok::<_, DbError>(Database::new(
+                        to_mine.context().clone(),
+                        second_binding,
+                        second_backend,
+                    ))
+                })
+                .expect("install the second database's schema on the shared context");
+            assert_eq!(
+                to_mine.binding().app_id(),
+                to_theirs.binding().app_id(),
+                "the control for the claim below: one tenant, two databases"
+            );
 
-    let inner = to_mine
-        .transaction(|first| async move {
-            let Output::Rows { rows, .. } = first
-                .collection("orders")?
-                .find(value!({ "id": 1 }), value!({}))
-                .await?
-            else {
-                panic!("find must return rows");
-            };
-            assert_eq!(rows[0]["total"].as_i64(), Some(42));
-
-            // A top-level transaction on the OTHER database, opened while this
-            // callback is being polled.
-            to_theirs
-                .transaction(|second| async move {
-                    let Output::Rows { rows, .. } = second
+            let inner = to_mine
+                .transaction(|first| async move {
+                    let Output::Rows { rows, .. } = first
                         .collection("orders")?
                         .find(value!({ "id": 1 }), value!({}))
                         .await?
                     else {
                         panic!("find must return rows");
                     };
-                    Ok::<_, DbError>(rows[0]["total"].as_i64())
+                    assert_eq!(rows[0]["total"].as_i64(), Some(42));
+
+                    // A top-level transaction on the OTHER database, opened
+                    // while this callback is being polled.
+                    to_theirs
+                        .transaction(|second| async move {
+                            let Output::Rows { rows, .. } = second
+                                .collection("orders")?
+                                .find(value!({ "id": 1 }), value!({}))
+                                .await?
+                            else {
+                                panic!("find must return rows");
+                            };
+                            Ok::<_, DbError>(rows[0]["total"].as_i64())
+                        })
+                        .await
                 })
                 .await
-        })
-        .await
-        .expect("a second database's transaction must not collide with the first's lane");
-    assert_eq!(
-        inner,
-        Some(99),
-        "the second transaction must read its OWN database"
-    );
+                .expect("a second database's transaction must not collide with the first's lane");
+            assert_eq!(
+                inner,
+                Some(99),
+                "the second transaction must read its OWN database"
+            );
 
-    drop(to_mine);
-    drop(fence);
+            drop(to_mine);
+        })
+        .await;
     drain().await;
 }
 
@@ -528,120 +677,133 @@ async fn one_app_s_two_databases_do_not_cross_deliver_a_shared_collection_name()
 
     let postgres = Postgres::start();
     let fence = Fence::build(postgres.url()).await;
-
-    let to_mine = Database::connect(
-        fence.mine(),
-        zeroship_data_orm::ConnectOptions::new(&fence.url, ProjectKeySource::unavailable()),
-        orders_schema(),
-    )
-    .await
-    .expect("open the first database");
-    let to_theirs = Database::connect(
-        fence.theirs(),
-        zeroship_data_orm::ConnectOptions::new(&fence.url, ProjectKeySource::unavailable()),
-        orders_schema(),
-    )
-    .await
-    .expect("open the second database");
-
-    // PRECONDITION 1 - one tenant. Compared to each other; a pair of
-    // non-empty app ids would say nothing.
-    assert_eq!(
-        to_mine.binding().app_id(),
-        to_theirs.binding().app_id(),
-        "the arm is about ONE app reaching two databases"
-    );
-    // PRECONDITION 2 - two databases, and two physical schemas derived from
-    // them. Equal ids would make the whole arm vacuous.
-    assert_ne!(
-        to_mine.binding().database(),
-        to_theirs.binding().database(),
-        "the two bindings must address DIFFERENT databases"
-    );
-    assert_ne!(
-        to_mine.binding().schema().as_str(),
-        to_theirs.binding().schema().as_str(),
-        "two databases derive two physical schemas"
-    );
-
-    // PRECONDITION 3 - the app holds a LIVE binding to each, and each database
-    // really declares `orders`. A read through the ORM proves both at once: the
-    // session narrows with the binding role the reconciler granted, and the
-    // statement is qualified with that binding's own schema. The two seeded
-    // totals differ, so each read also proves it reached ITS OWN database.
-    assert_eq!(
-        read_total(&fence.url, fence.mine())
+    fence
+        .run(async |fence| {
+            let to_mine = Database::connect(
+                fence.mine(),
+                zeroship_data_orm::ConnectOptions::new(&fence.url, ProjectKeySource::unavailable()),
+                orders_schema(),
+            )
             .await
-            .expect("the first binding is live and its database declares orders"),
-        42
-    );
-    assert_eq!(
-        read_total(&fence.url, fence.theirs())
+            .expect("open the first database");
+            let to_theirs = Database::connect(
+                fence.theirs(),
+                zeroship_data_orm::ConnectOptions::new(&fence.url, ProjectKeySource::unavailable()),
+                orders_schema(),
+            )
             .await
-            .expect("the second binding is live and its database declares orders"),
-        99
-    );
+            .expect("open the second database");
 
-    let my_route = to_mine.binding().route();
-    let their_route = to_theirs.binding().route();
-    let mine = broker::subscribe(&my_route, "orders");
-    let theirs = broker::subscribe(&their_route, "orders");
-    // PRECONDITION 4 - the two subscriptions name the SAME collection. Without
-    // this the databases would be separated by the collection rather than by
-    // the routing key, and the arm would measure nothing.
-    assert_eq!(
-        mine.collection(),
-        theirs.collection(),
-        "both databases declare a collection of the same name"
-    );
+            // PRECONDITION 1 - one tenant. Compared to each other; a pair of
+            // non-empty app ids would say nothing.
+            assert_eq!(
+                to_mine.binding().app_id(),
+                to_theirs.binding().app_id(),
+                "the arm is about ONE app reaching two databases"
+            );
+            // PRECONDITION 2 - two databases, and two physical schemas derived
+            // from them. Equal ids would make the whole arm vacuous.
+            assert_ne!(
+                to_mine.binding().database(),
+                to_theirs.binding().database(),
+                "the two bindings must address DIFFERENT databases"
+            );
+            assert_ne!(
+                to_mine.binding().schema().as_str(),
+                to_theirs.binding().schema().as_str(),
+                "two databases derive two physical schemas"
+            );
 
-    // A write on the FIRST database.
-    to_mine
-        .collection("orders")
-        .expect("the first database declares orders")
-        .insert(value!({ "id": 2, "total": 7 }))
-        .await
-        .expect("insert into the first database");
+            // PRECONDITION 3 - the app holds a LIVE binding to each, and each
+            // database really declares `orders`. A read through the ORM proves
+            // both at once: the session narrows with the binding role the
+            // reconciler granted, and the statement is qualified with that
+            // binding's own schema. The two seeded totals differ, so each read
+            // also proves it reached ITS OWN database.
+            assert_eq!(
+                read_total(&fence.url, fence.mine())
+                    .await
+                    .expect("the first binding is live and its database declares orders"),
+                42
+            );
+            assert_eq!(
+                read_total(&fence.url, fence.theirs())
+                    .await
+                    .expect("the second binding is live and its database declares orders"),
+                99
+            );
 
-    match mine.pop() {
-        Some(SubscriptionMessage::Change(event)) => {
-            assert_eq!(event.collection, "orders");
-            assert_eq!(event.route, my_route);
-            assert_eq!(event.pk.as_deref(), Some("2"));
-        }
-        other => panic!("the writing database's subscriber must receive its change; got {other:?}"),
-    }
-    assert!(
-        theirs.pop().is_none(),
-        "a change on the first database must NOT reach the second database's subscription"
-    );
+            let my_route = to_mine.binding().route();
+            let their_route = to_theirs.binding().route();
+            let mine = broker::subscribe(&my_route, "orders");
+            let theirs = broker::subscribe(&their_route, "orders");
+            // PRECONDITION 4 - the two subscriptions name the SAME collection.
+            // Without this the databases would be separated by the collection
+            // rather than by the routing key, and the arm would measure nothing.
+            assert_eq!(
+                mine.collection(),
+                theirs.collection(),
+                "both databases declare a collection of the same name"
+            );
 
-    // The mirror, so neither direction can be right by accident.
-    to_theirs
-        .collection("orders")
-        .expect("the second database declares orders")
-        .insert(value!({ "id": 3, "total": 11 }))
-        .await
-        .expect("insert into the second database");
+            // A write on the FIRST database.
+            to_mine
+                .collection("orders")
+                .expect("the first database declares orders")
+                .insert(value!({ "id": 2, "total": 7 }))
+                .await
+                .expect("insert into the first database");
 
-    match theirs.pop() {
-        Some(SubscriptionMessage::Change(event)) => {
-            assert_eq!(event.collection, "orders");
-            assert_eq!(event.route, their_route);
-            assert_eq!(event.pk.as_deref(), Some("3"));
-        }
-        other => panic!("the writing database's subscriber must receive its change; got {other:?}"),
-    }
-    assert!(
-        mine.pop().is_none(),
-        "a change on the second database must NOT reach the first database's subscription"
-    );
+            match mine.pop() {
+                Some(SubscriptionMessage::Change(event)) => {
+                    assert_eq!(event.collection, "orders");
+                    assert_eq!(event.route, my_route);
+                    assert_eq!(event.pk.as_deref(), Some("2"));
+                }
+                other => {
+                    panic!(
+                        "the writing database's subscriber must receive its change; got {other:?}"
+                    )
+                }
+            }
+            assert!(
+                theirs.pop().is_none(),
+                "a change on the first database must NOT reach the second database's \
+                 subscription"
+            );
 
-    mine.close();
-    theirs.close();
-    drop(to_mine);
-    drop(to_theirs);
-    drop(fence);
+            // The mirror, so neither direction can be right by accident.
+            to_theirs
+                .collection("orders")
+                .expect("the second database declares orders")
+                .insert(value!({ "id": 3, "total": 11 }))
+                .await
+                .expect("insert into the second database");
+
+            match theirs.pop() {
+                Some(SubscriptionMessage::Change(event)) => {
+                    assert_eq!(event.collection, "orders");
+                    assert_eq!(event.route, their_route);
+                    assert_eq!(event.pk.as_deref(), Some("3"));
+                }
+                other => {
+                    panic!(
+                        "the writing database's subscriber must receive its change; got {other:?}"
+                    )
+                }
+            }
+            assert!(
+                mine.pop().is_none(),
+                "a change on the second database must NOT reach the first database's \
+                 subscription"
+            );
+
+            mine.close();
+            theirs.close();
+            drop(to_mine);
+            drop(to_theirs);
+        })
+        .await;
     drain().await;
 }
 
@@ -734,6 +896,10 @@ struct MaskedFence {
     url: String,
     database: DatabaseId,
     edge: BindingId,
+    admin: Client,
+    /// The per-case login this fence minted, dropped by [`MaskedFence::teardown`].
+    /// Never the worker login itself: see the module doc.
+    login: String,
 }
 
 impl MaskedFence {
@@ -793,18 +959,34 @@ impl MaskedFence {
             .await
             .expect("the apply converges this schema's column grants");
 
-        admin
-            .batch_execute(&format!(
-                "ALTER ROLE \"{WORKER_ROLE}\" PASSWORD '{WORKER_PASSWORD}'"
-            ))
-            .await
-            .expect("the operator supplies the worker's authentication material");
+        let login = mint_assuming_login(&admin, WORKER_ROLE).await;
         unlock_role_provisioning(&lock).await;
 
         Self {
-            url: worker_url(&url),
+            url: login_url(&url, &login),
             database,
             edge,
+            admin,
+            login,
+        }
+    }
+
+    /// Drop the per-case login this fence minted, before the caller drops the
+    /// fence itself.
+    async fn teardown(&self) {
+        drop_login(&self.admin, &self.login).await;
+    }
+
+    /// Run `body` against this fence, always dropping the minted login before
+    /// the fence itself drops - including when `body` panics. The body runs
+    /// under `catch_unwind`, so a failing assertion cannot skip the teardown
+    /// and leave the login on the server.
+    async fn run(self, body: impl AsyncFnOnce(&Self)) {
+        let outcome = AssertUnwindSafe(body(&self)).catch_unwind().await;
+        self.teardown().await;
+        if let Err(panic) = outcome {
+            drop(self);
+            std::panic::resume_unwind(panic);
         }
     }
 
@@ -910,41 +1092,44 @@ async fn masked_ssn(database: &Database) -> Result<Value, DbError> {
 async fn an_audited_unmask_reaches_the_real_value_a_binding_role_cannot_select() {
     let postgres = Postgres::start();
     let fence = MaskedFence::build(postgres.url()).await;
-    let database = fence.open().await;
+    fence
+        .run(async |fence| {
+            let database = fence.open().await;
 
-    // CONTROL: the ordinary read returns the mask.
-    assert_eq!(
-        masked_ssn(&database)
-            .await
-            .expect("the binding role reads the mask column"),
-        Value::from(MASKED_SSN)
-    );
-
-    // SUBJECT, autocommit route.
-    assert_eq!(
-        unmasked_ssn(&database)
-            .await
-            .expect("an audited unmask must reach the real value"),
-        Value::from(REAL_SSN)
-    );
-
-    // SUBJECT, the creator's own transaction: the same read on the lane the
-    // creator's statements run on, with its own control beside it.
-    let inside = database
-        .transaction(|tx| async move {
+            // CONTROL: the ordinary read returns the mask.
             assert_eq!(
-                masked_ssn(&tx).await?,
-                Value::from(MASKED_SSN),
-                "the control: the ordinary read inside the transaction"
+                masked_ssn(&database)
+                    .await
+                    .expect("the binding role reads the mask column"),
+                Value::from(MASKED_SSN)
             );
-            unmasked_ssn(&tx).await
-        })
-        .await
-        .expect("an audited unmask inside a creator transaction must reach the real value");
-    assert_eq!(inside, Value::from(REAL_SSN));
 
-    drop(database);
-    drop(fence);
+            // SUBJECT, autocommit route.
+            assert_eq!(
+                unmasked_ssn(&database)
+                    .await
+                    .expect("an audited unmask must reach the real value"),
+                Value::from(REAL_SSN)
+            );
+
+            // SUBJECT, the creator's own transaction: the same read on the lane
+            // the creator's statements run on, with its own control beside it.
+            let inside = database
+                .transaction(|tx| async move {
+                    assert_eq!(
+                        masked_ssn(&tx).await?,
+                        Value::from(MASKED_SSN),
+                        "the control: the ordinary read inside the transaction"
+                    );
+                    unmasked_ssn(&tx).await
+                })
+                .await
+                .expect("an audited unmask inside a creator transaction must reach the real value");
+            assert_eq!(inside, Value::from(REAL_SSN));
+
+            drop(database);
+        })
+        .await;
     drain().await;
 }
 
@@ -957,44 +1142,51 @@ async fn an_audited_unmask_reaches_the_real_value_a_binding_role_cannot_select()
 async fn the_binding_role_is_refused_the_real_value_column_and_the_whole_row() {
     let postgres = Postgres::start();
     let fence = MaskedFence::build(postgres.url()).await;
-    let table = fence.table();
-    let role = fence.binding_role();
-    let ssn_raw = raw_column_name("ssn");
+    fence
+        .run(async |fence| {
+            let table = fence.table();
+            let role = fence.binding_role();
+            let ssn_raw = raw_column_name("ssn");
 
-    // CONTROL: the binding role reads the mask column and the identity.
-    let permitted = fence
-        .under_role(&role, &format!("SELECT ssn FROM {table} WHERE id = '{ROW_PK}'"))
-        .await
-        .expect("the binding role reads the columns its capability was granted");
-    assert_eq!(permitted.len(), 1);
-    assert_eq!(permitted[0].get::<_, &str>("ssn"), MASKED_SSN);
+            // CONTROL: the binding role reads the mask column and the identity.
+            let permitted = fence
+                .under_role(
+                    &role,
+                    &format!("SELECT ssn FROM {table} WHERE id = '{ROW_PK}'"),
+                )
+                .await
+                .expect("the binding role reads the columns its capability was granted");
+            assert_eq!(permitted.len(), 1);
+            assert_eq!(permitted[0].get::<_, &str>("ssn"), MASKED_SSN);
 
-    for (what, sql) in [
-        (
-            "the real-value column by name",
-            format!("SELECT \"{ssn_raw}\" FROM {table} WHERE id = '{ROW_PK}'"),
-        ),
-        (
-            "a whole-row projection",
-            format!("SELECT * FROM {table} WHERE id = '{ROW_PK}'"),
-        ),
-    ] {
-        let error = fence
-            .under_role(&role, &sql)
-            .await
-            .err()
-            .unwrap_or_else(|| panic!("{what} must be refused under the binding role"));
-        assert_eq!(
-            error
-                .as_db_error()
-                .unwrap_or_else(|| panic!("{what}: the server must refuse, not the transport"))
-                .code(),
-            &SqlState::INSUFFICIENT_PRIVILEGE,
-            "{what} must be refused with 42501"
-        );
-    }
-
-    drop(fence);
+            for (what, sql) in [
+                (
+                    "the real-value column by name",
+                    format!("SELECT \"{ssn_raw}\" FROM {table} WHERE id = '{ROW_PK}'"),
+                ),
+                (
+                    "a whole-row projection",
+                    format!("SELECT * FROM {table} WHERE id = '{ROW_PK}'"),
+                ),
+            ] {
+                let error = fence
+                    .under_role(&role, &sql)
+                    .await
+                    .err()
+                    .unwrap_or_else(|| panic!("{what} must be refused under the binding role"));
+                assert_eq!(
+                    error
+                        .as_db_error()
+                        .unwrap_or_else(|| panic!(
+                            "{what}: the server must refuse, not the transport"
+                        ))
+                        .code(),
+                    &SqlState::INSUFFICIENT_PRIVILEGE,
+                    "{what} must be refused with 42501"
+                );
+            }
+        })
+        .await;
     drain().await;
 }
 
@@ -1007,66 +1199,69 @@ async fn the_binding_role_is_refused_the_real_value_column_and_the_whole_row() {
 async fn the_unmask_role_reaches_the_real_value_and_no_other_column_or_verb() {
     let postgres = Postgres::start();
     let fence = MaskedFence::build(postgres.url()).await;
-    let table = fence.table();
-    let role = fence.unmask_role();
-    let ssn_raw = raw_column_name("ssn");
+    fence
+        .run(async |fence| {
+            let table = fence.table();
+            let role = fence.unmask_role();
+            let ssn_raw = raw_column_name("ssn");
 
-    // CONTROL: the statement the data plane compiles, under this role.
-    let permitted = fence
-        .under_role(
-            &role,
-            &format!("SELECT \"{ssn_raw}\" AS raw FROM {table} WHERE id = '{ROW_PK}'"),
-        )
-        .await
-        .expect("the unmask role reads the real value it was granted");
-    assert_eq!(permitted.len(), 1);
-    assert_eq!(permitted[0].get::<_, &str>("raw"), REAL_SSN);
+            // CONTROL: the statement the data plane compiles, under this role.
+            let permitted = fence
+                .under_role(
+                    &role,
+                    &format!("SELECT \"{ssn_raw}\" AS raw FROM {table} WHERE id = '{ROW_PK}'"),
+                )
+                .await
+                .expect("the unmask role reads the real value it was granted");
+            assert_eq!(permitted.len(), 1);
+            assert_eq!(permitted[0].get::<_, &str>("raw"), REAL_SSN);
 
-    for (what, sql) in [
-        (
-            "a non-raw column it was not granted",
-            format!("SELECT nickname FROM {table} WHERE id = '{ROW_PK}'"),
-        ),
-        (
-            "the mask column",
-            format!("SELECT ssn FROM {table} WHERE id = '{ROW_PK}'"),
-        ),
-        (
-            "a whole-row projection",
-            format!("SELECT * FROM {table} WHERE id = '{ROW_PK}'"),
-        ),
-        (
-            "an INSERT",
-            format!("INSERT INTO {table} (id) VALUES ('p2') RETURNING id"),
-        ),
-        (
-            "an UPDATE",
-            format!("UPDATE {table} SET nickname = 'x' WHERE id = '{ROW_PK}' RETURNING id"),
-        ),
-        (
-            "a DELETE",
-            format!("DELETE FROM {table} WHERE id = '{ROW_PK}' RETURNING id"),
-        ),
-    ] {
-        let error = fence
-            .under_role(&role, &sql)
-            .await
-            .err()
-            .unwrap_or_else(|| panic!("{what} must be refused under the unmask role"));
-        assert_eq!(
-            error
-                .as_db_error()
-                .unwrap_or_else(|| panic!("{what}: the server must refuse, not the transport"))
-                .code(),
-            &SqlState::INSUFFICIENT_PRIVILEGE,
-            "{what} must be refused with 42501"
-        );
-    }
-
-    drop(fence);
+            for (what, sql) in [
+                (
+                    "a non-raw column it was not granted",
+                    format!("SELECT nickname FROM {table} WHERE id = '{ROW_PK}'"),
+                ),
+                (
+                    "the mask column",
+                    format!("SELECT ssn FROM {table} WHERE id = '{ROW_PK}'"),
+                ),
+                (
+                    "a whole-row projection",
+                    format!("SELECT * FROM {table} WHERE id = '{ROW_PK}'"),
+                ),
+                (
+                    "an INSERT",
+                    format!("INSERT INTO {table} (id) VALUES ('p2') RETURNING id"),
+                ),
+                (
+                    "an UPDATE",
+                    format!("UPDATE {table} SET nickname = 'x' WHERE id = '{ROW_PK}' RETURNING id"),
+                ),
+                (
+                    "a DELETE",
+                    format!("DELETE FROM {table} WHERE id = '{ROW_PK}' RETURNING id"),
+                ),
+            ] {
+                let error = fence
+                    .under_role(&role, &sql)
+                    .await
+                    .err()
+                    .unwrap_or_else(|| panic!("{what} must be refused under the unmask role"));
+                assert_eq!(
+                    error
+                        .as_db_error()
+                        .unwrap_or_else(|| panic!(
+                            "{what}: the server must refuse, not the transport"
+                        ))
+                        .code(),
+                    &SqlState::INSUFFICIENT_PRIVILEGE,
+                    "{what} must be refused with 42501"
+                );
+            }
+        })
+        .await;
     drain().await;
 }
-
 
 /// The bracket gives the binding role back, whether the read succeeded or not.
 ///
@@ -1097,78 +1292,262 @@ async fn the_unmask_role_reaches_the_real_value_and_no_other_column_or_verb() {
 async fn the_unmask_bracket_gives_the_binding_role_back_on_both_outcomes() {
     let postgres = Postgres::start();
     let fence = MaskedFence::build(postgres.url()).await;
-    let binding = fence.binding();
-    let backend = zeroship_data_orm::ConnectOptions::new(&fence.url, ProjectKeySource::unavailable())
-        .connect()
-        .await
-        .expect("the worker login opens a backend");
-    let session = backend
-        .open_tx_session(&binding, BeginIntent::Default)
-        .await
-        .expect("the creator's transaction opens and narrows to its binding role");
+    fence
+        .run(async |fence| {
+            let binding = fence.binding();
+            let backend =
+                zeroship_data_orm::ConnectOptions::new(&fence.url, ProjectKeySource::unavailable())
+                    .connect()
+                    .await
+                    .expect("the worker login opens a backend");
+            let session = backend
+                .open_tx_session(&binding, BeginIntent::Default)
+                .await
+                .expect("the creator's transaction opens and narrows to its binding role");
 
-    let current_user = async |session: &Session| -> String {
-        session
-            .query("SELECT current_user AS u", &[])
-            .await
-            .expect("current_user is readable under any role")[0]["u"]
-            .as_str()
-            .expect("current_user is text")
-            .to_owned()
-    };
+            let current_user = async |session: &Session| -> String {
+                session
+                    .query("SELECT current_user AS u", &[])
+                    .await
+                    .expect("current_user is readable under any role")[0]["u"]
+                    .as_str()
+                    .expect("current_user is text")
+                    .to_owned()
+            };
 
-    assert_eq!(
-        current_user(&session).await,
-        fence.binding_role(),
-        "the setup batch must have narrowed to the binding role"
-    );
+            assert_eq!(
+                current_user(&session).await,
+                fence.binding_role(),
+                "the setup batch must have narrowed to the binding role"
+            );
 
-    // SUBJECT 1 - a read that succeeds. Its statement reports the role it ran
-    // under, so the elevation is measured rather than assumed.
-    let during = backend
-        .read_unmasked(
-            &binding,
-            Some(&session),
-            "SELECT current_user AS \"_raw\"",
-            &[],
-        )
+            // SUBJECT 1 - a read that succeeds. Its statement reports the role
+            // it ran under, so the elevation is measured rather than assumed.
+            let during = backend
+                .read_unmasked(
+                    &binding,
+                    Some(&session),
+                    "SELECT current_user AS \"_raw\"",
+                    &[],
+                )
+                .await
+                .expect("the bracketed read runs");
+            assert_eq!(
+                during[0]["_raw"],
+                Value::from(fence.unmask_role()),
+                "the bracketed statement must run as the database's unmask role"
+            );
+            assert_eq!(
+                current_user(&session).await,
+                fence.binding_role(),
+                "a successful bracketed read must narrow straight back"
+            );
+
+            // SUBJECT 2 - the same bracket over a read the server answers and
+            // the row decoder refuses. One variable differs: the value that
+            // comes back.
+            let failed = backend
+                .read_unmasked(
+                    &binding,
+                    Some(&session),
+                    "SELECT 'NaN'::numeric AS \"_raw\"",
+                    &[],
+                )
+                .await
+                .expect_err("a value the row decoder refuses must surface as an error");
+            assert!(
+                failed.to_string().contains("_raw"),
+                "the failure must be the decode of the projected column: {failed}"
+            );
+            assert_eq!(
+                current_user(&session).await,
+                fence.binding_role(),
+                "a FAILED bracketed read must narrow back too, or the creator's next \
+                 statement on this session runs as the unmask role"
+            );
+
+            session.discard();
+            drop(backend);
+        })
+        .await;
+    drain().await;
+}
+
+// ---------------------------------------------------------------------------
+// The shared worker login belongs to a sibling suite, not this file
+// ---------------------------------------------------------------------------
+
+/// A password standing for whatever sibling suite reaches the shared worker
+/// login first on the worktree's bare server. The dev-password convention is
+/// `zeroship_worker`, which the platform corpus
+/// (`db/migrations-ts/20260702000100_schema_roles_extensions.ts`) and
+/// `zeroship_workflow_testkit::journal_server::ensure_roles` give the login
+/// only when they create it; a suite that reaches it first may write anything
+/// else. Deliberately distinct from that convention and from
+/// [`Fence::build_isolated`]'s [`WORKER_PASSWORD`], so this test cannot pass by
+/// accident on a value one of those already produces.
+const SIBLING_SUITE_PASSWORD: &str = "sibling-suite-owns-this-login";
+
+/// **The property.** Building and tearing down a [`Fence`] leaves the worker
+/// login's own password alone, so a suite that set it keeps it. This runs on a
+/// server this case alone leases - a private scope, as
+/// `the_shared_worker_login_reaches_no_converged_schema_without_narrowing`'s
+/// arm does - because its subject is the cluster-global worker login's
+/// password, which a sibling case on the shared bare server would observe. The
+/// rule it measures is the one the module doc states: a cluster-global login's
+/// password on a shared server belongs to no single suite, so no arm here
+/// writes it.
+///
+/// It reproduces the two-suite interaction deterministically, in one process: a
+/// sibling suite's own password is set first (standing for whichever suite
+/// reaches the role first on the shared server), then a fence is built and run
+/// exactly as every other arm in this file does - through [`Fence::build`],
+/// which mints a login of its own and writes no password to the worker login -
+/// then the sibling's login is tried again. Because the fence writes no
+/// password, the sibling's login below succeeds.
+#[compio::test]
+async fn a_binding_fence_does_not_decide_a_sibling_suites_worker_password() {
+    let postgres = Postgres::start_in(&Scope::private(PRIVATE_KIND, PRIVATE_GRACE))
+        .expect("a private bare server for the worker login's own password");
+
+    // A sibling suite's own convention on the cluster-global login. No advisory
+    // lock: this case is the private server's only lease, and no other suite's
+    // role DDL runs against it.
+    let probe = connect(&postgres.url()).await;
+    cluster::apply_bootstrap_corpus(&probe)
         .await
-        .expect("the bracketed read runs");
-    assert_eq!(
-        during[0]["_raw"],
-        Value::from(fence.unmask_role()),
-        "the bracketed statement must run as the database's unmask role"
-    );
-    assert_eq!(
-        current_user(&session).await,
-        fence.binding_role(),
-        "a successful bracketed read must narrow straight back"
-    );
-
-    // SUBJECT 2 - the same bracket over a read the server answers and the row
-    // decoder refuses. One variable differs: the value that comes back.
-    let failed = backend
-        .read_unmasked(
-            &binding,
-            Some(&session),
-            "SELECT 'NaN'::numeric AS \"_raw\"",
-            &[],
-        )
+        .expect("the datastore bootstrap corpus applies");
+    probe
+        .batch_execute(&format!(
+            "ALTER ROLE \"{WORKER_ROLE}\" PASSWORD '{SIBLING_SUITE_PASSWORD}'"
+        ))
         .await
-        .expect_err("a value the row decoder refuses must surface as an error");
+        .expect("a sibling suite's own convention sets the shared login's password");
+    drop(probe);
+
+    // THE COLLISION: this file's own fixture, built and run exactly as every
+    // other arm in it does, on the path that mints a login rather than
+    // connecting as the worker login.
+    let fence = Fence::build(postgres.url()).await;
+    fence
+        .run(async |fence| {
+            assert_eq!(
+                read_total(&fence.url, fence.mine()).await.expect(
+                    "the fence's own arm reaches its database, exactly as every other one does"
+                ),
+                42
+            );
+        })
+        .await;
+
+    // THE SUBJECT: the sibling suite's own login, with the password IT set,
+    // must still work.
+    let mut sibling = url::Url::parse(&postgres.url()).expect("the fixture URL parses");
+    sibling
+        .set_username(WORKER_ROLE)
+        .expect("the fixture URL accepts a username");
+    sibling
+        .set_password(Some(SIBLING_SUITE_PASSWORD))
+        .expect("the fixture URL accepts a password");
+    connect(sibling.as_str())
+        .await
+        .query_one("SELECT 1", &[])
+        .await
+        .expect(
+            "a sibling suite's own password on the shared worker login must survive this \
+             file's fixture building and tearing down a binding fence",
+        );
+
+    drain().await;
+}
+
+// ---------------------------------------------------------------------------
+// The minted login is dropped on every path
+// ---------------------------------------------------------------------------
+
+/// **The property.** A body that panics still drops the login [`Fence::build`]
+/// minted. The body reaches the fence's own database first, so the panic is on
+/// a fence that really ran, then fails on purpose; [`Fence::run`] catches the
+/// panic, drops the login, and resumes. Reading the role catalog afterwards
+/// proves nothing of this case's login remains on the shared bare server.
+#[compio::test]
+async fn a_panicking_binding_fence_arm_still_drops_its_minted_login() {
+    let postgres = Postgres::start();
+    let fence = Fence::build(postgres.url()).await;
+    let login = fence
+        .login
+        .clone()
+        .expect("the shared-server fence mints a login to drop");
+    let caught = AssertUnwindSafe(fence.run(async |fence| {
+        assert_eq!(
+            read_total(&fence.url, fence.mine())
+                .await
+                .expect("the panic arm reaches its database before it panics"),
+            42
+        );
+        panic!("this arm panics after the fence ran, to prove the runner drops its login");
+    }))
+    .catch_unwind()
+    .await;
     assert!(
-        failed.to_string().contains("_raw"),
-        "the failure must be the decode of the projected column: {failed}"
-    );
-    assert_eq!(
-        current_user(&session).await,
-        fence.binding_role(),
-        "a FAILED bracketed read must narrow back too, or the creator's next \
-         statement on this session runs as the unmask role"
+        caught.is_err(),
+        "the runner must propagate the body's panic"
     );
 
-    session.discard();
-    drop(backend);
-    drop(fence);
+    let admin = connect(&postgres.url()).await;
+    let remaining: i64 = admin
+        .query_one(
+            "SELECT count(*) FROM pg_roles WHERE rolname = $1",
+            &[&login],
+        )
+        .await
+        .expect("read the role catalog")
+        .get(0);
+    drop(admin);
+    assert_eq!(
+        remaining, 0,
+        "a panicking arm must not leave its minted login on the shared bare server"
+    );
+    drain().await;
+}
+
+/// **The property.** The same as [`a_panicking_binding_fence_arm_still_drops_its_minted_login`],
+/// for [`MaskedFence`]: its minted login drops even when the body panics.
+#[compio::test]
+async fn a_panicking_masked_fence_arm_still_drops_its_minted_login() {
+    let postgres = Postgres::start();
+    let fence = MaskedFence::build(postgres.url()).await;
+    let login = fence.login.clone();
+    let caught = AssertUnwindSafe(fence.run(async |fence| {
+        let database = fence.open().await;
+        assert_eq!(
+            masked_ssn(&database)
+                .await
+                .expect("the panic arm reads its masked row before it panics"),
+            Value::from(MASKED_SSN)
+        );
+        panic!("this arm panics after the masked fence ran, to prove the runner drops its login");
+    }))
+    .catch_unwind()
+    .await;
+    assert!(
+        caught.is_err(),
+        "the runner must propagate the body's panic"
+    );
+
+    let admin = connect(&postgres.url()).await;
+    let remaining: i64 = admin
+        .query_one(
+            "SELECT count(*) FROM pg_roles WHERE rolname = $1",
+            &[&login],
+        )
+        .await
+        .expect("read the role catalog")
+        .get(0);
+    drop(admin);
+    assert_eq!(
+        remaining, 0,
+        "a panicking arm must not leave its minted login on the shared bare server"
+    );
     drain().await;
 }

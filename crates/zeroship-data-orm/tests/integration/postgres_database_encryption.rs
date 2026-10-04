@@ -20,17 +20,30 @@
 //! **The role DDL is cluster-shared, and that is not a convenience.**
 //! `pg_authid` and `pg_auth_members` are shared by every database on a server,
 //! so each arm serializes the migrating service's cluster-global convergence
-//! against the worktree's other cases.
+//! against the worktree's other cases on the shared bare server they lease.
+//!
+//! **No arm here writes `zeroship_worker`'s own password.** That login is
+//! cluster-global, so on the worktree's shared bare server its password
+//! belongs to no single suite: the platform corpus
+//! (`db/migrations-ts/20260702000100_schema_roles_extensions.ts`) and
+//! `zeroship_workflow_testkit::journal_server::ensure_roles` each create it
+//! with the dev password `zeroship_worker` only when it is missing, and a
+//! sibling suite that reaches the role first may write anything else. Every arm
+//! below instead mints a login of its own, a member of `zeroship_worker` and
+//! nothing else, which reaches a live binding's privileges by assuming the
+//! worker login rather than by being it.
 
 use zeroship_testkit::postgres::server::Postgres;
 
+use futures::FutureExt;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use compio_postgres::{Client, NoTls};
 
 use zeroship_core::database_derivation;
 use zeroship_core::database_role::DatabaseCapability;
-use zeroship_core::{BindingId, DatabaseId};
+use zeroship_core::{typed_id, BindingId, DatabaseId};
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::encryption::{
     self, AeadKey, KeyStore, ProjectKeySource, SuppliedProjectKeys,
@@ -41,11 +54,6 @@ use zeroship_data_orm::schema::{CollectionSchema, ColumnSchema, LogicalType, Sch
 use zeroship_data_orm::value;
 use zeroship_migrate_server::apply::WORKER_ROLE;
 use zeroship_migrate_server::datastore::cluster;
-
-/// The password the fixture gives the worker login. The arm's database is
-/// dropped with the test; the login the corpus shares stays on the worktree's
-/// server for the run.
-const WORKER_PASSWORD: &str = "fixture";
 
 /// The deploy pin is `postgres:16` (`deploy/compose/docker-compose.yml`), and
 /// the grant options the whole ladder rests on do not exist below it.
@@ -163,14 +171,38 @@ async fn seed_table(admin: &Client, database: &DatabaseId) {
         .expect("an apply's column grants over a converged schema");
 }
 
-/// The URL the worker login opens, built from the fixture's own.
-fn worker_url(base: &str) -> String {
+/// The URL a minted per-case login opens, built from the fixture's own.
+fn login_url(base: &str, login: &str) -> String {
     let mut url = url::Url::parse(base).expect("the fixture URL parses");
-    url.set_username(WORKER_ROLE)
+    url.set_username(login)
         .expect("the fixture URL accepts a username");
-    url.set_password(Some(WORKER_PASSWORD))
+    url.set_password(Some(login))
         .expect("the fixture URL accepts a password");
     url.to_string()
+}
+
+/// Mint a login unique to this case, a member of `role` and of nothing else,
+/// so a session that connects as it reaches `role`'s privileges by assuming
+/// the role rather than by being it. See the module doc for why no arm
+/// connects as `role` itself on the shared bare server.
+async fn mint_assuming_login(admin: &Client, role: &str) -> String {
+    let login = typed_id::generate("wpl");
+    admin
+        .batch_execute(&format!(
+            "CREATE ROLE \"{login}\" LOGIN PASSWORD '{login}'; GRANT \"{role}\" TO \"{login}\";"
+        ))
+        .await
+        .expect("mint a per-case login that assumes the platform login");
+    login
+}
+
+/// Drop a login [`mint_assuming_login`] minted, so it does not linger on the
+/// server after this case ends.
+async fn drop_login(admin: &Client, login: &str) {
+    admin
+        .batch_execute(&format!("DROP ROLE \"{login}\""))
+        .await
+        .expect("drop the per-case login");
 }
 
 /// A cluster the reconciler converged: two databases, and three bindings whose
@@ -186,6 +218,9 @@ struct Cluster {
     a_on_other: BindingId,
     keys: Arc<SuppliedProjectKeys>,
     admin: Client,
+    /// The per-case login this cluster minted, dropped by [`Cluster::teardown`].
+    /// Never the worker login itself: see the module doc.
+    login: String,
 }
 
 impl Cluster {
@@ -220,12 +255,7 @@ impl Cluster {
                 .expect("the reconciler grants the binding's two edges");
         }
 
-        admin
-            .batch_execute(&format!(
-                "ALTER ROLE \"{WORKER_ROLE}\" PASSWORD '{WORKER_PASSWORD}'"
-            ))
-            .await
-            .expect("the operator supplies the worker's authentication material");
+        let login = mint_assuming_login(&admin, WORKER_ROLE).await;
         unlock_role_provisioning(&lock).await;
 
         // One project, one root key, two tenants - exactly what Control serves
@@ -241,7 +271,7 @@ impl Cluster {
         }
 
         Self {
-            url: worker_url(&url),
+            url: login_url(&url, &login),
             shared,
             other,
             a_on_shared,
@@ -249,6 +279,26 @@ impl Cluster {
             a_on_other,
             keys,
             admin,
+            login,
+        }
+    }
+
+    /// Drop the per-case login this cluster minted, before the caller drops
+    /// the cluster itself.
+    async fn teardown(&self) {
+        drop_login(&self.admin, &self.login).await;
+    }
+
+    /// Run `body` against this cluster, always dropping the minted login before
+    /// the cluster itself drops - including when `body` panics. The body runs
+    /// under `catch_unwind`, so a failing assertion cannot skip the teardown
+    /// and leave the login on the shared bare server.
+    async fn run(self, body: impl AsyncFnOnce(&Self)) {
+        let outcome = AssertUnwindSafe(body(&self)).catch_unwind().await;
+        self.teardown().await;
+        if let Err(panic) = outcome {
+            drop(self);
+            std::panic::resume_unwind(panic);
         }
     }
 
@@ -391,72 +441,76 @@ fn assert_aead_refusal(error: &DbError, what: &str) {
 async fn two_apps_bound_to_one_database_read_each_others_encrypted_rows() {
     let postgres = Postgres::start();
     let cluster = Cluster::build(postgres.url()).await;
+    cluster
+        .run(async |cluster| {
+            let writer = cluster
+                .open(Cluster::binding(
+                    APP_A,
+                    &cluster.shared,
+                    &cluster.a_on_shared,
+                ))
+                .await;
+            write_row(&writer).await;
 
-    let writer = cluster
-        .open(Cluster::binding(
-            APP_A,
-            &cluster.shared,
-            &cluster.a_on_shared,
-        ))
+            // CONTROL 1: the writer reads back its own row, so the write path
+            // stored something this stack can recover.
+            assert_eq!(
+                read_column(&writer)
+                    .await
+                    .expect("the writer reads its row"),
+                PLAINTEXT
+            );
+
+            // CONTROL 2: what is on disk is ciphertext. Without this, a design
+            // that skipped encryption would satisfy every other assertion
+            // here.
+            let stored = cluster.stored_ciphertext(&cluster.shared).await;
+            assert_ne!(
+                stored.as_slice(),
+                PLAINTEXT.as_bytes(),
+                "the column must hold ciphertext"
+            );
+            let foreign = AeadKey { k_enc: [0x5a; 32] };
+            let aad =
+                encryption::canonical_aad(&cluster.shared, COLLECTION, COLUMN, ROW_PK.as_bytes());
+            assert!(
+                encryption::decrypt(&foreign, &stored, &aad).is_err(),
+                "the stored bytes must be authenticated under the derived key, not any key"
+            );
+
+            // THE SUBJECT, differing in one variable: a different tenant, its
+            // own binding, the same database.
+            let reader = cluster
+                .open(Cluster::binding(
+                    APP_B,
+                    &cluster.shared,
+                    &cluster.b_on_shared,
+                ))
+                .await;
+            assert_eq!(
+                read_column(&reader)
+                    .await
+                    .expect("a co-binding-holder must read the plaintext it is entitled to"),
+                PLAINTEXT
+            );
+
+            // CONTROL 3: the two tenants really are two, so the read above is
+            // not the writer's handle under another name.
+            assert_ne!(
+                writer.binding().app_id(),
+                reader.binding().app_id(),
+                "the control: two tenants"
+            );
+            assert_ne!(
+                writer.binding().session_role(),
+                reader.binding().session_role(),
+                "the control: two binding roles, so two grant edges"
+            );
+
+            drop(writer);
+            drop(reader);
+        })
         .await;
-    write_row(&writer).await;
-
-    // CONTROL 1: the writer reads back its own row, so the write path stored
-    // something this stack can recover.
-    assert_eq!(
-        read_column(&writer)
-            .await
-            .expect("the writer reads its row"),
-        PLAINTEXT
-    );
-
-    // CONTROL 2: what is on disk is ciphertext. Without this, a design that
-    // had stopped encrypting would satisfy every other assertion here.
-    let stored = cluster.stored_ciphertext(&cluster.shared).await;
-    assert_ne!(
-        stored.as_slice(),
-        PLAINTEXT.as_bytes(),
-        "the column must hold ciphertext"
-    );
-    let foreign = AeadKey { k_enc: [0x5a; 32] };
-    let aad = encryption::canonical_aad(&cluster.shared, COLLECTION, COLUMN, ROW_PK.as_bytes());
-    assert!(
-        encryption::decrypt(&foreign, &stored, &aad).is_err(),
-        "the stored bytes must be authenticated under the derived key, not any key"
-    );
-
-    // THE SUBJECT, differing in one variable: a different tenant, its own
-    // binding, the same database.
-    let reader = cluster
-        .open(Cluster::binding(
-            APP_B,
-            &cluster.shared,
-            &cluster.b_on_shared,
-        ))
-        .await;
-    assert_eq!(
-        read_column(&reader)
-            .await
-            .expect("a co-binding-holder must read the plaintext it is entitled to"),
-        PLAINTEXT
-    );
-
-    // CONTROL 3: the two tenants really are two, so the read above is not the
-    // writer's handle under another name.
-    assert_ne!(
-        writer.binding().app_id(),
-        reader.binding().app_id(),
-        "the control: two tenants"
-    );
-    assert_ne!(
-        writer.binding().session_role(),
-        reader.binding().session_role(),
-        "the control: two binding roles, so two grant edges"
-    );
-
-    drop(writer);
-    drop(reader);
-    drop(cluster);
     drain().await;
 }
 
@@ -475,74 +529,136 @@ async fn two_apps_bound_to_one_database_read_each_others_encrypted_rows() {
 async fn a_ciphertext_lifted_into_another_database_does_not_verify() {
     let postgres = Postgres::start();
     let cluster = Cluster::build(postgres.url()).await;
+    cluster
+        .run(async |cluster| {
+            let here = cluster
+                .open(Cluster::binding(
+                    APP_A,
+                    &cluster.shared,
+                    &cluster.a_on_shared,
+                ))
+                .await;
+            write_row(&here).await;
+            let lifted = cluster.stored_ciphertext(&cluster.shared).await;
+            cluster.plant(&cluster.other, &lifted).await;
 
-    let here = cluster
-        .open(Cluster::binding(
-            APP_A,
-            &cluster.shared,
-            &cluster.a_on_shared,
-        ))
+            // CONTROL: the same app reads the row where it was written. The
+            // blob is intact and the app is entitled to it, so the refusal
+            // below is about the database and not about the row, the key store,
+            // or the binding.
+            assert_eq!(
+                read_column(&here).await.expect("the writer reads its row"),
+                PLAINTEXT
+            );
+
+            // THE SUBJECT: the SAME app, its OWN second database, the planted
+            // bytes.
+            let there = cluster
+                .open(Cluster::binding(APP_A, &cluster.other, &cluster.a_on_other))
+                .await;
+            let refused = read_column(&there)
+                .await
+                .expect_err("a lifted ciphertext must not verify in another database");
+            assert_aead_refusal(&refused, "the lifted read");
+
+            // WHICH FENCE REFUSED IT. Both the key and the AAD moved with the
+            // database, so the refusal above is over-determined. Decompose it.
+            let keys = cluster.key_store();
+            let key_here = keys
+                .resolve(APP_A, &cluster.shared)
+                .await
+                .expect("the host supplied this project's root");
+            let key_there = keys
+                .resolve(APP_A, &cluster.other)
+                .await
+                .expect("the host supplied this project's root");
+            let aad_here =
+                encryption::canonical_aad(&cluster.shared, COLLECTION, COLUMN, ROW_PK.as_bytes());
+            let aad_there =
+                encryption::canonical_aad(&cluster.other, COLLECTION, COLUMN, ROW_PK.as_bytes());
+            assert_ne!(key_here.k_enc, key_there.k_enc, "the salt is the database");
+            assert_ne!(aad_here, aad_there, "the AAD carries the database");
+
+            // The baseline: under the database it was written in, the blob
+            // decrypts.
+            assert_eq!(
+                encryption::decrypt(&key_here, &lifted, &aad_here)
+                    .expect("the lifted blob is intact under its own database"),
+                PLAINTEXT.as_bytes()
+            );
+            // THE AAD ALONE, with the key held at the one the blob was written
+            // under.
+            assert_aead_refusal(
+                &encryption::decrypt(&key_here, &lifted, &aad_there)
+                    .expect_err("the AAD must refuse a ciphertext from another database"),
+                "the AAD in isolation",
+            );
+            // THE KEY ALONE, with the AAD held at the one the blob was written
+            // under.
+            assert_aead_refusal(
+                &encryption::decrypt(&key_there, &lifted, &aad_here)
+                    .expect_err("the key must refuse a ciphertext from another database"),
+                "the key in isolation",
+            );
+
+            drop(here);
+            drop(there);
+        })
         .await;
-    write_row(&here).await;
-    let lifted = cluster.stored_ciphertext(&cluster.shared).await;
-    cluster.plant(&cluster.other, &lifted).await;
+    drain().await;
+}
 
-    // CONTROL: the same app reads the row where it was written. The blob is
-    // intact and the app is entitled to it, so the refusal below is about the
-    // database and not about the row, the key store, or the binding.
+// ---------------------------------------------------------------------------
+// The minted login is dropped on every path
+// ---------------------------------------------------------------------------
+
+/// **The property.** A body that panics still drops the login [`Cluster::build`]
+/// minted. The body reaches the cluster's own database first, so the panic is
+/// on a cluster that really ran, then fails on purpose; [`Cluster::run`] catches
+/// the panic, drops the login, and resumes. Reading the role catalog afterwards
+/// proves nothing of this case's login remains on the shared bare server.
+#[compio::test]
+async fn a_panicking_encryption_cluster_arm_still_drops_its_minted_login() {
+    let postgres = Postgres::start();
+    let cluster = Cluster::build(postgres.url()).await;
+    let login = cluster.login.clone();
+    let caught = AssertUnwindSafe(cluster.run(async |cluster| {
+        let writer = cluster
+            .open(Cluster::binding(
+                APP_A,
+                &cluster.shared,
+                &cluster.a_on_shared,
+            ))
+            .await;
+        write_row(&writer).await;
+        assert_eq!(
+            read_column(&writer)
+                .await
+                .expect("the panic arm reads its row before it panics"),
+            PLAINTEXT
+        );
+        panic!("this arm panics after the cluster ran, to prove the runner drops its login");
+    }))
+    .catch_unwind()
+    .await;
+    assert!(
+        caught.is_err(),
+        "the runner must propagate the body's panic"
+    );
+
+    let admin = connect(&postgres.url()).await;
+    let remaining: i64 = admin
+        .query_one(
+            "SELECT count(*) FROM pg_roles WHERE rolname = $1",
+            &[&login],
+        )
+        .await
+        .expect("read the role catalog")
+        .get(0);
+    drop(admin);
     assert_eq!(
-        read_column(&here).await.expect("the writer reads its row"),
-        PLAINTEXT
+        remaining, 0,
+        "a panicking arm must not leave its minted login on the shared bare server"
     );
-
-    // THE SUBJECT: the SAME app, its OWN second database, the planted bytes.
-    let there = cluster
-        .open(Cluster::binding(APP_A, &cluster.other, &cluster.a_on_other))
-        .await;
-    let refused = read_column(&there)
-        .await
-        .expect_err("a lifted ciphertext must not verify in another database");
-    assert_aead_refusal(&refused, "the lifted read");
-
-    // WHICH FENCE REFUSED IT. Both the key and the AAD moved with the
-    // database, so the refusal above is over-determined. Decompose it.
-    let keys = cluster.key_store();
-    let key_here = keys
-        .resolve(APP_A, &cluster.shared)
-        .await
-        .expect("the host supplied this project's root");
-    let key_there = keys
-        .resolve(APP_A, &cluster.other)
-        .await
-        .expect("the host supplied this project's root");
-    let aad_here =
-        encryption::canonical_aad(&cluster.shared, COLLECTION, COLUMN, ROW_PK.as_bytes());
-    let aad_there =
-        encryption::canonical_aad(&cluster.other, COLLECTION, COLUMN, ROW_PK.as_bytes());
-    assert_ne!(key_here.k_enc, key_there.k_enc, "the salt is the database");
-    assert_ne!(aad_here, aad_there, "the AAD carries the database");
-
-    // The baseline: under the database it was written in, the blob decrypts.
-    assert_eq!(
-        encryption::decrypt(&key_here, &lifted, &aad_here)
-            .expect("the lifted blob is intact under its own database"),
-        PLAINTEXT.as_bytes()
-    );
-    // THE AAD ALONE, with the key held at the one the blob was written under.
-    assert_aead_refusal(
-        &encryption::decrypt(&key_here, &lifted, &aad_there)
-            .expect_err("the AAD must refuse a ciphertext from another database"),
-        "the AAD in isolation",
-    );
-    // THE KEY ALONE, with the AAD held at the one the blob was written under.
-    assert_aead_refusal(
-        &encryption::decrypt(&key_there, &lifted, &aad_here)
-            .expect_err("the key must refuse a ciphertext from another database"),
-        "the key in isolation",
-    );
-
-    drop(here);
-    drop(there);
-    drop(cluster);
     drain().await;
 }

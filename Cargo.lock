@@ -8175,6 +8175,7 @@ dependencies = [
  "zeroship-migrate-postgres",
  "zeroship-migrate-server",
  "zeroship-migrate-sqlite",
+ "zeroship-shared-server",
  "zeroship-testkit",
 ]
 
