@@ -1,4 +1,7 @@
-#![expect(unused_imports)]
+#![expect(
+    unused_imports,
+    reason = "the attribute rejects this struct before its fields are used, and the field types must be spelled exactly as the shared identity declares them"
+)]
 
 //! A flag control's default is false and an optional control's is None.
 //!

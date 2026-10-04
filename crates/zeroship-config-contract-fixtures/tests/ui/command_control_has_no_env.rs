@@ -1,5 +1,3 @@
-#![expect(unused_imports)]
-
 //! A command control reaches no environment tier.
 //!
 //! `resolve_control` takes no overlay and the generated carrier carries no clap
@@ -9,12 +7,12 @@
 //! it as an undeclared read site. What the compiler stops here is the earlier
 //! mistake: naming a wrapper the attribute does not implement.
 
-use zeroship_core::config::{zeroship_config, CommandEnv};
+use zeroship_core::config::zeroship_config;
 
 #[zeroship_config(binary = "zeroship-fixture-bad", scope = "bad")]
 struct EnvBackedCommandConfig {
     #[config(shared = CHECK_CONFIG)]
-    check_config: CommandEnv<bool>,
+    check_config: zeroship_core::config::CommandEnv<bool>,
 }
 
 fn main() {}
