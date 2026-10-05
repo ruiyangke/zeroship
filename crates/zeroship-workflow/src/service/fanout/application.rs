@@ -3,11 +3,6 @@ use super::{
     recipients, signals, topic_record, AppId, Broadcast, FanoutOptions, JobOperation, JobOutcome,
     JobReceipt, JobSpec, Page, PageResult, Pending, TopicRecord, Transaction, WorkflowServiceError,
 };
-use std::collections::BTreeMap;
-use zeroship_data_orm::{
-    orm::{FindOptions, FromRow},
-    sql::MAX_MEMBERSHIP_LIST_LEN,
-};
 
 pub(super) async fn apply(
     tx: &mut Transaction,
@@ -157,73 +152,24 @@ async fn persist(
     history::receipt(tx, job).await?.ok_or_else(invalid)
 }
 
-#[derive(FromRow)]
-#[orm(entity = models::runs)]
-struct Idle {
-    id: String,
-    generation: i64,
-}
-
 /// Wake each delivered recipient whose run is idle and waiting in the
 /// generation its signal targets, and record the runnable frontier of every
 /// run it woke, in delivery order.
 ///
-/// The caller holds the app lock, so the runs read idle here are the runs the
-/// update wakes. Each statement covers a membership list of runs, at most
-/// [`MAX_MEMBERSHIP_LIST_LEN`], so the round trips grow by one per membership
-/// list instead of one per run.
+/// `delivered` holds one recipient per run however many of a run's
+/// subscriptions the page selected: the journal keeps one signal per run for a
+/// broadcast, so [`signals::materialize`] delivers a run's first subscription
+/// in the page and passes over the rest.
 async fn wake(
     tx: &Transaction,
     app: &AppId,
     delivered: &[&models::SubscriptionRecipient],
     now: i64,
 ) -> Result<Vec<JobSpec>, WorkflowServiceError> {
-    let mut idle = BTreeMap::new();
-    for chunk in delivered.chunks(MAX_MEMBERSHIP_LIST_LEN) {
-        let rows = tx
-            .database()
-            .entity::<models::runs::Entity>()?
-            .find::<Idle>(
-                idle_runs(app, chunk.iter().map(|recipient| recipient.run_id.as_str()))?,
-                FindOptions {
-                    limit: Some(i64::try_from(chunk.len()).map_err(|_| invalid())?),
-                    ..Default::default()
-                },
-            )
-            .await?;
-        idle.extend(rows.into_iter().map(|row| (row.id, row.generation)));
-    }
-    let woken: Vec<&str> = delivered
+    let candidates: Vec<(&str, i64)> = delivered
         .iter()
-        .filter(|recipient| idle.get(&recipient.run_id) == Some(&recipient.generation))
-        .map(|recipient| recipient.run_id.as_str())
+        .map(|recipient| (recipient.run_id.as_str(), recipient.generation))
         .collect();
-    for chunk in woken.chunks(MAX_MEMBERSHIP_LIST_LEN) {
-        let changed = tx
-            .database()
-            .entity::<models::runs::Entity>()?
-            .update_many(
-                idle_runs(app, chunk.iter().copied())?,
-                models::runs::due_at.set(Some(now))?,
-            )
-            .await?;
-        if usize::try_from(changed) != Ok(chunk.len()) {
-            return Err(invalid());
-        }
-    }
+    let woken = publication::wake_idle(tx, app, &candidates, &["waiting"], now).await?;
     Box::pin(publication::advance_jobs(tx, app, &woken, now)).await
-}
-
-/// The runs among `runs` with no live task, no control intent and a waiting
-/// state: the runs a topic signal may wake.
-fn idle_runs<'a>(
-    app: &AppId,
-    runs: impl IntoIterator<Item = &'a str>,
-) -> Result<zeroship_data_orm::orm::Filter<models::runs::Entity>, WorkflowServiceError> {
-    Ok(models::runs::app_id
-        .eq(app.as_str())?
-        .and(models::runs::id.in_values(runs)?)
-        .and(models::runs::task_id.eq(None::<&str>)?)
-        .and(models::runs::control.eq("none")?)
-        .and(models::runs::state.eq("waiting")?))
 }

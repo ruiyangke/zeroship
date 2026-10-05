@@ -5,7 +5,7 @@ use super::{
 };
 use std::collections::BTreeSet;
 use zeroship_core::workflow_coordination::RunId;
-use zeroship_data_orm::orm::FromRow;
+use zeroship_data_orm::{orm::FromRow, sql::MAX_MEMBERSHIP_LIST_LEN};
 
 #[derive(FromRow)]
 #[orm(entity = models::runs)]
@@ -100,40 +100,57 @@ async fn cascade(
         .all()
         .await?;
     result.finished = children.len() < options.page_size as usize;
-    for child in children {
+    let mut leased = Vec::new();
+    let mut idle = Vec::new();
+    for child in &children {
         RunId::parse(&child.id).map_err(|_| invalid())?;
         result.after = Some(child.id.clone());
         if parse_state(&child.state)?.is_terminal() {
             continue;
         }
         result.affected += 1;
-        let entity = tx.database().entity::<runs::Entity>()?;
-        let selected = runs::app_id
-            .eq(app.as_str())?
-            .and(runs::id.eq(child.id.as_str())?)
-            .and(runs::task_id.eq(child.task_id.as_deref())?);
-        if child.task_id.is_some() {
-            changed_once(
-                entity
-                    .update_many(selected, runs::control.set("cancel")?)
-                    .await?, invalid
-            )?;
-            continue;
-        }
-        changed_once(
-            entity
-                .update_many(
-                    selected,
-                    runs::control
-                        .set("cancel")?
-                        .and(runs::due_at.set(Some(now))?)?,
-                )
-                .await?, invalid
-        )?;
-        if let Some(advance) = Box::pin(publication::advance_job(tx, app, &child.id, now)).await? {
-            result.successors.push(advance);
+        match &child.task_id {
+            Some(task) => leased.push((child.id.as_str(), task.as_str())),
+            None => idle.push(child.id.as_str()),
         }
     }
+    let entity = tx.database().entity::<runs::Entity>()?;
+    // A leased child keeps its task and observes cancellation at renewal or
+    // completion. Task identities belong to one run each, so the pair of
+    // memberships selects exactly the children read with those tasks.
+    for chunk in leased.chunks(MAX_MEMBERSHIP_LIST_LEN) {
+        let changed = entity
+            .update_many(
+                runs::app_id
+                    .eq(app.as_str())?
+                    .and(runs::id.in_values(chunk.iter().map(|(id, _)| *id))?)
+                    .and(runs::task_id.in_values(chunk.iter().map(|(_, task)| Some(*task)))?),
+                runs::control.set("cancel")?,
+            )
+            .await?;
+        if usize::try_from(changed) != Ok(chunk.len()) {
+            return Err(invalid());
+        }
+    }
+    for chunk in idle.chunks(MAX_MEMBERSHIP_LIST_LEN) {
+        let changed = entity
+            .update_many(
+                runs::app_id
+                    .eq(app.as_str())?
+                    .and(runs::id.in_values(chunk.iter().copied())?)
+                    .and(runs::task_id.eq(None::<&str>)?),
+                runs::control
+                    .set("cancel")?
+                    .and(runs::due_at.set(Some(now))?)?,
+            )
+            .await?;
+        if usize::try_from(changed) != Ok(chunk.len()) {
+            return Err(invalid());
+        }
+    }
+    result
+        .successors
+        .extend(Box::pin(publication::advance_jobs(tx, app, &idle, now)).await?);
     Ok(())
 }
 
@@ -147,7 +164,6 @@ async fn notify(
     now: i64,
     result: &mut PageResult,
 ) -> Result<(), WorkflowServiceError> {
-    use models::runs;
     let member = continuations::member(tx, app, &source.run_id, source.generation).await?;
     if !member.is_current {
         result.finished = true;
@@ -169,38 +185,28 @@ async fn notify(
     )
     .await?;
     result.finished = parents.len() < options.page_size as usize;
+    // A parent with several waits on this head is woken once per page, at the
+    // generation of its first wait in the page.
     let mut visited = BTreeSet::new();
-    for parent in parents {
+    let mut candidates = Vec::new();
+    for parent in &parents {
         result.after = Some(parent.id.clone());
-        // A parent with several waits on this head is woken once per page.
-        if !visited.insert(parent.run_id.clone()) {
-            continue;
-        }
-        let woken = tx
-            .database()
-            .entity::<runs::Entity>()?
-            .update_many(
-                runs::app_id
-                    .eq(app.as_str())?
-                    .and(runs::id.eq(parent.run_id.as_str())?)
-                    .and(runs::generation.eq(parent.generation)?)
-                    .and(runs::task_id.eq(None::<&str>)?)
-                    .and(runs::control.eq("none")?)
-                    .and(runs::state.in_values(["waiting", "sleeping", "queued"])?),
-                runs::due_at.set(Some(now))?,
-            )
-            .await?;
-        if woken == 0 {
-            continue;
-        }
-        changed_once(woken, invalid)?;
-        result.affected += 1;
-        if let Some(advance) =
-            Box::pin(publication::advance_job(tx, app, &parent.run_id, now)).await?
-        {
-            result.successors.push(advance);
+        if visited.insert(parent.run_id.as_str()) {
+            candidates.push((parent.run_id.as_str(), parent.generation));
         }
     }
+    let woken = publication::wake_idle(
+        tx,
+        app,
+        &candidates,
+        &["waiting", "sleeping", "queued"],
+        now,
+    )
+    .await?;
+    result.affected += i64::try_from(woken.len()).map_err(|_| invalid())?;
+    result
+        .successors
+        .extend(Box::pin(publication::advance_jobs(tx, app, &woken, now)).await?);
     Ok(())
 }
 

@@ -124,6 +124,7 @@ use zeroship_testkit::s3 as s3_fixture;
 mod schema_binding;
 mod schema_metadata;
 mod shared_server;
+mod wire;
 mod signal_models;
 mod step_retries;
 mod task_models;

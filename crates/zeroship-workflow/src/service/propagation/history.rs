@@ -155,7 +155,6 @@ async fn successors(
         if successor.app_id != job.app_id || !identities.insert(successor.id.clone()) {
             return Err(invalid());
         }
-        publication::exact(tx, successor).await?;
         match &successor.operation {
             JobOperation::Advance { .. } => advances += 1,
             JobOperation::Propagate {
@@ -170,5 +169,5 @@ async fn successors(
     if next_pages != usize::from(!result.finished) || advances > result.affected {
         return Err(invalid());
     }
-    Ok(())
+    publication::exact_all(tx, &job.app_id, &result.successors).await
 }

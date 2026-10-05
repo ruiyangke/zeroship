@@ -2,10 +2,10 @@
 //! them.
 
 use super::*;
-use crate::service::delivery::ATTEMPT_IO_CEILING;
-
-mod wire;
-use wire::{Recorded, Wire};
+use crate::service::{
+    delivery::ATTEMPT_IO_CEILING,
+    tests::wire::{Recorded, Wire},
+};
 
 /// Recipients of the page that sets the baseline.
 const FEW: u32 = 2;

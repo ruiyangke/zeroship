@@ -68,11 +68,19 @@ async fn seed_app(
         .id
 }
 
+/// Apps the unassigned backlog seeds.
+const BACKLOG: usize = 140;
+/// Backlog apps one seeding transaction writes. Each app is a production root
+/// run and topic publication of their own statements, so a batch is kept small
+/// enough that its transaction stays far inside the journal's per-transaction
+/// budget.
+const BACKLOG_BATCH: usize = 5;
+
 // Populate a backlog larger than the discovery budget without giving the
 // reopened host any authority for its apps. These rows model another host's
 // journal state; none may be selected, advanced or repaired by this host.
 async fn seed_unassigned_backlog(service: &WorkflowService, source: &AppId) {
-    let mut tx = service.begin().await.unwrap();
+    let tx = service.begin().await.unwrap();
     let source_deploy = journal_rows(
         &tx,
         "deploys",
@@ -80,44 +88,60 @@ async fn seed_unassigned_backlog(service: &WorkflowService, source: &AppId) {
     )
     .await
     .remove(0);
-    for _ in 0..140 {
-        let app = AppId::mint();
-        journal_insert(&tx, "app_state", json!({"id":storage_id(), "app_id":app.as_str(), "signal_epoch":0, "last_polled_at":-1})).await.unwrap();
-        let deploy_id = typed_id::generate("dep");
-        let mut deploy = serde_json::to_value(&source_deploy.0).unwrap();
-        deploy["id"] = json!(deploy_id);
-        deploy["app_id"] = json!(app.as_str());
-        journal_insert(&tx, "deploys", deploy).await.unwrap();
-        crate::service::app::insert_root_run(
-            &mut tx,
-            &app,
-            &crate::service::app::NewRun {
-                id: &typed_id::new_workflow_run_id(),
-                name: "Example",
-                deploy: &deploy_id,
-                options: &StartOptions::default(),
-                input_source: None,
-                max_input_bytes: AppPolicy::default().max_input_bytes,
-            },
-            0,
-        )
-        .await
-        .unwrap();
-        crate::service::signals::publish(
-            &mut tx,
-            &app,
-            "updates",
-            &SignalOptions {
-                signal_type: "ready".into(),
-                payload: json!(null),
-            },
-            "app",
-            0,
-        )
-        .await
-        .unwrap();
-    }
     tx.commit().await.unwrap();
+    for _ in 0..BACKLOG / BACKLOG_BATCH {
+        let mut tx = service.begin().await.unwrap();
+        for _ in 0..BACKLOG_BATCH {
+            seed_unassigned_app(&mut tx, &source_deploy).await;
+        }
+        tx.commit().await.unwrap();
+    }
+}
+
+/// One backlog app: its state, a copy of the source deployment, a root run and
+/// a topic publication.
+async fn seed_unassigned_app(tx: &mut Transaction, source_deploy: &crate::service::store::Row) {
+    let app = AppId::mint();
+    journal_insert(
+        tx,
+        "app_state",
+        json!({"id":storage_id(), "app_id":app.as_str(), "signal_epoch":0, "last_polled_at":-1}),
+    )
+    .await
+    .unwrap();
+    let deploy_id = typed_id::generate("dep");
+    let mut deploy = serde_json::to_value(&source_deploy.0).unwrap();
+    deploy["id"] = json!(deploy_id);
+    deploy["app_id"] = json!(app.as_str());
+    journal_insert(tx, "deploys", deploy).await.unwrap();
+    crate::service::app::insert_root_run(
+        tx,
+        &app,
+        &crate::service::app::NewRun {
+            id: &typed_id::new_workflow_run_id(),
+            name: "Example",
+            deploy: &deploy_id,
+            options: &StartOptions::default(),
+            input_source: None,
+            max_input_bytes: AppPolicy::default().max_input_bytes,
+        },
+        0,
+    )
+    .await
+    .unwrap();
+    crate::service::signals::publish(
+        tx,
+        &app,
+        "updates",
+        &SignalOptions {
+            signal_type: "ready".into(),
+            payload: json!(null),
+        },
+        "app",
+        0,
+    )
+    .await
+    .unwrap();
 }
 
 #[expect(

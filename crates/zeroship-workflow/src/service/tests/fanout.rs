@@ -16,6 +16,7 @@ mod latency;
 mod ordering;
 mod retention;
 mod rollback;
+mod subscriptions;
 
 #[derive(Clone)]
 pub(super) struct Grant {
@@ -196,4 +197,14 @@ paired!(
     sqlite_fanout_largest_admitted_page_bound_delivers_a_page,
     postgres_fanout_largest_admitted_page_bound_delivers_a_page,
     failures::page_bound
+);
+paired!(
+    sqlite_fanout_wakes_a_run_subscribed_twice_once,
+    postgres_fanout_wakes_a_run_subscribed_twice_once,
+    subscriptions::idle
+);
+paired!(
+    sqlite_fanout_passes_over_a_held_run_subscribed_twice,
+    postgres_fanout_passes_over_a_held_run_subscribed_twice,
+    subscriptions::not_idle
 );

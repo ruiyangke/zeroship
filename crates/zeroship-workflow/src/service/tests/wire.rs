@@ -7,6 +7,11 @@
 //! and it records each statement the store executes by the first journal table
 //! the statement names.
 
+#![expect(
+    clippy::future_not_send,
+    reason = "the proxy runs on the case's own compio runtime"
+)]
+
 use compio::{
     buf::BufResult,
     io::{AsyncRead, AsyncWriteExt},

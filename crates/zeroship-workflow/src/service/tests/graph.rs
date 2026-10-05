@@ -529,10 +529,16 @@ pub(super) struct Wait {
     pub child: String,
 }
 
+/// Seed parent waits on children with their accepted child checkpoints. Each
+/// distinct child's current member is read once, however many waits name it,
+/// so the seeding transaction does not grow by a read per wait.
 pub(super) async fn seed_waits(tx: &Transaction, app_id: &AppId, waits: &[Wait]) {
     assert!(!waits.is_empty());
-    let mut steps = Vec::new();
+    let mut members = std::collections::BTreeMap::new();
     for wait in waits {
+        if members.contains_key(&wait.child) {
+            continue;
+        }
         let (head, _) = app::current_run(tx, app_id, &wait.child)
             .await
             .unwrap()
@@ -541,6 +547,11 @@ pub(super) async fn seed_waits(tx: &Transaction, app_id: &AppId, waits: &[Wait])
             crate::service::continuations::member(tx, app_id, &wait.child, head.generation)
                 .await
                 .unwrap();
+        members.insert(wait.child.clone(), accepted.id);
+    }
+    let mut steps = Vec::new();
+    for wait in waits {
+        let accepted = &members[&wait.child];
         let mut step = StepCheckpoint::completed_run(
             wait.ordinal as i32,
             format!("child-{}", wait.ordinal),
@@ -552,7 +563,7 @@ pub(super) async fn seed_waits(tx: &Transaction, app_id: &AppId, waits: &[Wait])
         step.child_run_id = Some(wait.child.clone());
         steps.push(value!({"id":storage_id(), "app_id":app_id.as_str(), "run_id":wait.run.clone(),
             "generation":wait.generation, "ordinal":wait.ordinal, "name":step.name.clone(), "occurrence":0,
-            "origin_generation":wait.generation, "kind":"child", "state":"running", "record":journal::encode_checkpoint(&step, Some(&accepted.id), None).unwrap(), "child_member_id":accepted.id}));
+            "origin_generation":wait.generation, "kind":"child", "state":"running", "record":journal::encode_checkpoint(&step, Some(accepted.as_str()), None).unwrap(), "child_member_id":accepted.clone()}));
     }
     let edges: Vec<_> = waits
         .iter()

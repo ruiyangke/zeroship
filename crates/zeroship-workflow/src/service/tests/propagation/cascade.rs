@@ -31,7 +31,10 @@ pub(super) async fn pages(store: Rc<OrmStore>) {
     )
     .await;
     let terminal = children[0].clone();
-    let leased = children[1].clone();
+    // More leased children than one membership list holds, all within the
+    // first page, so their cancellation crosses a membership boundary.
+    let leased = children[1..=zeroship_data_orm::sql::MAX_MEMBERSHIP_LIST_LEN + 1].to_vec();
+    assert!(leased.len() < PropagationOptions::default().page_size as usize);
     update_runs(
         &service,
         &app,
@@ -39,13 +42,15 @@ pub(super) async fn pages(store: Rc<OrmStore>) {
         json!({"state":"completed", "due_at":null}),
     )
     .await;
-    update_runs(
-        &service,
-        &app,
-        std::slice::from_ref(&leased),
-        json!({"state":"running", "task_id":storage_id(), "due_at":i64::MAX}),
-    )
-    .await;
+    for child in &leased {
+        update_runs(
+            &service,
+            &app,
+            std::slice::from_ref(child),
+            json!({"state":"running", "task_id":storage_id(), "due_at":i64::MAX}),
+        )
+        .await;
+    }
 
     let settled = cancel_idle(&scope, &parent).await;
     assert_eq!(settled.outcome, JobOutcome::Completed {});
@@ -107,15 +112,15 @@ pub(super) async fn pages(store: Rc<OrmStore>) {
             _ => panic!("unexpected propagation successor"),
         }
     }
-    // Idle children become runnable with their cancellation; the leased child
-    // keeps its task and observes cancellation at renewal or completion.
-    assert_eq!(advanced.len(), children.len() - 2);
+    // Idle children become runnable with their cancellation; leased children
+    // keep their tasks and observe cancellation at renewal or completion.
+    assert_eq!(advanced.len(), children.len() - 1 - leased.len());
     for child in &children {
         let row = run_row(&service, &app, child).await;
         if *child == terminal {
             assert_eq!(row.text("control").unwrap(), "none");
             assert_eq!(row.text("state").unwrap(), "completed");
-        } else if *child == leased {
+        } else if leased.contains(child) {
             assert_eq!(row.text("control").unwrap(), "cancel");
             assert_eq!(row.integer("due_at").unwrap(), i64::MAX);
             assert_eq!(row.integer("frontier_revision").unwrap(), 1);

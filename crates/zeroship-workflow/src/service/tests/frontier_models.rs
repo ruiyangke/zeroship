@@ -291,18 +291,26 @@ async fn seed_history(
     generation: i64,
     entries: Vec<(StepCheckpoint, Option<serde_json::Value>)>,
 ) {
+    // Each distinct child's member is read once, however many entries name it,
+    // so the seeding transaction does not grow by a read per entry.
+    let mut members = std::collections::BTreeMap::new();
+    for child in entries
+        .iter()
+        .filter_map(|(step, _)| step.child_run_id.as_ref())
+    {
+        if !members.contains_key(child) {
+            let member = crate::service::continuations::member(tx, app_id, child, 0)
+                .await
+                .unwrap();
+            members.insert(child.clone(), member.id);
+        }
+    }
     let mut documents = Vec::new();
     for (step, error) in &entries {
-        let accepted = if let Some(child) = &step.child_run_id {
-            Some(
-                crate::service::continuations::member(tx, app_id, child, 0)
-                    .await
-                    .unwrap()
-                    .id,
-            )
-        } else {
-            None
-        };
+        let accepted = step
+            .child_run_id
+            .as_ref()
+            .map(|child| members[child].clone());
         documents.push(value!({
             "id":storage_id(), "app_id":app_id.as_str(), "run_id":id, "generation":generation,
             "ordinal":i64::from(step.ordinal), "name":step.name.clone(), "occurrence":0,

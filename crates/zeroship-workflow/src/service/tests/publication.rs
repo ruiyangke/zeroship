@@ -860,3 +860,58 @@ async fn retention(store: Rc<OrmStore>, _faults: &FaultDb) {
     );
     tx.commit().await.unwrap();
 }
+
+#[compio::test]
+async fn sqlite_making_a_run_due_names_the_generation_it_was_read_at() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = journal_file(dir.path());
+    schema::initialize_sqlite(&path).unwrap();
+    Box::pin(make_due_contract(Rc::new(sqlite_store(&path).await))).await;
+}
+
+#[compio::test]
+async fn postgres_making_a_run_due_names_the_generation_it_was_read_at() {
+    let fixture = PostgresFixture::start().await;
+    Box::pin(make_due_contract(Rc::new(fixture.store.clone()))).await;
+}
+
+/// A run read idle at one generation is made due only at that generation: a
+/// run named at a generation other than its own matches nothing and the
+/// attempt is refused, while the same run named at its own generation is made
+/// due.
+async fn make_due_contract(store: Rc<OrmStore>) {
+    use crate::service::{app, publication};
+    let (service, app_id, _, _deployments) = Box::pin(registered_service(store)).await;
+    let scope = service.fixture_app(app_id.clone());
+    let worker = WorkerIdentity::new("make-due".into()).unwrap();
+    let run = wait_on_topic(&service, &scope, &worker).await;
+    let mut tx = service.begin().await.unwrap();
+    app::lock_app(&mut tx, &app_id).await.unwrap();
+    let now = tx.now().await.unwrap();
+    assert_eq!(due_at(&tx, &app_id, &run).await, None);
+    assert!(matches!(
+        publication::make_due(&tx, &app_id, &[(run.as_str(), 1)], &["waiting"], now).await,
+        Err(WorkflowServiceError::Internal(_))
+    ));
+    drop(tx);
+    let mut tx = service.begin().await.unwrap();
+    app::lock_app(&mut tx, &app_id).await.unwrap();
+    assert_eq!(
+        due_at(&tx, &app_id, &run).await,
+        None,
+        "the refused attempt changed nothing"
+    );
+    publication::make_due(&tx, &app_id, &[(run.as_str(), 0)], &["waiting"], now)
+        .await
+        .unwrap();
+    assert_eq!(due_at(&tx, &app_id, &run).await, Some(now));
+    tx.commit().await.unwrap();
+}
+
+async fn due_at(tx: &Transaction, app: &AppId, run: &str) -> Option<i64> {
+    journal_rows(tx, "runs", json!({"app_id":app.as_str(), "id":run}))
+        .await
+        .remove(0)
+        .optional_integer("due_at")
+        .unwrap()
+}

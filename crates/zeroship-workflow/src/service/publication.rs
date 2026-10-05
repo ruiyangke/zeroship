@@ -337,6 +337,106 @@ pub(super) async fn advance_job(
     Ok(Box::pin(advance_jobs(tx, app, &[run], now)).await?.pop())
 }
 
+#[derive(FromRow)]
+#[orm(entity = runs)]
+struct Idle {
+    id: String,
+    generation: i64,
+}
+
+/// Make due each distinct candidate run that is idle at the generation it is
+/// named with: in one of `states`, with no live task and no control intent.
+/// Returns the runs it woke, in candidate order.
+///
+/// Each statement covers a membership list of runs, at most
+/// [`MAX_MEMBERSHIP_LIST_LEN`], so the round trips grow by one per membership
+/// list instead of one per run.
+pub(super) async fn wake_idle<'a>(
+    tx: &Transaction,
+    app: &AppId,
+    candidates: &[(&'a str, i64)],
+    states: &[&str],
+    now: i64,
+) -> Result<Vec<&'a str>, WorkflowServiceError> {
+    distinct(&candidates.iter().map(|(run, _)| *run).collect::<Vec<_>>())?;
+    let mut idle = BTreeMap::new();
+    for chunk in candidates.chunks(MAX_MEMBERSHIP_LIST_LEN) {
+        let rows = tx
+            .database()
+            .entity::<runs::Entity>()?
+            .find::<Idle>(
+                runs::app_id
+                    .eq(app.as_str())?
+                    .and(runs::id.in_values(chunk.iter().map(|(run, _)| *run))?)
+                    .and(idle_runs(states)?),
+                limited(chunk.len())?,
+            )
+            .await?;
+        idle.extend(rows.into_iter().map(|row| (row.id, row.generation)));
+    }
+    let woken: Vec<(&str, i64)> = candidates
+        .iter()
+        .filter(|(run, generation)| idle.get(*run) == Some(generation))
+        .copied()
+        .collect();
+    make_due(tx, app, &woken, states, now).await?;
+    Ok(woken.into_iter().map(|(run, _)| run).collect())
+}
+
+/// Make due each of `woken`, a distinct run read idle at the generation it is
+/// named with.
+///
+/// The caller holds the app lock (`lock_app_state`) for its whole transaction,
+/// and every journal writer of a run takes that lock first, so no run read idle
+/// can change before this update. The update still names each run's
+/// generation and idle state, so a run that did change matches nothing and the
+/// changed-row count refuses the attempt rather than waking it.
+pub(super) async fn make_due(
+    tx: &Transaction,
+    app: &AppId,
+    woken: &[(&str, i64)],
+    states: &[&str],
+    now: i64,
+) -> Result<(), WorkflowServiceError> {
+    for chunk in woken.chunks(MAX_MEMBERSHIP_LIST_LEN) {
+        let mut named: Option<zeroship_data_orm::orm::Filter<runs::Entity>> = None;
+        for (run, generation) in chunk {
+            let member = runs::id.eq(*run)?.and(runs::generation.eq(*generation)?);
+            named = Some(match named {
+                Some(named) => named.or(member),
+                None => member,
+            });
+        }
+        let Some(named) = named else {
+            continue;
+        };
+        let changed = Box::pin(
+            tx.database().entity::<runs::Entity>()?.update_many(
+                runs::app_id
+                    .eq(app.as_str())?
+                    .and(named)
+                    .and(idle_runs(states)?),
+                runs::due_at.set(Some(now))?,
+            ),
+        )
+        .await?;
+        if usize::try_from(changed) != Ok(chunk.len()) {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
+
+/// Runs in one of `states` with no live task and no control intent.
+fn idle_runs(
+    states: &[&str],
+) -> Result<zeroship_data_orm::orm::Filter<runs::Entity>, WorkflowServiceError> {
+    Ok(runs::task_id
+        .eq(None::<&str>)?
+        .and(runs::control.eq("none")?)
+        .and(runs::state.in_values(states.iter().copied())?))
+}
+
 /// [`advance_job`] for distinct `runs` together, returning the runnable intents
 /// recorded for them in `runs` order.
 ///

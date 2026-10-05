@@ -18,6 +18,7 @@ use zeroship_data_orm::sql::MAX_ROW_LIMIT;
 mod cascade;
 mod corruption;
 mod fence;
+mod latency;
 mod notify;
 mod rollback;
 
@@ -79,7 +80,14 @@ paired!(
     corruption::damage
 );
 
-/// Seed runs in batches so fixture setup stays within one transaction's bound.
+/// Runs one seeding transaction creates. Each run is a production root-run
+/// insertion of its own statements, so a batch is kept small enough that its
+/// transaction stays far inside the journal's per-transaction budget.
+const SEED_BATCH: usize = 10;
+
+/// Seed `count` root runs through the production insertion, in batches of
+/// [`SEED_BATCH`] per transaction, reading the app's deployment and the
+/// journal clock once per batch.
 async fn seed_runs(
     service: &WorkflowService,
     app: &AppId,
@@ -90,33 +98,58 @@ async fn seed_runs(
     while runs.len() < count {
         let mut tx = service.begin().await.unwrap();
         app::lock_app(&mut tx, app).await.unwrap();
-        for _ in 0..(count - runs.len()).min(100) {
-            runs.push(graph::seed_run(&mut tx, app, name, None).await);
+        let deploy = app::active_deploy(&mut tx, app).await.unwrap();
+        let now = tx.now().await.unwrap();
+        for _ in 0..(count - runs.len()).min(SEED_BATCH) {
+            let id = typed_id::new_workflow_run_id();
+            app::insert_root_run(
+                &mut tx,
+                app,
+                &app::NewRun {
+                    id: &id,
+                    name,
+                    deploy: &deploy.id,
+                    options: &StartOptions::default(),
+                    input_source: None,
+                    max_input_bytes: AppPolicy::default().max_input_bytes,
+                },
+                now,
+            )
+            .await
+            .unwrap();
+            runs.push(id);
         }
         tx.commit().await.unwrap();
     }
     runs
 }
 
+/// Apply one `patch` to every run of `runs`, a membership list per statement.
 async fn update_runs(
     service: &WorkflowService,
     app: &AppId,
     runs: &[String],
     patch: serde_json::Value,
 ) {
-    for chunk in runs.chunks(100) {
-        let tx = service.begin().await.unwrap();
-        for run in chunk {
-            journal_update(
-                &tx,
-                "runs",
-                json!({"app_id":app.as_str(), "id":run}),
-                patch.clone(),
-            )
-            .await;
-        }
-        tx.commit().await.unwrap();
+    use zeroship_data_orm::orm::{Entity, Operation, Output};
+    let tx = service.begin().await.unwrap();
+    for chunk in runs.chunks(zeroship_data_orm::sql::MAX_MEMBERSHIP_LIST_LEN) {
+        let changed = tx
+            .database()
+            .collection(crate::service::models::runs::Entity::COLLECTION)
+            .unwrap()
+            .execute(Operation::Update {
+                filter: zeroship_data_orm::value!({"app_id":app.as_str(), "id":{"$in":chunk.to_vec()}}),
+                patch: patch.clone().into(),
+                many: true,
+            })
+            .await
+            .unwrap();
+        assert!(
+            matches!(changed, Output::Count(count) if usize::try_from(count) == Ok(chunk.len()))
+        );
     }
+    tx.commit().await.unwrap();
 }
 
 async fn run_row(service: &WorkflowService, app: &AppId, run: &str) -> Row {
