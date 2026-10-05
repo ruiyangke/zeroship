@@ -228,8 +228,10 @@ handler is `api::deploy`:
    reconciled.
 6. One Control catalog transaction (`publication::catalog::accept`): schema
    admission against the app's newest applied migration, the `app_deploys`
-   row, the app's current deployment pointer, the next lifecycle revision with
-   an activation intent (unless the app is archived), and the command receipt.
+   row, the app's current deployment pointer, whether that deployment declares
+   a workflow, the next lifecycle revision with an activation intent (unless
+   the app is archived, or neither the deployment nor the one it replaces
+   declares a workflow), and the command receipt.
 ```
 
 Any refusal or failure in step 6 rolls back every write in it. Deploy never
@@ -262,9 +264,10 @@ frozen execution zone, read from `zeroship.apps.execution_zone_id`; the manager
 records it on the app's queue scope, and workers of that zone are the only ones
 whose claims reach the app's jobs. An app whose attempt fails waits out a retry delay that
 doubles to a cap and resets after a success, while other apps keep publishing.
-Archive and restore commit disable and activation intents through the same
-catalog, and the deployment collector keeps a pending activation's bundle
-until the manager's queue hold takes over.
+Archive commits a disable intent only when the app's active deployment declared
+a workflow; restore republishes an activation only for a staged deployment that
+declares one. Both run through the same catalog, and the deployment collector
+keeps a pending activation's bundle until the manager's queue hold takes over.
 
 Control refuses to start when publication could not run: without its service
 key, or with a `control.workflow_coordinator_url` the manager client refuses.

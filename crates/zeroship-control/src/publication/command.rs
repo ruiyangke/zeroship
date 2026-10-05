@@ -201,8 +201,9 @@ fn schedule_refusal(error: zeroship_workflow_manager::Error) -> String {
 /// unchanged, including the blob counters of the first ingest.
 ///
 /// `lifecycle_revision` names the activation this deploy committed for
-/// publication; `None` means the app was archived and the deploy only staged
-/// its code. The manager acknowledges publication asynchronously, so no
+/// publication; `None` means nothing was activated: the deploy is staged on an
+/// archived app, or neither it nor the deployment it replaces declares a
+/// workflow. The manager acknowledges publication asynchronously, so no
 /// synchronization state appears here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

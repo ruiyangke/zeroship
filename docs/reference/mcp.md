@@ -187,7 +187,7 @@ The result carries:
 | `deploy_hash` | string | The deployed artifact's content hash: 64 lowercase hex characters (a bare sha256 digest, no `sha256:` prefix). |
 | `blobs_uploaded` | number | Artifact blobs this command wrote to the blob store. |
 | `blobs_deduped` | number | Artifact blobs already present and reused. |
-| `lifecycle_revision` | number or null | The revision that activated the deploy; `null` when the app is archived and the deploy is staged. |
+| `lifecycle_revision` | number or null | The revision that activated the deploy; `null` when nothing was activated: the deploy is staged on an archived app, or neither the deployed artifact nor the deployment it replaces declares a workflow. |
 | `replayed` | boolean | `true` when this answers a repeat of a command the control plane already accepted. |
 
 **Resuming an unknown outcome.** Each call without `commandId` is a new deploy

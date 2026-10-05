@@ -22,6 +22,7 @@ zeroship_data_orm::orm::schema! {
             archived_at: Nullable<Timestamp>,
             deleted_at: Nullable<Timestamp>,
             updated_at: Timestamp,
+            deploy_declares_workflows: Boolean,
         }
 
         database_bindings {

@@ -540,11 +540,15 @@ and nothing was accepted. `zeroship deploy` prints its `command_id` before it
 uploads, resends an unanswered command a bounded number of times, and resumes
 one with `--command-id=<id>`.
 
-**Acceptance is durable publication, not activation.** A live app's deploy
-takes the app's next lifecycle revision and publishes an activation. A `200`
-means the deployment is durably published, not that its schedules already run.
-An archived app's deploy is staged: its `lifecycle_revision` is `null`, and
-restoring the app activates the staged deployment under a fresh revision.
+**Acceptance is where publication stands.** A live app's deploy takes the app's
+next lifecycle revision and publishes an activation whenever either the
+deployed artifact or the deployment it replaces declares a workflow, and the
+activation carries the deployed artifact's registration. `lifecycle_revision`
+is `null` when the deploy is staged on an archived app, or when neither the
+deployed artifact nor the deployment it replaces declares a workflow. An
+archived app's deploy is staged, and restoring the app activates the staged
+deployment under a fresh revision. A `200` means the deployment is durably
+committed, not that its schedules already run.
 
 ## Errors
 

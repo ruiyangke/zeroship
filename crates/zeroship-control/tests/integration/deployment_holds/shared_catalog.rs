@@ -13,7 +13,7 @@ use zeroship_control::{
     sessions::CATALOG,
 };
 
-use super::deployment_commands::{deploy, labelled};
+use super::deployment_commands::{deploy, labelled, workflow};
 
 const GATE: i64 = 73_921_901;
 
@@ -248,7 +248,7 @@ async fn concurrent_deploys_to_many_apps_share_the_session_bound() {
     let deploys = async {
         let outcomes = join_all(
             apps.iter()
-                .map(|app| deploy(&registry, app, &actor, labelled(app.as_str()))),
+                .map(|app| deploy(&registry, app, &actor, workflow(app.as_str()))),
         )
         .await;
         done.set(true);
@@ -316,7 +316,7 @@ async fn concurrent_deploys_to_one_app_serialize_on_its_row_lock() {
             &registry,
             &target,
             &actor,
-            labelled(&format!("catalog-serial-{index}")),
+            workflow(&format!("catalog-serial-{index}")),
         )
     }));
     // Observation never ends the test itself: it always releases the gate, so
@@ -380,7 +380,7 @@ async fn a_dropped_caller_rolls_back_its_catalog_transaction() {
     let (registry, _) = bounded(&fixture, 1).await;
     let (blocker, gate_holder) = gate(&fixture).await;
     let waited = compio::time::timeout(Duration::from_secs(20), async {
-        let pending = deploy(&registry, &abandoned, &actor, labelled("abandoned"));
+        let pending = deploy(&registry, &abandoned, &actor, workflow("abandoned"));
         let watch = until(&fixture, "the deploy waits at the gate", || async {
             blocked_by(&fixture, gate_holder).await.len() == 1
         });
@@ -398,7 +398,7 @@ async fn a_dropped_caller_rolls_back_its_catalog_transaction() {
     release(&blocker).await;
     // The catalog has one session, so this deploy runs only after the
     // abandoned transaction has released it.
-    let committed = deploy(&registry, &later, &actor, labelled("later")).await;
+    let committed = deploy(&registry, &later, &actor, workflow("later")).await;
     assert!(matches!(committed, Ok(Acceptance::Accepted(_))), "{committed:?}");
     assert_eq!(revisions(&fixture, &later).await, [1]);
     assert!(revisions(&fixture, &abandoned).await.is_empty());

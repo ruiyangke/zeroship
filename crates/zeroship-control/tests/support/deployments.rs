@@ -33,6 +33,15 @@ pub fn labelled(label: &str) -> Manifest {
     manifest
 }
 
+/// A labelled manifest that declares one workflow and no schedules, so a deploy
+/// provisions the app's workflow journal and publishes an activation without
+/// generating a calendar.
+pub fn workflow(label: &str) -> Manifest {
+    let mut manifest = labelled(label);
+    manifest.workflows = Some(serde_json::json!(["Workflow"]));
+    manifest
+}
+
 /// The verified deployment for `manifest`.
 pub fn verified(manifest: Manifest) -> VerifiedDeployment {
     let (hash, json) = sealed(manifest);

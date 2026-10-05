@@ -577,8 +577,8 @@ fn cmd_deploy(args: &[String]) {
             );
             if accepted.lifecycle_revision.is_none() {
                 eprintln!(
-                    "  the app is archived: this deployment is staged and becomes live when \
-                     the app is restored"
+                    "  no workflow activation was published: the app is archived, or neither \
+                     the deployment nor the one it replaces declares a workflow"
                 );
             }
         }
@@ -1014,7 +1014,8 @@ struct Accepted {
     blobs_uploaded: u64,
     blobs_deduped: u64,
     /// The app lifecycle revision that activates this deployment; absent when
-    /// the app is archived and the deployment is only staged.
+    /// no activation was published: the app is archived, or neither the
+    /// deployment nor the one it replaces declares a workflow.
     lifecycle_revision: Option<u64>,
 }
 

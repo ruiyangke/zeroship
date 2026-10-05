@@ -29,7 +29,7 @@ use zeroship_core::{
 };
 use zeroship_workflow_manager::deployments::DeploymentHolds;
 
-use super::deployment_commands::{command, deploy, labelled, sealed, verified};
+use super::deployment_commands::{command, deploy, labelled, sealed, verified, workflow};
 
 /// One intent row as `(revision, action, deploy_id, state, receipt)`.
 type IntentRow = (i64, String, Option<String>, String, Option<String>);
@@ -321,7 +321,7 @@ async fn an_empty_schedule_list_fences_the_previous_calendar() {
     };
     assert!(calendar().await.is_some(), "the declared schedule runs");
 
-    let without = accept(&fixture, &app, &actor, labelled("without-schedule")).await;
+    let without = accept(&fixture, &app, &actor, scheduled("without-schedule", &[])).await;
     let registration: RegisterSchedules = serde_json::from_str(
         &fixture
             .platform
@@ -345,6 +345,158 @@ async fn an_empty_schedule_list_fences_the_previous_calendar() {
     assert_eq!(
         selection(&fixture, &app).await,
         Some((2, true, Some((without.deploy_id.as_str().to_owned(), 2))))
+    );
+}
+
+/// On an app whose deployments declare no workflow, a workflow-less deploy
+/// stages its code with no revision and no outbox row; the same app's next
+/// deploy that declares one still gets its activation, so the gate is the
+/// manifests, not the app.
+#[compio::test(crate = "crate::support::live::system")]
+async fn a_deploy_publishes_an_activation_only_when_it_declares_a_workflow() {
+    let fixture = Fixture::new().await;
+    let actor = fixture.actor().await;
+    let app = app(&fixture, "publication-declares").await;
+
+    let plain = accept(&fixture, &app, &actor, labelled("no-workflow")).await;
+    assert_eq!(
+        plain.lifecycle_revision, None,
+        "a workflow-less deploy allocates no lifecycle revision"
+    );
+    assert!(
+        intents(&fixture, &app).await.is_empty(),
+        "a workflow-less deploy leaves no outbox row"
+    );
+
+    let declared = accept(&fixture, &app, &actor, scheduled("declared", &[])).await;
+    assert_eq!(declared.lifecycle_revision.map(Revision::get), Some(1));
+    let rows = intents(&fixture, &app).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (rows[0].0, rows[0].1.as_str(), rows[0].2.as_deref()),
+        (1, "activate", Some(declared.deploy_id.as_str()))
+    );
+    assert_eq!(rows[0].3, PENDING);
+}
+
+/// Archiving publishes a disable only when the app's active deployment declared
+/// a workflow. A workflow-less app records the marker and nothing else; a
+/// workflow app still sends the disable that fences its calendar.
+#[compio::test(crate = "crate::support::live::system")]
+async fn archiving_publishes_a_disable_only_for_a_workflow_deployment() {
+    let fixture = Fixture::new().await;
+    let actor = fixture.actor().await;
+
+    let plain = app(&fixture, "archive-no-workflow").await;
+    accept(&fixture, &plain, &actor, labelled("plain")).await;
+    let archived = fixture
+        .state
+        .registry
+        .archive_app(&plain)
+        .await
+        .unwrap()
+        .expect("the app exists");
+    assert!(archived.archived_at.is_some(), "the marker committed");
+    assert!(
+        intents(&fixture, &plain).await.is_empty(),
+        "a workflow-less archive publishes nothing"
+    );
+
+    let flows = app(&fixture, "archive-with-workflow").await;
+    accept(&fixture, &flows, &actor, scheduled("flows", &[])).await;
+    fixture
+        .state
+        .registry
+        .archive_app(&flows)
+        .await
+        .unwrap()
+        .expect("the app exists");
+    let rows = intents(&fixture, &flows).await;
+    assert_eq!(rows.len(), 2, "the activation and its disable");
+    assert_eq!(
+        (rows[1].0, rows[1].1.as_str(), rows[1].2.as_deref()),
+        (2, "disable", None)
+    );
+    assert_eq!((rows[0].3.as_str(), rows[1].3.as_str()), (PENDING, PENDING));
+}
+
+/// A workflow-less deploy that supersedes a workflow deployment still
+/// publishes an activation, carrying an empty registration, so the manager
+/// replaces the superseded registration instead of running its schedules
+/// against the old deployment. Once neither the deployment nor the one it
+/// replaces declares a workflow, a further deploy publishes nothing.
+#[compio::test(crate = "crate::support::live::system")]
+async fn a_workflow_less_deploy_fences_the_superseded_registration() {
+    let fixture = Fixture::new().await;
+    let manager = fixture.coordinator().await;
+    let actor = fixture.actor().await;
+    let app = app(&fixture, "publication-supersede").await;
+    let mut publisher = manager_publisher(&fixture, &manager).await;
+
+    let running = || async {
+        fixture
+            .platform
+            .admin
+            .query_one(
+                "SELECT COUNT(*)::bigint FROM workflow_manager.schedules \
+                  WHERE app_id=$1 AND next_at IS NOT NULL",
+                &[&app.as_str()],
+            )
+            .await
+            .unwrap()
+            .get::<_, i64>(0)
+    };
+
+    let first = accept(&fixture, &app, &actor, scheduled("declares", &["nightly"])).await;
+    assert_eq!(first.lifecycle_revision.map(Revision::get), Some(1));
+    assert_eq!(publish_all(&mut publisher).await, 1);
+    assert_eq!(running().await, 1, "the declared schedule runs");
+
+    let superseding = accept(&fixture, &app, &actor, labelled("supersedes")).await;
+    assert_eq!(
+        superseding.lifecycle_revision.map(Revision::get),
+        Some(2),
+        "a workflow-less deploy that replaces a workflow deployment activates to fence it"
+    );
+    let registration: RegisterSchedules = serde_json::from_str(
+        &fixture
+            .platform
+            .admin
+            .query_one(
+                "SELECT registration FROM zeroship.app_lifecycle_intents \
+                  WHERE app_id=$1 AND revision=2",
+                &[&app.as_str()],
+            )
+            .await
+            .unwrap()
+            .get::<_, String>(0),
+    )
+    .unwrap();
+    assert!(
+        registration.schedules.is_empty(),
+        "the activation installs no schedules"
+    );
+    let rows = intents(&fixture, &app).await;
+    assert_eq!(
+        (rows[1].0, rows[1].1.as_str(), rows[1].2.as_deref()),
+        (2, "activate", Some(superseding.deploy_id.as_str()))
+    );
+    assert_eq!(publish_all(&mut publisher).await, 1);
+    assert_eq!(
+        running().await,
+        0,
+        "the superseded deployment's schedules stopped"
+    );
+
+    let again = accept(&fixture, &app, &actor, labelled("still-none")).await;
+    assert_eq!(
+        again.lifecycle_revision, None,
+        "neither deployment declares a workflow, so nothing is activated"
+    );
+    assert_eq!(
+        intents(&fixture, &app).await.len(),
+        2,
+        "no outbox row is added"
     );
 }
 
@@ -548,7 +700,7 @@ async fn a_blocked_app_does_not_starve_other_apps() {
     let mut apps = Vec::new();
     for name in ["publication-a", "publication-b", "publication-c"] {
         let app = app(&fixture, name).await;
-        accept(&fixture, &app, &actor, labelled(name)).await;
+        accept(&fixture, &app, &actor, workflow(name)).await;
         apps.push(app);
     }
     apps.sort();
@@ -609,7 +761,7 @@ async fn a_manager_conflict_leaves_the_intent_pending() {
     let manager = fixture.coordinator().await;
     let actor = fixture.actor().await;
     let app = app(&fixture, "publication-conflict").await;
-    let accepted = accept(&fixture, &app, &actor, labelled("conflict")).await;
+    let accepted = accept(&fixture, &app, &actor, workflow("conflict")).await;
     // Another authority already moved the manager past revision 1.
     let direct = ControlCoordinator::new(
         &origin(&manager),
@@ -653,14 +805,14 @@ async fn a_pending_activation_keeps_its_bundle_until_the_queue_hold_takes_over()
     let app = app(&fixture, "publication-retention").await;
     let mut accepted = Vec::new();
     for label in ["retained-a", "retained-b", "retained-c"] {
-        let (hash, manifest) = sealed(labelled(label));
+        let (hash, manifest) = sealed(workflow(label));
         fixture
             .state
             .blob_store
             .put_manifest(&app, &hash, manifest.as_bytes())
             .await
             .unwrap();
-        accepted.push(accept(&fixture, &app, &actor, labelled(label)).await);
+        accepted.push(accept(&fixture, &app, &actor, workflow(label)).await);
     }
     // A historical deployment with no pending intent, eligible by every other rule.
     let (control_hash, control_manifest) = sealed(labelled("retained-control"));
@@ -756,6 +908,62 @@ async fn a_pending_activation_keeps_its_bundle_until_the_queue_hold_takes_over()
     ));
 }
 
+/// A workflow-less app's superseded bundle is reclaimable. No activation intent
+/// exists to hold it, so collection deletes the older deployment's manifest
+/// while the newest stays.
+#[compio::test(crate = "crate::support::live::system")]
+async fn a_workflow_less_deploys_superseded_bundle_is_reclaimed() {
+    let fixture = Fixture::new().await;
+    let actor = fixture.actor().await;
+    let app = app(&fixture, "retention-no-workflow").await;
+
+    let mut accepted = Vec::new();
+    for label in ["reclaim-a", "reclaim-b"] {
+        let (hash, manifest) = sealed(labelled(label));
+        fixture
+            .state
+            .blob_store
+            .put_manifest(&app, &hash, manifest.as_bytes())
+            .await
+            .unwrap();
+        accepted.push(accept(&fixture, &app, &actor, labelled(label)).await);
+    }
+    assert!(
+        intents(&fixture, &app).await.is_empty(),
+        "no activation stands between the older bundle and collection"
+    );
+    fixture
+        .platform
+        .admin
+        .execute(
+            "UPDATE zeroship.app_deploys SET activated_at=now()-interval '1 day' WHERE id=$1",
+            &[&accepted[0].deploy_id.as_str()],
+        )
+        .await
+        .unwrap();
+
+    let stats = collect_once(&fixture).await;
+    assert_eq!(stats.failed, 0);
+    assert_eq!(
+        retention(&fixture, accepted[0].deploy_id.as_str()).await,
+        "deleted",
+        "the superseded bundle was reclaimed"
+    );
+    assert_eq!(
+        retention(&fixture, accepted[1].deploy_id.as_str()).await,
+        "available",
+        "the newest deployment stays"
+    );
+    assert!(matches!(
+        fixture
+            .state
+            .blob_store
+            .get_manifest(&app, &accepted[0].deploy_hash)
+            .await,
+        Err(zeroship_bundle::BlobError::NotFound(_))
+    ));
+}
+
 /// A fault raised inside the catalog callback after every write is staged
 /// rolls back the pointer, the deployment row, the revision, the intent and
 /// the receipt together; archive and restore behave the same way.
@@ -766,7 +974,7 @@ async fn a_callback_fault_rolls_back_every_staged_catalog_write() {
     let app = app(&fixture, "publication-rollback").await;
     let database = catalog::connect(&fixture.control_url, CatalogRole::Publication).await.unwrap();
     let empty = snapshot(&fixture, &app).await;
-    let faulted = command(&app, &actor, verified(labelled("faulted")));
+    let faulted = command(&app, &actor, verified(workflow("faulted")));
     let outcome = catalog::transact(&database, |tx| async move {
         let accepted =
             catalog::accept(&tx, &faulted, zeroship_control::publication::now()?).await?;
@@ -777,7 +985,7 @@ async fn a_callback_fault_rolls_back_every_staged_catalog_write() {
     assert!(matches!(outcome, Err(CatalogError::Storage(_))));
     assert_eq!(snapshot(&fixture, &app).await, empty);
 
-    accept(&fixture, &app, &actor, labelled("committed")).await;
+    accept(&fixture, &app, &actor, workflow("committed")).await;
     let committed = snapshot(&fixture, &app).await;
     let target = &app;
     for restore in [false, true] {
@@ -961,7 +1169,7 @@ impl Backoff<'_> {
     async fn pass(&mut self, now: Instant, expect: Expect) {
         self.passes += 1;
         let label = format!("backoff-healthy-{}", self.passes);
-        let revision = accept(self.fixture, &self.healthy, &self.actor, labelled(&label))
+        let revision = accept(self.fixture, &self.healthy, &self.actor, workflow(&label))
             .await
             .lifecycle_revision
             .expect("the healthy app is active")
@@ -1005,7 +1213,7 @@ async fn a_failing_app_backs_off_while_other_apps_publish_every_pass() {
         config,
     )
     .unwrap();
-    accept(&fixture, &failing, &actor, labelled("backoff-failing")).await;
+    accept(&fixture, &failing, &actor, workflow("backoff-failing")).await;
     let mut case = Backoff {
         fixture: &fixture,
         actor: actor.clone(),
@@ -1054,7 +1262,7 @@ async fn a_failing_app_backs_off_while_other_apps_publish_every_pass() {
         .iter()
         .all(|row| row.3 == ACKNOWLEDGED));
     *flaky.refused.borrow_mut() = Some(failing.clone());
-    accept(&fixture, &failing, &actor, labelled("backoff-failing-again")).await;
+    accept(&fixture, &failing, &actor, workflow("backoff-failing-again")).await;
     let later = due + Duration::from_millis(1);
     case.pass(later, Expect::Fails).await;
     assert_eq!(
@@ -1105,7 +1313,7 @@ async fn a_later_pass_publishes_after_the_catalog_session_is_terminated() {
         .collect();
     assert_eq!(own.len(), 1, "the publisher's database holds one session");
 
-    accept(&fixture, &app, &actor, labelled("before-termination")).await;
+    accept(&fixture, &app, &actor, workflow("before-termination")).await;
     assert_eq!(publish_all(&mut publisher).await, 1);
 
     let terminated: bool = fixture
@@ -1124,7 +1332,7 @@ async fn a_later_pass_publishes_after_the_catalog_session_is_terminated() {
     .await
     .expect("the terminated session left pg_stat_activity");
 
-    let second = accept(&fixture, &app, &actor, labelled("after-termination")).await;
+    let second = accept(&fixture, &app, &actor, workflow("after-termination")).await;
     let revision = second.lifecycle_revision.unwrap().get();
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
@@ -1201,7 +1409,7 @@ async fn publication_starts_only_with_a_signer_and_a_usable_coordinator() {
 
     let actor = fixture.actor().await;
     let app = app(&fixture, "publication-started").await;
-    let accepted = accept(&fixture, &app, &actor, labelled("started")).await;
+    let accepted = accept(&fixture, &app, &actor, workflow("started")).await;
     assert_eq!(intents(&fixture, &app).await[0].3, PENDING);
     publisher::start(
         catalog,

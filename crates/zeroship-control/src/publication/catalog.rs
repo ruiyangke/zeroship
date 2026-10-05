@@ -83,8 +83,12 @@ impl From<CatalogError> for zeroship_workflow_manager::deployments::Error {
 pub enum Transition {
     /// The app was already in the requested state; no revision was allocated.
     Unchanged,
-    /// Restored without a staged deployment to activate.
+    /// Restored with nothing to activate: no staged deployment, or one whose
+    /// manifest declares no workflow.
     Restored,
+    /// Archived with no lifecycle intent: the active deployment declared no
+    /// workflow, so no disable was published.
+    Archived,
     /// The transition committed an intent at this lifecycle revision.
     Published(Revision),
 }
@@ -166,6 +170,7 @@ struct AppRow {
     lifecycle_revision: i64,
     archived_at: Option<UtcInstant>,
     execution_zone_id: String,
+    deploy_declares_workflows: bool,
 }
 
 #[derive(FromRow)]
@@ -283,8 +288,14 @@ impl ReceiptRow {
 /// Accept a deploy command in the caller's transaction.
 ///
 /// Recheck its receipt, admit the schema, select the deployment, move the app
-/// pointer, publish an activation for an active app and record the receipt.
-/// An exact retry replays the stored result before any other check.
+/// pointer, persist whether the selected deployment declares a workflow, then
+/// publish an activation for an active app when either the selected deployment
+/// or the one it replaces declares a workflow. The activation carries the
+/// selected deployment's registration, empty when it declares none, so the
+/// manager replaces the registration it held for the superseded deployment. No
+/// activation is published when the app is archived, or when neither the
+/// selected deployment nor the one it replaces declares a workflow. An exact
+/// retry replays the stored result before any other check.
 ///
 /// # Errors
 /// Refuses absent or deleted apps, receipt conflicts, schema admission,
@@ -311,11 +322,25 @@ pub async fn accept(
                 apps::deploy_hash
                     .set(Some(command.deployment.hash()))?
                     .and(apps::manifest_json.set(Some(command.deployment.manifest_json()))?)?
+                    .and(
+                        apps::deploy_declares_workflows
+                            .set(command.deployment.declares_workflows())?,
+                    )?
                     .and(apps::updated_at.set(now)?)?,
             )
             .await?,
     )?;
-    let lifecycle_revision = if state.archived_at.is_none() {
+    // A live app needs an activation when the deployment being selected has a
+    // registration to install, or when the deployment it replaces had one to
+    // remove. The intent carries the selected deployment's registration, empty
+    // for a workflow-less deploy, so the manager fences the superseded
+    // registration instead of running its schedules against the old code.
+    // Nothing to install and nothing to remove means no intent: a row for it
+    // would stay pending forever, hold its bundle against collection, and
+    // accumulate one per deploy.
+    let lifecycle_revision = if state.archived_at.is_none()
+        && (command.deployment.declares_workflows() || state.deploy_declares_workflows)
+    {
         let revision = allocate_revision(tx, app, state.lifecycle_revision).await?;
         let registration =
             serde_json::to_string(&command.deployment.registration(
@@ -408,8 +433,10 @@ pub async fn lookup(
         .transpose()
 }
 
-/// Archive an active app: record the marker and a disable intent at the next
-/// lifecycle revision. Archiving an archived app changes nothing.
+/// Archive an active app. An app whose active deployment declared a workflow
+/// records the marker and a disable intent at the next lifecycle revision; one
+/// whose active deployment declared none records only the marker, because there
+/// is no activation to disable. Archiving an archived app changes nothing.
 ///
 /// # Errors
 /// Reports exhausted revisions and storage failures. `Ok(None)` means the app
@@ -424,6 +451,19 @@ pub async fn archive(
     };
     if state.archived_at.is_some() {
         return Ok(Some(Transition::Unchanged));
+    }
+    if !state.deploy_declares_workflows {
+        changed(
+            tx.entity::<apps::Entity>()?
+                .update_many(
+                    apps::id.eq(app.as_str())?.and(apps::archived_at.is_null()),
+                    apps::archived_at
+                        .set(Some(now))?
+                        .and(apps::updated_at.set(now)?)?,
+                )
+                .await?,
+        )?;
+        return Ok(Some(Transition::Archived));
     }
     let revision = allocate_revision(tx, app, state.lifecycle_revision).await?;
     changed(
@@ -441,8 +481,9 @@ pub async fn archive(
 }
 
 /// Restore an archived app after the existing migration checks, then publish
-/// a fresh activation of its staged deployment. Restoring an active app, or an
-/// app with no staged deployment, publishes nothing.
+/// a fresh activation of its staged deployment. Restoring an active app, an
+/// app with no staged deployment, or an app whose staged deployment declares no
+/// workflow publishes nothing.
 ///
 /// # Errors
 /// Refuses an invalid retained manifest, schema
@@ -490,6 +531,11 @@ pub async fn restore(
     let Some(staged) = staged else {
         return Ok(Some(Transition::Restored));
     };
+    // A staged deployment that declares no workflow has nothing to activate, so
+    // restore commits the marker without publishing.
+    if !staged.declares_workflows() {
+        return Ok(Some(Transition::Restored));
+    }
     let deployment =
         existing_deployment(tx, app, staged.hash())
             .await?

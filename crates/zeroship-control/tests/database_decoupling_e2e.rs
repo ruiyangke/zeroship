@@ -1972,10 +1972,14 @@ async fn a_migration_one_app_applies_to_a_shared_database_does_not_fail_the_othe
     // built against BEFORE the migration; only the compiler label differs from
     // the artifact already live, so this is a new deployment rather than a
     // replay of the stored receipt.
-    let redeploy = manifest_labelled(
+    let mut redeploy = manifest_labelled(
         "after-a-co-tenants-migration",
         vec![(SHARED_LABEL, shared, true)],
     );
+    // A deployment that declares a workflow so the active-app deploy allocates
+    // the lifecycle revision this case asserts; the workflow set is unrelated
+    // to the database admission under test.
+    redeploy.workflows = Some(serde_json::json!(["Workflow"]));
     assert!(
         redeploy
             .runtime_descriptor

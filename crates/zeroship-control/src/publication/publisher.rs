@@ -556,6 +556,12 @@ pub async fn start(
     // Built here to refuse, and again on the catalog thread to use: the HTTP
     // client's pooled streams belong to the thread that opens them.
     manager(coordinator_url, service_auth.clone(), options.clone())?;
+    // One line naming the manager this process publishes to, so a coordinator
+    // that is not running is visible before the first retry warning.
+    tracing::info!(
+        coordinator = %coordinator_url,
+        "control: lifecycle publisher will publish to the workflow coordinator"
+    );
     let url = coordinator_url.to_owned();
     catalog
         .spawn(move |database, closing| {

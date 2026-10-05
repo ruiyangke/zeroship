@@ -123,6 +123,11 @@ export default {
         deleted_at: t.timestamp(),
         lifecycle_revision: t.bigInt().required().default(0),
         execution_zone_id: t.text().required().default("ezn_default000000000000000000"),
+        // Whether the deployment `deploy_hash` currently names declared any
+        // workflow. Deployment selection rewrites it in the same statement that
+        // moves the pointer, so archive can withhold the disable intent that a
+        // workflow-less app would leave pending forever.
+        deploy_declares_workflows: t.boolean().required().default(false),
       },
       primaryKey: ["id"],
     });

@@ -1222,6 +1222,9 @@ fn manifest_with_descriptor(
         primary: true,
         hash: descriptor_hash.to_string(),
     }];
+    // A deployment that declares a workflow, so acceptance publishes the
+    // activation its lifecycle assertions read.
+    m.workflows = Some(serde_json::json!(["Workflow"]));
     m
 }
 
@@ -1571,7 +1574,10 @@ async fn publication_rows(
 fn marked_zship(marker: &str) -> (Vec<u8>, String) {
     let server = format!("export default {{ fetch() {{ return new Response('{marker}'); }} }}");
     let server_hash = sha256_hex(server.as_bytes());
-    let manifest = manifest_for(Some(&server_hash), &[]);
+    let mut manifest = manifest_for(Some(&server_hash), &[]);
+    // A deployment that declares a workflow, so acceptance publishes the
+    // activation the lifecycle assertions on these artifacts read.
+    manifest.workflows = Some(serde_json::json!(["Workflow"]));
     let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
     (
         build_zship(
