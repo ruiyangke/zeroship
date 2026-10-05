@@ -92,6 +92,9 @@ fn a_server_container_that_cannot_see_the_lease_is_refused_and_removed() {
     assert!(refusal.contains("cannot see"), "{refusal}");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     while let Some(state) = shared::container_status(&blind) {
+        if shared::removal_issued(Some(&state)) {
+            break;
+        }
         assert!(
             std::time::Instant::now() < deadline,
             "the refused container {blind} is still listed ({state})"

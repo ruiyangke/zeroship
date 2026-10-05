@@ -177,9 +177,13 @@ fn field(lines: &[String], prefix: &str) -> String {
 fn wait_removed(id: &str, bound: Duration) {
     let deadline = Instant::now() + bound;
     while let Some(state) = shared::container_status(id) {
+        if shared::removal_issued(Some(&state)) {
+            return;
+        }
         assert!(
             Instant::now() < deadline,
-            "container {id} is still listed as {state} after {bound:?}"
+            "container {id} is still listed as {state} after {bound:?}: its watchdog did not \
+             remove it"
         );
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -1106,6 +1110,28 @@ fn a_daemon_error_is_not_read_as_a_removed_container() {
         message.contains("could not say whether"),
         "the failure names what the daemon could not answer: {message}"
     );
+}
+
+/// The removal waiters succeed on the daemon's own report that the removal has
+/// been issued, not on the deletion that follows it: `removing` means the
+/// daemon has accepted the removal and stopped the container, and `None` means
+/// the deletion finished. A state the daemon was never asked to remove - or one
+/// whose removal it has not issued - stays outside that set, so a waiter fails
+/// it rather than reading it as removal.
+#[test]
+fn issued_removal_is_the_removing_state_or_gone() {
+    for issued in [None, Some("removing")] {
+        assert!(
+            shared::removal_issued(issued),
+            "{issued:?} is a removal the daemon has issued"
+        );
+    }
+    for present in [Some("running"), Some("created"), Some("exited"), Some("dead")] {
+        assert!(
+            !shared::removal_issued(present),
+            "{present:?} is a state whose removal the daemon has not issued"
+        );
+    }
 }
 
 /// Child side of the lifetime instrument's measurements: join a throwaway server

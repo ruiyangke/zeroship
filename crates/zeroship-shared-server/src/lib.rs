@@ -1091,6 +1091,19 @@ pub fn container_status(container_id: &str) -> Option<String> {
     }
 }
 
+/// Whether a [`container_status`] answer shows a container's removal has been
+/// issued: the daemon has accepted the removal and is deleting it (`removing`),
+/// or deletion has finished and it is gone (`None`).
+///
+/// `removing` is the daemon's own report that the container is stopped and
+/// being deleted. A container the daemon was never asked to remove keeps a
+/// state such as `running` or `exited` and reads as `false` here, so a waiter
+/// that polls this still fails a container nothing removed.
+#[must_use]
+pub fn removal_issued(state: Option<&str>) -> bool {
+    matches!(state, None | Some("removing"))
+}
+
 /// The deterministic name the boot of the scope at `dir` gives its container.
 ///
 /// `dir` is the scope's canonical directory, the path its containers carry in

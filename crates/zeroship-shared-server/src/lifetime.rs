@@ -11,7 +11,7 @@
 //! [`DIR_LABEL`](crate::DIR_LABEL) while the child runs - which also
 //! proves, before anything is asserted about an absence, that the query it
 //! reads absences through can see a container that is there - and then requires
-//! the daemon to stop listing it.
+//! the daemon to have issued its removal.
 //!
 //! A throwaway scope is what makes the removal observable. The worktree scope a
 //! fixture normally joins is leased by every test process of a run, so its
@@ -225,6 +225,9 @@ fn reported(lines: &[String]) -> Option<String> {
 fn wait_until_removed(id: &str, why: &str) {
     let deadline = Instant::now() + REMOVAL_BOUND;
     while let Some(state) = shared::container_status(id) {
+        if shared::removal_issued(Some(&state)) {
+            return;
+        }
         assert!(
             Instant::now() < deadline,
             "container {id} is still listed ({state}) {REMOVAL_BOUND:?} after {why}; its \

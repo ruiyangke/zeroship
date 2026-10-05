@@ -135,9 +135,13 @@ fn field(lines: &[String], prefix: &str) -> String {
 fn wait_removed(id: &str, bound: Duration) {
     let deadline = Instant::now() + bound;
     while let Some(state) = shared::container_status(id) {
+        if shared::removal_issued(Some(&state)) {
+            return;
+        }
         assert!(
             Instant::now() < deadline,
-            "container {id} is still listed as {state} after {bound:?}"
+            "container {id} is still listed as {state} after {bound:?}: its watchdog did not \
+             remove it"
         );
         std::thread::sleep(Duration::from_millis(200));
     }
