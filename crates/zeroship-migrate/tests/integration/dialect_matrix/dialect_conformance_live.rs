@@ -92,6 +92,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
+use futures::StreamExt;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
@@ -875,6 +876,7 @@ fn prelude(
 /// for a leak it did not make. The slug a row appends is capped so a minted name
 /// plus the `_aux` a `createSchema` row adds and the `_migrations` the engine
 /// appends stays inside MySQL's 64-byte identifier limit.
+#[derive(Clone)]
 struct Sweep(String);
 
 impl Sweep {
@@ -1005,6 +1007,23 @@ async fn pg_verdict(url: &str, sweep: &Sweep, kind: &str, variant: &str, op: &Op
 // ---------------------------------------------------------------------------
 // The MySQL probe
 // ---------------------------------------------------------------------------
+
+/// How many `MySQL` rows may be in flight at once.
+///
+/// A row's wait is server-side `CREATE DATABASE` / `DROP DATABASE`, and the rows
+/// are independent: each mints its own names (see [`nonce`]) and drops its own
+/// databases through its guard. Running them one after another therefore spends
+/// the sweep's whole duration waiting on a server that can serve several at once.
+///
+/// The bound is fixed rather than proportional to the corpus because the shared
+/// `MySQL` server's connection budget is a whole-server resource: every other
+/// live-MySQL test process of the run draws from the same `max_connections`, and
+/// `mysql_verdict` holds one pinned session per in-flight row (the row's
+/// `DatabaseGuard` can open a second, fallback connection), with the sweep's own
+/// census holding one more. The bound stays far below that budget so a sweep
+/// cannot starve its siblings, and a fixed bound keeps the server's metadata-lock
+/// pressure flat no matter how large the corpus grows.
+const MYSQL_SWEEP_CONCURRENCY: usize = 8;
 
 /// One row, in its own throwaway MySQL DATABASE.
 ///
@@ -1661,11 +1680,30 @@ async fn every_mysql_row_of_the_dialect_table_answers_to_a_live_server() {
         "no probe database of this sweep may be on the shared server before the \
          sweep creates one: {before:?}"
     );
-    let mut ledger: Vec<(String, String, Verdict)> = Vec::new();
-    for (kind, variant, op) in crate::integration::dialect_corpus::corpus() {
-        let verdict = mysql_verdict(&url, &sweep, kind, variant, &op).await;
-        ledger.push((kind.to_string(), variant.to_string(), verdict));
-    }
+    // Rows are independent (per-row names, per-row guards) and the wait is
+    // server-side DDL, so run a bounded number at once instead of one after
+    // another. `mysql_verdict` blocks on the MySQL client, which would stall the
+    // single-threaded compio scheduler, so each row is offloaded to a worker
+    // thread; `buffered` restores corpus order for the ledger and the judge.
+    let ledger: Vec<(String, String, Verdict)> =
+        futures::stream::iter(crate::integration::dialect_corpus::corpus())
+            .map(|(kind, variant, op)| {
+                let url = url.clone();
+                let sweep = sweep.clone();
+                async move {
+                    let verdict = compio::runtime::spawn_blocking(move || {
+                        compio::runtime::Runtime::new()
+                            .expect("create a runtime for one MySQL conformance row")
+                            .block_on(mysql_verdict(&url, &sweep, kind, variant, &op))
+                    })
+                    .await
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                    (kind.to_string(), variant.to_string(), verdict)
+                }
+            })
+            .buffered(MYSQL_SWEEP_CONCURRENCY)
+            .collect()
+            .await;
 
     let (after_total, leaked) = mysql_probe_databases(&session, &sweep).await;
     println!(
