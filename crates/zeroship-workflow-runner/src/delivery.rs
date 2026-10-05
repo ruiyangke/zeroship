@@ -802,6 +802,19 @@ fn constrain<L: JobLease>(
 /// journal's `CapturedLease::capture` refuses a grant with no remaining authority
 /// before it opens a transaction and rechecks it around the commit. What this
 /// side cannot do is withhold the journal write on its own clock.
+///
+/// A CALL THAT MISSED ITS BOUND IS RETRIED, NOT FATED TO END THE ATTEMPT. Each
+/// heartbeat is bounded by `operation_timeout` so a hung connection cannot hold
+/// the renewal open, and a retryable miss is retried while the grant and the
+/// phase still leave room. The whole renewal is bounded by what those two still
+/// grant, so the retries stop once the remaining grant cannot cover another
+/// renewal and only then. A refusal -- the manager's `PermissionDenied`,
+/// `Conflict` or `Denied`, or the client's own delivery mismatch -- is not
+/// retried and ends the attempt at once.
+///
+/// DURING A TOTAL MANAGER OUTAGE A SLOT KEEPS RETRYING UNTIL ITS RENEWAL BUDGET
+/// RUNS OUT, a bounded cost the proposal accepts so a lost reply does not cost
+/// a re-run.
 async fn renew<T: JobTransport>(
     transport: &T,
     app: &T::Journal,
@@ -813,20 +826,43 @@ async fn renew<T: JobTransport>(
     loop {
         let delay = available(&claims.borrow())?.min(phase.remaining()?) / 3;
         compio::time::sleep(delay).await;
-        let (mut task, original) = snapshot(claims);
-        let timeout = available(&claims.borrow())?
-            .min(options.operation_timeout)
-            .min(phase.remaining()?);
-        let (task, renewed, control) = bounded(timeout, async {
-            let renewed = transport.heartbeat(app, &original, &task).await?;
-            if !same_delivery(original.delivery(), renewed.lease.delivery()) {
-                return Err(WorkflowServiceError::PermissionDenied);
-            }
-            let control = renewed.renewal.control();
-            task.renew(renewed.renewal);
-            Ok((task, renewed.lease, control))
-        })
-        .await?;
+        // ONE RENEWAL, RETRIED INSIDE ITS OWN BUDGET. A heartbeat whose reply
+        // misses the per-call bound is retried while the grant and the phase
+        // still leave room, so transport delay inside the lease does not end an
+        // attempt that could still renew; a refusal is not retried and ends the
+        // attempt at once. Every call is bounded by the operation bound, so a
+        // connection that hangs never holds the retry loop open.
+        let (task, renewed, control) = {
+            // Bind the budget before the call so the `RefCell` borrow it reads
+            // is released before the await.
+            let renewal = available(&claims.borrow())?.min(phase.remaining()?);
+            bounded(renewal, async {
+                loop {
+                    let (mut task, original) = snapshot(claims);
+                    let timeout = available(&claims.borrow())?
+                        .min(options.operation_timeout)
+                        .min(phase.remaining()?);
+                    match bounded(timeout, async {
+                        let renewed = transport.heartbeat(app, &original, &task).await?;
+                        if !same_delivery(original.delivery(), renewed.lease.delivery()) {
+                            return Err(WorkflowServiceError::PermissionDenied);
+                        }
+                        let control = renewed.renewal.control();
+                        task.renew(renewed.renewal);
+                        Ok((task, renewed.lease, control))
+                    })
+                    .await
+                    {
+                        Ok(renewed) => return Ok(renewed),
+                        Err(error) if retryable(&error) => {
+                            compio::time::sleep(options.retry_delay).await;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+            })
+            .await?
+        };
         *claims.borrow_mut() = Claims {
             lease: renewed,
             task,

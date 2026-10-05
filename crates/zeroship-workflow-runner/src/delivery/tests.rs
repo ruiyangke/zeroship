@@ -127,8 +127,23 @@ struct Metadata {
     /// the journal committed, the way a peer that settled another request would.
     substitute_outcome: Cell<bool>,
     renewals: Cell<usize>,
+    /// The execution this attempt started has resolved, set by the executor the
+    /// moment `wait` answers. A renewal after that is the settlement keeping its
+    /// lease, not the execution reporting that it began.
+    resolved: Rc<Cell<bool>>,
+    /// Renewals made before the execution resolved: the ones that report an
+    /// execution began rather than a delivery was made.
+    renewals_before_resolution: Cell<usize>,
+    /// A terminal reply -- a manager refusal or a substituted delivery -- has
+    /// been given; a call after it would be a retry of what must not be retried.
+    terminal: Cell<bool>,
+    /// Renewal calls made after a terminal reply.
+    calls_after_terminal: Cell<usize>,
     renewal_deadline: Cell<Option<Instant>>,
     renewed_late: Cell<bool>,
+    /// How long the next renewal call takes before it answers; taken by the
+    /// call it delays, so a retry of the same attempt answers at once.
+    renewal_delay: Cell<Option<Duration>>,
     /// How far one renewal extends the manager lease; the fixture lease when
     /// unset. Never past the attempt the delivery carries, as the manager caps it.
     renewal: Cell<Option<Duration>>,
@@ -177,6 +192,17 @@ impl JobTransport for Metadata {
         task: &DeliveredTask,
     ) -> Result<Renewed<Lease>, WorkflowServiceError> {
         self.renewals.set(self.renewals.get() + 1);
+        if !self.resolved.get() {
+            self.renewals_before_resolution
+                .set(self.renewals_before_resolution.get() + 1);
+        }
+        if self.terminal.get() {
+            self.calls_after_terminal
+                .set(self.calls_after_terminal.get() + 1);
+        }
+        if let Some(delay) = self.renewal_delay.take() {
+            compio::time::sleep(delay).await;
+        }
         if self.stall_renewal.get() {
             std::future::pending::<()>().await;
         }
@@ -188,6 +214,7 @@ impl JobTransport for Metadata {
             self.renewed_late.set(true);
         }
         if self.reject_renewal.get() {
+            self.terminal.set(true);
             return Err(WorkflowServiceError::PermissionDenied);
         }
         let mut renewed = lease.clone();
@@ -195,6 +222,7 @@ impl JobTransport for Metadata {
             .min(lease.attempt_ends);
         let renewal = journal.heartbeat_job(task, &renewed).await?;
         if self.substitute_renewal.get() {
+            self.terminal.set(true);
             renewed.delivery.worker_id = WorkerId::mint();
         }
         Ok(Renewed {
@@ -289,6 +317,9 @@ struct Probe {
     stopping: RefCell<Option<oneshot::Sender<()>>>,
     stop_gate: RefCell<Option<oneshot::Receiver<()>>>,
     creator_renewed: Cell<bool>,
+    /// The execution this attempt started has resolved, shared with the
+    /// transport so a renewal it makes can tell reporting from settlement.
+    resolved: Rc<Cell<bool>>,
     /// How long `Mode::CompleteAfter` runs before it completes.
     hold: Cell<Duration>,
     /// The gate `Mode::Gated` waits on, taken by the execution it starts.
@@ -406,6 +437,10 @@ impl TaskExecution for Execution {
                 }
             }
         }
+        // The execution has now resolved; a renewal after this point is the
+        // settlement keeping its lease alive, not the execution reporting that
+        // it began.
+        self.probe.resolved.set(true);
         // The canned dispatch closes its run and returns nothing. A result
         // would have to be a staged payload object, and a fixture that stands
         // in for the runtime never reaches the transport that stages one.
@@ -513,6 +548,7 @@ impl Fixture {
             Arc::new(zeroship_storage::LocalFs::new(directory.path().join("payloads"))),
         ))
         .unwrap();
+        let resolved = Rc::new(Cell::new(false));
         Self {
             _directory: directory,
             objects,
@@ -521,8 +557,14 @@ impl Fixture {
             app,
             job,
             lease,
-            metadata: Rc::new(Metadata::default()),
-            probe: Rc::new(Probe::default()),
+            metadata: Rc::new(Metadata {
+                resolved: resolved.clone(),
+                ..Metadata::default()
+            }),
+            probe: Rc::new(Probe {
+                resolved,
+                ..Probe::default()
+            }),
         }
     }
 
@@ -1079,16 +1121,16 @@ async fn an_execution_bound_below_the_lease_still_renews_inside_the_attempt() {
         WorkflowServiceError::Timeout
     );
     assert!(
-        fixture.metadata.renewals.get() > 0,
+        fixture.metadata.renewals_before_resolution.get() > 0,
         "an attempt that outlived its renewal delay reported nothing to the manager"
     );
     assert!(fixture.metadata.requests.borrow().is_empty());
 }
 
 /// The control for the renewal above, differing only in whether the attempt
-/// outlives its renewal delay. An attempt that resolves first reports nothing,
-/// which is what makes a renewal evidence that an execution began rather than
-/// evidence that a delivery was made.
+/// outlives its renewal delay. An attempt that resolves first reports nothing
+/// before it resolves, which is what makes a renewal evidence that an execution
+/// began rather than evidence that a delivery was made.
 #[compio::test]
 async fn an_attempt_resolved_before_its_renewal_delay_reports_no_renewal() {
     let fixture = Fixture::new(AppPolicy::default()).await;
@@ -1098,7 +1140,11 @@ async fn an_attempt_resolved_before_its_renewal_delay_reports_no_renewal() {
         slot.run(&fixture.app, claimed(&fixture.app, fixture.lease.clone()).await.unwrap()).await.unwrap(),
         DeliveryOutcome::Settled { .. }
     ));
-    assert_eq!(fixture.metadata.renewals.get(), 0);
+    assert_eq!(
+        fixture.metadata.renewals_before_resolution.get(),
+        0,
+        "a renewal reported an execution before the execution resolved"
+    );
 }
 
 /// A control intent on a renewal interrupts the attempt, and settles nothing.
@@ -1171,7 +1217,7 @@ async fn an_attempt_bound_ending_before_the_lease_still_renews_inside_the_attemp
         "the attempt outlived the attempt bound that had to end it: {elapsed:?}"
     );
     assert!(
-        fixture.metadata.renewals.get() > 0,
+        fixture.metadata.renewals_before_resolution.get() > 0,
         "an attempt that outlived its renewal delay reported nothing to the manager"
     );
     assert!(
@@ -1182,9 +1228,14 @@ async fn an_attempt_bound_ending_before_the_lease_still_renews_inside_the_attemp
 }
 
 /// The control for the renewal above, differing only in whether the attempt
-/// outlives its renewal delay. An attempt that resolves first reports nothing,
-/// which is what keeps a renewal evidence that an execution began rather than
-/// evidence that a delivery was made.
+/// outlives its renewal delay. An attempt that resolves first reports nothing
+/// before it resolves, which is what keeps a renewal evidence that an execution
+/// began rather than evidence that a delivery was made.
+///
+/// A renewal made after the execution resolves is the settlement keeping its
+/// lease alive, not the execution reporting; the assertion is the ordering, so
+/// a loaded host that lets one land during a slow settlement does not turn it
+/// into execution evidence.
 #[compio::test]
 async fn an_attempt_bound_resolved_first_reports_no_renewal() {
     let mut fixture = Fixture::new(AppPolicy::default()).await;
@@ -1195,7 +1246,11 @@ async fn an_attempt_bound_resolved_first_reports_no_renewal() {
         slot.run(&fixture.app, claimed(&fixture.app, fixture.lease.clone()).await.unwrap()).await.unwrap(),
         DeliveryOutcome::Settled { .. }
     ));
-    assert_eq!(fixture.metadata.renewals.get(), 0);
+    assert_eq!(
+        fixture.metadata.renewals_before_resolution.get(),
+        0,
+        "a renewal reported an execution before the execution resolved"
+    );
 }
 
 /// An execution is cut at the attempt bound its delivery carries, whatever
@@ -1383,43 +1438,103 @@ async fn a_renewed_lease_carries_an_execution_past_the_lease_it_started_under() 
     assert!(fixture.metadata.renewals.get() > 1);
 }
 
-/// A manager exchange that never answers ends the attempt on the operation
-/// bound, not on the execution bound.
+/// A heartbeat reply that lands after one operation bound, but inside the lease
+/// and phase, does not end the attempt: the renewal is retried and the execution
+/// finishes once it lands, settling exactly once.
 ///
-/// The renewal is the only exchange an executing attempt makes, and a manager
-/// that accepts the connection and then says nothing would otherwise hold the
-/// slot for the whole execution bound while reporting nothing. Two bounds could
-/// end this attempt and the assertion below is what says which one did: the
-/// execution bound is an order of magnitude larger, so an attempt that ran to it
-/// would fail here rather than pass slowly.
+/// The first call's reply misses the operation bound while the attempt still has
+/// most of its lease and phase left. A renewal the attempt could not retry would
+/// end it at that one call -- the `?` on the bounded heartbeat -- and the turn
+/// the journal was about to commit would be dropped for redelivery instead. The
+/// execution completes only after it sees the deadline the retry wrote, so the
+/// settlement is caused by the renewal that landed rather than by a call that
+/// never answered.
 #[compio::test]
-async fn a_renewal_that_never_answers_ends_the_attempt_on_the_operation_bound() {
+async fn a_renewal_delayed_past_its_bound_but_within_the_lease_still_commits_once() {
     let fixture = Fixture::new(AppPolicy::default()).await;
-    fixture.probe.mode.set(Mode::Pending);
-    fixture.metadata.stall_renewal.set(true);
-    let execution = Duration::from_secs(6);
-    let mut slot = fixture.slot_bounding_operations(execution, Duration::from_millis(200));
-    let started = Instant::now();
-    Box::pin(slot.run(
+    fixture.probe.mode.set(Mode::AfterCreatorRenewal);
+    let operation = Duration::from_millis(500);
+    fixture.metadata.renewal_delay.set(Some(operation * 2));
+    let mut slot = fixture.slot_bounding_operations(Duration::from_secs(3), operation);
+    let outcome = Box::pin(slot.run(
         &fixture.app,
         claimed(&fixture.app, fixture.lease.clone()).await.unwrap(),
     ))
-    .await
-    .unwrap_err();
-    let elapsed = started.elapsed();
+    .await;
     assert!(
-        elapsed < execution / 2,
-        "the attempt ran to its execution bound instead of the stalled exchange: {elapsed:?}"
+        matches!(outcome, Ok(DeliveryOutcome::Settled { .. })),
+        "an attempt whose first renewal missed its bound did not settle: {outcome:?}"
+    );
+    assert!(
+        fixture.probe.creator_renewed.get(),
+        "the execution finished without a renewal landing"
+    );
+    assert!(
+        fixture.metadata.renewals.get() > 1,
+        "the delayed renewal was never retried"
+    );
+    assert_eq!(fixture.probe.starts.get(), 1, "the execution ran once");
+    assert_eq!(
+        fixture.metadata.releases.get(),
+        0,
+        "an attempt that settled was handed back for redelivery"
     );
     assert_eq!(
-        fixture.metadata.renewals.get(),
+        fixture.metadata.requests.borrow().len(),
         1,
-        "the stalled exchange is the one renewal this attempt attempted"
+        "the attempt settled more than once"
+    );
+}
+
+/// A renewal that never answers is retried while its renewal budget lasts, and
+/// the attempt ends when that budget runs out.
+///
+/// The manager accepts each connection and then says nothing. One call does not
+/// end the attempt: each is bounded by the operation bound so it cannot hold the
+/// slot, and the whole renewal is bounded by the grant and the phase, so the
+/// attempt runs until the remaining lease cannot cover another renewal. The
+/// lease is deliberately shorter than the phase, so the grant is the budget that
+/// ends the attempt and not the execution bound. Several calls are made inside
+/// it, and the attempt commits nothing.
+#[compio::test]
+async fn a_renewal_that_never_answers_is_retried_until_its_renewal_budget_runs_out() {
+    let mut fixture = Fixture::new(AppPolicy::default()).await;
+    fixture.probe.mode.set(Mode::Pending);
+    fixture.metadata.stall_renewal.set(true);
+    let lease = Duration::from_secs(1);
+    fixture.lease.expires = Instant::now() + lease;
+    let execution = Duration::from_secs(30);
+    let mut slot = fixture.slot_bounding_operations(execution, Duration::from_millis(100));
+    let started = Instant::now();
+    let outcome = Box::pin(slot.run(
+        &fixture.app,
+        claimed(&fixture.app, fixture.lease.clone()).await.unwrap(),
+    ))
+    .await;
+    let elapsed = started.elapsed();
+    assert_eq!(outcome.unwrap_err(), WorkflowServiceError::Timeout);
+    assert!(
+        elapsed < execution / 2,
+        "the attempt ran to its execution bound instead of its renewal budget: {elapsed:?}"
+    );
+    assert!(
+        elapsed > lease / 2,
+        "the attempt ended before its renewal budget was spent: {elapsed:?}"
+    );
+    assert!(
+        fixture.metadata.renewals.get() > 1,
+        "a stalled renewal ended the attempt after one call instead of retrying"
     );
     assert!(
         fixture.metadata.requests.borrow().is_empty(),
         "an attempt ended by a stalled renewal reported a settlement"
     );
+    assert!(fixture
+        .app
+        .job_receipt(&fixture.job)
+        .await
+        .unwrap()
+        .is_none());
 }
 
 /// Completion retries stay bounded while renewal keeps succeeding.
@@ -1546,7 +1661,11 @@ async fn substituted_renewal_stops_without_ack_or_checkpoint() {
         slot.run(&fixture.app, claimed(&fixture.app, fixture.lease.clone()).await.unwrap()).await,
         Err(WorkflowServiceError::PermissionDenied)
     ));
-    assert!(fixture.metadata.renewals.get() > 0);
+    assert_eq!(
+        fixture.metadata.calls_after_terminal.get(),
+        0,
+        "a non-retryable refusal was retried"
+    );
     assert_eq!(fixture.probe.stops.get(), 1);
     assert!(fixture.metadata.requests.borrow().is_empty());
     assert!(fixture
@@ -1563,6 +1682,41 @@ async fn substituted_renewal_stops_without_ack_or_checkpoint() {
         fixture.app.status(run_id.as_str()).await.unwrap().state,
         RunState::Completed
     );
+}
+
+/// A manager refusal on renewal is not retried and ends the attempt at once.
+///
+/// The transport answers `PermissionDenied` -- the manager refusing an identity
+/// that cannot renew -- and the retry around a renewal must not turn that
+/// durable refusal into a loop. The attempt ends at that refusal, reports it,
+/// and settles nothing.
+#[compio::test]
+async fn a_refused_renewal_ends_the_attempt_without_retrying() {
+    let fixture = Fixture::new(AppPolicy {
+        lease_ms: 1000,
+        ..AppPolicy::default()
+    })
+    .await;
+    fixture.probe.mode.set(Mode::Pending);
+    fixture.metadata.reject_renewal.set(true);
+    let mut slot = fixture.slot(Duration::from_secs(5));
+    assert!(matches!(
+        slot.run(&fixture.app, claimed(&fixture.app, fixture.lease.clone()).await.unwrap()).await,
+        Err(WorkflowServiceError::PermissionDenied)
+    ));
+    assert_eq!(
+        fixture.metadata.calls_after_terminal.get(),
+        0,
+        "a manager refusal was retried"
+    );
+    assert_eq!(fixture.probe.stops.get(), 1);
+    assert!(fixture.metadata.requests.borrow().is_empty());
+    assert!(fixture
+        .app
+        .job_receipt(&fixture.job)
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[compio::test]
