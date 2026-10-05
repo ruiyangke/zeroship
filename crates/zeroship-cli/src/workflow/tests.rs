@@ -1,8 +1,8 @@
 use super::{manager::LocalTransport, *};
 use serde_json::json;
-use std::sync::Mutex;
+use std::{collections::HashMap, sync::Mutex};
 use zeroship_core::workflow_jobs::{
-    ClaimJobs, JobId, JobOperation, JobOutcome, JobSpec, SettlementReceipt,
+    ClaimJobs, Delivery, JobId, JobOperation, JobOutcome, JobSpec, SettlementReceipt,
 };
 use zeroship_workflow::{
     backend::WorkflowBackend,
@@ -21,7 +21,7 @@ use zeroship_workflow_manager::{
     local::LocalPlatform,
     recovery::{DutyKind, Options as RecoveryOptions, Recovery, Responsibility, ScopeState},
     scheduling::{Options as SchedulingOptions, Scheduler, Selection},
-    Claimant, DeliveryGrant, Options as QueueOptions,
+    Claimant, DeliveryGrant, GiveBack, Options as QueueOptions,
 };
 
 #[test]
@@ -889,8 +889,14 @@ struct Deliveries {
     /// The first Advance job and every settlement attempt the host made for it.
     target: Mutex<Option<JobId>>,
     settlements: Mutex<Vec<(u32, bool)>>,
-    /// The replayed journal length of every started execution.
-    starts: Mutex<Vec<usize>>,
+    /// The delivery whose acknowledgements were lost, still leased to the host.
+    lost: Mutex<Option<Delivery>>,
+    /// The job and attempt each assignment the manager handed out belongs to,
+    /// keyed by the task id the acceptance carries so a start can name its job.
+    assignments: Mutex<HashMap<String, (JobId, i64)>>,
+    /// Every started execution: the job it ran, the attempt it ran under and the
+    /// replayed journal length it began from.
+    starts: Mutex<Vec<(JobId, i64, usize)>>,
 }
 
 /// Loses every acknowledgement of the first Advance job's first attempt before
@@ -921,15 +927,16 @@ struct LossyTransport {
 }
 
 impl JobTransport for LossyTransport {
-    /// Asked of the journal this host holds, the way the crossed transport asks
-    /// the service that holds it.
+    /// Both halves, as the host's own transport releases: an attempt that stops
+    /// without a receipt returns its row at once rather than holding it for a
+    /// lease this fixture leaves long.
     async fn release(
         &self,
         journal: &Self::Journal,
         lease: &Self::Lease,
         task: &zeroship_workflow::service::delivery::DeliveredTask,
     ) -> Result<(), WorkflowServiceError> {
-        journal.release_job(task, lease).await
+        self.inner.release(journal, lease, task).await
     }
     async fn receipt(
         &self,
@@ -947,7 +954,20 @@ impl JobTransport for LossyTransport {
         &self,
         request: &ClaimJobs,
     ) -> Result<ClaimedBatch<DeliveryGrant>, WorkflowServiceError> {
-        self.inner.claim(request).await
+        let batch = self.inner.claim(request).await?;
+        // The acceptance names the task id a later start reports; the lease it
+        // arrived with names the job and attempt that task belongs to. Record
+        // both together so a start can be keyed to the job the manager delivered.
+        for claimed in &batch.deliveries {
+            if let Some(task) = claimed.task() {
+                let delivery = claimed.lease.delivery();
+                self.observed.assignments.lock().unwrap().insert(
+                    task.assignment().id.clone(),
+                    (delivery.job.id.clone(), delivery.attempt.get()),
+                );
+            }
+        }
+        Ok(batch)
     }
 
     async fn give_back(
@@ -989,6 +1009,7 @@ impl JobTransport for LossyTransport {
                 .unwrap()
                 .push((attempt, !lost));
             if lost {
+                *self.observed.lost.lock().unwrap() = Some(lease.delivery().clone());
                 return Err(WorkflowServiceError::Unavailable(
                     "acknowledgement lost before the manager".into(),
                 ));
@@ -1029,15 +1050,64 @@ impl TaskExecutor for CountingExecutor {
         assignment: &TaskAssignment,
         budget: ExecutionBudget,
     ) -> Result<Box<dyn TaskExecution>, WorkflowServiceError> {
-        self.observed
-            .starts
+        // The acceptance the runner hands here is the one this host recorded at
+        // claim, so its task id names the job and attempt being started. A start
+        // whose assignment is absent is a contract break, not a turn to ignore.
+        let identity = self
+            .observed
+            .assignments
             .lock()
             .unwrap()
-            .push(assignment.invocation.journal.len());
+            .get(&assignment.id)
+            .cloned()
+            .expect("every execution starts from a claimed assignment");
+        self.observed.starts.lock().unwrap().push((
+            identity.0,
+            identity.1,
+            assignment.invocation.journal.len(),
+        ));
         self.inner.start(assignment, budget)
     }
 }
 
+/// End a delivery's lease through a second binding to the platform file.
+/// `GiveBack::Unsent` returns a still-live lease to `ready` with no attempt
+/// counted and no deferral, so the next claim takes the row at once. That is
+/// the row a lapse leaves: `claimable_rows` offers a `leased` row whose
+/// `lease_deadline` has passed, and neither path counts an attempt. The
+/// give-back itself refuses a lease that has already lapsed, through the
+/// `live` check inside `give_back_within`, so this call must reach the row
+/// while its lease is live and the redelivery that follows is the one it
+/// caused.
+async fn end_lease(root: &Path, delivery: &Delivery) {
+    Box::pin(retry(async || {
+        let platform = LocalPlatform::open(&root.join(".zeroship/platform/metadata.sqlite"))
+            .await
+            .map_err(manager::catalog_error)?;
+        platform
+            .queue(QueueOptions::default())
+            .await
+            .map_err(manager::manager_error)?
+            .give_back(&delivery.worker_id, delivery, GiveBack::Unsent, |_| {
+                std::future::ready(Ok(delivery.worker_id.clone()))
+            })
+            .await
+            .map_err(manager::manager_error)
+    }))
+    .await;
+}
+
+/// A delivery whose acknowledgement was lost replays the receipt its committed
+/// turn left rather than executing that turn again. The lost first attempt
+/// still holds its manager lease, and this test ends that lease after every
+/// later turn has committed. Left to lapse on its own, the lease would have to
+/// be short enough to expire inside the test, and every later turn would run
+/// under that short lease too: one that outlasts a third of it needs a renewal
+/// answered inside the renewal's bound. A turn whose renewal misses that bound
+/// stops before committing and legitimately runs again from the same journal,
+/// which at-least-once delivery allows. The starts are therefore keyed to the
+/// lost job alone: the test proves that job is not executed a second time, not
+/// that no other turn ever re-ran.
 #[compio::test]
 async fn lost_acknowledgement_replays_the_committed_turn_without_executing_again() {
     let root = tempfile::tempdir().unwrap();
@@ -1049,10 +1119,6 @@ async fn lost_acknowledgement_replays_the_committed_turn_without_executing_again
             operation_timeout_ms: 1_000,
             error_backoff_ms: 100,
             ..ConsumerConfig::default()
-        },
-        manager: ManagerConfig {
-            lease_ms: 3_000,
-            ..ManagerConfig::default()
         },
         ..LocalConfig::default()
     };
@@ -1071,8 +1137,24 @@ async fn lost_acknowledgement_replays_the_committed_turn_without_executing_again
         returned_value(&host.backend, &run).await,
         json!("original:original:lazy")
     );
-    // The lost first attempt keeps its manager lease until expiry, which can
-    // outlast the run's later turns. Its redelivery then settles the receipt.
+    // The lost first attempt still holds its manager lease. Ending it offers the
+    // row again, and the redelivery settles the receipt the journal kept.
+    let lost = observed
+        .lost
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the first attempt's acknowledgement was lost");
+    assert_eq!(lost.attempt.get(), 1, "{lost:?}");
+    assert_eq!(
+        Some(&lost.job.id),
+        observed.target.lock().unwrap().as_ref(),
+        "{lost:?}"
+    );
+    // Everything the lost job starts, it starts before its lease ends, so any
+    // start of it from this point on is the redelivery's.
+    let starts_before_lease = observed.starts.lock().unwrap().len();
+    end_lease(root.path(), &lost).await;
     let settlements = until(async || {
         let settlements = observed.settlements.lock().unwrap().clone();
         settlements
@@ -1081,23 +1163,27 @@ async fn lost_acknowledgement_replays_the_committed_turn_without_executing_again
             .then_some(settlements)
     })
     .await;
+    assert!(settlements.contains(&(1, false)), "{settlements:?}");
+    // The journal kept the committed receipt the redelivery replays.
+    let creator = client(root.path(), &app).await;
     assert!(
-        settlements
-            .iter()
-            .any(|(attempt, delivered)| *attempt == 1 && !delivered),
-        "{settlements:?}"
+        creator.job_receipt(&lost.job).await.unwrap().is_some(),
+        "the lost turn's receipt is committed"
     );
-    // Each execution starts from a longer journal. A redelivered first turn
-    // replays its receipt instead of executing the empty journal again.
+    // The lost job started once, its attempt-1 execution, and the redelivery
+    // does not start it again: no start of that job follows the lease's end.
     let starts = observed.starts.lock().unwrap().clone();
-    assert_eq!(
-        starts.iter().filter(|replayed| **replayed == 0).count(),
-        1,
-        "{starts:?}"
-    );
+    let lost_starts: Vec<_> = starts
+        .iter()
+        .filter(|(job, _, _)| job == &lost.job.id)
+        .collect();
+    assert_eq!(lost_starts.len(), 1, "{starts:?}");
+    assert_eq!(lost_starts[0].1, 1, "{starts:?}");
     assert!(
-        starts.windows(2).all(|pair| pair[0] < pair[1]),
-        "{starts:?}"
+        starts[starts_before_lease..]
+            .iter()
+            .all(|(job, _, _)| job != &lost.job.id),
+        "the lost job re-executed after its lease ended: {starts:?}"
     );
     drop(host);
 }
