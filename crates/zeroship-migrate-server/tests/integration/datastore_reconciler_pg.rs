@@ -1497,6 +1497,66 @@ async fn two_services_on_one_cluster_converge_on_one_row_and_a_zone_change_is_re
     );
 }
 
+/// A login role is a fact of the whole cluster it is created on, not of the rows
+/// a case mints: every later session on that server sees it. The suite's cases
+/// bootstrap roles on the migrated server they share, which is a server of this
+/// suite's own scope for that reason, so a role made there must not appear on the
+/// worktree's shared platform server that every other suite joins.
+///
+/// Both counts are read before either is asserted, and the role is dropped
+/// before either is, so the check leaves the server as it found it. The role is
+/// PRESENT on the server the suite joined, which is what makes its absence on the
+/// shared server a reading rather than an empty result set.
+mod migrated_server_isolation {
+    use crate::support::fixture;
+
+    /// A login this case bootstraps, named so no other case can collide with it.
+    const ROLE: &str = "zeroship_suite_isolation_probe";
+
+    #[ntex::test]
+    async fn a_role_a_case_bootstraps_is_absent_from_the_shared_platform_server() {
+        let suite = super::connect(&fixture::migrated_url()).await;
+        suite
+            .batch_execute(&format!(
+                "DROP ROLE IF EXISTS \"{ROLE}\"; \
+                 CREATE ROLE \"{ROLE}\" LOGIN PASSWORD '{ROLE}'"
+            ))
+            .await
+            .expect("bootstrap a cluster role on the suite's migrated server");
+        let shared = super::connect(
+            zeroship_testkit::postgres::platform()
+                .admin_url()
+                .as_str(),
+        )
+        .await;
+
+        let present: i64 = suite
+            .query_one("SELECT count(*) FROM pg_roles WHERE rolname = $1", &[&ROLE])
+            .await
+            .expect("count the role on the server the suite joined")
+            .get(0);
+        let elsewhere: i64 = shared
+            .query_one("SELECT count(*) FROM pg_roles WHERE rolname = $1", &[&ROLE])
+            .await
+            .expect("count the role on the worktree's shared platform server")
+            .get(0);
+
+        suite
+            .batch_execute(&format!("DROP ROLE \"{ROLE}\""))
+            .await
+            .expect("drop the probe role");
+
+        assert_eq!(
+            present, 1,
+            "the role must exist on the suite's own server, or its absence elsewhere proves nothing"
+        );
+        assert_eq!(
+            elsewhere, 0,
+            "a role this suite bootstrapped reached the server every other suite joins"
+        );
+    }
+}
+
 /// The suite's migrated server is removed once the last process holding it has
 /// ended - after a normal exit, and after a `SIGKILL` while it is still starting
 /// or migrating. Both run

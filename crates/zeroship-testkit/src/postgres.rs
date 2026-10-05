@@ -6,6 +6,10 @@
 //! and every other process joins the ready server. A process holds its lease for
 //! as long as it runs; the container's watchdog removes the server once no
 //! process has held it for the idle grace.
+//!
+//! [`migrate_server_platform`] is the same migrated server under a scope of its
+//! own, for a suite whose cases write cluster-global facts that every other
+//! suite sharing [`platform`] would observe.
 
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -96,7 +100,8 @@ impl Platform {
     ///
     /// [`platform()`] joins the worktree's own scope; a suite whose cases write
     /// cluster-global facts the other suites must not see joins a scope of its
-    /// own, and a lifetime measurement joins a throwaway one.
+    /// own, which [`migrate_server_platform`] is for the migration server, and a
+    /// lifetime measurement joins a throwaway one.
     ///
     /// # Errors
     /// When the image cannot be built, or the server cannot be booted, migrated
@@ -234,6 +239,31 @@ pub fn platform() -> &'static Platform {
         Platform::join(&scope).unwrap_or_else(|error| {
             panic!("the shared platform database could not be started: {error}")
         })
+    })
+}
+
+/// The scope kind the migration server's migrated platform server is filed under.
+///
+/// Its cases bootstrap cluster roles and declare execution zones, and both are
+/// cluster-global: on the worktree's shared server every other suite would
+/// observe them. The suite therefore joins a migrated server of its own kind.
+const MIGRATE_SERVER_KIND: &str = "migrate-server-platform";
+
+/// The migrated platform database the migration server's cases share, on a
+/// migrated server of that suite's own scope.
+///
+/// The suite's fixture and every test area whose packages run its cases reach
+/// the server here, so a warm and a case cannot name two different servers.
+///
+/// # Panics
+/// When the server cannot be booted, migrated or joined.
+pub fn migrate_server_platform() -> &'static Platform {
+    static MIGRATE_SERVER: OnceLock<Platform> = OnceLock::new();
+    MIGRATE_SERVER.get_or_init(|| {
+        Platform::join(&Scope::worktree_with_grace(MIGRATE_SERVER_KIND, PLATFORM_IDLE_GRACE))
+            .unwrap_or_else(|error| {
+                panic!("the migration server's migrated control database could not start: {error}")
+            })
     })
 }
 
