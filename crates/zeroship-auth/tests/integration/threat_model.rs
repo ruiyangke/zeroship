@@ -3,7 +3,19 @@
 use crate::support;
 use support::{auth_server::AuthServer, database::Database, read_set_cookie, CookieJar};
 
-const CLIENT_IP: &str = "192.0.2.10";
+/// A per-case account email so cases sharing the database never collide on
+/// `zeroship.users.email`.
+fn fixture_email(label: &str) -> String {
+    format!("{label}-{}@zeroship.test", uuid::Uuid::new_v4().simple())
+}
+
+/// A per-case forwarded client IP, keeping login rate-limit buckets scoped to
+/// the case that minted it.
+fn fixture_ip() -> String {
+    let bytes = uuid::Uuid::new_v4();
+    let bytes = bytes.as_bytes();
+    format!("10.{}.{}.{}", bytes[0], bytes[1], bytes[2])
+}
 
 fn login_url(fx: &AuthServer, return_to: &str) -> String {
     let query = url::form_urlencoded::Serializer::new(String::new())
@@ -240,8 +252,8 @@ async fn login_rate_limit_kicks_in() {
     Database::run(async |database| {
         let fx = AuthServer::start(database).await;
 
-        let email = "ratelimit@zeroship.test".to_owned();
-        let xff_ip = CLIENT_IP.to_owned();
+        let email = fixture_email("ratelimit");
+        let xff_ip = fixture_ip();
 
         let mut last_status: u16 = 0;
         for i in 1..=6 {
@@ -363,8 +375,8 @@ async fn session_id_rotates_post_login_success() {
         let fx = AuthServer::start(database).await;
 
         // Seed a user.
-        let email = "rotate@zeroship.test".to_owned();
-        let xff_ip = CLIENT_IP.to_owned();
+        let email = fixture_email("rotate");
+        let xff_ip = fixture_ip();
         let password = "rotation-test-password-1234567890";
         let phc = zeroship_auth::identity::password::hash(password)
             .await

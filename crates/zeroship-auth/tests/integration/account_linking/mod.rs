@@ -13,7 +13,7 @@ async fn locked_account_cannot_link_until_the_lock_expires() {
     Database::run(async |database| {
         let server = AuthServer::start(database).await;
         let confirmation =
-            Confirmation::new(&server, "locked@example.test", "locked-profile").await;
+            Confirmation::new(&server, &email("locked"), &subject("locked")).await;
         for _ in 0..users::lockout::THRESHOLD {
             users::record_login_failure(&server.orm, &confirmation.user.id)
                 .await
@@ -56,7 +56,7 @@ async fn disabled_account_cannot_link_until_reenabled() {
     Database::run(async |database| {
         let server = AuthServer::start(database).await;
         let confirmation =
-            Confirmation::new(&server, "disabled@example.test", "disabled-profile").await;
+            Confirmation::new(&server, &email("disabled"), &subject("disabled")).await;
         let admin = database.connect().await;
         admin
             .execute(
@@ -104,8 +104,8 @@ async fn wrong_password_attempts_exhaust_only_their_bucket_and_refill_allows_con
     Database::run(async |database| {
         let server = AuthServer::start(database).await;
         let confirmation =
-            Confirmation::new(&server, "limited@example.test", "limited-profile").await;
-        let other = Confirmation::new(&server, "other@example.test", "other-profile").await;
+            Confirmation::new(&server, &email("limited"), &subject("limited")).await;
+        let other = Confirmation::new(&server, &email("other"), &subject("other")).await;
         let ip = "192.0.2.1";
         let response = confirmation.submit(&server, WRONG_PASSWORD, ip).await;
         assert_refused(&server, &confirmation, response, 401, "invalid password").await;
@@ -151,7 +151,7 @@ async fn unusable_authorization_target_cannot_link_even_with_the_correct_passwor
     Database::run(async |database| {
         let server = AuthServer::start(database).await;
         let confirmation =
-            Confirmation::new(&server, "target@example.test", "target-profile").await;
+            Confirmation::new(&server, &email("target"), &subject("target")).await;
         let token = confirmation
             .token_for_target(&server, "/oauth2/authorize?client_id=link-test-client")
             .await;

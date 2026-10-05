@@ -16,6 +16,12 @@ pub(super) fn email(label: &str) -> String {
     format!("{label}-{}@example.test", uuid::Uuid::new_v4().simple())
 }
 
+/// A per-case audit correlation id so a redemption in one run never matches the
+/// audit rows another run left in the shared database.
+pub(super) fn request_id(label: &str) -> String {
+    format!("{label}-{}", uuid::Uuid::new_v4().simple())
+}
+
 pub(super) async fn issue(
     pg: &Client,
     orm: &zeroship_data_orm::Database,

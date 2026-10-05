@@ -8,21 +8,24 @@ async fn consumes_until_throttled() {
     Database::run(async |database| {
         let client = database.connect_as_auth().await;
 
-        let key = "consumes-until-throttled";
+        let key = format!(
+            "consumes-until-throttled-{}",
+            zeroship_core::typed_id::generate("rl")
+        );
         let bucket = Quota {
             capacity: 3.0,
             refill_per_sec: 0.0,
         }; // no refill for the test
 
         for i in 1..=3 {
-            let res = consume(&client, key, bucket).await.expect("consume");
+            let res = consume(&client, &key, bucket).await.expect("consume");
             assert!(
                 matches!(res, RateLimitDecision::Allowed),
                 "request {i} should pass"
             );
         }
 
-        let res = consume(&client, key, bucket).await.expect("consume");
+        let res = consume(&client, &key, bucket).await.expect("consume");
         let RateLimitDecision::Throttled(err) = res else {
             panic!("4th request should throttle");
         };
@@ -40,7 +43,10 @@ async fn concurrent_consumes_are_atomic() {
     Database::run(async |database| {
         let seed_client = database.connect_as_auth().await;
 
-        let key = "concurrent-consumption";
+        let key = format!(
+            "concurrent-consumption-{}",
+            zeroship_core::typed_id::generate("rl")
+        );
         seed_client
             .execute(
                 "INSERT INTO zeroship.rate_limits (bucket_key, tokens, updated_at) \
@@ -79,8 +85,9 @@ async fn concurrent_consumes_are_atomic() {
 
         let mut handles = Vec::new();
         for client in clients {
+            let key = key.clone();
             handles.push(compio::runtime::spawn(async move {
-                consume(&client, key, bucket).await
+                consume(&client, &key, bucket).await
             }));
         }
 

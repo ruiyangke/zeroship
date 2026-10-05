@@ -15,6 +15,18 @@ use zeroship_authn::rate_limit::Quota;
 pub(super) const PASSWORD: &str = "correct account linking password phrase";
 pub(super) const WRONG_PASSWORD: &str = "incorrect account linking password phrase";
 
+/// A per-case email so cases sharing the database never collide on
+/// `zeroship.users.email`.
+pub(super) fn email(label: &str) -> String {
+    format!("{label}-{}@example.test", uuid::Uuid::new_v4().simple())
+}
+
+/// A per-case federated subject so cases sharing the database never resolve
+/// another case's identity in `resolve_or_link`.
+pub(super) fn subject(label: &str) -> String {
+    format!("{label}-{}", uuid::Uuid::new_v4().simple())
+}
+
 pub(super) struct Confirmation {
     pub user: users::UserRow,
     pub token: String,
