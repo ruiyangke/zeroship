@@ -2102,6 +2102,16 @@ async fn native_runner_reloads_v8_to_resume_a_durable_signal_wait() {
     fixture.assert_disposed().await;
 }
 
+/// The manager the timeout cases run over.
+///
+/// The delivery lease outlasts a whole attempt's execution and settlement
+/// bound, so the execution budget still cuts a callback that outlasts it, and
+/// it is short enough that a cut attempt's row comes back inside the reuse
+/// window rather than at the default lease's half minute.
+async fn timeout_manager(fixture: &Fixture) -> Rc<Manager> {
+    Manager::with_delivery_lease(fixture, Duration::from_secs(4)).await
+}
+
 #[compio::test]
 async fn an_execution_timeout_disposes_v8_before_reusing_the_slot() {
     let fixture = Fixture::new(
@@ -2120,9 +2130,7 @@ async fn an_execution_timeout_disposes_v8_before_reusing_the_slot() {
     let blocked = fixture
         .start(json!({"hang":true}))
         .await;
-    // Leave room for ordinary journal I/O when reusing the slot. The blocked
-    // callback remains pending until the execution budget interrupts it.
-    let manager = Manager::new(&fixture).await;
+    let manager = timeout_manager(&fixture).await;
     let mut consumer = manager.consumer_bounding_execution(&fixture, 1, Duration::from_secs(1));
     assert!(
         drive_until_disposed(&fixture, &manager, &mut consumer, Duration::from_secs(4)).await,
@@ -2150,6 +2158,39 @@ async fn an_execution_timeout_disposes_v8_before_reusing_the_slot() {
     assert_eq!(done.state, RunState::Completed);
     assert_eq!(returned_value(&fixture, &next.id).await, json!("finished"));
     fixture.assert_disposed().await;
+}
+
+/// A cut attempt's delivery comes back to the queue inside the reuse window.
+///
+/// The execution bound ends an attempt the host cannot finish. The row then has
+/// to be claimable again before the reuse cases wait it out: at the default
+/// half-minute lease there is only ever the first cut, so a reused slot that is
+/// itself cut can never recover. This is the property `timeout_manager`'s lease
+/// buys, asserted on its own rather than inferred from the reuse case.
+#[compio::test]
+async fn a_cut_attempt_returns_to_the_queue_for_redelivery() {
+    let fixture = Fixture::new(HELD_STEP).await;
+    fixture.start(json!({})).await;
+    let manager = timeout_manager(&fixture).await;
+    let mut consumer = manager.consumer_bounding_execution(&fixture, 1, Duration::from_secs(1));
+    // One release is the host's bound ending an attempt; the second is the
+    // redelivery. A host that left the row leased past this window never
+    // reaches it.
+    let redelivered = compio::time::timeout(
+        Duration::from_secs(8),
+        beside(&mut consumer, async {
+            while manager.released.get() < 2 {
+                manager.publish(&fixture.app).await;
+                compio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }),
+    )
+    .await
+    .is_ok();
+    assert!(
+        redelivered,
+        "a cut attempt must return to the queue for redelivery inside the reuse window"
+    );
 }
 
 /// A step that never settles, under a `StepConfig.timeout` the trigger chooses.
