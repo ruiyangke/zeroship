@@ -53,6 +53,7 @@ async fn state(client: &(impl GenericClient + ?Sized), nonce: &str) -> State {
 async fn wrong_code_does_not_mutate_a_concurrent_reservation() {
     Database::run(async |database| {
         let mut winner = database.connect_as_auth().await;
+        let orm = database.orm().await;
         let nonce = nonce();
         let email = email();
         create(&winner, &nonce, &email).await;
@@ -92,7 +93,7 @@ async fn wrong_code_does_not_mutate_a_concurrent_reservation() {
             "wrong code must not mutate the winning reservation"
         );
         assert!(
-            magic_completions::finalize_consume(&winner, &nonce, &reserved.reserved_at)
+            magic_completions::finalize_consume(&orm, &nonce, &reserved.reserved_at)
                 .await
                 .unwrap()
         );
@@ -145,6 +146,7 @@ async fn wrong_codes_exhaust_the_completion() {
 async fn concurrent_correct_codes_reserve_once_without_wrong_attempts() {
     Database::run(async |database| {
         let client = database.connect_as_auth().await;
+        let orm = database.orm().await;
         let nonce = nonce();
         let email = email();
         create(&client, &nonce, &email).await;
@@ -193,7 +195,7 @@ async fn concurrent_correct_codes_reserve_once_without_wrong_attempts() {
             }
         );
         assert!(
-            magic_completions::finalize_consume(&client, &nonce, &accepted[0].reserved_at)
+            magic_completions::finalize_consume(&orm, &nonce, &accepted[0].reserved_at)
                 .await
                 .unwrap()
         );
@@ -208,6 +210,7 @@ async fn concurrent_correct_codes_reserve_once_without_wrong_attempts() {
 async fn stale_completion_owner_cannot_finalize_or_clear_a_newer_reservation() {
     Database::run(async |database| {
         let client = database.connect_as_auth().await;
+        let orm = database.orm().await;
         let nonce = nonce();
         let email = email();
         create(&client, &nonce, &email).await;
@@ -219,19 +222,19 @@ async fn stale_completion_owner_cannot_finalize_or_clear_a_newer_reservation() {
         let current = magic_completions::consume_pending(&client, &nonce, CODE).await.unwrap();
         assert_ne!(first.reserved_at, current.reserved_at);
         let before = state(&client, &nonce).await;
-        assert!(!magic_completions::finalize_consume(&client, &nonce, &first.reserved_at)
+        assert!(!magic_completions::finalize_consume(&orm, &nonce, &first.reserved_at)
             .await.unwrap());
-        assert!(!magic_completions::clear_consume_pending(&client, &nonce, Some(&first.reserved_at))
+        assert!(!magic_completions::clear_consume_pending(&orm, &nonce, Some(&first.reserved_at))
             .await.unwrap());
         assert_eq!(state(&client, &nonce).await, before);
 
-        assert!(magic_completions::clear_consume_pending(&client, &nonce, Some(&current.reserved_at))
+        assert!(magic_completions::clear_consume_pending(&orm, &nonce, Some(&current.reserved_at))
             .await.unwrap(), "the current owner can release its reservation");
         let retried = magic_completions::consume_pending(&client, &nonce, CODE).await.unwrap();
         assert_ne!(current.reserved_at, retried.reserved_at);
-        assert!(!magic_completions::finalize_consume(&client, &nonce, &current.reserved_at)
+        assert!(!magic_completions::finalize_consume(&orm, &nonce, &current.reserved_at)
             .await.unwrap());
-        assert!(magic_completions::finalize_consume(&client, &nonce, &retried.reserved_at)
+        assert!(magic_completions::finalize_consume(&orm, &nonce, &retried.reserved_at)
             .await.unwrap(), "the retried owner can finalize");
     }).await;
 }
@@ -252,6 +255,85 @@ async fn expired_completion_cannot_be_reserved() {
             "{outcome:?}"
         );
         assert_eq!(state(&client, &nonce).await, before);
+    })
+    .await;
+}
+
+/// A reservation instant read back from the server binds back to its own row,
+/// so the reservation is finalized. This is the whole reason
+/// `native::instant_value` exists: equality on a timestamp survives only a
+/// lossless conversion.
+#[compio::test]
+async fn stored_reservation_instant_finalizes_its_own_row() {
+    Database::run(async |database| {
+        let client = database.connect_as_auth().await;
+        let orm = database.orm().await;
+        let nonce = nonce();
+        let email = email();
+        create(&client, &nonce, &email).await;
+        magic_completions::consume_pending(&client, &nonce, CODE)
+            .await
+            .unwrap();
+        let stored: chrono::DateTime<chrono::Utc> = client
+            .query_one(
+                "SELECT consumed_pending_at FROM zeroship.magic_completions WHERE csrf_nonce = $1",
+                &[&nonce],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        // The database clock carries a fraction, so a millisecond-floored bind
+        // would be a different instant than the one stored.
+        assert_ne!(
+            stored.timestamp_subsec_micros() % 1_000,
+            0,
+            "the database clock must supply a sub-millisecond fraction for this case to bind"
+        );
+        assert!(
+            magic_completions::finalize_consume(&orm, &nonce, &stored)
+                .await
+                .unwrap(),
+            "the stored reservation instant must finalize its own row"
+        );
+    })
+    .await;
+}
+
+/// Rejection control for the lossless bind: an instant one microsecond away
+/// from the stored reservation is a different instant and finalizes nothing,
+/// while the untouched reservation is still finalized by its stored instant.
+#[compio::test]
+async fn finalize_rejects_a_reservation_instant_one_microsecond_off() {
+    Database::run(async |database| {
+        let client = database.connect_as_auth().await;
+        let orm = database.orm().await;
+        let nonce = nonce();
+        let email = email();
+        create(&client, &nonce, &email).await;
+        magic_completions::consume_pending(&client, &nonce, CODE)
+            .await
+            .unwrap();
+        let stored: chrono::DateTime<chrono::Utc> = client
+            .query_one(
+                "SELECT consumed_pending_at FROM zeroship.magic_completions WHERE csrf_nonce = $1",
+                &[&nonce],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        let skewed = stored + chrono::Duration::microseconds(1);
+        assert!(
+            !magic_completions::finalize_consume(&orm, &nonce, &skewed)
+                .await
+                .unwrap(),
+            "an instant one microsecond off must not match the reservation"
+        );
+        assert!(
+            magic_completions::finalize_consume(&orm, &nonce, &stored)
+                .await
+                .unwrap(),
+            "the untouched reservation is still finalized by its stored instant"
+        );
     })
     .await;
 }

@@ -1118,7 +1118,7 @@ pub async fn complete(
             )
             .await;
             if let Err(e) = magic_completions::clear_consume_pending(
-                db.as_ref(),
+                &orm,
                 &form.csrf_nonce,
                 Some(&completion.reserved_at),
             )
@@ -1146,7 +1146,7 @@ pub async fn complete(
         )
         .await;
         if let Err(e) = magic_completions::clear_consume_pending(
-            db.as_ref(),
+            &orm,
             &form.csrf_nonce,
             Some(&completion.reserved_at),
         )
@@ -1164,7 +1164,7 @@ pub async fn complete(
         Err(e) => {
             tracing::error!(error = %e, "magic complete find-or-create failed");
             if let Err(e) = magic_completions::clear_consume_pending(
-                db.as_ref(),
+                &orm,
                 &form.csrf_nonce,
                 Some(&completion.reserved_at),
             )
@@ -1185,7 +1185,7 @@ pub async fn complete(
     }
     if let Err(e) = eligibility::check_user_eligible(db.as_ref(), &user_id).await {
         if let Err(clear_err) =
-            magic_completions::clear_consume_pending(db.as_ref(), &form.csrf_nonce, None).await
+            magic_completions::clear_consume_pending(&orm, &form.csrf_nonce, None).await
         {
             tracing::warn!(error = %clear_err, "magic_completions clear pending after eligibility failure failed");
         }
@@ -1213,7 +1213,7 @@ pub async fn complete(
     match totp_store::is_enabled(db.as_ref(), &user_id).await {
         Ok(true) => {
             match magic_completions::finalize_consume(
-                db.as_ref(),
+                &orm,
                 &form.csrf_nonce,
                 &completion.reserved_at,
             )
@@ -1248,7 +1248,7 @@ pub async fn complete(
         Err(e) => {
             tracing::error!(error = %e, user_id = user_id.as_str(), "magic complete totp is_enabled check failed");
             if let Err(e) = magic_completions::clear_consume_pending(
-                db.as_ref(),
+                &orm,
                 &form.csrf_nonce,
                 Some(&completion.reserved_at),
             )
@@ -1279,7 +1279,7 @@ pub async fn complete(
         Err(e) => {
             tracing::error!(error = %e, "magic complete sessions::create failed");
             if let Err(e) = magic_completions::clear_consume_pending(
-                db.as_ref(),
+                &orm,
                 &form.csrf_nonce,
                 Some(&completion.reserved_at),
             )
@@ -1296,7 +1296,7 @@ pub async fn complete(
     }
 
     match magic_completions::finalize_consume(
-        db.as_ref(),
+        &orm,
         &form.csrf_nonce,
         &completion.reserved_at,
     )

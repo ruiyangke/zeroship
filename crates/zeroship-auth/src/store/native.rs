@@ -51,6 +51,21 @@ zeroship_data_orm::orm::schema! {
             deletion_scheduled_for: Nullable<Timestamp>,
             anonymized_at: Nullable<Timestamp>,
         }
+        magic_completions {
+            #[orm(primary_key, assign(on = insert, by = identity))]
+            id: BigInt,
+            #[orm(unique)]
+            csrf_nonce: Text,
+            code: Text,
+            #[orm(case_sensitive = false)]
+            email: Text,
+            login_challenge: Text,
+            #[orm(default = 0)]
+            attempts: Integer,
+            expires_at: Timestamp,
+            consumed_pending_at: Nullable<Timestamp>,
+            consumed_at: Nullable<Timestamp>,
+        }
     }
 }
 
@@ -98,13 +113,6 @@ pub(crate) fn optional_instant(
 }
 
 /// The inverse, for a value auth binds back into a predicate or an assignment.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the inverse timestamp conversion has no production caller yet; only the round-trip test exercises it"
-    )
-)]
 pub(crate) fn instant_value(value: DateTime<Utc>) -> Result<UtcInstant, DbError> {
     UtcInstant::from_unix_micros(value.timestamp_micros())
 }

@@ -1,6 +1,10 @@
 //! Cross-device magic-login completion persistence and reservation ownership.
 
 use compio_postgres::{Client, GenericClient};
+use zeroship_data_orm::orm::{Database, TimestampExpr, UtcInstant};
+
+use super::native::instant_value;
+use super::native::models::magic_completions as model;
 
 use crate::error::AuthError;
 
@@ -157,60 +161,63 @@ pub async fn consume_pending(
 
 /// Finish the reservation identified by its timestamp.
 ///
+/// The stored instant is bound back through the same conversion that decoded it
+/// (`native::instant_value`), so the equality matches the reservation the caller
+/// took rather than a coarser instant.
+///
 /// # Errors
 /// Returns an error if the database update fails.
+#[expect(
+    clippy::future_not_send,
+    reason = "the ORM belongs to its compio runtime"
+)]
 pub async fn finalize_consume(
-    db: &Client,
+    db: &Database,
     csrf_nonce: &str,
     reserved_at: &chrono::DateTime<chrono::Utc>,
 ) -> crate::error::Result<bool> {
     let updated = db
-        .execute(
-            "UPDATE zeroship.magic_completions \
-             SET consumed_at = NOW() \
-             WHERE csrf_nonce = $1 \
-               AND consumed_pending_at = $2 \
-               AND consumed_at IS NULL",
-            &[&csrf_nonce, reserved_at],
+        .entity::<model::Entity>()?
+        .update_many(
+            model::csrf_nonce.eq(csrf_nonce)?.and(
+                model::consumed_pending_at
+                    .eq(Some(instant_value(reserved_at.to_owned())?))?
+                    .and(model::consumed_at.is_null()),
+            ),
+            model::consumed_at.set_expression(TimestampExpr::database_now())?,
         )
-        .await
-        .map_err(|e| AuthError::Db(format!("magic_completions finalize consume: {e}")))?;
+        .await?;
     Ok(updated > 0)
 }
 
 /// Release a reservation after a handoff fails.
 ///
-/// A supplied timestamp must match the current reservation. Without one, any
-/// unconsumed reservation for the nonce can be cleared.
+/// A supplied timestamp must match the current reservation, bound back through
+/// `native::instant_value`. Without one, any unconsumed reservation for the
+/// nonce can be cleared.
 ///
 /// # Errors
 /// Returns an error if the database update fails.
+#[expect(
+    clippy::future_not_send,
+    reason = "the ORM belongs to its compio runtime"
+)]
 pub async fn clear_consume_pending(
-    db: &Client,
+    db: &Database,
     csrf_nonce: &str,
     reserved_at: Option<&chrono::DateTime<chrono::Utc>>,
 ) -> crate::error::Result<bool> {
-    let result = if let Some(ts) = reserved_at {
-        db.execute(
-            "UPDATE zeroship.magic_completions \
-             SET consumed_pending_at = NULL \
-             WHERE csrf_nonce = $1 \
-               AND consumed_pending_at = $2 \
-               AND consumed_at IS NULL",
-            &[&csrf_nonce, ts],
-        )
-        .await
-    } else {
-        db.execute(
-            "UPDATE zeroship.magic_completions \
-             SET consumed_pending_at = NULL \
-             WHERE csrf_nonce = $1 \
-               AND consumed_at IS NULL",
-            &[&csrf_nonce],
-        )
-        .await
-    };
-    let updated = result
-        .map_err(|e| AuthError::Db(format!("magic_completions clear consume pending: {e}")))?;
+    let mut filter = model::csrf_nonce
+        .eq(csrf_nonce)?
+        .and(model::consumed_at.is_null());
+    if let Some(ts) = reserved_at {
+        filter = filter.and(
+            model::consumed_pending_at.eq(Some(instant_value(ts.to_owned())?))?,
+        );
+    }
+    let updated = db
+        .entity::<model::Entity>()?
+        .update_many(filter, model::consumed_pending_at.set(None::<UtcInstant>)?)
+        .await?;
     Ok(updated > 0)
 }
