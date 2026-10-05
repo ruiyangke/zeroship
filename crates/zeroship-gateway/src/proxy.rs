@@ -401,14 +401,31 @@ async fn relay_chunked(
     tx: ntex::channel::mpsc::Sender<Result<ntex::util::Bytes, std::io::Error>>,
 ) {
     loop {
-        while let ChunkDecode::Complete(data, consumed) = decode_next_chunk(&leftover) {
-            if data.is_empty() {
-                return;
+        loop {
+            match decode_next_chunk(&leftover) {
+                ChunkDecode::Complete(data, consumed) => {
+                    if data.is_empty() {
+                        return;
+                    }
+                    if tx.send(Ok(ntex::util::Bytes::from(data))).is_err() {
+                        return;
+                    }
+                    leftover = leftover[consumed..].to_vec();
+                }
+                ChunkDecode::Incomplete => break,
+                ChunkDecode::Malformed => {
+                    // The framing cannot be repaired by more bytes, so waiting
+                    // for them would hold the downstream body open until the
+                    // peer closes. End it now, the same way a cut-by-EOF body
+                    // ends below.
+                    let error = std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "upstream sent malformed chunked framing",
+                    );
+                    let _ = tx.send(Err(error));
+                    return;
+                }
             }
-            if tx.send(Ok(ntex::util::Bytes::from(data))).is_err() {
-                return;
-            }
-            leftover = leftover[consumed..].to_vec();
         }
 
         let read_buf = vec![0u8; 4096];
@@ -722,37 +739,74 @@ async fn read_body_buffered(
 
 /// Result of attempting to decode the next chunk from a buffer.
 enum ChunkDecode {
-    /// A complete chunk was decoded: (data, bytes_consumed_from_buffer).
+    /// A complete chunk was decoded: (data, bytes consumed from the buffer).
     /// data is empty for the final zero-length terminator chunk.
     Complete(Vec<u8>, usize),
     /// Not enough data in the buffer to decode a complete chunk.
     Incomplete,
+    /// The framing itself is invalid: no further bytes can make it decodable.
+    /// The relay must end the downstream body with an error rather than wait
+    /// for a byte that would never arrive.
+    Malformed,
 }
+
+/// Maximum bytes allowed in a chunk-size line - the hex size plus any chunk
+/// extensions - before the framing is [`ChunkDecode::Malformed`].
+///
+/// RFC 9112 defines `chunk-size = 1*HEXDIG` and leaves chunk extensions
+/// unbounded, so a decoder that accumulates until it sees CRLF lets a peer
+/// that never sends one grow the relay's buffer without limit while the
+/// downstream response stays open. A `usize` is at most 16 hex digits on a
+/// 64-bit target, so the size field is tiny; the rest of the line is
+/// creator-controlled metadata, the same kind this module already bounds at
+/// 8 KiB for `Set-Cookie` ([`MAX_APP_SET_COOKIE_TOTAL_BYTES`]). Applying that
+/// bound to a chunk-size line leaves a legitimate extension ample room while
+/// classifying a line that runs past it as malformed.
+const MAX_CHUNK_SIZE_LINE_BYTES: usize = 8 * 1024;
 
 /// Attempt to decode the next HTTP chunked-encoding frame from `buf`.
 ///
 /// Chunked format: `<hex-size>\r\n<data>\r\n`, terminated by `0\r\n\r\n`.
+/// `chunk-size` may carry `;`-delimited chunk extensions, which are ignored.
+///
+/// Returns [`ChunkDecode::Malformed`] for framing no later bytes can repair: a
+/// size line that is not UTF-8, is not hexadecimal, runs past
+/// [`MAX_CHUNK_SIZE_LINE_BYTES`] without a CRLF, or names a size whose
+/// `chunk_end` would overflow `usize`.
 fn decode_next_chunk(buf: &[u8]) -> ChunkDecode {
-    // Find the chunk size line ending (\r\n)
-    let Some(crlf_pos) = find_crlf(buf) else {
-        return ChunkDecode::Incomplete;
+    // Bound the size line before parsing it. When no CRLF has arrived yet the
+    // whole buffer is a size line still in progress; once it exceeds the
+    // bound no later CRLF can make it valid.
+    let Some(line_len) = find_crlf(buf) else {
+        return if buf.len() > MAX_CHUNK_SIZE_LINE_BYTES {
+            ChunkDecode::Malformed
+        } else {
+            ChunkDecode::Incomplete
+        };
     };
+    if line_len > MAX_CHUNK_SIZE_LINE_BYTES {
+        return ChunkDecode::Malformed;
+    }
 
     // Parse hex size
-    let size_str = match std::str::from_utf8(&buf[..crlf_pos]) {
-        Ok(s) => s.trim(),
-        Err(_) => return ChunkDecode::Incomplete,
+    let Ok(size_str) = std::str::from_utf8(&buf[..line_len]) else {
+        return ChunkDecode::Malformed;
     };
+    let size_str = size_str.trim();
     // Strip chunk extensions (anything after ';')
     let size_hex = size_str.split(';').next().unwrap_or("").trim();
-    let chunk_size = match usize::from_str_radix(size_hex, 16) {
-        Ok(s) => s,
-        Err(_) => return ChunkDecode::Incomplete,
+    let Ok(chunk_size) = usize::from_str_radix(size_hex, 16) else {
+        return ChunkDecode::Malformed;
     };
 
-    // Total bytes for this chunk: size_line + \r\n + data + \r\n
-    let data_start = crlf_pos + 2; // past the first \r\n
-    let chunk_end = data_start + chunk_size + 2; // data + trailing \r\n
+    // Total bytes for this chunk: size_line + \r\n + data + \r\n. A huge
+    // declared size overflows `usize`; classify that as malformed instead of
+    // wrapping (a wrong parse) or panicking in a debug build.
+    let data_start = line_len + 2; // past the first \r\n
+    let Some(chunk_end) = data_start.checked_add(chunk_size).and_then(|end| end.checked_add(2))
+    else {
+        return ChunkDecode::Malformed;
+    };
 
     if buf.len() < chunk_end {
         return ChunkDecode::Incomplete;
@@ -770,6 +824,71 @@ fn decode_next_chunk(buf: &[u8]) -> ChunkDecode {
 /// Find the position of the first \r\n in `buf`.
 fn find_crlf(buf: &[u8]) -> Option<usize> {
     buf.windows(2).position(|w| w == b"\r\n")
+}
+
+#[cfg(test)]
+mod chunk_decode_tests {
+    //! Framing classification for the chunked decoder. The malformed cases
+    //! here must not be mistaken for "need more bytes": that classification
+    //! holds the downstream body open until the peer closes.
+
+    use super::*;
+
+    #[test]
+    fn a_non_hex_size_is_malformed() {
+        assert!(matches!(decode_next_chunk(b"zz\r\n"), ChunkDecode::Malformed));
+    }
+
+    #[test]
+    fn a_non_utf8_size_line_is_malformed() {
+        assert!(matches!(
+            decode_next_chunk(&[0xff, 0xfe, b'\r', b'\n']),
+            ChunkDecode::Malformed
+        ));
+    }
+
+    #[test]
+    fn an_overflowing_size_is_malformed() {
+        // `usize::MAX` parses as hex but leaves no room for the two CRLF bytes
+        // after the data, so `chunk_end` overflows. An unchecked sum would
+        // panic in a debug build and wrap in release; the checked add must
+        // reject it.
+        let line = format!("{:x}\r\n", usize::MAX);
+        assert!(matches!(
+            decode_next_chunk(line.as_bytes()),
+            ChunkDecode::Malformed
+        ));
+    }
+
+    #[test]
+    fn a_size_line_past_the_bound_is_malformed() {
+        // No CRLF, so the whole buffer is a size line still in progress; past
+        // the bound no later CRLF can make it valid.
+        let buf = vec![b'a'; MAX_CHUNK_SIZE_LINE_BYTES + 1];
+        assert!(matches!(decode_next_chunk(&buf), ChunkDecode::Malformed));
+    }
+
+    #[test]
+    fn a_size_line_at_the_bound_without_crlf_is_incomplete() {
+        // The rejection control: the bound is inclusive. A line that has
+        // reached exactly the bound may still be completed by the CRLF that
+        // follows, so it is not yet malformed.
+        let buf = vec![b'a'; MAX_CHUNK_SIZE_LINE_BYTES];
+        assert!(matches!(decode_next_chunk(&buf), ChunkDecode::Incomplete));
+    }
+
+    #[test]
+    fn a_size_line_with_chunk_extensions_parses() {
+        // Control: a well-formed extension line still yields its chunk.
+        match decode_next_chunk(b"5;ext=1\r\nhello\r\n") {
+            ChunkDecode::Complete(data, consumed) => {
+                assert_eq!(data, b"hello");
+                assert_eq!(consumed, 16);
+            }
+            ChunkDecode::Incomplete => panic!("a complete chunk was reported incomplete"),
+            ChunkDecode::Malformed => panic!("a chunk-extension line was reported malformed"),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1346,6 +1465,19 @@ mod chunked_relay_tests {
     /// A worker that reads one whole request, answers with `body` after a
     /// chunked head, and closes.
     async fn worker_answering(body: &'static [u8]) -> String {
+        worker_answering_inner(body.to_vec(), false).await
+    }
+
+    /// A worker that answers with `body` after a chunked head and then holds
+    /// the connection open, reading until the gateway closes it. This is the
+    /// peer the malformed-framing tests need: it never sends EOF on its own,
+    /// so the relay must classify the framing itself instead of waiting for a
+    /// close that never comes.
+    async fn worker_answering_holding_open(body: Vec<u8>) -> String {
+        worker_answering_inner(body, true).await
+    }
+
+    async fn worker_answering_inner(body: Vec<u8>, hold_open: bool) -> String {
         let listener = compio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind the worker");
@@ -1378,8 +1510,20 @@ mod chunked_relay_tests {
                 }
             }
             let mut answer = HEAD.to_vec();
-            answer.extend_from_slice(body);
+            answer.extend_from_slice(&body);
             let _ = compio::io::AsyncWriteExt::write_all(&mut stream, answer).await;
+            if hold_open {
+                // No FIN: keep the connection open until the gateway closes
+                // it. The relay's classification of the framing is what ends
+                // the exchange, never a peer close.
+                loop {
+                    let BufResult(read, _) =
+                        compio::io::AsyncRead::read(&mut stream, vec![0u8; 4096]).await;
+                    if matches!(read, Ok(0) | Err(_)) {
+                        return;
+                    }
+                }
+            }
         })
         .detach();
         url
@@ -1436,5 +1580,46 @@ mod chunked_relay_tests {
     async fn a_complete_chunked_body_ends_cleanly() {
         let items = relayed(&worker_answering(b"5\r\nhello\r\n0\r\n\r\n").await).await;
         assert_eq!(items, vec![Ok(b"hello".to_vec())]);
+    }
+
+    /// A peer that writes a size line which is not hexadecimal and keeps the
+    /// connection open must make the relay end its body in error promptly -
+    /// not wait for the close that never comes. The bounded wait is `relayed`'s
+    /// own timeout around the poll loop.
+    #[compio::test]
+    async fn a_non_hex_size_line_held_open_ends_the_relay_with_an_error() {
+        let items = relayed(&worker_answering_holding_open(b"zz\r\n".to_vec()).await).await;
+        assert_eq!(items.len(), 1, "only the framing error, no chunk: {items:?}");
+        assert!(
+            items[0].is_err(),
+            "a non-hex size line must end the body in error, not hold it open: {items:?}"
+        );
+    }
+
+    /// Same, for a size line that is not UTF-8.
+    #[compio::test]
+    async fn a_non_utf8_size_line_held_open_ends_the_relay_with_an_error() {
+        let items =
+            relayed(&worker_answering_holding_open(vec![0xff, 0xfe, b'\r', b'\n']).await).await;
+        assert_eq!(items.len(), 1, "only the framing error, no chunk: {items:?}");
+        assert!(
+            items[0].is_err(),
+            "a non-UTF-8 size line must end the body in error, not hold it open: {items:?}"
+        );
+    }
+
+    /// A size line that never sends its CRLF and runs past the bound must end
+    /// the body in error rather than grow the relay's buffer without limit.
+    #[compio::test]
+    async fn a_size_line_past_the_bound_held_open_ends_the_relay_with_an_error() {
+        let items = relayed(
+            &worker_answering_holding_open(vec![b'a'; MAX_CHUNK_SIZE_LINE_BYTES + 1]).await,
+        )
+        .await;
+        assert_eq!(items.len(), 1, "only the framing error, no chunk: {items:?}");
+        assert!(
+            items[0].is_err(),
+            "a size line past the bound must end the body in error, not hold it open: {items:?}"
+        );
     }
 }
