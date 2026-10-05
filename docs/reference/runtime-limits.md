@@ -261,3 +261,76 @@ The dev server's heap default is 512 MB (`zeroship serve --heap-limit-mb`, or
 the `ZEROSHIP_HEAP_LIMIT_MB` environment variable), so a bundle that loads large
 dependencies can run locally and still exceed the free tier's 64 MB in
 production. Size the plan for what you import.
+
+## Outbound fetch
+
+`fetch` sends any request body, including a `ReadableStream`. These are the
+rules a request body follows, and the limits on what comes back.
+
+### Streaming a request body
+
+Pass a `ReadableStream` as `body` together with `duplex: "half"`; without
+`duplex` the `Request` constructor (and so `fetch`) throws a `TypeError`, and
+`duplex: "full"` is not supported. The body is sent as your stream produces
+it, chunk by chunk, so the receiving server sees the first bytes before the
+stream has ended. The stream is read only once the request can be sent: a URL
+the network refuses (a blocked port, a private address) fails the fetch with a
+`TypeError` before your stream is touched.
+
+- **Memory stays bounded.** The platform holds at most 4 MiB of an upload, plus
+  the rest of a chunk larger than that while it is sent. When the server or the
+  network is slower than your stream, the platform stops reading the stream
+  until that drains, so a fast producer waits instead of filling memory. The
+  uploads one isolate runs share 32 MiB the same way: once they hold that much
+  together, each waits with at most the unsent rest of the chunk it is on.
+- **No size cap.** A streamed upload has no total-size limit, the same as any
+  other request body. It ends when your stream closes.
+- **An upload belongs to its request.** When the request that started it is
+  cancelled or reaches your plan's wall timeout, the upload stops sending and
+  your stream is cancelled.
+- **An upload counts as a fetch in flight** until its body has been sent or
+  cancelled, which can be after the response has arrived. It counts against
+  the limit of 64 fetches in flight per isolate; a fetch past that limit is
+  rejected with a `RangeError`.
+- **Chunks are `Uint8Array`, of any size.** Any other chunk (a string, an
+  `ArrayBuffer`, a `DataView`) fails the fetch with a `TypeError` and cancels
+  your stream with that error. One large chunk, such as the single chunk
+  `Blob.stream()` yields, is accepted like many small ones.
+- **Length.** Without a `Content-Length` header the body is sent with chunked
+  transfer coding. If you set `Content-Length`, the stream must deliver exactly
+  that many bytes, or the fetch fails. A `Transfer-Encoding` header you set is
+  ignored: the platform frames the body.
+
+### When the server answers early
+
+A server can answer before it has read the whole body. Once that answer is
+complete, the fetch resolves with it and your stream is cancelled; the part of
+the body the platform had already queued may still be delivered.
+
+### Failures while the body is sent
+
+| what happens | what you see |
+| --- | --- |
+| your stream errors | the fetch rejects with a `TypeError` whose message includes your error's message; the server receives an incomplete body, never one that looks complete |
+| you abort the request's signal | the fetch rejects with `signal.reason`, at any point: while the body is being sent, or while the server has not answered yet; your stream is cancelled with the same reason |
+| the connection fails | the fetch rejects with a `TypeError`, and your stream is cancelled |
+
+### Redirects
+
+A stream body can be sent only once. A `301`, `302`, `307` or `308` redirect
+of a request with a stream body fails the fetch with a `TypeError`; a `303` is
+followed as a `GET` without a body. A body built from a string, buffer, `Blob`,
+`FormData` or `URLSearchParams` (including one from `request.clone()`) is sent
+again when a `307` or `308` keeps it. With `redirect: "manual"` the redirect
+response is returned instead.
+
+### Handing a request's body over
+
+`fetch(request)` and `new Request(request)` take over `request`'s stream body:
+afterwards `request.bodyUsed` is `true` and `request.body` is locked. They also
+follow `request.signal`, so aborting it aborts the new request. Call
+`request.clone()` first to keep a copy of the body.
+
+### Responses
+
+A response body larger than 10 MiB fails the fetch with a `TypeError`.

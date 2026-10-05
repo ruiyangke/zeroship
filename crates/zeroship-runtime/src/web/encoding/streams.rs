@@ -33,11 +33,9 @@
 //! synthetic underlyingTransformer object. The transformer's `transform`
 //! and `flush` callbacks are FunctionTemplate-backed C functions that
 //! delegate to a heap-allocated native TextEncoder / TextDecoder kept
-//! alive by the External payload. This reuses the well-tested JS-from-
-//!   transformer construction path in `streams::transform` rather than
-//!   threading the Rust-side `from_native_transformer` (whose driver
-//!   algorithms are still placeholders, see comments in
-//!   `transform_controller.rs`).
+//! alive by the External payload. The codec work is synchronous, so the
+//! JS-from-transformer construction path in `streams::transform` gives the
+//! spec's transform-settles-before-next-write semantics directly.
 //!
 //! The TransformStream wrapper is held as a `v8::Global<v8::Object>` in
 //! the `#[v8_class]`-generated instance state; `readable` and `writable`

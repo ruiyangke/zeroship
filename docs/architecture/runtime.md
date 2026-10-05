@@ -66,7 +66,24 @@ The `#[v8_class]` macro support lives in `crates/zeroship-runtime-macros`.
 - native `EventSource`
 - WebSocket and crypto support
 
-Stream responses are pumped by [response_forwarder.rs](../../crates/zeroship-runtime/src/web/streams/response_forwarder.rs), not by the older JS shim.
+When a native consumer takes a JS `ReadableStream`'s bytes, it does so through
+[stream_forwarder.rs](../../crates/zeroship-runtime/src/web/streams/stream_forwarder.rs):
+it holds a reader, drives `read()` from promise reactions and pushes the bytes
+into a bounded native channel. Response bodies to the gateway, RPC stream
+procedures, `env.storage.putStream` uploads and streaming `fetch` request
+bodies go through it; body consumers such as `Response.text()` read through
+`fetch/body/body_stream.rs`, and `EventSource` drives its own reader.
+
+Uploads read their stream through the internal reader algorithms, pause the
+read loop while their channel is half full or a chunk is parked, and slice a
+chunk larger than the free space. A runtime's uploads share one byte budget
+(`MAX_UPLOAD_BUFFER_BYTES`, channels plus parked chunks), so one app cannot take
+the process-wide stream budget from the others. An upload belongs to the
+request that started it: a cancelled or timed-out request cancels its uploads
+(`cancel_uploads_owned_by`). `fetch` sends the channel as the request body,
+read by the HTTP client as it writes; the body holds the fetch's in-flight
+slot until the client lets go of it, and a body whose source has not finished
+is cancelled when its hop ends, including when the response is complete first.
 
 ## Limits
 

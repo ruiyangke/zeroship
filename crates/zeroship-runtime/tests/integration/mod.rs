@@ -85,8 +85,8 @@
 //!     become its own target, exactly like `v8_fastcall_smoke`.
 //!
 //!   * `ZEROSHIP_DEV` is set to "1" here and never unset. `fetch_native`,
-//!     `fetch_native_install`, `eventsource` and `websocket_e2e` each set it
-//!     one-way, and the files that also RESTORE it live in their own targets
+//!     `fetch_native_install`, `fetch_streaming_upload`, `eventsource` and
+//!     `websocket_e2e` each set it one-way, and the files that also RESTORE it live in their own targets
 //!     precisely so nothing here observes it flipping back. A new module added
 //!     below that asserts the NON-dev path - SSRF blocking loopback, say - will
 //!     pass or fail depending on which of its neighbours ran first. That is a
@@ -132,6 +132,7 @@ mod fetch_native_install;
 mod fetch_native;
 mod fetch_request;
 mod fetch_response;
+mod fetch_streaming_upload;
 mod form_data;
 mod headers;
 mod heap_limits;

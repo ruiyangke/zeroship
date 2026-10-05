@@ -35,19 +35,15 @@
 //!   bad-port table + scheme allowlist; spec subtleties around upgrade
 //!   are deferred).
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use compio::bytes::Bytes;
 
 use super::bad_ports::is_bad_port;
 use super::content_encoding::decompress_response_body;
 use super::data_url::parse_data_url;
-use super::http_network::{http_network_fetch, NetworkResponse};
-use super::redirect::{
-    apply_redirect_method, body_rewindable_for_status, is_same_origin,
-};
+use super::http_network::{http_network_fetch, NetworkResponse, UploadBody};
+use super::redirect::{apply_redirect_method, is_same_origin};
 
 use crate::channel::CancelFlag;
-use crate::fetch_body::BodySource;
 
 // ---------------------------------------------------------------------------
 // FetchParams — the shared state passed down the algorithm chain
@@ -59,17 +55,11 @@ use crate::fetch_body::BodySource;
 /// We keep this as plain Rust structs — V8 entry happens at the
 /// boundaries (algorithm output → `Response` JS object) but the loop
 /// itself is pure async.
-#[derive(Clone)]
 pub struct FetchRequest {
     pub method: String,
     pub url: String,
     pub headers: Vec<(String, String)>,
-    /// Body bytes for rewindable bodies; `None` if body is null.
-    /// Stream bodies are surfaced separately via `stream_body` when the
-    /// caller knows we won't redirect.
-    pub body: Option<Vec<u8>>,
-    /// Original body source — for redirect rewindability checks.
-    pub body_source: Option<BodySource>,
+    pub body: RequestBody,
     pub redirect_mode: RedirectMode,
     pub credentials_mode: CredentialsMode,
     /// Cancel flag for AbortSignal integration.
@@ -80,6 +70,27 @@ pub struct FetchRequest {
     /// Initial URL (the URL the user passed). For Origin header on
     /// cross-origin redirects.
     pub origin_url: String,
+}
+
+/// A request's body as the algorithm chain sends it.
+pub enum RequestBody {
+    /// The body is null.
+    Empty,
+    /// A body with a byte source: every BodyInit except a ReadableStream.
+    /// Sent with its length, and sent again when a 307/308 redirect keeps
+    /// the body.
+    Bytes(Bytes),
+    /// A ReadableStream body, whose source is null: read once, chunk by
+    /// chunk, by the stream forwarder. The first hop takes the stream, so a
+    /// redirect that would send the body again is a network error.
+    Stream(Option<UploadBody>),
+}
+
+impl RequestBody {
+    /// True for a ReadableStream body, before and after a hop has sent it.
+    pub fn is_stream(&self) -> bool {
+        matches!(self, RequestBody::Stream(_))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,6 +232,23 @@ async fn http_fetch(
     http_redirect_fetch(request).await
 }
 
+/// The refusals the network applies to `url` before anything is sent: the
+/// SSRF check on the URL's text and the bad-port table. `Ok(false)` for a
+/// scheme fetched without the network (`data:`), which never sends a body.
+/// The algorithm chain applies the same checks again; this lets `fetch`
+/// refuse such a request before it reads a stream body.
+pub fn precheck_network_url(url: &str) -> Result<bool, String> {
+    let parsed = ada_url::Url::parse(url, None)
+        .map_err(|e| format!("network error: invalid URL: {e}"))?;
+    let scheme = parsed.protocol().trim_end_matches(':').to_lowercase();
+    if scheme != "http" && scheme != "https" {
+        return Ok(false);
+    }
+    crate::fetch::validate_url(url).map_err(|msg| format!("network error: {msg}"))?;
+    check_bad_port(url)?;
+    Ok(true)
+}
+
 fn check_bad_port(url: &str) -> Result<(), String> {
     let parsed = ada_url::Url::parse(url, None)
         .map_err(|e| format!("network error: invalid URL: {e}"))?;
@@ -264,7 +292,7 @@ async fn http_redirect_fetch(
     const MAX_REDIRECTS: u32 = 20;
 
     loop {
-        let net = http_network_or_cache_fetch(&request).await?;
+        let net = http_network_or_cache_fetch(&mut request).await?;
 
         let status = net.status;
         let is_redirect = matches!(status, 301 | 302 | 303 | 307 | 308);
@@ -336,18 +364,20 @@ async fn http_redirect_fetch(
                     ));
                 }
 
+                // HTTP-redirect fetch: "If internalResponse's status is not
+                // 303, request's body is non-null, and request's body's
+                // source is null, then return a network error." A stream is
+                // the only body without a source, and this runs before the
+                // 301/302 POST-to-GET rewrite, so a stream body follows 303
+                // alone.
+                if status != 303 && request.body.is_stream() {
+                    return Err(format!(
+                        "network error: a {status} redirect cannot resend a ReadableStream request body"
+                    ));
+                }
+
                 // Method / body mutation.
                 let change = apply_redirect_method(status, &request.method);
-
-                // 307/308 + non-rewindable body → network error
-                // (§5.6 step 12).
-                if matches!(status, 307 | 308)
-                    && !body_rewindable_for_status(status, &request.body_source)
-                {
-                    return Err(
-                        "network error: redirect requires body replay but body is a stream".to_string(),
-                    );
-                }
 
                 // Cross-origin Authorization strip (§5.6 step 13).
                 let cross_origin = !is_same_origin(&request.url, &next_url);
@@ -357,8 +387,7 @@ async fn http_redirect_fetch(
                 request.url = next_url;
 
                 if change.drop_body {
-                    request.body = None;
-                    request.body_source = None;
+                    request.body = RequestBody::Empty;
                 }
 
                 if change.strip_content_headers {
@@ -397,7 +426,7 @@ async fn http_redirect_fetch(
 /// servers expect (`Cache-Control` propagation), then hand off to
 /// `http_network_fetch`.
 async fn http_network_or_cache_fetch(
-    request: &FetchRequest,
+    request: &mut FetchRequest,
 ) -> Result<NetworkResponse, String> {
     let resp = http_network_fetch(request).await?;
     // After decoding, strip Content-Encoding and Content-Length when
@@ -472,17 +501,6 @@ pub fn append_origin_if_needed(headers: &mut Vec<(String, String)>, method: &str
     };
     headers.push(("Origin".to_string(), value));
 }
-
-// ---------------------------------------------------------------------------
-// Concurrent helpers (kept here so the algorithm module can advertise
-// them as the FetchRequest-construction path's extension points).
-// ---------------------------------------------------------------------------
-
-/// Cancel-flag wrapper for AbortSignal integration. The `Rc` lets us
-/// hand a clone to the cyper request so cancelling the signal terminates
-/// the in-flight TCP read without the algorithm needing to poll a flag
-/// directly.
-pub type SharedCancelFlag = Rc<RefCell<bool>>;
 
 #[cfg(test)]
 mod tests {

@@ -138,6 +138,13 @@ whole object in memory, and an object past the cap is **refused**, never truncat
 upload — or a source stream that fails mid-upload — resolves `{ data: null, error }` and
 leaves no new object behind: a key that already held an object keeps it. A streamed `put`
 resolves the same `{ bucket, key, size }` result as a buffered one.
+A streamed `put` accepts chunks of any size: one large chunk, such as the single chunk
+`Blob.stream()` yields, is uploaded like many small ones.
+The streamed uploads one isolate has in flight (streamed `put`s and streamed `fetch`
+bodies) share 32 MiB of buffering: once they hold that much together, each waits, holding
+at most the unsent rest of the chunk it is on, rather than fail. A
+streamed `put` belongs to the request that started it: when that request is cancelled or
+reaches its wall timeout, the upload stops and stores nothing.
 
 `getStream` on a missing key is `{ data: null }`, exactly like `get`.
 

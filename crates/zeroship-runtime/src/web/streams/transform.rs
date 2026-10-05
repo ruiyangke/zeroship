@@ -32,8 +32,6 @@
 //!   lands with compression, not in v1.
 
 use std::cell::{Cell, RefCell};
-use std::future::Future;
-use std::pin::Pin;
 use std::rc::Rc;
 
 use zeroship_runtime_macros::v8_class;
@@ -69,7 +67,7 @@ pub struct TransformHalves {
 
 /// Setup args stashed by the constructor body so `after_install` can
 /// finish wiring once the box is reachable via internal field 0. None
-/// for streams built via `from_native_transformer` (the Rust-side helper
+/// for streams built by `create_identity_transform_stream` (the Rust-side helper
 /// runs its own controller setup directly).
 struct PendingTransformSetup {
     transformer: v8::Global<v8::Value>,
@@ -94,7 +92,7 @@ pub struct TSStreamState {
     pub bp_change_promise: RefCell<Option<v8::Global<v8::Promise>>>,
     pub bp_change_resolver: RefCell<Option<v8::Global<v8::PromiseResolver>>>,
     /// Constructor args plumbing — populated by the constructor body, consumed
-    /// (`take()`) by `after_install`. None on the `from_native_transformer`
+    /// (`take()`) by `after_install`. None on the `create_identity_transform_stream`
     /// path which wires the controller directly without the post_init hook.
     pending_setup: RefCell<Option<PendingTransformSetup>>,
     /// This stream's charge to its isolate's budget.
@@ -103,7 +101,7 @@ pub struct TSStreamState {
 
 impl TSStreamState {
     /// Allocate the boxed state with no pending setup — used by
-    /// `from_native_transformer` which drives controller setup directly
+    /// `create_identity_transform_stream`, which drives controller setup directly
     /// rather than through the macro's post_init hook.
     fn new_for_internal(budget: StreamBudgetGuard) -> Self {
         Self {
@@ -323,55 +321,51 @@ pub fn ts_controller_slot<'s>(
 }
 
 // ---------------------------------------------------------------------------
-// `from_native_transformer` — Rust-only constructor
+// Identity TransformStream: Rust-only constructor
 // ---------------------------------------------------------------------------
 
-/// Build a JS TransformStream from a Rust transformer.
+/// Streams "create an identity TransformStream": a TransformStream whose
+/// transform enqueues every chunk unchanged, set up with the writable
+/// high-water mark 1 and readable high-water mark 0 that "set up a
+/// TransformStream" uses.
 ///
-/// **C-12 INVARIANT (`#[doc(hidden)]`):** callers MUST NOT pass a
-/// JS-bridged transformer (one whose transform/flush/cancel indirectly
-/// touch a JS-visible TransformStream). This is the internal entrypoint
-/// for compression and similar Rust-side codecs.
-///
-/// Fails with the budget's `RangeError` when the isolate cannot hold the
-/// stream and both its halves.
-#[doc(hidden)]
-pub fn from_native_transformer<'s, T: NativeTransformer + 'static>(
+/// Built from the intrinsic class rather than `globalThis.TransformStream`,
+/// so creator code cannot substitute it. The stream and both halves are
+/// charged to the isolate's budget before any of them exists, so an
+/// exhausted budget is the budget's `RangeError` and builds nothing.
+pub(crate) fn create_identity_transform_stream<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    transformer: T,
-    writable_hwm: f64,
-    readable_hwm: f64,
 ) -> Result<v8::Local<'s, v8::Object>, OpError> {
     let [budget, readable_budget, writable_budget] = try_alloc_streams::<3>(scope)?;
+    let start_resolver = v8::PromiseResolver::new(scope)
+        .ok_or_else(|| OpError::error("identity TransformStream: no start promise"))?;
     let stream = build_stream_wrapper(scope, budget);
-
-    // Set up the TS controller from the native transformer. The
-    // transform/flush/cancel algorithms get wired as Native variants on
-    // the TS controller; SetUp wires Initialize + SetBackpressure(true).
-    crate::streams::transform_controller::set_up_transform_stream_default_controller_native(
+    let no_transformer: v8::Local<v8::Value> = v8::undefined(scope).into();
+    crate::streams::transform_controller::set_up_transform_stream_default_controller_from_transformer(
         scope,
         stream,
-        transformer,
+        no_transformer,
+        start_resolver,
         TransformHalves {
             readable: HalfSetup {
-                hwm: readable_hwm,
+                hwm: 0.0,
                 size: SizeAlgorithm::DefaultCount,
                 budget: readable_budget,
             },
             writable: HalfSetup {
-                hwm: writable_hwm,
+                hwm: 1.0,
                 size: SizeAlgorithm::DefaultCount,
                 budget: writable_budget,
             },
         },
-    );
+    )?;
     Ok(stream)
 }
 
 /// Construct the bare `TransformStream` JS wrapper — no controller wired,
-/// no halves attached. Used by `from_native_transformer`. The macro's
-/// post_init path mints its own wrapper through the constructor callback;
-/// this helper is the parallel manual mint for the Rust-side path.
+/// no halves attached. Used by `create_identity_transform_stream`. The
+/// macro's post_init path mints its own wrapper through the constructor
+/// callback; this helper is the parallel manual mint for the Rust-side path.
 fn build_stream_wrapper<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     budget: StreamBudgetGuard,
@@ -802,113 +796,6 @@ fn promise_returning_callback<'s>(
     let p_g: &v8::Global<v8::Promise> = unsafe { &*raw };
     let p_l = v8::Local::new(scope, p_g);
     rv.set(p_l.into());
-}
-
-// ---------------------------------------------------------------------------
-// NativeTransformer trait — §VIII.3
-// ---------------------------------------------------------------------------
-
-/// Native UnderlyingTransformer — Rust trait that mirrors WebIDL's
-/// `Transformer` dictionary, but typed.
-///
-/// Per design §VIII.3 + critic C-5 (transform/flush/cancel return Futures).
-pub trait NativeTransformer: 'static {
-    fn start(
-        &mut self,
-        _controller: &mut NativeTransformController,
-    ) -> Result<(), v8::Global<v8::Value>> {
-        Ok(())
-    }
-
-    /// Transform one chunk. Per critic C-5 the return is a Future so the
-    /// spec's `transformPromise = transformAlgorithm(chunk)` semantic
-    /// (writes block until transform settles) is honored.
-    fn transform(
-        &mut self,
-        chunk: v8::Global<v8::Value>,
-        controller: &mut NativeTransformController,
-    ) -> Pin<Box<dyn Future<Output = Result<(), v8::Global<v8::Value>>> + 'static>>;
-
-    fn flush(
-        &mut self,
-        _controller: &mut NativeTransformController,
-    ) -> Pin<Box<dyn Future<Output = Result<(), v8::Global<v8::Value>>> + 'static>> {
-        Box::pin(async { Ok(()) })
-    }
-
-    /// Single-cancel invariant per compression dep #2: this fires AT MOST
-    /// ONCE across error/terminate/cancel paths.
-    fn cancel(
-        &mut self,
-        _reason: Option<v8::Global<v8::Value>>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), v8::Global<v8::Value>>> + 'static>> {
-        Box::pin(async { Ok(()) })
-    }
-}
-
-/// Thin wrapper around the TS controller wrapper, exposed to NativeTransformer
-/// trait impls. Provides enqueue/error/terminate + desiredSize.
-#[allow(missing_debug_implementations)]
-pub struct NativeTransformController {
-    pub(crate) controller_obj: v8::Global<v8::Object>,
-    /// Cancelled flag — set true on first error/terminate/cancel-from-source.
-    /// Once true, further enqueue/error/terminate are no-ops (compression dep #2).
-    pub(crate) cancelled: Cell<bool>,
-}
-
-impl NativeTransformController {
-    pub fn enqueue<'s>(
-        &mut self,
-        scope: &mut v8::PinScope<'s, '_>,
-        chunk: v8::Local<'s, v8::Value>,
-    ) -> Result<(), v8::Global<v8::Value>> {
-        if self.cancelled.get() {
-            return Ok(());
-        }
-        let controller_obj = v8::Local::new(scope, &self.controller_obj);
-        crate::streams::transform_controller::transform_stream_default_controller_enqueue(
-            scope,
-            controller_obj,
-            chunk,
-        )
-    }
-
-    pub fn error<'s>(
-        &mut self,
-        scope: &mut v8::PinScope<'s, '_>,
-        reason: v8::Local<'s, v8::Value>,
-    ) {
-        if self.cancelled.get() {
-            return;
-        }
-        self.cancelled.set(true);
-        let controller_obj = v8::Local::new(scope, &self.controller_obj);
-        crate::streams::transform_controller::transform_stream_default_controller_error(
-            scope,
-            controller_obj,
-            reason,
-        );
-    }
-
-    pub fn terminate(&mut self, scope: &mut v8::PinScope) {
-        if self.cancelled.get() {
-            return;
-        }
-        self.cancelled.set(true);
-        let controller_obj = v8::Local::new(scope, &self.controller_obj);
-        crate::streams::transform_controller::transform_stream_default_controller_terminate(
-            scope,
-            controller_obj,
-        );
-    }
-
-    pub fn desired_size(&self, scope: &mut v8::PinScope) -> Option<f64> {
-        let controller_obj = v8::Local::new(scope, &self.controller_obj);
-        crate::streams::transform_controller::transform_stream_default_controller_get_desired_size(
-            scope,
-            controller_obj,
-        )
-    }
 }
 
 // ---------------------------------------------------------------------------

@@ -475,10 +475,12 @@ impl RequestState {
         let body_v: Option<v8::Local<v8::Value>> =
             init_obj.and_then(|o| get_raw_init(scope, o, "body"));
 
-        // If init.body is missing AND input was a Request, inherit the
-        // input's body. Per Fetch §5.4 step 36 + step 42 ("clone a body"):
-        // the new request's body is a CLONE of the input's body — a fresh
-        // body whose stream is independent of the input's.
+        // If init.body is missing AND input was a Request, take over the
+        // input's body. Fetch: "If initBody is null and inputBody is
+        // non-null, then: If inputBody is unusable, then throw a TypeError.
+        // Set finalBody to the result of creating a proxy for inputBody."
+        // A byte source is shared (it is immutable); a stream is proxied,
+        // which locks and disturbs the input's stream.
         //
         // We delay both the actual cloning AND the input-disturb marker
         // until AFTER all input validation succeeds (per WPT
@@ -592,11 +594,8 @@ impl RequestState {
 
         // Apply inherited body from input Request (if init.body wasn't
         // provided). At this point all validation has succeeded, so
-        // disturbing the input is safe. Per Fetch §5.4 step 42 ("If
-        // initBody is null and inputBody is non-null, set finalBody to the
-        // result of cloning inputBody.") — clone via body-source rebuild
-        // (preserves input's stream identity for byte sources) or tee
-        // (for true Stream sources).
+        // disturbing the input is safe: a byte source is shared through
+        // its rewindable source, a stream through a proxy.
         if !has_explicit_body {
             if let InheritMode::BytesSource(rc) = &inherit_mode {
                 // FIX B: defer stream construction. The body getter
@@ -608,9 +607,8 @@ impl RequestState {
                     length,
                 };
             } else if let InheritMode::StreamSource = &inherit_mode {
-                // Tee the input's stream; replace input's stream with
-                // branch[0] (it remains in input's body slot but is now
-                // tee'd-locked); use branch[1] as the new request's body.
+                // The input keeps its own stream, now locked and disturbed
+                // by the proxy's pipe; the new request reads the proxy.
                 let req_obj: v8::Local<v8::Object> = input_v.try_into().unwrap();
                 let raw = state_ptr(scope, req_obj).unwrap();
                 // SAFETY: input was brand-checked above.
@@ -618,14 +616,15 @@ impl RequestState {
                 let other_stream_g = other.body.borrow().stream.borrow().clone();
                 if let Some(stream_g) = other_stream_g {
                     let stream_local = v8::Local::new(scope, stream_g);
-                    if let Some((branch_a, branch_b)) = tee_stream(scope, stream_local) {
-                        *other.body.borrow().stream.borrow_mut() = Some(v8::Global::new(scope, branch_a));
-                        *state.body.borrow_mut() = crate::fetch_body::BodyImpl {
-                            stream: std::cell::RefCell::new(Some(v8::Global::new(scope, branch_b))),
-                            source: Some(crate::fetch_body::BodySource::Stream),
-                            length: None,
-                        };
-                    }
+                    let proxy = crate::streams::algorithms::readable_stream_create_proxy(
+                        scope,
+                        stream_local,
+                    )?;
+                    *state.body.borrow_mut() = crate::fetch_body::BodyImpl {
+                        stream: std::cell::RefCell::new(Some(v8::Global::new(scope, proxy))),
+                        source: Some(crate::fetch_body::BodySource::Stream),
+                        length: None,
+                    };
                 }
             }
         }
@@ -676,11 +675,26 @@ impl RequestState {
 
         *state.headers.borrow_mut() = Some(v8::Global::new(scope, headers_obj));
 
-        // Signal: chain `init.signal` if provided. Always mint a fresh
-        // signal so `request.signal` is non-null per Fetch §5.4.
+        // Signal: chain `init.signal` if provided, otherwise the input
+        // Request's signal (Fetch: "If input is a Request object, then set
+        // signal to input's signal"; an explicit `init.signal`, even null,
+        // replaces it). Always mint a fresh signal so `request.signal` is
+        // non-null per Fetch section 5.4.
         let init_signal_v: Option<v8::Local<v8::Value>> =
             init_obj.and_then(|o| get_raw_init(scope, o, "signal"));
-        let signal_obj = build_request_signal(scope, init_signal_v);
+        let followed_signal_v = match init_signal_v {
+            Some(v) => Some(v),
+            None if input_is_request => v8::Local::<v8::Object>::try_from(input_v)
+                .ok()
+                .and_then(|req_obj| state_ptr(scope, req_obj))
+                .map(|raw| {
+                    // SAFETY: input was brand-checked above.
+                    let other: &RequestState = unsafe { &*raw };
+                    other.signal(scope).into()
+                }),
+            None => None,
+        };
+        let signal_obj = build_request_signal(scope, followed_signal_v);
         *state.signal.borrow_mut() = Some(v8::Global::new(scope, signal_obj));
 
         // The macro's emitted callback boxes `state`, installs the box
@@ -839,9 +853,9 @@ impl RequestState {
     // clone()
     // ---------------------------------------------------------------------
 
-    /// Fetch §5.4 `clone()`. Builds a fresh Request via the public
+    /// Fetch section 5.4 `clone()`. Builds a fresh Request via the intrinsic
     /// constructor (URL parser + signal mint) but tees the body's
-    /// stream (or rebuilds from its rewindable source) so the
+    /// stream (or shares its rewindable source and length) so the
     /// original remains usable. The synthetic `wrapper: Local<Object>`
     /// param is bound by the macro to `args.this()` (per
     /// `helpers::is_wrapper_local`) — needed for the body-used Private
@@ -871,10 +885,13 @@ impl RequestState {
         // since the spec's `clone()` algorithm preserves the original's
         // body usability. So we build a fresh Request instance, copy
         // scalar fields from `this`, and tee or rebuild the body.
-        let global = scope.get_current_context().global(scope);
-        let req_class_key = v8::String::new(scope, "Request").unwrap();
-        let req_class_v = global.get(scope, req_class_key.into()).unwrap();
-        let req_class_fn: v8::Local<v8::Function> = req_class_v.try_into().unwrap();
+        //
+        // The constructor is the intrinsic class, never `globalThis.Request`:
+        // creator code can replace that global, and the object it returns
+        // would be cast to a RequestState below.
+        let req_class_fn = Request::install(scope)
+            .get_function(scope)
+            .ok_or_else(|| crate::state::OpError::type_error("Failed to clone Request"))?;
 
         let body_is_stream = matches!(
             self.body.borrow().source,
@@ -933,19 +950,6 @@ impl RequestState {
             if let Some(lb) = left_branch {
                 *self.body.borrow().stream.borrow_mut() = Some(v8::Global::new(scope, lb));
             }
-        } else if let Some(src) = self.body.borrow().source.clone() {
-            match src {
-                crate::fetch_body::BodySource::Bytes(rc)
-                | crate::fetch_body::BodySource::Blob(rc, _)
-                | crate::fetch_body::BodySource::UrlSearchParams(rc)
-                | crate::fetch_body::BodySource::FormData(rc, _) => {
-                    let new_stream = crate::fetch_body::extract::build_byte_stream(scope, rc)?;
-                    let stream_local = v8::Local::new(scope, new_stream);
-                    let key = v8::String::new(scope, "body").unwrap();
-                    init.set(scope, key.into(), stream_local.into());
-                }
-                crate::fetch_body::BodySource::Stream => {}
-            }
         }
 
         // Pass URL as a string input (NOT `this` — that would trigger the
@@ -953,7 +957,37 @@ impl RequestState {
         let url_str = v8::String::new(scope, &self.url.borrow()).unwrap();
         let args2 = [url_str.into(), init.into()];
         match req_class_fn.new_instance(scope, &args2) {
-            Some(o) => Ok(o),
+            Some(o) => {
+                // Fetch "clone a body" keeps the source and length: a byte
+                // body stays a byte body (rewindable for a 307/308 replay,
+                // sent with its length), and its stream is built lazily from
+                // the shared source like the original's.
+                let (source, length) = {
+                    let body = self.body.borrow();
+                    (body.source.clone(), body.length)
+                };
+                if !body_is_stream && let Some(source) = source {
+                    let raw = if Request::is_instance(scope, o.into()) {
+                        state_ptr(scope, o)
+                    } else {
+                        None
+                    };
+                    let Some(raw) = raw else {
+                        return Err(crate::state::OpError::type_error("Failed to clone Request"));
+                    };
+                    // SAFETY: `o` was built by the intrinsic Request
+                    // constructor and passed its brand check, so its
+                    // internal field holds a live RequestState, and it is a
+                    // new object, never `self`.
+                    let clone_state: &RequestState = unsafe { &*raw };
+                    *clone_state.body.borrow_mut() = crate::fetch_body::BodyImpl {
+                        stream: std::cell::RefCell::new(None),
+                        source: Some(source),
+                        length,
+                    };
+                }
+                Ok(o)
+            }
             None => {
                 // Inner constructor already set a pending exception on
                 // scope; surfacing our own would mask the cause. The

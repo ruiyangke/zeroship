@@ -963,6 +963,37 @@ pub fn readable_stream_pipe_to<'s>(
     )
 }
 
+/// Streams "create a proxy" for `stream`.
+///
+/// A new ReadableStream that pulls its data from `stream` through an
+/// identity TransformStream, while `stream` itself becomes locked and
+/// disturbed at once. Fetch uses it when a Request takes over another
+/// Request's stream body. The pipe's promise is marked handled, as "piped
+/// through" requires.
+///
+/// Fails with a TypeError if `stream` is locked, and with the budget's
+/// RangeError, before `stream` is touched, when the isolate cannot hold
+/// the identity TransformStream.
+pub fn readable_stream_create_proxy<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    stream: v8::Local<v8::Object>,
+) -> Result<v8::Local<'s, v8::Object>, crate::state::OpError> {
+    use crate::state::OpError;
+    if is_readable_stream_locked(scope, stream) {
+        return Err(OpError::type_error("cannot proxy a locked ReadableStream"));
+    }
+    let transform = crate::streams::transform::create_identity_transform_stream(scope)?;
+    let (Some(writable), Some(readable)) = (
+        crate::streams::transform::writable_slot_obj(scope, transform),
+        crate::streams::transform::readable_slot_obj(scope, transform),
+    ) else {
+        return Err(OpError::error("identity TransformStream was built without its halves"));
+    };
+    let piped = readable_stream_pipe_to(scope, stream, writable, false, false, false, None);
+    piped.mark_as_handled();
+    Ok(readable)
+}
+
 /// `ReadableStreamTee(stream, cloneForBranch2)` — spec §3.5.2. Public
 /// `tee()` always passes `cloneForBranch2 = false` (the default-tee
 /// path). The byte-tee path (§3.5.3) lands with BYOB byte streams.

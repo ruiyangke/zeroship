@@ -241,37 +241,13 @@ impl zeroship_runtime::streams::NativeSource for IdleSource {
     }
 }
 
-struct IdleSink;
-
-impl zeroship_runtime::streams::NativeSink for IdleSink {
-    fn write(
-        &mut self,
-        _chunk: v8::Global<v8::Value>,
-        _controller: &mut zeroship_runtime::streams::NativeWritableController,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), v8::Global<v8::Value>>>>> {
-        Box::pin(std::future::pending())
-    }
-}
-
-struct IdleTransformer;
-
-impl zeroship_runtime::streams::NativeTransformer for IdleTransformer {
-    fn transform(
-        &mut self,
-        _chunk: v8::Global<v8::Value>,
-        _controller: &mut zeroship_runtime::streams::NativeTransformController,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), v8::Global<v8::Value>>>>> {
-        Box::pin(std::future::pending())
-    }
-}
-
-/// The Rust-side constructors charge the same per-isolate budget as the JS
-/// classes and refuse past the cap with its `RangeError`, charging nothing.
+/// The Rust-side constructor charges the same per-isolate budget as the JS
+/// classes and refuses past the cap with its `RangeError`, charging nothing.
 #[test]
 fn native_constructors_past_the_cap_return_range_error() {
     use zeroship_runtime::state::OpErrorKind;
     use zeroship_runtime::streams::budget::{try_alloc_stream, StreamBudget, MAX_LIVE_STREAMS};
-    use zeroship_runtime::streams::{from_native_sink, from_native_source, from_native_transformer};
+    use zeroship_runtime::streams::from_native_source;
 
     run_in_v8(|scope| {
         let budget = StreamBudget::of(scope);
@@ -280,14 +256,7 @@ fn native_constructors_past_the_cap_return_range_error() {
             .collect();
         assert_eq!(budget.live(), MAX_LIVE_STREAMS);
 
-        let refusals = [
-            ("from_native_source", from_native_source(scope, IdleSource, 1.0).err()),
-            ("from_native_sink", from_native_sink(scope, IdleSink, 1.0).err()),
-            (
-                "from_native_transformer",
-                from_native_transformer(scope, IdleTransformer, 1.0, 0.0).err(),
-            ),
-        ];
+        let refusals = [("from_native_source", from_native_source(scope, IdleSource, 1.0).err())];
         for (constructor, refusal) in refusals {
             let refusal = refusal.unwrap_or_else(|| panic!("{constructor} built a stream past the cap"));
             assert!(

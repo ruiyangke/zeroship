@@ -32,10 +32,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
-use std::future::Future;
-use std::pin::Pin;
 
-use crate::state::OpError;
 use crate::streams::budget::{try_alloc_stream, StreamBudgetGuard};
 use crate::streams::writable_controller as ctlr;
 
@@ -164,26 +161,8 @@ pub fn with_ws_state<R>(
 }
 
 // ---------------------------------------------------------------------------
-// from_native_sink — Rust-only constructor (§I.1)
+// Internal construction
 // ---------------------------------------------------------------------------
-
-/// Build a JS WritableStream from a Rust sink.
-///
-/// Mirror of `ReadableStream::from_native_source`. Per design §VIII.2.
-///
-/// Fails with the budget's `RangeError` when the isolate is at its live
-/// stream cap.
-#[doc(hidden)]
-pub fn from_native_sink<'s, S: NativeSink + 'static>(
-    scope: &mut v8::PinScope<'s, '_>,
-    sink: S,
-    hwm: f64,
-) -> Result<v8::Local<'s, v8::Object>, OpError> {
-    let budget = try_alloc_stream(scope)?;
-    let stream = build_stream_wrapper(scope, budget);
-    ctlr::set_up_writable_stream_default_controller_native(scope, stream, sink, hwm);
-    Ok(stream)
-}
 
 /// Public wrapper around `build_stream_wrapper` for internal use by
 /// `transform.rs` (TransformStream's writable half is a programmatically-
@@ -525,74 +504,6 @@ fn get_writer_method_callback(
         }
     };
     rv.set(writer.into());
-}
-
-// ---------------------------------------------------------------------------
-// NativeSink trait — §VIII.2
-// ---------------------------------------------------------------------------
-
-/// Native UnderlyingSink — Rust trait that mirrors WebIDL's
-/// `UnderlyingSink` dictionary, but typed.
-///
-/// Per design §VIII.2. Used by `from_native_sink` to build a JS-visible
-/// WritableStream from a Rust consumer (e.g. compression encoder, fetch
-/// upload buffer).
-pub trait NativeSink: 'static {
-    fn start(
-        &mut self,
-        _controller: &mut NativeWritableController,
-    ) -> Result<(), v8::Global<v8::Value>> {
-        Ok(())
-    }
-
-    fn write(
-        &mut self,
-        chunk: v8::Global<v8::Value>,
-        controller: &mut NativeWritableController,
-    ) -> Pin<Box<dyn Future<Output = Result<(), v8::Global<v8::Value>>> + 'static>>;
-
-    fn close(
-        &mut self,
-    ) -> Pin<Box<dyn Future<Output = Result<(), v8::Global<v8::Value>>> + 'static>> {
-        Box::pin(async { Ok(()) })
-    }
-
-    fn abort(
-        &mut self,
-        _reason: Option<v8::Global<v8::Value>>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), v8::Global<v8::Value>>> + 'static>> {
-        Box::pin(async { Ok(()) })
-    }
-}
-
-/// Thin wrapper around the controller wrapper, exposed to NativeSink
-/// trait impls.
-#[allow(missing_debug_implementations)]
-pub struct NativeWritableController {
-    pub(crate) controller_obj: v8::Global<v8::Object>,
-}
-
-impl NativeWritableController {
-    /// `controller.error(scope, exc)` — drive the spec's
-    /// WritableStreamDefaultControllerError from a NativeSink.
-    pub fn error<'s>(
-        &mut self,
-        scope: &mut v8::PinScope<'s, '_>,
-        reason: v8::Local<'s, v8::Value>,
-    ) {
-        let controller_obj = v8::Local::new(scope, &self.controller_obj);
-        ctlr::writable_stream_default_controller_error_if_needed(scope, controller_obj, reason);
-    }
-
-    /// Returns the controller's AbortSignal (placeholder until
-    /// AbortSignal native lands — see §II.9 / dispatch brief).
-    pub fn signal<'s>(
-        &self,
-        scope: &mut v8::PinScope<'s, '_>,
-    ) -> v8::Local<'s, v8::Value> {
-        let controller_obj = v8::Local::new(scope, &self.controller_obj);
-        ctlr::signal_value(scope, controller_obj)
-    }
 }
 
 // ---------------------------------------------------------------------------

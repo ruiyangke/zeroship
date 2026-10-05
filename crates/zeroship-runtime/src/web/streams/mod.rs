@@ -4,9 +4,10 @@
 //!
 //! # Module layout
 //!
-//! - `response_forwarder` — Rust-side pump that locks a Response's
-//!   `body` ReadableStream via `getReader()` and forwards chunks to
-//!   a `StreamWriter` (TCP-bound channel).
+//! - `stream_forwarder` - reads a JS ReadableStream into a bounded
+//!   `StreamWriter` channel a native consumer drains (response bodies,
+//!   RPC stream procedures, `putStream` uploads and streaming `fetch`
+//!   request bodies).
 //! - `slots` — V8 private symbol helpers (read/write `[[reader]]`,
 //!   `[[controller]]`, `[[storedError]]` etc).
 //! - `queue` — `VecDeque<QueueEntry>` + `[[queueTotalSize]]` invariant
@@ -25,9 +26,10 @@
 //! - `transform` / `transform_controller`
 //! - `strategies` (ByteLength + Count)
 
-// Rust-side response-body forwarder. Used by `http::inspect_response`
-// and `runtime::build_fetch_outcome`.
-pub mod response_forwarder;
+// Native consumer of JS ReadableStreams. Used by `transport::handler`,
+// `runtime::build_fetch_outcome`, RPC stream dispatch, `env.storage`
+// uploads and `fetch` request bodies.
+pub mod stream_forwarder;
 
 // Native classes and primitives installed unconditionally.
 pub mod algorithms;
@@ -58,11 +60,7 @@ pub use pipe::{pipe_native_internal, PipeOptions};
 pub use readable::{
     from_native_source, NativeReadableController, NativeSource,
 };
-pub use transform::{
-    from_native_transformer, readable_slot, writable_slot, NativeTransformController,
-    NativeTransformer,
-};
-pub use writable::{from_native_sink, NativeSink, NativeWritableController};
+pub use transform::{readable_slot, writable_slot};
 
 /// `new globalThis[class_name](...args)` for a stream class, returning what
 /// the constructor threw verbatim: a budget refusal stays the `RangeError`

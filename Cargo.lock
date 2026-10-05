@@ -8631,6 +8631,7 @@ dependencies = [
  "rcgen",
  "rustls",
  "rustls-native-certs",
+ "send_wrapper",
  "serde",
  "serde_json",
  "sha1",

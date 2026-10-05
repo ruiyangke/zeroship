@@ -17,7 +17,7 @@
 #![allow(unsafe_code)]
 
 use zeroship_runtime::fetch_native::algorithms::{
-    main_fetch, CredentialsMode, FetchRequest, RedirectMode,
+    main_fetch, CredentialsMode, FetchRequest, RedirectMode, RequestBody,
 };
 
 #[derive(Debug)]
@@ -31,8 +31,7 @@ fn req(method: &str, url: &str) -> FetchRequest {
         method: method.to_string(),
         url: url.to_string(),
         headers: Vec::new(),
-        body: None,
-        body_source: None,
+        body: RequestBody::Empty,
         redirect_mode: RedirectMode::Follow,
         credentials_mode: CredentialsMode::SameOrigin,
         cancel: None,

@@ -1,9 +1,17 @@
-//! Response readers forwarded through native body channels.
+//! Native consumption of JS ReadableStreams through native byte channels.
 //!
 //! The runtime retains a reader, converts its results to bytes and delivers
-//! them through the attached writer. Uploads and RPC iterators pause while
-//! the consumer's buffer is full. Reader methods use the public stream API
-//! so creator-supplied stream implementations can participate.
+//! them through the attached writer, a bounded channel a native consumer
+//! drains: response bodies to the kernel, RPC stream procedures,
+//! `env.storage.putStream` and `fetch` request bodies. (Body consumers such
+//! as `Response.text()` read through `fetch::body::body_stream`, and
+//! `EventSource` drives its response reader itself.) Uploads and RPC
+//! iterators pause while the consumer's buffer is full; an upload also
+//! slices a chunk larger than the buffer's free space, so no single chunk is
+//! too large to send. A response body or RPC iterator is read through the
+//! public reader methods, so creator-supplied stream implementations can
+//! participate; an upload reads its own native stream through the internal
+//! reader algorithms.
 //!
 //! Promise callbacks identify the live forwarder without retaining its reader.
 //! RPC cancellation and deadlines follow the response body after headers,
@@ -11,12 +19,16 @@
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::rc::Rc;
+use std::fmt;
+use std::rc::{Rc, Weak};
+use std::task::{Context, Poll};
 use std::time::Instant;
+
+use compio::bytes::Bytes;
 
 use crate::rpc::lifetime::{Cancellation, RequestLifetime};
 
-use crate::channel::{StreamPushResult, StreamWriter};
+use crate::channel::{stream_buffer_in_share, StreamPushResult, StreamReader, StreamShare, StreamWriter};
 use crate::state::SharedState;
 
 // ---------------------------------------------------------------------------
@@ -29,9 +41,11 @@ use crate::state::SharedState;
 /// pending `read()` Promise's reaction list) can mutate it without
 /// crossing thread boundaries.
 #[derive(Default)]
-pub struct ResponseForwarderInner {
-    /// Buffered chunks not yet drained into a `direct_writer`. Empty
-    /// once a writer is attached and chunks flow direct.
+pub struct StreamForwarderInner {
+    /// Bytes not yet handed to `direct_writer`: every chunk read before a
+    /// writer is attached, and, for an upload, the part of a chunk that did
+    /// not fit in the writer's free space. An upload does not read again
+    /// until this is empty.
     pub buffer: VecDeque<Vec<u8>>,
     /// True once `read()` returned `{done: true}` OR a read rejected.
     pub closed: bool,
@@ -59,6 +73,89 @@ pub struct ResponseForwarderInner {
     request: Option<RequestLifetime>,
     rpc_framing: bool,
     error: Option<String>,
+    /// An upload hands the writer only what fits and keeps the rest in
+    /// `buffer`, so a chunk of any size is accepted within the byte cap.
+    slices: bool,
+    /// How a `read()` result's value becomes bytes.
+    chunk_policy: ChunkPolicy,
+    /// The `fetch` signal an upload follows. Once it has aborted, its reason
+    /// is what the source is cancelled with.
+    abort_signal: Option<v8::Global<v8::Object>>,
+    /// The runtime's upload share an upload's channel and parked bytes
+    /// count against.
+    share: Option<Rc<StreamShare>>,
+    /// Bytes in `buffer` charged to `share`.
+    parked: usize,
+    /// The request that started an upload. When that request ends early
+    /// (timeout or cancellation), the upload ends with it.
+    owner_request: Option<u64>,
+    /// An upload reads its own native stream through the internal reader
+    /// algorithms, so creator code cannot substitute the reader.
+    internal_reader: bool,
+}
+
+impl Drop for StreamForwarderInner {
+    fn drop(&mut self) {
+        if let Some(share) = &self.share {
+            share.release(self.parked);
+        }
+    }
+}
+
+impl StreamForwarderInner {
+    /// Queue `data` behind `buffer`, charging an upload's share.
+    fn park_back(&mut self, data: Vec<u8>) {
+        self.charge_parked(data.len());
+        self.buffer.push_back(data);
+    }
+
+    /// Queue `data` at the front of `buffer`, charging an upload's share.
+    fn park_front(&mut self, data: Vec<u8>) {
+        self.charge_parked(data.len());
+        self.buffer.push_front(data);
+    }
+
+    /// Take the front of `buffer`, releasing its charge.
+    fn unpark_front(&mut self) -> Option<Vec<u8>> {
+        let data = self.buffer.pop_front()?;
+        if self.share.is_some() {
+            self.parked = self.parked.saturating_sub(data.len());
+            if let Some(share) = &self.share {
+                share.release(data.len());
+            }
+        }
+        Some(data)
+    }
+
+    fn charge_parked(&mut self, n: usize) {
+        if let Some(share) = &self.share {
+            share.charge(n);
+            self.parked += n;
+        }
+    }
+}
+
+/// How an upload is read and where its bytes are accounted.
+pub struct UploadOptions<'s> {
+    /// Bytes the upload's channel holds before the producer pauses.
+    pub buffer_cap: usize,
+    pub chunk_policy: ChunkPolicy,
+    /// The `fetch` signal of a request body; its abort cancels the source
+    /// with its reason.
+    pub abort_signal: Option<v8::Local<'s, v8::Object>>,
+    /// The request that started the upload; see [`cancel_uploads_owned_by`].
+    pub owner_request: Option<u64>,
+}
+
+/// How the forwarder turns the `value` of a `read()` result into bytes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ChunkPolicy {
+    /// Bytes of any ArrayBufferView or ArrayBuffer; UTF-8 of anything else.
+    #[default]
+    Coerce,
+    /// Fetch "incrementally read": a chunk that is not a Uint8Array errors
+    /// the body with a TypeError and cancels the source with it.
+    Uint8Array,
 }
 
 /// Resume the read loop on a forwarder that paused for backpressure. Called
@@ -71,11 +168,24 @@ pub fn resume_read(scope: &mut v8::PinScope, state: &SharedState, stream_id: u32
         cancel_reader(scope, state, stream_id, &fwd);
         return;
     }
-    let (reader, continuation_context) = {
+    let flushed = {
         let mut inner = fwd.borrow_mut();
         if inner.closed || !inner.paused {
             return;
         }
+        flush_parked(&mut inner)
+    };
+    if let Some(reason) = refusal(flushed) {
+        request_cancel(state, stream_id, reason);
+        return;
+    }
+    // Parked bytes that still do not fit, or a writer still above the
+    // watermark, keep the producer paused until the consumer drains more.
+    if should_pause(&fwd) {
+        return;
+    }
+    let (reader, continuation_context) = {
+        let mut inner = fwd.borrow_mut();
         let Some(reader) = inner.reader.clone() else { return };
         inner.paused = false;
         (reader, inner.continuation_context.clone())
@@ -90,21 +200,21 @@ pub fn resume_read(scope: &mut v8::PinScope, state: &SharedState, stream_id: u32
     }
 }
 
-pub type ResponseForwarder = Rc<RefCell<ResponseForwarderInner>>;
+pub type StreamForwarder = Rc<RefCell<StreamForwarderInner>>;
 
 // ---------------------------------------------------------------------------
-// Registry — stream_id → ResponseForwarder
+// Registry: stream_id -> StreamForwarder
 // ---------------------------------------------------------------------------
 
 /// Insert a forwarder into the per-isolate map. Caller must hold the
 /// SharedState mutex (we do that internally).
-fn register(state: &SharedState, stream_id: u32, fwd: ResponseForwarder) {
-    state.borrow_mut().response_forwarders.insert(stream_id, fwd);
+fn register(state: &SharedState, stream_id: u32, fwd: StreamForwarder) {
+    state.borrow_mut().stream_forwarders.insert(stream_id, fwd);
 }
 
 /// Look up a forwarder by stream_id.
-pub fn get(state: &SharedState, stream_id: u32) -> Option<ResponseForwarder> {
-    state.borrow().response_forwarders.get(&stream_id).cloned()
+pub fn get(state: &SharedState, stream_id: u32) -> Option<StreamForwarder> {
+    state.borrow().stream_forwarders.get(&stream_id).cloned()
 }
 
 /// Transfer cancellation ownership from RPC invocation to its response body.
@@ -135,7 +245,7 @@ pub(crate) fn owns_request(state: &SharedState, stream_id: u32) -> bool {
 }
 
 pub(crate) fn next_deadline(state: &SharedState) -> Option<Instant> {
-    state.borrow().response_forwarders.values().filter_map(|fwd| {
+    state.borrow().stream_forwarders.values().filter_map(|fwd| {
         let inner = fwd.borrow();
         if inner.closed || inner.cancel_requested.is_some() { return None; }
         inner.request.as_ref().and_then(|request| request.deadline)
@@ -143,7 +253,7 @@ pub(crate) fn next_deadline(state: &SharedState) -> Option<Instant> {
 }
 
 pub(crate) fn poll_cancellation(state: &SharedState, cx: &mut std::task::Context<'_>) -> bool {
-    state.borrow().response_forwarders.values().any(|fwd| {
+    state.borrow().stream_forwarders.values().any(|fwd| {
         let inner = fwd.borrow();
         if inner.closed || inner.cancel_requested.is_some() { return false; }
         inner.request.as_ref().is_some_and(|request| {
@@ -154,7 +264,7 @@ pub(crate) fn poll_cancellation(state: &SharedState, cx: &mut std::task::Context
 }
 
 pub(crate) fn queue_cancellations(state: &SharedState, now: Instant) {
-    let cancelled: Vec<_> = state.borrow().response_forwarders.iter().filter_map(|(&id, fwd)| {
+    let cancelled: Vec<_> = state.borrow().stream_forwarders.iter().filter_map(|(&id, fwd)| {
         let inner = fwd.borrow();
         if inner.closed || inner.cancel_requested.is_some() { return None; }
         inner.request.as_ref()?.cancellation(now).map(|reason| (id, reason))
@@ -166,11 +276,11 @@ pub(crate) fn queue_cancellations(state: &SharedState, now: Instant) {
 /// the writer has been attached + the buffered chunks drained, or
 /// after the stream errors.
 pub fn remove(state: &SharedState, stream_id: u32) {
-    state.borrow_mut().response_forwarders.remove(&stream_id);
+    state.borrow_mut().stream_forwarders.remove(&stream_id);
 }
 
 // ---------------------------------------------------------------------------
-// begin_forward — entry from `http::inspect_response`
+// begin_forward — entry from `transport::handler::inspect_response`
 // ---------------------------------------------------------------------------
 
 /// Lock the Response body's ReadableStream and start pumping into
@@ -207,7 +317,9 @@ pub fn begin_forward(
 
     // Wire response-body path: NO upload backpressure (the TCP consumer does
     // not re-arm a paused producer). Keeps the original eager read loop.
-    let stream_id = forward_from_readable(scope, body_obj, false)?;
+    let state = runtime_state(scope)?;
+    let stream_id =
+        forward_from_readable(scope, &state, body_obj, ForwardMode::Body, ChunkPolicy::Coerce, None)?;
 
     // Stamp the id on the response so the kernel can read it later
     // for idempotent re-inspect — and so build_fetch_outcome can match
@@ -217,33 +329,67 @@ pub fn begin_forward(
     Ok(stream_id)
 }
 
-/// Start a forwarder over a **bare `ReadableStream`** (not a Response body).
+/// Read a **bare `ReadableStream`** into a native upload channel.
 ///
-/// Same pump as [`begin_forward`] — lock via `getReader()`, drive
-/// `reader.read()` in a Rust promise-reaction loop, push chunks through a
-/// registered [`ResponseForwarder`] — but the entry point is any object
-/// satisfying the WHATWG Streams reader surface. Used by `env.storage.put`
-/// to consume an app-supplied `ReadableStream` (or `Blob.stream()`) into a
-/// Rust channel feeding `Backend::put_stream`.
+/// Same pump as [`begin_forward`] (lock via `getReader()`, drive
+/// `reader.read()` in a Rust promise-reaction loop), with upload
+/// backpressure: the read loop pauses while the channel is half full and
+/// resumes once the returned [`UploadReader`] drains it to a quarter, and a
+/// chunk larger than the free space is sliced. The channel and the parked
+/// part of a chunk count against the runtime's upload share, so an app's
+/// uploads together stay within it.
 ///
-/// Returns the allocated `stream_id`; attach a [`StreamWriter`] with
-/// [`attach_writer`] to receive the chunks.
-pub fn begin_forward_stream(
+/// The stream is locked and read through the internal reader algorithms:
+/// a creator cannot substitute `getReader`, `read` or `cancel`.
+///
+/// Used by `env.storage.putStream` (`Backend::put_stream`) and by `fetch`
+/// for a `ReadableStream` request body.
+///
+/// # Errors
+///
+/// Outside a runtime isolate, when `stream_obj` is not a native
+/// ReadableStream, or when it is locked; each is checked before the stream
+/// is touched.
+pub fn forward_upload(
     scope: &mut v8::PinScope,
     stream_obj: v8::Local<v8::Object>,
-) -> Result<u32, String> {
-    // Upload path: ENABLE backpressure. The consumer (`StreamReaderSource`)
-    // re-arms the paused read loop via `request_resume` once it drains the
-    // buffer, so a large upload stays bounded by the buffer cap.
-    forward_from_readable(scope, stream_obj, true)
+    options: UploadOptions<'_>,
+) -> Result<UploadReader, String> {
+    let state = runtime_state(scope)?;
+    if !crate::streams::readable::is_readable_stream(scope, stream_obj) {
+        return Err("the upload source is not a ReadableStream".to_string());
+    }
+    let reader = crate::streams::readable_default_reader::acquire_readable_stream_default_reader(
+        scope, stream_obj,
+    )?;
+    let share = state.borrow().upload_share.clone();
+    let stream_id = start_forwarder(
+        scope,
+        &state,
+        reader,
+        ForwardMode::Upload,
+        options.chunk_policy,
+        options.abort_signal,
+    )?;
+    if let Some(fwd) = get(&state, stream_id) {
+        let mut inner = fwd.borrow_mut();
+        inner.share = Some(share.clone());
+        inner.owner_request = options.owner_request;
+    }
+    let (writer, reader) = stream_buffer_in_share(options.buffer_cap, share);
+    attach_writer(&state, stream_id, writer);
+    Ok(UploadReader { reader, state: Rc::downgrade(&state), stream_id })
 }
 
 /// Shared core: lock `readable` via `getReader()`, register a forwarder,
 /// and schedule the first read. Returns the new `stream_id`.
 fn forward_from_readable(
     scope: &mut v8::PinScope,
+    state: &SharedState,
     body_obj: v8::Local<v8::Object>,
-    backpressure: bool,
+    mode: ForwardMode,
+    chunk_policy: ChunkPolicy,
+    abort_signal: Option<v8::Local<v8::Object>>,
 ) -> Result<u32, String> {
     // Lock via getReader().
     let get_reader_key = v8::String::new(scope, "getReader").unwrap();
@@ -273,7 +419,17 @@ fn forward_from_readable(
     };
 
     let reader = v8::Local::new(scope, reader_global);
-    begin_forward_reader(scope, reader, if backpressure { ForwardMode::Upload } else { ForwardMode::Body })
+    start_forwarder(scope, state, reader, mode, chunk_policy, abort_signal)
+}
+
+/// The isolate's runtime state. A forwarder registers there, so stream
+/// forwarding outside a runtime isolate is refused before any stream is
+/// touched, rather than panicking inside a V8 callback.
+fn runtime_state(scope: &mut v8::PinScope) -> Result<SharedState, String> {
+    scope
+        .get_slot::<SharedState>()
+        .cloned()
+        .ok_or_else(|| "stream forwarding runs only inside a runtime isolate".to_string())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -285,17 +441,26 @@ pub(crate) fn begin_forward_reader(
     reader: v8::Local<v8::Object>,
     mode: ForwardMode,
 ) -> Result<u32, String> {
+    let state = runtime_state(scope)?;
+    start_forwarder(scope, &state, reader, mode, ChunkPolicy::Coerce, None)
+}
+
+fn start_forwarder(
+    scope: &mut v8::PinScope,
+    state: &SharedState,
+    reader: v8::Local<v8::Object>,
+    mode: ForwardMode,
+    chunk_policy: ChunkPolicy,
+    abort_signal: Option<v8::Local<v8::Object>>,
+) -> Result<u32, String> {
     let reader_global = v8::Global::new(scope, reader);
     // Allocate stream_id.
-    let state: SharedState = scope
-        .get_slot::<SharedState>()
-        .expect("RuntimeState not in isolate slot")
-        .clone();
+    let state = state.clone();
     let stream_id = state.borrow_mut().alloc_stream_id();
 
     // Allocate forwarder and register. Persist the reader so a backpressure
     // pause can be resumed later by `resume_read`.
-    let fwd: ResponseForwarder = Rc::new(RefCell::new(ResponseForwarderInner::default()));
+    let fwd: StreamForwarder = Rc::new(RefCell::new(StreamForwarderInner::default()));
     let continuation_context = crate::core::invocation::capture_context(scope);
     {
         let mut inner = fwd.borrow_mut();
@@ -303,8 +468,25 @@ pub(crate) fn begin_forward_reader(
         inner.continuation_context = Some(continuation_context);
         inner.backpressure = mode != ForwardMode::Body;
         inner.rpc_framing = mode == ForwardMode::Rpc;
+        inner.slices = mode == ForwardMode::Upload;
+        inner.internal_reader = mode == ForwardMode::Upload;
+        inner.chunk_policy = chunk_policy;
+        inner.abort_signal = abort_signal.map(|signal| v8::Global::new(scope, signal));
     }
     register(&state, stream_id, fwd.clone());
+
+    if let Some(signal) = abort_signal {
+        let weak_state = Rc::downgrade(&state);
+        crate::dom::abort_signal::add_abort_algorithm(scope, signal, Box::new(move || {
+            if let Some(state) = weak_state.upgrade() {
+                request_cancel(&state, stream_id, Cancellation::Cancelled);
+            }
+        }));
+        if crate::dom::abort_signal::is_aborted(scope, signal) {
+            request_cancel(&state, stream_id, Cancellation::Cancelled);
+            return Ok(stream_id);
+        }
+    }
 
     // Schedule the first read.
     schedule_next_read(scope, reader_global, fwd, stream_id, state);
@@ -322,11 +504,36 @@ pub(crate) fn begin_forward_reader(
 fn schedule_next_read(
     scope: &mut v8::PinScope,
     reader_global: v8::Global<v8::Object>,
-    fwd: ResponseForwarder,
+    fwd: StreamForwarder,
     stream_id: u32,
     state: SharedState,
 ) {
     let reader = v8::Local::new(scope, &reader_global);
+    if fwd.borrow().internal_reader {
+        // ReadableStreamDefaultReaderRead with a promise read request: the
+        // same `{ value, done }` result `reader.read()` resolves with, without
+        // looking anything up on the reader.
+        let stream_v = crate::streams::slots::read_slot(scope, reader, crate::streams::slots::STREAM);
+        let (Ok(stream), Some(resolver)) =
+            (v8::Local::<v8::Object>::try_from(stream_v), v8::PromiseResolver::new(scope))
+        else {
+            error_forwarder(&fwd, &state, stream_id, "the upload's reader has no stream");
+            return;
+        };
+        let promise = resolver.get_promise(scope);
+        let request = crate::streams::readable_default_reader::ReadRequest {
+            kind: crate::streams::readable_default_reader::ReadRequestKind::Js {
+                resolver: v8::Global::new(scope, resolver),
+            },
+        };
+        crate::streams::readable_default_reader::readable_stream_default_reader_read(
+            scope, reader, stream, request,
+        );
+        let on_chunk = make_on_chunk_callback(scope, stream_id);
+        let on_error = make_on_error_callback(scope, stream_id);
+        promise.then2(scope, on_chunk, on_error);
+        return;
+    }
     let read_key = v8::String::new(scope, "read").unwrap();
     let read_v = match reader.get(scope, read_key.into()) {
         Some(v) => v,
@@ -444,6 +651,11 @@ fn on_chunk_callback(
         }
     };
 
+    if fwd.borrow().chunk_policy == ChunkPolicy::Uint8Array && !value.is_uint8_array() {
+        reject_chunk(scope, &fwd, &state, stream_id, "ReadableStream chunk is not a Uint8Array");
+        return;
+    }
+
     // Normalise to bytes:
     //   - Uint8Array / typed array / DataView (ArrayBufferView): copy
     //     contents.
@@ -498,15 +710,80 @@ fn on_chunk_callback(
     );
 }
 
-/// Pause before writer attachment or when its buffer reaches the producer
-/// watermark. Attachment and consumer draining enqueue the next pull.
-fn should_pause(fwd: &ResponseForwarder) -> bool {
+/// Pause before writer attachment, while bytes are parked, or when the
+/// writer's buffer reaches the producer watermark. Attachment and consumer
+/// draining enqueue the next pull.
+fn should_pause(fwd: &StreamForwarder) -> bool {
     let inner = fwd.borrow();
     inner.backpressure
-        && inner
-            .direct_writer
-            .as_ref()
-            .is_none_or(|w| w.buffered_bytes() >= w.cap() / 2)
+        && (!inner.buffer.is_empty()
+            || inner
+                .direct_writer
+                .as_ref()
+                .is_none_or(|w| w.buffered_bytes() >= w.cap() / 2))
+}
+
+/// Fetch's incrementally-read loop: a chunk that is not a Uint8Array is a
+/// TypeError. The consumer sees the failure and the source is cancelled
+/// with the TypeError, in the context that supplied the stream.
+fn reject_chunk(
+    scope: &mut v8::PinScope,
+    fwd: &StreamForwarder,
+    state: &SharedState,
+    stream_id: u32,
+    msg: &str,
+) {
+    let (reader, frame, internal) = {
+        let mut inner = fwd.borrow_mut();
+        (inner.reader.take(), inner.continuation_context.take(), inner.internal_reader)
+    };
+    error_forwarder(fwd, state, stream_id, msg);
+    let Some(reader) = reader else { return };
+    let cancel = |scope: &mut v8::PinScope| {
+        let text = crate::web::js_text(scope, msg);
+        let reason = v8::Exception::type_error(scope, text);
+        cancel_source(scope, reader, reason, internal);
+    };
+    match frame {
+        Some(frame) => crate::core::invocation::with_captured_context(scope, &frame, cancel),
+        None => cancel(scope),
+    }
+}
+
+/// Cancel the source with `reason`, its promise marked handled: the
+/// forwarder has already reported the outcome. An upload's own native
+/// reader goes through ReadableStreamReaderGenericCancel; any other reader
+/// through its public `cancel` method.
+fn cancel_source<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    reader: v8::Global<v8::Object>,
+    reason: v8::Local<'s, v8::Value>,
+    internal: bool,
+) {
+    if internal {
+        // ReadableStreamCancel settles a throwing cancel algorithm as a
+        // rejected promise, so nothing escapes this call.
+        let reader = v8::Local::new(scope, reader);
+        let stream_v = crate::streams::slots::read_slot(scope, reader, crate::streams::slots::STREAM);
+        if let Ok(stream) = v8::Local::<v8::Object>::try_from(stream_v) {
+            let cancelled = crate::streams::readable_default_reader::readable_stream_reader_generic_cancel(
+                scope, reader, stream, reason,
+            );
+            cancelled.mark_as_handled();
+        }
+        return;
+    }
+    v8::tc_scope!(let tc, scope);
+    let reader = v8::Local::new(tc, reader);
+    let key = v8::String::new(tc, "cancel").unwrap();
+    if let Some(method) = reader.get(tc, key.into())
+        && let Ok(method) = v8::Local::<v8::Function>::try_from(method)
+        && let Some(result) = method.call(tc, reader.into(), &[reason])
+        && let Some(resolver) = v8::PromiseResolver::new(tc)
+    {
+        resolver.get_promise(tc).mark_as_handled();
+        resolver.resolve(tc, result);
+    }
 }
 
 fn on_error_callback(
@@ -540,7 +817,7 @@ fn on_error_callback(
 // ---------------------------------------------------------------------------
 
 fn push_chunk(
-    fwd: &ResponseForwarder,
+    fwd: &StreamForwarder,
     state: &SharedState,
     stream_id: u32,
     data: Vec<u8>,
@@ -549,23 +826,65 @@ fn push_chunk(
     if inner.closed || inner.cancel_requested.is_some() {
         return false;
     }
-    if let Some(writer) = inner.direct_writer.as_ref() {
-        match writer.push(data) {
-            StreamPushResult::Ok => true,
-            result @ (StreamPushResult::Closed | StreamPushResult::Full) => {
-                drop(inner);
-                let reason = if matches!(result, StreamPushResult::Full) { Cancellation::Overflow } else { Cancellation::Cancelled };
-                request_cancel(state, stream_id, reason);
-                false
-            }
+    if inner.direct_writer.is_none() || !inner.buffer.is_empty() {
+        inner.park_back(data);
+        return true;
+    }
+    let result = write_or_park(&mut inner, data);
+    drop(inner);
+    match refusal(result) {
+        None => true,
+        Some(reason) => {
+            request_cancel(state, stream_id, reason);
+            false
         }
-    } else {
-        inner.buffer.push_back(data);
-        true
     }
 }
 
-fn close_forwarder(fwd: &ResponseForwarder, state: &SharedState, stream_id: u32) {
+/// Hand `data` to the attached writer. A slicing forwarder writes only what
+/// fits in the writer's free space and parks the rest at the front of
+/// `buffer`, so the writer's byte cap holds for a chunk of any size.
+fn write_or_park(inner: &mut StreamForwarderInner, mut data: Vec<u8>) -> StreamPushResult {
+    let Some(room) = inner.direct_writer.as_ref().map(StreamWriter::room) else {
+        inner.park_front(data);
+        return StreamPushResult::Ok;
+    };
+    if inner.slices && data.len() > room {
+        let rest = data.split_off(room);
+        inner.park_front(rest);
+        if data.is_empty() {
+            return StreamPushResult::Ok;
+        }
+    }
+    match inner.direct_writer.as_ref() {
+        Some(writer) => writer.push(data),
+        None => StreamPushResult::Closed,
+    }
+}
+
+/// Move parked bytes into the writer while it has room: its own free space,
+/// and the share's for an upload.
+fn flush_parked(inner: &mut StreamForwarderInner) -> StreamPushResult {
+    while inner.direct_writer.as_ref().is_some_and(|writer| writer.room() > 0) {
+        let Some(chunk) = inner.unpark_front() else { break };
+        let result = write_or_park(inner, chunk);
+        if result != StreamPushResult::Ok {
+            return result;
+        }
+    }
+    StreamPushResult::Ok
+}
+
+/// The cancellation a refused push stands for, or `None` if it was accepted.
+fn refusal(result: StreamPushResult) -> Option<Cancellation> {
+    match result {
+        StreamPushResult::Ok => None,
+        StreamPushResult::Full => Some(Cancellation::Overflow),
+        StreamPushResult::Closed => Some(Cancellation::Cancelled),
+    }
+}
+
+fn close_forwarder(fwd: &StreamForwarder, state: &SharedState, stream_id: u32) {
     let mut inner = fwd.borrow_mut();
     inner.closed = true;
     let request = inner.request.take();
@@ -583,7 +902,7 @@ fn close_forwarder(fwd: &ResponseForwarder, state: &SharedState, stream_id: u32)
     if let Some(request) = request { request.release(state); }
 }
 
-fn error_forwarder(fwd: &ResponseForwarder, state: &SharedState, stream_id: u32, msg: &str) {
+fn error_forwarder(fwd: &StreamForwarder, state: &SharedState, stream_id: u32, msg: &str) {
     // Abort rather than close, so a consumer can tell a producer failure from
     // a clean EOF. `abort` still ends the stream, so the wire path is
     // unchanged: the upstream peer sees a truncated body, since HTTP has no
@@ -622,9 +941,9 @@ fn error_forwarder(fwd: &ResponseForwarder, state: &SharedState, stream_id: u32,
 /// it is given the terminal error frame first and then closed - the same end
 /// `cancel_reader` gives a cancelled one.
 pub(crate) fn fail_all(state: &SharedState, msg: &'static str) {
-    let forwarders: Vec<(u32, ResponseForwarder)> = state
+    let forwarders: Vec<(u32, StreamForwarder)> = state
         .borrow()
-        .response_forwarders
+        .stream_forwarders
         .iter()
         .map(|(&stream_id, fwd)| (stream_id, fwd.clone()))
         .collect();
@@ -651,7 +970,7 @@ pub(crate) fn fail_all(state: &SharedState, msg: &'static str) {
                 if let Some(writer) = &inner.direct_writer {
                     matches!(writer.push(frame), StreamPushResult::Ok)
                 } else {
-                    inner.buffer.push_back(frame);
+                    inner.park_back(frame);
                     true
                 }
             }
@@ -684,6 +1003,7 @@ pub fn attach_writer(state: &SharedState, stream_id: u32, writer: StreamWriter) 
         return;
     };
     let weak_state = Rc::downgrade(state);
+    let in_share = fwd.borrow().share.is_some();
     writer.set_consumer_callback(Rc::new(move |event| {
         let Some(state) = weak_state.upgrade() else { return; };
         match event {
@@ -696,11 +1016,20 @@ pub fn attach_writer(state: &SharedState, stream_id: u32, writer: StreamWriter) 
             }
             crate::channel::StreamConsumerEvent::Closed => request_cancel(&state, stream_id, Cancellation::Cancelled),
         }
+        // Bytes left the runtime's upload share: an upload parked for want
+        // of share room may now go on.
+        if in_share {
+            resume_parked_uploads(&state);
+        }
     }));
     let (buffered, closed) = {
         let mut inner = fwd.borrow_mut();
         inner.direct_writer = Some(writer);
-        (std::mem::take(&mut inner.buffer), inner.closed)
+        let mut taken = std::collections::VecDeque::new();
+        while let Some(chunk) = inner.unpark_front() {
+            taken.push_back(chunk);
+        }
+        (taken, inner.closed)
     };
     for chunk in buffered {
         if closed {
@@ -743,12 +1072,13 @@ fn cancel_reader(
     scope: &mut v8::PinScope,
     state: &SharedState,
     stream_id: u32,
-    fwd: &ResponseForwarder,
+    fwd: &StreamForwarder,
 ) {
-    let (reader, frame, request, reason, rpc_framing) = {
+    let (reader, frame, request, reason, rpc_framing, abort_signal, internal) = {
         let mut inner = fwd.borrow_mut();
         (inner.reader.take(), inner.continuation_context.take(), inner.request.take(),
-         inner.cancel_requested.take().unwrap_or(Cancellation::Cancelled), inner.rpc_framing)
+         inner.cancel_requested.take().unwrap_or(Cancellation::Cancelled), inner.rpc_framing,
+         inner.abort_signal.take(), inner.internal_reader)
     };
     // Mark closed before abort listeners run. Late reads and reentrant
     // cancellation cannot append chunks or invoke source cleanup again.
@@ -770,24 +1100,17 @@ fn cancel_reader(
         writer.abort(reason.message());
     }
     let cancel = |scope: &mut v8::PinScope| {
-        let reason_value = reason.exception(scope);
+        let reason_value = match aborted_reason(scope, abort_signal.as_ref()) {
+            Some(signal_reason) => signal_reason,
+            None => reason.exception(scope),
+        };
         if let Some(request) = &request {
             request.cancel.cancel();
             v8::tc_scope!(let tc, scope);
             request.signal.abort(tc, reason_value);
         }
         if let Some(reader) = reader {
-            v8::tc_scope!(let tc, scope);
-            let reader = v8::Local::new(tc, reader);
-            let key = v8::String::new(tc, "cancel").unwrap();
-            if let Some(method) = reader.get(tc, key.into())
-                && let Ok(method) = v8::Local::<v8::Function>::try_from(method)
-                && let Some(result) = method.call(tc, reader.into(), &[reason_value])
-                && let Some(resolver) = v8::PromiseResolver::new(tc)
-            {
-                resolver.get_promise(tc).mark_as_handled();
-                resolver.resolve(tc, result);
-            }
+            cancel_source(scope, reader, reason_value, internal);
         }
     };
     match frame {
@@ -796,6 +1119,61 @@ fn cancel_reader(
     }
     close_forwarder(fwd, state, stream_id);
     if let Some(request) = request { request.release(state); }
+}
+
+/// End every upload `request_id` started, cancelling each source with
+/// `reason`'s exception. An upload belongs to the request that started it:
+/// when that request is cancelled or times out, its uploads stop reading
+/// their sources and their channels end in failure.
+pub(crate) fn cancel_uploads_owned_by(state: &SharedState, request_id: u64, reason: Cancellation) {
+    let owned: Vec<u32> = state
+        .borrow()
+        .stream_forwarders
+        .iter()
+        .filter(|(_, fwd)| {
+            let inner = fwd.borrow();
+            !inner.closed && inner.owner_request == Some(request_id)
+        })
+        .map(|(&stream_id, _)| stream_id)
+        .collect();
+    for stream_id in owned {
+        request_cancel(state, stream_id, reason);
+    }
+}
+
+/// Re-arm every upload paused with parked bytes. Called when bytes leave the
+/// runtime's upload share, so an upload that parked for want of share room
+/// is not left waiting on its own, empty, channel.
+fn resume_parked_uploads(state: &SharedState) {
+    let parked: Vec<u32> = state
+        .borrow()
+        .stream_forwarders
+        .iter()
+        .filter(|(_, fwd)| {
+            let inner = fwd.borrow();
+            inner.share.is_some() && inner.paused && !inner.closed && !inner.buffer.is_empty()
+        })
+        .map(|(&stream_id, _)| stream_id)
+        .collect();
+    for stream_id in parked {
+        request_resume(state, stream_id);
+    }
+}
+
+/// The reason of an aborted `fetch` signal: "abort a fetch() call" cancels
+/// the request body with the abort's error. `None` if there is no signal or
+/// it has not aborted.
+fn aborted_reason<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    signal: Option<&v8::Global<v8::Object>>,
+) -> Option<v8::Local<'s, v8::Value>> {
+    let signal = v8::Local::new(scope, signal?);
+    let state = crate::dom::abort_signal::signal_from_obj(scope, signal)?;
+    if !state.aborted.get() {
+        return None;
+    }
+    let reason = state.reason.borrow().clone()?;
+    Some(v8::Local::new(scope, reason))
 }
 
 /// Ask the pump to resume a paused upload forwarder. Called by the consumer of
@@ -845,6 +1223,131 @@ pub fn drain_into_complete(state: &SharedState, stream_id: u32) -> Vec<Vec<u8>> 
     chunks
 }
 
+// ---------------------------------------------------------------------------
+// Upload consumer
+// ---------------------------------------------------------------------------
+
+/// Why an upload ended before its source reached end-of-stream.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UploadError {
+    /// The channel refused a chunk: its process-wide byte budget is spent.
+    Overflow,
+    /// The source failed or was cancelled. The bytes read so far are a
+    /// prefix of the body, never the whole of it.
+    Failed(String),
+}
+
+impl fmt::Display for UploadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            UploadError::Overflow => f.write_str("upload stream exceeded the buffer backpressure cap"),
+            UploadError::Failed(reason) => write!(f, "upload stream failed: {reason}"),
+        }
+    }
+}
+
+/// The consumer side of [`forward_upload`].
+///
+/// Yields the source's bytes in order, waits (waker-based) while the
+/// channel is empty and the source is live, reports a failed source as an
+/// error rather than an end, and ends at the source's end-of-stream.
+///
+/// Draining re-arms the paused producer once the channel is down to a
+/// quarter of its cap, so the upload proceeds in bounded-memory waves.
+/// Dropping it before the end cancels the source.
+///
+/// It holds its runtime weakly: an upload stalled inside the HTTP client
+/// does not keep an evicted runtime's state alive.
+pub struct UploadReader {
+    reader: StreamReader,
+    state: Weak<RefCell<crate::state::RuntimeState>>,
+    stream_id: u32,
+}
+
+/// Ends an upload from outside its consumer, for example once the response
+/// it belongs to is complete.
+#[derive(Clone, Debug)]
+pub struct UploadControl {
+    state: Weak<RefCell<crate::state::RuntimeState>>,
+    stream_id: u32,
+}
+
+impl UploadControl {
+    /// Stop an upload whose source has not finished: its source is cancelled
+    /// and its channel ends in failure. Nothing happens once the source has
+    /// ended or the upload is already over.
+    pub fn cancel(&self) {
+        if let Some(state) = self.state.upgrade() {
+            request_cancel(&state, self.stream_id, Cancellation::Cancelled);
+        }
+    }
+}
+
+impl fmt::Debug for UploadReader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UploadReader").field("stream_id", &self.stream_id).finish_non_exhaustive()
+    }
+}
+
+impl UploadReader {
+    /// A handle that can end this upload from outside its consumer.
+    pub fn control(&self) -> UploadControl {
+        UploadControl { state: self.state.clone(), stream_id: self.stream_id }
+    }
+
+    /// The next chunk, the failure that ended the upload, or `None` at the
+    /// source's end-of-stream.
+    pub async fn next_chunk(&mut self) -> Option<Result<Bytes, UploadError>> {
+        std::future::poll_fn(|cx| self.poll_next_chunk(cx)).await
+    }
+
+    /// Poll form of [`Self::next_chunk`].
+    pub fn poll_next_chunk(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Bytes, UploadError>>> {
+        loop {
+            if let Some(chunk) = self.reader.pop() {
+                // Buffer space was just freed; let the producer refill it.
+                self.maybe_resume_producer();
+                return Poll::Ready(Some(Ok(Bytes::from(chunk))));
+            }
+            if self.reader.is_overflow() {
+                return Poll::Ready(Some(Err(UploadError::Overflow)));
+            }
+            // Checked BEFORE `is_done`, which an abort also sets: a source
+            // that failed partway must not read as a complete body.
+            if let Some(err) = self.reader.error() {
+                return Poll::Ready(Some(Err(UploadError::Failed(err))));
+            }
+            if self.reader.is_done() {
+                return Poll::Ready(None);
+            }
+            // Empty buffer with a live source that may be paused (it pauses
+            // at the high-water mark, and a final short chunk can leave it
+            // paused with the buffer drained). Nudge a resume before parking
+            // so the wait never outlasts data a paused source will not send.
+            self.maybe_resume_producer();
+            if self.reader.has_data() || self.reader.is_done() {
+                continue;
+            }
+            self.reader.register_waker(cx.waker());
+            return Poll::Pending;
+        }
+    }
+
+    /// Re-arm the paused producer once the channel has drained to a quarter
+    /// of its cap (hysteresis against the half-cap pause mark). Idempotent:
+    /// `request_resume` does nothing unless the forwarder is paused.
+    fn maybe_resume_producer(&self) {
+        if self.reader.buffered_bytes() <= self.reader.cap() / 4
+            && let Some(state) = self.state.upgrade()
+        {
+            request_resume(&state, self.stream_id);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -859,7 +1362,7 @@ mod tests {
     fn closed_forwarder_with_attached_writer_is_removed_from_registry() {
         let state = test_state();
         let stream_id = 41;
-        let fwd: ResponseForwarder = Rc::new(RefCell::new(ResponseForwarderInner::default()));
+        let fwd: StreamForwarder = Rc::new(RefCell::new(StreamForwarderInner::default()));
         register(&state, stream_id, fwd.clone());
 
         let (writer, _reader) = crate::channel::stream_buffer();
@@ -876,7 +1379,7 @@ mod tests {
     fn writer_overflow_closes_forwarder_and_unregisters_it() {
         let state = test_state();
         let stream_id = 42;
-        let fwd: ResponseForwarder = Rc::new(RefCell::new(ResponseForwarderInner::default()));
+        let fwd: StreamForwarder = Rc::new(RefCell::new(StreamForwarderInner::default()));
         register(&state, stream_id, fwd.clone());
 
         let (writer, reader) = crate::channel::stream_buffer_with_cap(4);
@@ -896,7 +1399,7 @@ mod tests {
     fn failure_before_writer_attachment_remains_a_transport_error() {
         let state = test_state();
         let stream_id = 43;
-        let fwd = Rc::new(RefCell::new(ResponseForwarderInner::default()));
+        let fwd = Rc::new(RefCell::new(StreamForwarderInner::default()));
         register(&state, stream_id, fwd.clone());
         error_forwarder(&fwd, &state, stream_id, "reader failed");
         let (writer, reader) = crate::channel::stream_buffer();

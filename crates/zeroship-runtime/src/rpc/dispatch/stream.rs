@@ -1,4 +1,4 @@
-//! A retained procedure iterator adapted to the runtime response forwarder.
+//! A retained procedure iterator adapted to the runtime's stream forwarder.
 //! Callback data is owned by V8, so it does not root the iterator through a
 //! Rust capture cycle while waiting for a creator promise.
 
@@ -54,10 +54,10 @@ pub(super) fn start<'s>(
         let key = v8::String::new(scope, name).unwrap();
         reader.create_data_property(scope, key.into(), function.into());
     }
-    let stream_id = crate::streams::response_forwarder::begin_forward_reader(
+    let stream_id = crate::streams::stream_forwarder::begin_forward_reader(
         scope,
         reader,
-        crate::streams::response_forwarder::ForwardMode::Rpc,
+        crate::streams::stream_forwarder::ForwardMode::Rpc,
     )
     .map_err(InvocationError::InvalidTarget)?;
     Ok(ResponseInfo::Stream {

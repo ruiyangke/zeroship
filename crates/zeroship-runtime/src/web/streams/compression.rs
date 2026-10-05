@@ -5,10 +5,10 @@
 //! the class is a `#[v8_class]` wrapper that constructs an underlying
 //! `globalThis.TransformStream` with a synthetic underlyingTransformer
 //! whose `transform`/`flush` callbacks are FunctionTemplate-backed C
-//! functions delegating to a heap-resident `Box<dyn Codec>`. Reusing the
-//! JS-from-transformer construction path in `streams::transform` is
-//! straightforward and avoids the still-stub native-transformer driver
-//! (see `transform_controller.rs::set_up_transform_stream_default_controller_native`).
+//! functions delegating to a heap-resident `Box<dyn Codec>`. Codecs are
+//! synchronous, so the JS-from-transformer construction path in
+//! `streams::transform` gives the spec's transform-settles-before-next-write
+//! semantics directly.
 //!
 //! Spec corner cases handled:
 //!   - Unknown format (constructor) → `TypeError`.

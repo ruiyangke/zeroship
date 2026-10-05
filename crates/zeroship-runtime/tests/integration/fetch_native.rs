@@ -30,9 +30,8 @@ use std::time::Duration;
 
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::codec::{make_codec, CodecMode, CompressionFormat};
-use zeroship_runtime::fetch_body::BodySource;
 use zeroship_runtime::fetch_native::algorithms::{
-    main_fetch, CredentialsMode, FetchRequest, RedirectMode,
+    main_fetch, CredentialsMode, FetchRequest, RedirectMode, RequestBody,
 };
 
 // ---------------------------------------------------------------------------
@@ -203,8 +202,7 @@ fn req(method: &str, url: &str) -> FetchRequest {
         method: method.to_string(),
         url: url.to_string(),
         headers: Vec::new(),
-        body: None,
-        body_source: None,
+        body: RequestBody::Empty,
         redirect_mode: RedirectMode::Follow,
         credentials_mode: CredentialsMode::SameOrigin,
         cancel: None,
@@ -290,8 +288,7 @@ fn redirect_301_post_becomes_get() {
         }
     });
     let mut r = req("POST", &server.url());
-    r.body = Some(b"PAYLOAD".to_vec());
-    r.body_source = Some(BodySource::Bytes(std::rc::Rc::new(b"PAYLOAD".to_vec())));
+    r.body = RequestBody::Bytes(b"PAYLOAD".to_vec().into());
     let resp = run(main_fetch(r)).unwrap();
     assert_eq!(resp.status, 200);
     assert!(resp.redirected);
@@ -315,8 +312,7 @@ fn redirect_303_put_becomes_get_drops_body() {
         }
     });
     let mut r = req("PUT", &server.url());
-    r.body = Some(b"DATA".to_vec());
-    r.body_source = Some(BodySource::Bytes(std::rc::Rc::new(b"DATA".to_vec())));
+    r.body = RequestBody::Bytes(b"DATA".to_vec().into());
     let resp = run(main_fetch(r)).unwrap();
     let body = String::from_utf8_lossy(&resp.body);
     assert!(body.contains("method=GET"), "got {body}");
@@ -342,27 +338,12 @@ fn redirect_307_post_preserves_method_and_body() {
         }
     });
     let mut r = req("POST", &server.url());
-    r.body = Some(b"PAYLOAD".to_vec());
-    r.body_source = Some(BodySource::Bytes(std::rc::Rc::new(b"PAYLOAD".to_vec())));
+    r.body = RequestBody::Bytes(b"PAYLOAD".to_vec().into());
     r.headers.push(("Content-Type".to_string(), "text/plain".to_string()));
     let resp = run(main_fetch(r)).unwrap();
     let body = String::from_utf8_lossy(&resp.body);
     assert!(body.contains("method=POST"), "got {body}");
     assert!(body.contains("body=PAYLOAD"), "got {body}");
-}
-
-// 9. 307 + Stream body → network error (non-rewindable)
-#[test]
-fn redirect_307_stream_body_errors() {
-    let server = start_mock_server(|_req| {
-        http_response(307, "Temporary Redirect", &[("Location", "/x")], b"")
-    });
-    let mut r = req("POST", &server.url());
-    r.body_source = Some(BodySource::Stream);
-    let result = run(main_fetch(r));
-    assert!(result.is_err());
-    let err = result.err().unwrap();
-    assert!(err.contains("stream") || err.contains("rewind"), "got {err}");
 }
 
 // 10. 20-redirect cap
@@ -509,8 +490,7 @@ fn origin_header_on_post_only() {
 
     // POST — Origin populated.
     let mut r = req("POST", &server.url());
-    r.body = Some(b"x".to_vec());
-    r.body_source = Some(BodySource::Bytes(std::rc::Rc::new(b"x".to_vec())));
+    r.body = RequestBody::Bytes(b"x".to_vec().into());
     let resp2 = run(main_fetch(r)).unwrap();
     let body = String::from_utf8_lossy(&resp2.body);
     assert!(body.contains("origin=http://"), "got {body}");
@@ -548,7 +528,7 @@ fn mid_body_cancel_flag_aborts_body_read() {
     });
 
     let cancel = CancelFlag::new();
-    let request = FetchRequest {
+    let mut request = FetchRequest {
         cancel: Some(cancel.clone()),
         ..req("GET", &format!("http://{addr}/slow-body"))
     };
@@ -560,7 +540,7 @@ fn mid_body_cancel_flag_aborts_body_read() {
             cancel_for_task.cancel();
         })
         .detach();
-        zeroship_runtime::fetch_native::http_network::http_network_fetch(&request)
+        zeroship_runtime::fetch_native::http_network::http_network_fetch(&mut request)
             .await
             .expect_err("mid-body cancellation should abort the body read")
     });
@@ -656,18 +636,6 @@ fn unknown_content_encoding_errors() {
     assert!(result.is_err());
     let err = result.err().unwrap();
     assert!(err.contains("Content-Encoding") || err.contains("snappy"), "got {err}");
-}
-
-// 23. 308 + non-rewindable body → network error (analogous to 307)
-#[test]
-fn redirect_308_stream_body_errors() {
-    let server = start_mock_server(|_req| {
-        http_response(308, "Permanent Redirect", &[("Location", "/x")], b"")
-    });
-    let mut r = req("PUT", &server.url());
-    r.body_source = Some(BodySource::Stream);
-    let result = run(main_fetch(r));
-    assert!(result.is_err());
 }
 
 // 24. 302 + GET preserved (no method change for non-POST)
@@ -945,7 +913,7 @@ fn a_fetch_its_isolate_never_settled_is_unreachable_from_another_isolate() {
         let written = upstream.server.join().expect("the upstream panicked");
         assert!(written > VICTIM_BODY.len(), "the upstream must have answered the victim");
         compio::time::timeout(Duration::from_secs(10), async {
-            while victim.state().borrow().in_flight_fetches != 0 {
+            while victim.state().borrow().in_flight_fetches.get() != 0 {
                 compio::time::sleep(Duration::from_millis(1)).await;
             }
         })

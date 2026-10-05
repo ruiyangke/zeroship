@@ -10,7 +10,7 @@
 //! ```
 //!
 //! Internal slots (§4.3.5):
-//! - `[[abortAlgorithm]]`, `[[closeAlgorithm]]`, `[[writeAlgorithm]]` → Rust enum AlgorithmFn
+//! - `[[abortAlgorithm]]`, `[[closeAlgorithm]]`, `[[writeAlgorithm]]` -> Rust enum SinkAlgorithm
 //! - `[[strategySizeAlgorithm]]`                                       → Rust enum SizeAlgorithm
 //! - `[[strategyHWM]]`                                                 → Rust f64
 //! - `[[queue]]`, `[[queueTotalSize]]`                                  → Rust ValueQueue (queue.rs)
@@ -36,15 +36,12 @@
 //! - Internal methods `[[AbortSteps]]`, `[[ErrorSteps]]` → `abort_steps`, `error_steps`
 
 use std::cell::{Cell, RefCell};
-use std::future::Future;
-use std::pin::Pin;
-use std::rc::Rc;
 
 use crate::streams::algorithms;
 use crate::streams::promise_resolve;
 use crate::streams::queue::is_non_negative_number;
-use crate::streams::readable_default_controller::{AlgorithmFn, SizeAlgorithm};
-use crate::streams::writable::{NativeSink, WSState};
+use crate::streams::readable_default_controller::SizeAlgorithm;
+use crate::streams::writable::WSState;
 
 const STREAM_OBJ_SLOT: &str = "[[ws.ctrl.streamObj]]";
 const ABORT_CONTROLLER_SLOT: &str = "[[ws.ctrl.abortController]]";
@@ -86,9 +83,9 @@ pub struct WSControllerState {
     queue_total_size: Cell<f64>,
     pub strategy_hwm: f64,
     pub strategy_size: SizeAlgorithm,
-    pub write_algorithm: AlgorithmFn,
-    pub close_algorithm: AlgorithmFn,
-    pub abort_algorithm: AlgorithmFn,
+    write_algorithm: SinkAlgorithm,
+    close_algorithm: SinkAlgorithm,
+    abort_algorithm: SinkAlgorithm,
     /// SLOT: `[[started]]`
     pub started: Cell<bool>,
 }
@@ -97,9 +94,9 @@ impl WSControllerState {
     fn new(
         hwm: f64,
         size: SizeAlgorithm,
-        write_algorithm: AlgorithmFn,
-        close_algorithm: AlgorithmFn,
-        abort_algorithm: AlgorithmFn,
+        write_algorithm: SinkAlgorithm,
+        close_algorithm: SinkAlgorithm,
+        abort_algorithm: SinkAlgorithm,
     ) -> Self {
         Self {
             queue: RefCell::new(std::collections::VecDeque::new()),
@@ -467,9 +464,9 @@ pub fn writable_stream_default_controller_clear_algorithms(
         return;
     }
     let state = unsafe { &mut *raw };
-    state.write_algorithm = AlgorithmFn::Noop;
-    state.close_algorithm = AlgorithmFn::Noop;
-    state.abort_algorithm = AlgorithmFn::Noop;
+    state.write_algorithm = SinkAlgorithm::Noop;
+    state.close_algorithm = SinkAlgorithm::Noop;
+    state.abort_algorithm = SinkAlgorithm::Noop;
     state.strategy_size = SizeAlgorithm::DefaultCount;
 }
 
@@ -632,13 +629,12 @@ pub fn abort_steps<'s>(
     let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) else {
         return algorithms::resolved_undefined_promise(scope);
     };
-    let snap = with_controller_state(scope, controller, |s| algorithm_snapshot(&s.abort_algorithm))
-        .flatten();
+    let snap = with_controller_state(scope, controller, |s| s.abort_algorithm.clone());
     writable_stream_default_controller_clear_algorithms(scope, controller);
     let Some(snap) = snap else {
         return algorithms::resolved_undefined_promise(scope);
     };
-    snap.invoke_with_reason(scope, reason)
+    snap.invoke(scope, &[reason])
 }
 
 /// `[[ErrorSteps]]()` — §4.7.1.2. ResetQueue(controller).
@@ -654,104 +650,40 @@ pub fn error_steps(
 }
 
 // ---------------------------------------------------------------------------
-// Algorithm snapshot — same pattern as readable_default_controller
+// Sink algorithms
 // ---------------------------------------------------------------------------
 
-/// Future returned by a [`AlgorithmSnapshot::Native`] one-shot closure.
-type NativeWritableFuture = Pin<Box<dyn Future<Output = Result<(), v8::Global<v8::Value>>>>>;
-
-/// One-shot closure shape reserved for `AlgorithmSnapshot::Native`.
-type NativeWritableOnceFn =
-    Box<dyn FnOnce(NativeWritableArg, v8::Global<v8::Object>) -> NativeWritableFuture>;
-
-enum AlgorithmSnapshot {
+/// `[[writeAlgorithm]]`, `[[closeAlgorithm]]`, `[[abortAlgorithm]]` and the
+/// start algorithm: the spec default ("return a promise resolved with
+/// undefined") or a method of the underlyingSink dictionary, called with the
+/// dictionary as `this`.
+///
+/// Invocation works on a clone, so no borrow of the controller state is held
+/// while JS runs and re-enters the controller.
+#[derive(Clone)]
+enum SinkAlgorithm {
     Noop,
     Js {
         function: v8::Global<v8::Function>,
         this_obj: v8::Global<v8::Value>,
     },
-    /// Native one-shot: reserved for the next dispatch when AlgorithmFn::Native
-    /// becomes drivable. Closure shape preserved for type-checking; actual
-    /// invocation defers to AlgorithmSnapshot::Noop until the runtime-loop
-    /// driver lands (§VII.5).
-    #[expect(
-        dead_code,
-        reason = "reserved for the native one-shot writable algorithm; the runtime-loop driver constructs only Noop and Js today"
-    )]
-    Native(Rc<RefCell<Option<NativeWritableOnceFn>>>),
 }
 
-impl AlgorithmSnapshot {
-    fn invoke_with_chunk<'s>(
+impl SinkAlgorithm {
+    fn invoke<'s>(
         self,
         scope: &mut v8::PinScope<'s, '_>,
-        chunk: v8::Local<'s, v8::Value>,
-        controller_obj: v8::Local<v8::Object>,
+        args: &[v8::Local<v8::Value>],
     ) -> v8::Local<'s, v8::Promise> {
         match self {
-            AlgorithmSnapshot::Noop => algorithms::resolved_undefined_promise(scope),
-            AlgorithmSnapshot::Js { function, this_obj } => {
+            SinkAlgorithm::Noop => algorithms::resolved_undefined_promise(scope),
+            SinkAlgorithm::Js { function, this_obj } => {
                 let f = v8::Local::new(scope, &function);
                 let this = v8::Local::new(scope, &this_obj);
-                invoke_js(scope, f, this, &[chunk, controller_obj.into()])
+                invoke_js(scope, f, this, args)
             }
-            AlgorithmSnapshot::Native(_) => algorithms::resolved_undefined_promise(scope),
         }
     }
-
-    fn invoke_with_controller<'s>(
-        self,
-        scope: &mut v8::PinScope<'s, '_>,
-        controller_obj: v8::Local<v8::Object>,
-    ) -> v8::Local<'s, v8::Promise> {
-        match self {
-            AlgorithmSnapshot::Noop => algorithms::resolved_undefined_promise(scope),
-            AlgorithmSnapshot::Js { function, this_obj } => {
-                let f = v8::Local::new(scope, &function);
-                let this = v8::Local::new(scope, &this_obj);
-                invoke_js(scope, f, this, &[controller_obj.into()])
-            }
-            AlgorithmSnapshot::Native(_) => algorithms::resolved_undefined_promise(scope),
-        }
-    }
-
-    fn invoke_with_reason<'s>(
-        self,
-        scope: &mut v8::PinScope<'s, '_>,
-        reason: v8::Local<'s, v8::Value>,
-    ) -> v8::Local<'s, v8::Promise> {
-        match self {
-            AlgorithmSnapshot::Noop => algorithms::resolved_undefined_promise(scope),
-            AlgorithmSnapshot::Js { function, this_obj } => {
-                let f = v8::Local::new(scope, &function);
-                let this = v8::Local::new(scope, &this_obj);
-                invoke_js(scope, f, this, &[reason])
-            }
-            AlgorithmSnapshot::Native(_) => algorithms::resolved_undefined_promise(scope),
-        }
-    }
-
-    fn invoke_zero_args<'s>(
-        self,
-        scope: &mut v8::PinScope<'s, '_>,
-    ) -> v8::Local<'s, v8::Promise> {
-        match self {
-            AlgorithmSnapshot::Noop => algorithms::resolved_undefined_promise(scope),
-            AlgorithmSnapshot::Js { function, this_obj } => {
-                let f = v8::Local::new(scope, &function);
-                let this = v8::Local::new(scope, &this_obj);
-                invoke_js(scope, f, this, &[])
-            }
-            AlgorithmSnapshot::Native(_) => algorithms::resolved_undefined_promise(scope),
-        }
-    }
-}
-
-#[doc(hidden)]
-pub enum NativeWritableArg {
-    Empty,
-    Chunk(v8::Global<v8::Value>),
-    Reason(Option<v8::Global<v8::Value>>),
 }
 
 fn invoke_js<'s>(
@@ -798,17 +730,6 @@ enum CallOutcome {
     Undefined,
 }
 
-fn algorithm_snapshot(af: &AlgorithmFn) -> Option<AlgorithmSnapshot> {
-    match af {
-        AlgorithmFn::Noop => Some(AlgorithmSnapshot::Noop),
-        AlgorithmFn::Js { function, this_obj } => Some(AlgorithmSnapshot::Js {
-            function: function.clone(),
-            this_obj: this_obj.clone(),
-        }),
-        AlgorithmFn::Native(_) | AlgorithmFn::NativeReason(_) => Some(AlgorithmSnapshot::Noop),
-    }
-}
-
 enum SizeAlgoSnapshot {
     DefaultCount,
     Count,
@@ -846,38 +767,22 @@ fn invoke_write_algorithm<'s>(
     controller: v8::Local<v8::Object>,
     chunk: v8::Local<'s, v8::Value>,
 ) -> v8::Local<'s, v8::Promise> {
-    let snap = with_controller_state(scope, controller, |s| algorithm_snapshot(&s.write_algorithm))
-        .flatten();
-    let Some(snap) = snap else {
+    let Some(algorithm) = with_controller_state(scope, controller, |s| s.write_algorithm.clone())
+    else {
         return algorithms::resolved_undefined_promise(scope);
     };
-    snap.invoke_with_chunk(scope, chunk, controller)
+    algorithm.invoke(scope, &[chunk, controller.into()])
 }
 
 fn invoke_close_algorithm<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     controller: v8::Local<v8::Object>,
 ) -> v8::Local<'s, v8::Promise> {
-    let snap = with_controller_state(scope, controller, |s| algorithm_snapshot(&s.close_algorithm))
-        .flatten();
-    let Some(snap) = snap else {
+    let Some(algorithm) = with_controller_state(scope, controller, |s| s.close_algorithm.clone())
+    else {
         return algorithms::resolved_undefined_promise(scope);
     };
-    snap.invoke_zero_args(scope)
-}
-
-fn invoke_start_algorithm<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    controller: v8::Local<v8::Object>,
-    start_algorithm: AlgorithmFn,
-) -> v8::Local<'s, v8::Promise> {
-    // start algorithm produced from underlyingSink.start; one-shot.
-    let snap = match start_algorithm {
-        AlgorithmFn::Noop => AlgorithmSnapshot::Noop,
-        AlgorithmFn::Js { function, this_obj } => AlgorithmSnapshot::Js { function, this_obj },
-        AlgorithmFn::Native(_) | AlgorithmFn::NativeReason(_) => AlgorithmSnapshot::Noop,
-    };
-    snap.invoke_with_controller(scope, controller)
+    algorithm.invoke(scope, &[])
 }
 
 // ---------------------------------------------------------------------------
@@ -888,10 +793,10 @@ fn invoke_start_algorithm<'s>(
 /// `SetUpWritableStreamDefaultController` — grouped so the setup function
 /// doesn't need one parameter per algorithm.
 struct WritableAlgorithms {
-    start: AlgorithmFn,
-    write: AlgorithmFn,
-    close: AlgorithmFn,
-    abort: AlgorithmFn,
+    start: SinkAlgorithm,
+    write: SinkAlgorithm,
+    close: SinkAlgorithm,
+    abort: SinkAlgorithm,
 }
 
 /// `SetUpWritableStreamDefaultController(stream, controller, startAlg,
@@ -980,7 +885,7 @@ fn set_up_writable_stream_default_controller(
 
     // Run startAlgorithm; on its promise's fulfill set started=true and
     // call AdvanceQueueIfNeeded; on rejection deal with rejection.
-    let start_promise = invoke_start_algorithm(scope, controller_obj, start_algorithm);
+    let start_promise = start_algorithm.invoke(scope, &[controller_obj.into()]);
     let stream_g = v8::Global::new(scope, stream);
     let stream_g2 = stream_g.clone();
     let controller_g = v8::Global::new(scope, controller_obj);
@@ -1018,10 +923,10 @@ pub fn set_up_writable_stream_default_controller_from_underlying_sink_with_strat
     hwm: f64,
     size_algo: SizeAlgorithm,
 ) -> Result<(), String> {
-    let mut start_alg = AlgorithmFn::Noop;
-    let mut write_alg = AlgorithmFn::Noop;
-    let mut close_alg = AlgorithmFn::Noop;
-    let mut abort_alg = AlgorithmFn::Noop;
+    let mut start_alg = SinkAlgorithm::Noop;
+    let mut write_alg = SinkAlgorithm::Noop;
+    let mut close_alg = SinkAlgorithm::Noop;
+    let mut abort_alg = SinkAlgorithm::Noop;
 
     if let Ok(us_obj) = v8::Local::<v8::Object>::try_from(underlying_sink) {
         for (key_name, slot) in [
@@ -1041,7 +946,7 @@ pub fn set_up_writable_stream_default_controller_from_underlying_sink_with_strat
                 // SAFETY: `slot` points at a stack-local variable and is
                 // valid for the duration of this loop iteration only.
                 unsafe {
-                    *slot = AlgorithmFn::Js {
+                    *slot = SinkAlgorithm::Js {
                         function: v8::Global::new(scope, fn_l),
                         this_obj: {
                             let v: v8::Local<v8::Value> = us_obj.into();
@@ -1065,35 +970,6 @@ pub fn set_up_writable_stream_default_controller_from_underlying_sink_with_strat
         hwm,
         size_algo,
     )
-}
-
-/// Native variant — used by `from_native_sink`.
-pub fn set_up_writable_stream_default_controller_native<S: NativeSink + 'static>(
-    scope: &mut v8::PinScope,
-    stream: v8::Local<v8::Object>,
-    sink: S,
-    hwm: f64,
-) {
-    let _sink_rc = Rc::new(RefCell::new(sink));
-    // For this dispatch the native sink's pull/cancel/write futures aren't
-    // driven by the runtime loop yet. The trait surface exists so the next dispatch
-    // can attach a runtime-loop driver without churning the API. For now,
-    // pull/close/abort are no-ops — same shape as
-    // set_up_readable_stream_default_controller_native.
-    let _ = set_up_writable_stream_default_controller(
-        scope,
-        stream,
-        WritableAlgorithms {
-            start: AlgorithmFn::Noop,
-            write: AlgorithmFn::Noop,
-            close: AlgorithmFn::Noop,
-            abort: AlgorithmFn::Noop,
-        },
-        hwm,
-        SizeAlgorithm::DefaultCount,
-    );
-    // Suppress unused-type lint when sink trait methods aren't driven.
-    let _ = std::mem::size_of_val(&_sink_rc);
 }
 
 // ---------------------------------------------------------------------------

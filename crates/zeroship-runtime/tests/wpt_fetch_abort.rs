@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::fetch_native::algorithms::{
-    main_fetch, CredentialsMode, FetchRequest, RedirectMode,
+    main_fetch, CredentialsMode, FetchRequest, RedirectMode, RequestBody,
 };
 
 #[derive(Debug)]
@@ -128,8 +128,7 @@ fn req(method: &str, url: &str, cancel: Option<CancelFlag>) -> FetchRequest {
         method: method.to_string(),
         url: url.to_string(),
         headers: Vec::new(),
-        body: None,
-        body_source: None,
+        body: RequestBody::Empty,
         redirect_mode: RedirectMode::Follow,
         credentials_mode: CredentialsMode::SameOrigin,
         cancel,
@@ -175,10 +174,7 @@ fn wpt_fetch_abort_pre_aborted() {
         let flag = CancelFlag::new();
         flag.cancel();
         let mut r = req("POST", &server.url(), Some(flag));
-        r.body = Some(b"hello".to_vec());
-        r.body_source = Some(zeroship_runtime::fetch_body::BodySource::Bytes(
-            std::rc::Rc::new(b"hello".to_vec()),
-        ));
+        r.body = RequestBody::Bytes(b"hello".to_vec().into());
         r.headers.push(("Content-Length".to_string(), "5".to_string()));
         let resp = run(main_fetch(r));
         let outcome = match resp {

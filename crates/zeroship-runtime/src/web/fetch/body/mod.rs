@@ -75,13 +75,6 @@ pub enum BodySource {
     Stream,
 }
 
-impl BodySource {
-    /// True if the source is rewindable (redirect can re-send).
-    pub fn is_rewindable(&self) -> bool {
-        !matches!(self, BodySource::Stream)
-    }
-}
-
 // ---------------------------------------------------------------------------
 // BodyImpl — Rust-side body state shared by Request and Response
 // ---------------------------------------------------------------------------

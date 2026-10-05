@@ -27,9 +27,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use zeroship_runtime::fetch_body::BodySource;
 use zeroship_runtime::fetch_native::algorithms::{
-    main_fetch, CredentialsMode, FetchRequest, RedirectMode,
+    main_fetch, CredentialsMode, FetchRequest, RedirectMode, RequestBody,
 };
 
 #[derive(Debug)]
@@ -193,8 +192,7 @@ fn req(method: &str, url: &str) -> FetchRequest {
         method: method.to_string(),
         url: url.to_string(),
         headers: Vec::new(),
-        body: None,
-        body_source: None,
+        body: RequestBody::Empty,
         redirect_mode: RedirectMode::Follow,
         credentials_mode: CredentialsMode::SameOrigin,
         cancel: None,
@@ -271,8 +269,7 @@ fn wpt_fetch_basic_request_headers() {
         let body = b"Request's body";
         let server = start_server(vec![ServerResponse::ok(b"ok", "text/plain")]);
         let mut r = req("POST", &server.url());
-        r.body = Some(body.to_vec());
-        r.body_source = Some(BodySource::Bytes(std::rc::Rc::new(body.to_vec())));
+        r.body = RequestBody::Bytes(body.to_vec().into());
         r.headers
             .push(("Content-Type".to_string(), "text/plain;charset=UTF-8".to_string()));
         r.headers
@@ -309,8 +306,7 @@ fn wpt_fetch_basic_request_headers() {
     {
         let server = start_server(vec![ServerResponse::ok(b"ok", "text/plain")]);
         let mut r = req("POST", &server.url());
-        r.body = Some(Vec::new());
-        r.body_source = Some(BodySource::Bytes(std::rc::Rc::new(Vec::new())));
+        r.body = RequestBody::Bytes(Vec::new().into());
         r.headers.push(("Content-Length".to_string(), "0".to_string()));
         let resp = run(main_fetch(r));
         let captured = server.requests.lock().unwrap().first().cloned();
@@ -336,8 +332,7 @@ fn wpt_fetch_basic_request_headers() {
         let body = b"Put body";
         let server = start_server(vec![ServerResponse::ok(b"ok", "text/plain")]);
         let mut r = req("PUT", &server.url());
-        r.body = Some(body.to_vec());
-        r.body_source = Some(BodySource::Bytes(std::rc::Rc::new(body.to_vec())));
+        r.body = RequestBody::Bytes(body.to_vec().into());
         r.headers.push(("Content-Length".to_string(), body.len().to_string()));
         let resp = run(main_fetch(r));
         let captured = server.requests.lock().unwrap().first().cloned();
@@ -409,8 +404,7 @@ fn wpt_fetch_basic_request_upload() {
         let body = b"hello upload";
         let server = start_server(vec![ServerResponse::ok(b"ok", "text/plain")]);
         let mut r = req("POST", &server.url());
-        r.body = Some(body.to_vec());
-        r.body_source = Some(BodySource::Bytes(std::rc::Rc::new(body.to_vec())));
+        r.body = RequestBody::Bytes(body.to_vec().into());
         r.headers.push(("Content-Length".to_string(), body.len().to_string()));
         let resp = run(main_fetch(r));
         let captured = server.requests.lock().unwrap().first().cloned();
@@ -431,8 +425,7 @@ fn wpt_fetch_basic_request_upload() {
         let body: Vec<u8> = (0u8..255).collect();
         let server = start_server(vec![ServerResponse::ok(b"ok", "text/plain")]);
         let mut r = req("POST", &server.url());
-        r.body = Some(body.clone());
-        r.body_source = Some(BodySource::Bytes(std::rc::Rc::new(body.clone())));
+        r.body = RequestBody::Bytes(body.clone().into());
         r.headers.push(("Content-Length".to_string(), body.len().to_string()));
         let resp = run(main_fetch(r));
         let captured = server.requests.lock().unwrap().first().cloned();
@@ -449,8 +442,7 @@ fn wpt_fetch_basic_request_upload() {
         let body: Vec<u8> = vec![b'a'; 65 * 1024];
         let server = start_server(vec![ServerResponse::ok(b"ok", "text/plain")]);
         let mut r = req("POST", &server.url());
-        r.body = Some(body.clone());
-        r.body_source = Some(BodySource::Bytes(std::rc::Rc::new(body.clone())));
+        r.body = RequestBody::Bytes(body.clone().into());
         r.headers.push(("Content-Length".to_string(), body.len().to_string()));
         let resp = run(main_fetch(r));
         let captured = server.requests.lock().unwrap().first().cloned();
@@ -467,8 +459,7 @@ fn wpt_fetch_basic_request_upload() {
         let body = b"put me";
         let server = start_server(vec![ServerResponse::ok(b"ok", "text/plain")]);
         let mut r = req("PUT", &server.url());
-        r.body = Some(body.to_vec());
-        r.body_source = Some(BodySource::Bytes(std::rc::Rc::new(body.to_vec())));
+        r.body = RequestBody::Bytes(body.to_vec().into());
         r.headers.push(("Content-Length".to_string(), body.len().to_string()));
         let resp = run(main_fetch(r));
         let captured = server.requests.lock().unwrap().first().cloned();

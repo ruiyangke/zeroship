@@ -14,9 +14,9 @@
 //! | 307    | Method preserved                      | preserved     |
 //! | 308    | Method preserved                      | preserved     |
 //!
-//! When the response is 307/308 and the request
-//! body source is `BodySource::Stream` (non-rewindable), the redirect is
-//! a network error: we can't replay the bytes.
+//! A ReadableStream body cannot be sent twice, so any redirect but 303
+//! with one is a network error; that rule lives with the redirect loop in
+//! `algorithms::http_redirect_fetch`.
 //!
 //! ## Cross-origin Authorization stripping
 //!
@@ -29,8 +29,6 @@
 //! This is a deliberate spec-faithful narrowing: stripping more than
 //! `Authorization` breaks real-world flows (S3 presigned URLs, GitHub
 //! redirects).
-
-use crate::fetch_body::BodySource;
 
 /// Result of inspecting a redirect response. Returned by
 /// [`apply_redirect_method`] so the caller knows whether to drop the
@@ -104,25 +102,6 @@ pub fn apply_redirect_method(status: u16, current_method: &str) -> RedirectMetho
                 strip_content_headers: false,
             }
         }
-    }
-}
-
-/// Per Fetch §5.6 step 12 "If actualResponse's status is 307 or 308 and
-/// request's body's source is null, return a network error."
-///
-/// In our model, "body's source is null" means a `BodySource::Stream`
-/// (the user fed us a ReadableStream — non-rewindable). All other
-/// `BodySource` variants are rewindable via `safely_extract_body`.
-pub fn body_rewindable_for_status(status: u16, source: &Option<BodySource>) -> bool {
-    if !matches!(status, 307 | 308) {
-        // 301/302/303 either preserve a non-body method or drop the
-        // body — rewindability moot.
-        return true;
-    }
-    match source {
-        Some(s) => s.is_rewindable(),
-        // No body — nothing to rewind.
-        None => true,
     }
 }
 
@@ -215,25 +194,6 @@ mod tests {
         let r = apply_redirect_method(308, "PUT");
         assert_eq!(r.method, "PUT");
         assert!(!r.drop_body);
-    }
-
-    #[test]
-    fn rewindable_307_with_stream_body_fails() {
-        let s = Some(BodySource::Stream);
-        assert!(!body_rewindable_for_status(307, &s));
-    }
-
-    #[test]
-    fn rewindable_307_with_bytes_body_succeeds() {
-        let s = Some(BodySource::Bytes(std::rc::Rc::new(vec![1, 2, 3])));
-        assert!(body_rewindable_for_status(307, &s));
-    }
-
-    #[test]
-    fn rewindable_303_with_stream_body_succeeds() {
-        // 303 drops the body anyway, so rewindability is moot.
-        let s = Some(BodySource::Stream);
-        assert!(body_rewindable_for_status(303, &s));
     }
 
     #[test]

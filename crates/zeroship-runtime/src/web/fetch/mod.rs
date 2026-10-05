@@ -20,7 +20,9 @@
 //!   1. Synchronously coerces input to a Request.
 //!   2. Synchronously checks `signal.aborted` per Fetch §5.1 step 7,
 //!      not after enqueueing work.
-//!   3. Drains the request body to bytes (rewindable BodySource → Vec).
+//!   3. Takes the request body: a byte source as bytes, a ReadableStream
+//!      through a stream forwarder upload that the HTTP client reads as
+//!      the request is sent.
 //!   4. Spawns a compio task that runs `main_fetch` then schedules a
 //!      pump turn to materialise the Response wrapper inside V8.
 
@@ -36,6 +38,7 @@ pub mod request;
 pub mod response;
 
 use std::pin::Pin;
+use std::rc::Rc;
 
 use crate::channel::CancelFlag;
 use crate::fetch_body::BodySource;
@@ -45,7 +48,7 @@ use crate::state::{
 
 use algorithms::{
     main_fetch, AlgorithmResponse, CredentialsMode, FetchRequest as AlgFetchRequest,
-    RedirectMode,
+    RedirectMode, RequestBody,
 };
 
 // ===========================================================================
@@ -182,6 +185,34 @@ fn cached_admission_error<'s>(
 }
 
 // ===========================================================================
+// In-flight accounting
+// ===========================================================================
+
+/// One fetch's place under [`MAX_PENDING_FETCHES`]. The count drops when the
+/// last holder lets go: the fetch task, and a streamed request body inside
+/// the HTTP client, which can outlive the task.
+pub struct FetchSlot(Rc<std::cell::Cell<usize>>);
+
+impl FetchSlot {
+    fn take(counter: &Rc<std::cell::Cell<usize>>) -> Self {
+        counter.set(counter.get() + 1);
+        Self(counter.clone())
+    }
+}
+
+impl std::fmt::Debug for FetchSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FetchSlot").finish_non_exhaustive()
+    }
+}
+
+impl Drop for FetchSlot {
+    fn drop(&mut self) {
+        self.0.set(self.0.get().saturating_sub(1));
+    }
+}
+
+// ===========================================================================
 // Install `fetch` onto globalThis.
 // ===========================================================================
 
@@ -284,8 +315,7 @@ fn fetch_callback(
                     method: "GET".to_string(),
                     url: canonical.clone(),
                     headers: Vec::new(),
-                    body: None,
-                    body_source: None,
+                    body: RequestBody::Empty,
                     redirect_mode: RedirectMode::Follow,
                     credentials_mode: CredentialsMode::SameOrigin,
                     cancel: Some(CancelFlag::new()),
@@ -294,8 +324,7 @@ fn fetch_callback(
                 })
             }
             Err(_) => {
-                let m = v8::String::new(scope, &format!("fetch: invalid URL: {url_str}"))
-                    .unwrap();
+                let m = crate::web::js_text(scope, &format!("fetch: invalid URL: {url_str}"));
                 let exc = v8::Exception::type_error(scope, m);
                 resolver.reject(scope, exc);
                 rv.set(promise.into());
@@ -367,7 +396,7 @@ fn fetch_callback(
             rv.set(promise.into());
             return;
         }
-        if s.in_flight_fetches >= MAX_PENDING_FETCHES {
+        if s.in_flight_fetches.get() >= MAX_PENDING_FETCHES {
             drop(s);
             let exc = cached_admission_error(scope, AdmissionLimit::Fetches);
             resolver.reject(scope, exc.into());
@@ -376,21 +405,21 @@ fn fetch_callback(
         }
     }
 
-    let (alg_req, signal_obj_opt) = match (alg_req_fast, alg_req_slow_data) {
-        (Some(alg), _) => (alg, None),
+    let (mut alg_req, upload_stream, signal_obj_opt) = match (alg_req_fast, alg_req_slow_data) {
+        (Some(alg), _) => (alg, None, None),
         (None, Some((req_obj, sig_opt))) => {
             // Snapshot request fields.
-            let alg = match snapshot_request(scope, req_obj) {
+            let (alg, upload_stream) = match snapshot_request(scope, req_obj) {
                 Ok(r) => r,
                 Err(msg) => {
-                    let m = v8::String::new(scope, &msg).unwrap();
+                    let m = crate::web::js_text(scope, &msg);
                     let exc = v8::Exception::type_error(scope, m);
                     resolver.reject(scope, exc);
                     rv.set(promise.into());
                     return;
                 }
             };
-            (alg, sig_opt)
+            (alg, upload_stream, sig_opt)
         }
         (None, None) => unreachable!(),
     };
@@ -412,26 +441,69 @@ fn fetch_callback(
         );
     }
 
-    let global_resolver = v8::Global::new(scope, resolver);
     let request_id = crate::core::invocation::current_request_id(scope, &state);
 
-    // Bump in-flight counter.
-    state.borrow_mut().in_flight_fetches += 1;
+    // A ReadableStream body: lock it and start reading it into the upload
+    // channel the HTTP client consumes. This is the last step that can
+    // fail, because the first `read()` can already run creator code, and a
+    // URL the network would refuse is refused first, so a stream is never
+    // read for a request that cannot be sent. The signal's abort cancels the
+    // stream with the abort's reason ("abort a fetch() call"), and the
+    // upload belongs to the request that started it.
+    'upload: {
+        let Some(stream_g) = upload_stream else { break 'upload };
+        match algorithms::precheck_network_url(&alg_req.url) {
+            Ok(true) => {}
+            // A scheme fetched without the network (data:) never sends the
+            // body: the stream is left unread.
+            Ok(false) => break 'upload,
+            Err(msg) => {
+                let m = crate::web::js_text(scope, &format!("Network request failed: {msg}"));
+                let exc = v8::Exception::type_error(scope, m);
+                resolver.reject(scope, exc);
+                rv.set(promise.into());
+                return;
+            }
+        }
+        let stream = v8::Local::new(scope, stream_g);
+        let options = crate::streams::stream_forwarder::UploadOptions {
+            buffer_cap: crate::channel::DEFAULT_STREAM_BUFFER_CAP,
+            chunk_policy: crate::streams::stream_forwarder::ChunkPolicy::Uint8Array,
+            abort_signal: signal_obj_opt,
+            owner_request: request_id,
+        };
+        match crate::streams::stream_forwarder::forward_upload(scope, stream, options) {
+            Ok(reader) => {
+                alg_req.body = RequestBody::Stream(Some(http_network::UploadBody::new(reader)));
+            }
+            Err(msg) => {
+                let m = crate::web::js_text(scope, &format!("fetch: request body: {msg}"));
+                let exc = v8::Exception::type_error(scope, m);
+                resolver.reject(scope, exc);
+                rv.set(promise.into());
+                return;
+            }
+        }
+    }
+
+    let global_resolver = v8::Global::new(scope, resolver);
+
+    // Take an in-flight slot. The task holds it until the algorithm chain
+    // returns; a streamed body holds it too, until the HTTP client has
+    // finished or dropped the body, which can be after the response.
+    let slot = Rc::new(FetchSlot::take(&state.borrow().in_flight_fetches));
+    if let RequestBody::Stream(Some(upload)) = &mut alg_req.body {
+        upload.hold_slot(slot.clone());
+    }
 
     // Snapshot signal Global so the rejection path can read
     // `signal.reason` if abort fires.
     let signal_global: Option<v8::Global<v8::Object>> = signal_obj_opt
         .map(|o| v8::Global::new(scope, o));
 
-    let state_for_task = state.clone();
     let fut: Pin<Box<dyn std::future::Future<Output = OpResult>>> = Box::pin(async move {
         let result = main_fetch(alg_req).await;
-
-        // Always release the fetch-concurrency slot.
-        {
-            let mut s = state_for_task.borrow_mut();
-            s.in_flight_fetches = s.in_flight_fetches.saturating_sub(1);
-        }
+        drop(slot);
 
         let outcome = match result {
             Ok(alg_resp) => FetchOutcome::Resolve(alg_resp),
@@ -507,13 +579,13 @@ fn read_signal_reason<'s>(
     Some(v)
 }
 
-/// Snapshot the JS Request into a Rust FetchRequest. Drains rewindable
-/// body sources to bytes; rejects streams because streaming uploads are
-/// not wired yet.
+/// Snapshot the JS Request into a Rust FetchRequest. A byte source becomes
+/// the request's bytes. A ReadableStream body is returned beside it, still
+/// unlocked: the caller starts reading it once nothing else can fail.
 fn snapshot_request<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     req: v8::Local<'s, v8::Object>,
-) -> Result<AlgFetchRequest, String> {
+) -> Result<(AlgFetchRequest, Option<v8::Global<v8::Object>>), String> {
     use crate::fetch_request::RequestState;
 
     // Reach the boxed RequestState via internal field 0.
@@ -538,45 +610,41 @@ fn snapshot_request<'s>(
 
     let headers = read_headers(scope, req)?;
 
-    // Body: drain rewindable sources synchronously; reject streams.
-    let body_impl = state.body.borrow();
-    let (body_bytes, body_source) = match body_impl.source.clone() {
-        Some(BodySource::Bytes(rc)) => (Some((*rc).clone()), Some(BodySource::Bytes(rc))),
-        Some(BodySource::Blob(rc, mime)) => (
-            Some((*rc).clone()),
-            Some(BodySource::Blob(rc, mime)),
-        ),
-        Some(BodySource::UrlSearchParams(rc)) => (
-            Some((*rc).clone()),
-            Some(BodySource::UrlSearchParams(rc)),
-        ),
-        Some(BodySource::FormData(rc, b)) => (
-            Some((*rc).clone()),
-            Some(BodySource::FormData(rc, b)),
-        ),
-        Some(BodySource::Stream) => {
-            // Streaming POST upload is not wired yet, so reject
-            // synchronously. Streaming send-side requires reader-driven
-            // chunked-transfer wiring through cyper; deferred.
-            return Err(
-                "fetch: streaming request body is not yet supported (use a buffered body)".to_string(),
-            );
+    // Body. The RequestState borrow ends here, before any stream is read:
+    // reading can run creator code that reaches this Request again.
+    let (body, upload_stream) = {
+        let body_impl = state.body.borrow();
+        match &body_impl.source {
+            Some(
+                BodySource::Bytes(rc)
+                | BodySource::Blob(rc, _)
+                | BodySource::UrlSearchParams(rc)
+                | BodySource::FormData(rc, _),
+            ) => (RequestBody::Bytes(compio::bytes::Bytes::from((**rc).clone())), None),
+            Some(BodySource::Stream) => {
+                let stream = body_impl
+                    .stream
+                    .borrow()
+                    .clone()
+                    .ok_or_else(|| "fetch: the Request has a stream body but no stream".to_string())?;
+                (RequestBody::Empty, Some(stream))
+            }
+            None => (RequestBody::Empty, None),
         }
-        None => (None, None),
     };
 
-    Ok(AlgFetchRequest {
+    let request = AlgFetchRequest {
         method,
         url: url.clone(),
         headers,
-        body: body_bytes,
-        body_source,
+        body,
         redirect_mode,
         credentials_mode,
         cancel: Some(CancelFlag::new()),
         redirect_count: 0,
         origin_url: url,
-    })
+    };
+    Ok((request, upload_stream))
 }
 
 /// Read `request.headers` directly from the native `Headers` state
@@ -693,8 +761,7 @@ impl FetchSettlement {
                         return Err(reason);
                     }
                 }
-                let m =
-                    v8::String::new(scope, &format!("Network request failed: {msg}")).unwrap();
+                let m = crate::web::js_text(scope, &format!("Network request failed: {msg}"));
                 Err(v8::Exception::type_error(scope, m))
             }
         }

@@ -219,7 +219,7 @@ pub(crate) fn state_ptr(
 ///   - `Empty`: respond with an empty body (no Content-Length set by us).
 ///   - `Bytes(Vec<u8>)`: rewindable buffered body — read once, ship it.
 ///   - `Stream`: a user-visible ReadableStream — the kernel calls
-///     `streams::response_forwarder::begin_forward` to lock + pump the
+///     `streams::stream_forwarder::begin_forward` to lock + pump the
 ///     stream into a Rust-side forwarder.
 pub enum NativeResponseBody {
     /// Body is conceptually `null` (no Content-Length, empty body).
@@ -228,7 +228,7 @@ pub enum NativeResponseBody {
     /// UrlSearchParams/FormData`. Cheap clone via Rc.
     Bytes(std::rc::Rc<Vec<u8>>),
     /// Body source is a user-supplied ReadableStream. Kernel must call
-    /// `streams::response_forwarder::begin_forward` to start pumping
+    /// `streams::stream_forwarder::begin_forward` to start pumping
     /// into a Rust-side forwarder.
     Stream,
 }

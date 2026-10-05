@@ -42,7 +42,7 @@ use crate::streams::algorithms;
 use crate::streams::promise_resolve;
 use crate::streams::readable_default_controller::AlgorithmFn;
 use crate::streams::slots;
-use crate::streams::transform::{NativeTransformer, TransformHalves};
+use crate::streams::transform::TransformHalves;
 
 const TS_CTRL_BRAND: &str = "[[ts.ctrl.brand]]";
 
@@ -1254,29 +1254,6 @@ enum StartOutcome {
     Threw(v8::Global<v8::Value>),
     Returned(v8::Global<v8::Value>),
     Undefined,
-}
-
-/// Native variant of `set_up_…_from_transformer`, used by `from_native_transformer`.
-///
-/// Native callbacks are not yet driven by the runtime loop. This entry point
-/// currently initializes the stream with no-op algorithms.
-pub fn set_up_transform_stream_default_controller_native<T: NativeTransformer + 'static>(
-    scope: &mut v8::PinScope,
-    stream: v8::Local<v8::Object>,
-    _transformer: T,
-    halves: TransformHalves,
-) {
-    let controller = set_up_transform_stream_default_controller(
-        scope,
-        stream,
-        AlgorithmFn::Noop,
-        AlgorithmFn::Noop,
-        AlgorithmFn::Noop,
-    );
-    let _ = controller;
-    // Synthesize a resolved start promise.
-    let start_promise = algorithms::resolved_undefined_promise(scope);
-    algorithms::initialize_transform_stream(scope, stream, start_promise, halves);
 }
 
 // ---------------------------------------------------------------------------

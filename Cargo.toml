@@ -67,6 +67,9 @@ ntex = { version = "3", features = ["compio"] }
 httparse = "1"
 http = "1"
 cyper = { version = "0.8", default-features = false, features = ["rustls", "json", "stream"] }
+# Moves a !Send body stream into cyper, whose executor polls it on the same
+# compio thread (cyper wraps its own file bodies the same way).
+send_wrapper = { version = "0.6", features = ["futures"] }
 url = "2"
 
 # Serialization

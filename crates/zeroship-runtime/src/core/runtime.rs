@@ -1551,7 +1551,7 @@ impl RuntimeInner {
             (queued, state)
         };
         drop(queued);
-        crate::streams::response_forwarder::fail_all(&state, reason);
+        crate::streams::stream_forwarder::fail_all(&state, reason);
         crate::node::net::state::destroy_all_sockets(&state);
         if !tasks.is_idle() {
             let keep_alive = this.clone();
@@ -1716,7 +1716,7 @@ impl RuntimeInner {
                     rt.cleanup_cancelled_requests();
                     rt.bill_pump_cpu(crate::core::init::thread_cpu_time().saturating_sub(cancellation_cpu_start));
                     let scan_now = rt.state.borrow().deadline_now();
-                    crate::streams::response_forwarder::queue_cancellations(&rt.state, scan_now);
+                    crate::streams::stream_forwarder::queue_cancellations(&rt.state, scan_now);
                     request_deadline = rt.startup_deadline().into_iter()
                         .chain(rt.dev_entry_deadline())
                         .chain(rt.waiting_startup_requests.iter().filter_map(|request| {
@@ -1726,7 +1726,7 @@ impl RuntimeInner {
                         .chain(rt.pending_requests.values().filter_map(|request| {
                             request.rpc_lifetime.as_ref().and_then(|request| request.deadline)
                         }))
-                        .chain(crate::streams::response_forwarder::next_deadline(&rt.state))
+                        .chain(crate::streams::stream_forwarder::next_deadline(&rt.state))
                         .min();
                 }
 
@@ -1815,7 +1815,7 @@ impl RuntimeInner {
                     request.cancel.register_waker(cx.waker());
                     if request.cancel.is_cancelled() { return std::task::Poll::Ready(()); }
                 }
-                if crate::streams::response_forwarder::poll_cancellation(&rt.state, cx) {
+                if crate::streams::stream_forwarder::poll_cancellation(&rt.state, cx) {
                     return std::task::Poll::Ready(());
                 }
                 std::task::Poll::Pending
@@ -2505,7 +2505,7 @@ impl RuntimeInner {
                         pending_rpc_call = call;
                         pending_rpc_lifetime = local_rpc_lifetime.take();
                     } else if let Ok(DispatchResult::HttpResponse(ResponseInfo::Stream {stream_id, ..})) = &result {
-                        crate::streams::response_forwarder::retain_request(
+                        crate::streams::stream_forwarder::retain_request(
                             scope, &self.state, *stream_id, local_rpc_lifetime.take().expect("RPC request lifetime"),
                         );
                     }
@@ -2770,7 +2770,7 @@ impl RuntimeInner {
         _cpu_time: Duration,
     ) -> crate::FetchOutcome {
         let logs = if matches!(&info, ResponseInfo::Stream { stream_id, .. }
-            if crate::streams::response_forwarder::owns_request(&self.state, *stream_id))
+            if crate::streams::stream_forwarder::owns_request(&self.state, *stream_id))
         {
             self.state.borrow_mut().per_request_logs.remove(&request_id).unwrap_or_default()
         } else {
@@ -2787,7 +2787,7 @@ impl RuntimeInner {
                 // then either closes the writer (if the body already
                 // completed) or stashes the writer so future chunks
                 // pump straight to the TCP-bound channel.
-                crate::streams::response_forwarder::attach_writer(
+                crate::streams::stream_forwarder::attach_writer(
                     &self.state,
                     stream_id,
                     writer,
@@ -2867,7 +2867,7 @@ impl RuntimeInner {
             },
             move |scope, state| {
                 for stream_id in pending {
-                    crate::streams::response_forwarder::resume_read(scope, state, stream_id);
+                    crate::streams::stream_forwarder::resume_read(scope, state, stream_id);
                 }
             },
         );
@@ -3873,6 +3873,9 @@ impl RuntimeInner {
                 send_pending_error(req, "Request timed out");
                 let _logs = self.drain_request_logs(id);
             }
+            // Uploads the request started end with it: their sources are
+            // cancelled and their bodies stop.
+            crate::streams::stream_forwarder::cancel_uploads_owned_by(&self.state, id, reason);
             self.drop_timers_owned_by(id);
         }
     }
@@ -3941,7 +3944,7 @@ fn collect_settled_promises(
                         .map(|result| {
                             let response = crate::rpc::dispatch::response::into_http(result, id);
                             if let Ok(ResponseInfo::Stream {stream_id, ..}) = &response {
-                                crate::streams::response_forwarder::retain_request(
+                                crate::streams::stream_forwarder::retain_request(
                                     scope, state, *stream_id, req.rpc_lifetime.take().expect("RPC request lifetime"),
                                 );
                             }

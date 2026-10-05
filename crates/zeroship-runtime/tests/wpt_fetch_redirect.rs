@@ -25,9 +25,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use zeroship_runtime::fetch_body::BodySource;
 use zeroship_runtime::fetch_native::algorithms::{
-    main_fetch, CredentialsMode, FetchRequest, RedirectMode,
+    main_fetch, CredentialsMode, FetchRequest, RedirectMode, RequestBody,
 };
 
 #[derive(Debug, Clone)]
@@ -186,8 +185,7 @@ fn redirect_method(
         method: method.to_string(),
         url: server.url(),
         headers: Vec::new(),
-        body: body.map(|b| b.to_vec()),
-        body_source: body.map(|b| BodySource::Bytes(std::rc::Rc::new(b.to_vec()))),
+        body: body.map_or(RequestBody::Empty, |b| RequestBody::Bytes(b.to_vec().into())),
         redirect_mode: RedirectMode::Follow,
         credentials_mode: CredentialsMode::SameOrigin,
         cancel: None,
@@ -467,8 +465,7 @@ fn make_request(url: String, redirect_mode: RedirectMode) -> FetchRequest {
         method: "GET".to_string(),
         url: url.clone(),
         headers: Vec::new(),
-        body: None,
-        body_source: None,
+        body: RequestBody::Empty,
         redirect_mode,
         credentials_mode: CredentialsMode::SameOrigin,
         cancel: None,

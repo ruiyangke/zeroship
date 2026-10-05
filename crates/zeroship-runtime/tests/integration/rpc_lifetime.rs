@@ -264,7 +264,7 @@ async fn cancellation_aborts_stream_context_and_returns_the_retained_iterator() 
                 let state = scope
                     .get_slot::<zeroship_runtime::state::SharedState>()
                     .unwrap();
-                assert!(state.borrow().response_forwarders.is_empty());
+                assert!(state.borrow().stream_forwarders.is_empty());
             });
         }
     }

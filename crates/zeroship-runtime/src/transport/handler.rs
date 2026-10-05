@@ -170,7 +170,7 @@ fn inspect_native_response(
             // forwarder (registered on SharedState by `stream_id`),
             // which buffers until the kernel attaches a `direct_writer`
             // in `build_fetch_outcome`.
-            let stream_id = crate::streams::response_forwarder::begin_forward(scope, obj)?;
+            let stream_id = crate::streams::stream_forwarder::begin_forward(scope, obj)?;
             classify_stream(scope, status, headers, stream_id)
         }
     }
@@ -190,12 +190,12 @@ fn classify_stream(
         .expect("RuntimeState not in isolate slot")
         .clone();
 
-    let stream_closed = crate::streams::response_forwarder::is_closed(&state, stream_id);
+    let stream_closed = crate::streams::stream_forwarder::is_closed(&state, stream_id);
 
     if stream_closed {
         // Stream sync-completed in start() — collect buffered chunks
         // as a complete body and discard the forwarder.
-        let chunks = crate::streams::response_forwarder::drain_into_complete(&state, stream_id);
+        let chunks = crate::streams::stream_forwarder::drain_into_complete(&state, stream_id);
         let body = chunks.concat();
         Ok(ResponseInfo::Complete { status, headers, body })
     } else {

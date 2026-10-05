@@ -139,6 +139,7 @@ rustls-native-certs = { version = "0.8", optional = true }
 
 # HTTP client (fetch)
 cyper = { workspace = true }
+send_wrapper = { workspace = true }
 http = { workspace = true }
 httparse = { workspace = true }
 

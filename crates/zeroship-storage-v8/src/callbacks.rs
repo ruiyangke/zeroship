@@ -6,9 +6,8 @@
 
 use base64::Engine;
 use serde_json::json;
-use zeroship_runtime::channel::{stream_buffer_with_cap, StreamReader};
 use zeroship_runtime::state::{NativeValue, OpError, OpResult, ResolveValue, SharedState};
-use zeroship_runtime::streams::response_forwarder;
+use zeroship_runtime::streams::stream_forwarder::{self, ChunkPolicy, UploadOptions, UploadReader};
 
 use zeroship_storage::backend::{ChunkResult, ChunkSource, ObjectMeta};
 use zeroship_storage::StorageError;
@@ -357,65 +356,22 @@ pub fn list(
 // Uploads bridge V8 to the Rust chunk source. Downloads remain owned by
 // the context captured from this isolate, including across asynchronous pulls.
 
-/// A [`ChunkSource`] over a runtime [`StreamReader`] — the consumer side of
-/// the `response_forwarder` pump used by `putStream`. Yields buffered chunks,
-/// blocks (waker-based) when the buffer is empty but the producer is still
-/// live, errors on backpressure overflow, and ends at producer EOF.
-///
-/// Backpressure (the reason a large upload doesn't overflow): the forwarder's
-/// V8 read loop PAUSES once the shared buffer crosses its high-water mark.
-/// After draining a chunk here, if the buffer has fallen to the low-water
-/// mark we ask the pump to resume the paused producer (`request_resume`), so
-/// the upload proceeds in bounded-memory waves instead of racing the read
-/// loop ahead of this S3-multipart consumer.
-struct StreamReaderSource {
-    reader: StreamReader,
-    state: SharedState,
-    stream_id: u32,
-}
-
-impl StreamReaderSource {
-    /// Release backpressure if the buffer has drained enough: re-arm the
-    /// paused producer. Cheap and idempotent — `request_resume` no-ops unless
-    /// the forwarder is actually paused.
-    fn maybe_resume_producer(&self) {
-        // Per-stream low-water (quarter the stream's own cap), with hysteresis
-        // against the half-cap pause mark, so the large-cap upload stream
-        // re-arms proportionally rather than at the global default.
-        if self.reader.buffered_bytes() <= self.reader.cap() / 4 {
-            response_forwarder::request_resume(&self.state, self.stream_id);
-        }
-    }
-}
+/// A [`ChunkSource`] over the runtime's [`UploadReader`], the consumer side
+/// of the `stream_forwarder` upload that `putStream` starts. The reader
+/// carries the backpressure (the V8 read loop pauses at the channel's
+/// high-water mark and this consumer's draining re-arms it), so a large
+/// upload proceeds in bounded-memory waves against the S3-multipart
+/// consumer.
+struct UploadSource(UploadReader);
 
 #[async_trait::async_trait(?Send)]
-impl ChunkSource for StreamReaderSource {
+impl ChunkSource for UploadSource {
     async fn next_chunk(&mut self) -> Option<ChunkResult> {
-        loop {
-            if let Some(chunk) = self.reader.pop() {
-                // We just freed buffer space; let the producer refill it.
-                self.maybe_resume_producer();
-                return Some(Ok(bytes::Bytes::from(chunk)));
-            }
-            if self.reader.is_overflow() {
-                return Some(Err(
-                    StorageError::Stream("storage: upload stream exceeded the buffer backpressure cap".to_string()),
-                ));
-            }
-            // Checked BEFORE `is_done`, which an abort also sets: a producer
-            // that failed partway must not be committed as a complete object.
-            if let Some(err) = self.reader.error() {
-                return Some(Err(StorageError::Stream(format!("storage: upload stream failed: {err}"))));
-            }
-            if self.reader.is_done() {
-                return None;
-            }
-            // Buffer is empty and the producer may be paused (it pauses on
-            // high-water, but a final short chunk can leave it paused with the
-            // buffer already drained). Nudge a resume before parking so we
-            // never deadlock waiting for data the paused producer won't send.
-            self.maybe_resume_producer();
-            self.reader.wait_for_data().await;
+        match self.0.next_chunk().await? {
+            Ok(chunk) => Some(Ok(chunk)),
+            // A source that failed partway is an error, never a complete
+            // object: committing it would store a prefix as if it were whole.
+            Err(err) => Some(Err(StorageError::Stream(format!("storage: {err}")))),
         }
     }
 }
@@ -493,10 +449,18 @@ pub fn put_stream(
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
 
-    // Lock the app's ReadableStream and start the read-loop pump. Chunks
-    // flow into `writer`; the spawned op drains `reader`.
-    let stream_id = match response_forwarder::begin_forward_stream(scope, stream_obj) {
-        Ok(id) => id,
+    // Lock the app's ReadableStream and start the read-loop pump into a
+    // dedicated upload channel sized to 2x the S3 part size, so the producer
+    // can fill the NEXT part while the current part PUTs (overlapping V8
+    // chunk generation with the in-flight upload). The spawned op drains it.
+    let options = UploadOptions {
+        buffer_cap: crate::limits::UPLOAD_STREAM_BUFFER_CAP,
+        chunk_policy: ChunkPolicy::Coerce,
+        abort_signal: None,
+        owner_request: request_id,
+    };
+    let upload = match stream_forwarder::forward_upload(scope, stream_obj, options) {
+        Ok(upload) => upload,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
                 OpResult::Failed {
@@ -509,15 +473,7 @@ pub fn put_stream(
             return;
         }
     };
-    // Dedicated upload buffer sized to 2× the S3 part size so the producer can
-    // fill a full NEXT part while the current part PUTs (overlapping V8 chunk
-    // generation with the in-flight upload), and so a single app chunk up to
-    // the cap is accepted rather than rejected at the 4 MiB default. RPC/SSE
-    // response streams keep the small default cap (they don't multipart).
-    let (writer, reader) = stream_buffer_with_cap(crate::limits::UPLOAD_STREAM_BUFFER_CAP);
-    response_forwarder::attach_writer(&state, stream_id, writer);
-
-    let source = StreamReaderSource { reader, state: state.clone(), stream_id };
+    let source = UploadSource(upload);
     let meter = context.meter.clone();
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         match context.storage

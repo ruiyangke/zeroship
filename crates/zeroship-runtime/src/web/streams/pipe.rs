@@ -910,10 +910,10 @@ pub struct PipeOptions {
 /// fetch decode where both ends are still being constructed.
 ///
 /// **C-12 INVARIANT (`#[doc(hidden)]`):** callers MUST ensure both
-/// `source` and `dest` are Rust-only (constructed via
-/// `from_native_source` / `from_native_sink`) and not yet exposed to
-/// JS. Pull requests adding a JS-bridged Source/Sink type without a
-/// lock-acquiring shim violate this invariant.
+/// `source` and `dest` are Rust-only (constructed by Rust, such as via
+/// `from_native_source`) and not yet exposed to JS. Pull requests adding
+/// a JS-bridged Source/Sink type without a lock-acquiring shim violate
+/// this invariant.
 #[doc(hidden)]
 pub fn pipe_native_internal<'s>(
     scope: &mut v8::PinScope<'s, '_>,

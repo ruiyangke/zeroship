@@ -16,7 +16,7 @@
 //!   request budget admission for free.
 //! - The response body is a `ReadableStream` whose default reader is
 //!   driven from Rust via promise-reaction callbacks (mirrors
-//!   `streams::response_forwarder`).
+//!   `streams::stream_forwarder`).
 //! - The SSE wire parser lives in this file. Per-line state is kept in
 //!   `ParserState`; a blank line dispatches the accumulated event.
 //! - Reconnection: on connection drop / IO error / non-2xx with

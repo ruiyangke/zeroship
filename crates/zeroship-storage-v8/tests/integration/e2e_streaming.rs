@@ -1,6 +1,6 @@
 //! End-to-end streaming test for `env.storage` — drives JS through the REAL
 //! V8 runtime + compio event loop down through the native streaming
-//! callbacks and the `response_forwarder` / `StreamWriter` bridges to a live
+//! callbacks and the `stream_forwarder` / `StreamWriter` bridges to a live
 //! `LocalFs` backend, then back out as a JS `ReadableStream`.
 //!
 //! ## What this covers that `backend_parity.rs` does NOT
@@ -9,8 +9,8 @@
 //! the parts that only exist in V8:
 //!
 //!     JS `env.storage.putStream(bucket, key, ReadableStream, ct)`
-//!       → response_forwarder.begin_forward_stream (getReader + read loop)
-//!       → StreamWriter → StreamReader → Backend::put_stream
+//!       -> stream_forwarder::forward_upload (getReader + read loop)
+//!       -> StreamWriter -> UploadReader -> Backend::put_stream
 //!
 //!     JS `env.storage.getStream(bucket, key)` + `readChunk(id)` loop
 //!       → Backend::get_stream → isolate-owned registry
@@ -396,7 +396,7 @@ fn usage_value(
 // water marks, the eager read loop drained the whole source into the channel
 // in one microtask burst and overflowed at 4 MiB — the upload failed with
 // "upload stream exceeded the buffer backpressure cap". This drives 24 MiB of
-// 256 KiB chunks through the real V8 → response_forwarder → StreamReader →
+// 256 KiB chunks through the real V8 -> stream_forwarder -> UploadReader ->
 // LocalFs path and asserts the full round-trip, proving backpressure bounds
 // the buffer instead of overflowing it.
 const STORAGE_STREAM_BACKPRESSURE_APP: &str = r#"
@@ -577,6 +577,59 @@ fn e2e_storage_streaming_backpressure_over_cap() {
     );
 }
 
+// One chunk larger than the upload channel: `Blob.stream()` hands over a whole
+// blob as a single chunk, and an app may enqueue one large Uint8Array. The
+// upload slices it to the channel's free space rather than refusing it, so the
+// object round-trips intact.
+const STORAGE_STREAM_ONE_LARGE_CHUNK_APP: &str = r#"
+export default {
+    async fetch(request, env, ctx) {
+        const s = env.storage;
+        const BUCKET = "uploads";
+        const KEY = "stream/one-chunk.bin";
+        const SIZE = 24 * 1024 * 1024;
+        const bytes = new Uint8Array(SIZE);
+        for (let i = 0; i < SIZE; i++) bytes[i] = i % 251;
+        const upload = new ReadableStream({
+            start(controller) { controller.enqueue(bytes); controller.close(); },
+        });
+        try {
+            const put = JSON.parse(await s.putStream(BUCKET, KEY, upload, "application/octet-stream"));
+            if (put.size !== SIZE) {
+                return Response.json({ ok: false, step: "put.size", got: put.size, want: SIZE }, { status: 500 });
+            }
+            const handle = JSON.parse(await s.getStream(BUCKET, KEY));
+            let read = 0;
+            for (;;) {
+                const chunk = await s.readChunk(handle.streamId);
+                if (chunk === undefined || chunk === null) break;
+                for (let i = 0; i < chunk.length; i++) {
+                    if (chunk[i] !== (read + i) % 251) {
+                        return Response.json({ ok: false, step: "byte", at: read + i }, { status: 500 });
+                    }
+                }
+                read += chunk.length;
+            }
+            if (read !== SIZE) {
+                return Response.json({ ok: false, step: "get.totalRead", got: read, want: SIZE }, { status: 500 });
+            }
+            return Response.json({ ok: true, size: SIZE });
+        } catch (e) {
+            return Response.json({ ok: false, message: (e && e.message) || String(e) }, { status: 500 });
+        }
+    },
+};
+"#;
+
+#[test]
+fn e2e_storage_streaming_one_chunk_larger_than_the_upload_buffer() {
+    let (status, body) = run_app(STORAGE_STREAM_ONE_LARGE_CHUNK_APP);
+    assert_eq!(status, 200, "a single over-cap chunk was refused; body: {body}");
+    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(value["ok"], true, "{body}");
+    assert_eq!(value["size"], 24 * 1024 * 1024, "{body}");
+}
+
 #[test]
 fn e2e_storage_streaming_s3() {
     let server = S3Server::start();
@@ -589,4 +642,91 @@ fn e2e_storage_streaming_s3() {
     let (status, body) = run_app_with_store(STORAGE_STREAM_E2E_APP, store);
     assert_eq!(status, 200, "storage S3 binding failed: {body}");
     assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["ok"], true);
+}
+
+// A streamed put belongs to the request that started it. `/start` begins a
+// put whose source stalls after one chunk and never settles; the test then
+// cancels that request, as the worker does at its wall timeout. `/check`, a
+// later request on the same isolate, reports what became of the put.
+const STORAGE_STREAM_OWNED_BY_REQUEST_APP: &str = r#"
+export default {
+    async fetch(request, env, ctx) {
+        const s = env.storage;
+        if (new URL(request.url).pathname === "/start") {
+            let n = 0;
+            const source = new ReadableStream({
+                pull(c) {
+                    if (n++ === 0) { c.enqueue(new Uint8Array(1024)); return; }
+                    return new Promise(() => {});
+                },
+                cancel(reason) { globalThis.cancelledWith = String(reason && reason.name); },
+            });
+            globalThis.put = s.putStream("uploads", "stream/owned.bin", source, "application/octet-stream")
+                .then(() => "stored", (e) => "failed: " + ((e && e.message) || String(e)));
+            await new Promise(() => {});
+        }
+        const outcome = await globalThis.put;
+        const after = await s.getStream("uploads", "stream/owned.bin");
+        return Response.json({
+            outcome,
+            cancelledWith: globalThis.cancelledWith ?? null,
+            stored: !!after && after !== "null",
+        });
+    },
+};
+"#;
+
+#[test]
+fn e2e_storage_put_stream_ends_with_the_request_that_started_it() {
+    let root = tempfile::tempdir().unwrap();
+    let store = StorageStore::from_backend(Arc::new(LocalFs::new(root.path())));
+    let (start, check) = compio::runtime::Runtime::new().unwrap().block_on(async move {
+        init_v8();
+        let env_vars = HashMap::from([("APP_ID".to_owned(), "e2e_app".to_owned())]);
+        let plugin: Arc<dyn NativePlugin> = Arc::new(StorageBinding::new(store, None));
+        let runtime = Runtime::builder()
+            .modules(module(STORAGE_STREAM_OWNED_BY_REQUEST_APP))
+            .env_vars(env_vars)
+            .plugins(vec![plugin])
+            .build();
+        runtime.start_pump();
+        let env = EnvSnapshot::empty();
+
+        let cancel = CancelFlag::new();
+        let outcome = runtime.call_fetch_handler(
+            "GET", "http://localhost/start", &[], "", &env, RequestCtx::new(cancel.clone()),
+        );
+        let FetchOutcome::Pending { rx, .. } = outcome else {
+            panic!("the starting request must be waiting");
+        };
+        // What the worker does when the wall timeout fires.
+        cancel.cancel();
+        runtime.notify_pump();
+        let start = compio::time::timeout(Duration::from_secs(30), rx.recv())
+            .await
+            .expect("the cancelled request never settled");
+
+        let outcome = runtime.call_fetch_handler(
+            "GET", "http://localhost/check", &[], "", &env, RequestCtx::new(CancelFlag::new()),
+        );
+        let FetchOutcome::Pending { rx, .. } = outcome else {
+            panic!("the checking request must wait on the put");
+        };
+        let check = compio::time::timeout(Duration::from_secs(30), rx.recv())
+            .await
+            .expect("the put outlived its request: the check never settled")
+            .expect("the check delivered a dispatch error");
+        let SettledFetch::Response { body, .. } = check else {
+            panic!("the check must settle with a Response");
+        };
+        (start.err().map(|e| e.message), String::from_utf8_lossy(&body).into_owned())
+    });
+    assert_eq!(start.as_deref(), Some("Request timed out"), "{check}");
+    let value: serde_json::Value = serde_json::from_str(&check).unwrap();
+    assert!(
+        value["outcome"].as_str().is_some_and(|o| o.starts_with("failed: ")),
+        "the put fails with its request: {check}"
+    );
+    assert_eq!(value["cancelledWith"], "AbortError", "the source is cancelled: {check}");
+    assert_eq!(value["stored"], false, "nothing is stored: {check}");
 }

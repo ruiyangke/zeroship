@@ -308,6 +308,15 @@ pub const MAX_PENDING_TIMERS: usize = 10_000;
 /// operator a clean error instead of an OOM or a control-plane outage.
 pub const MAX_PENDING_FETCHES: usize = 64;
 
+/// Bytes one runtime's uploads (`fetch` request bodies and
+/// `env.storage.putStream`) may hold buffered together, their channels and
+/// parked chunks both counted. An upload that finds no room parks the unsent
+/// rest of its current chunk and pauses rather than fails, so the total
+/// passes the limit by at most one chunk rest per upload. Because it sits
+/// well under the process-wide stream budget, one app's uploads cannot
+/// take that budget from the other apps on the worker.
+pub const MAX_UPLOAD_BUFFER_BYTES: usize = 32 * 1024 * 1024;
+
 /// Parse the EnvSnapshot wire JSON `{ vars, secrets, expose }` into typed
 /// maps + the expose list. Defensive — missing or malformed fields
 /// degrade to empty values. Non-string entries inside `vars` / `secrets`
@@ -379,21 +388,23 @@ pub struct RuntimeState {
     pub timeout_pinned_signals: HashMap<u32, v8::Global<v8::Object>>,
 
     /// Monotonically increasing stream-id counter, shared across all
-    /// stream-id-keyed maps (currently just `response_forwarders`).
+    /// stream-id-keyed maps (currently just `stream_forwarders`).
     pub next_stream_id: u32,
 
-    /// Response-body forwarders — Rust-side replacements for the legacy
-    /// JS pump in `__zsBeginStreamForward`. Populated by
-    /// `streams::response_forwarder::begin_forward` when the kernel's
-    /// `inspect_response` decides a Response with a ReadableStream body
-    /// should ship to the wire; drained via `attach_writer` /
-    /// `is_closed` / `drain_into_complete` in `runtime.rs`.
-    pub response_forwarders: HashMap<u32, crate::streams::response_forwarder::ResponseForwarder>,
+    /// Live stream forwarders, keyed by stream id: each reads one JS
+    /// ReadableStream into a native channel. Registered by
+    /// `streams::stream_forwarder` for response bodies (`begin_forward`),
+    /// RPC stream procedures (`begin_forward_reader`) and uploads
+    /// (`forward_upload`: `env.storage.putStream`, `fetch` request bodies);
+    /// a response body is drained via `attach_writer` / `is_closed` /
+    /// `drain_into_complete` in `runtime.rs`.
+    pub stream_forwarders: HashMap<u32, crate::streams::stream_forwarder::StreamForwarder>,
 
     /// Stream-ids of paused upload forwarders awaiting resume. A forwarder
     /// pauses its `reader.read()` loop when its downstream `StreamWriter`
     /// buffer crosses the high-water mark (backpressure); the consumer of the
-    /// paired `StreamReader` (e.g. `env.storage.putStream` → S3 multipart)
+    /// paired `StreamReader` (`env.storage.putStream` to S3 multipart, or
+    /// a `fetch` request body to the HTTP client)
     /// enqueues the id here once it has drained the buffer below the low-water
     /// mark. The pump services these inside its V8 scope (`resume_read`),
     /// re-arming the read loop. This is what keeps a large streaming upload
@@ -417,12 +428,17 @@ pub struct RuntimeState {
 
     /// Number of fetches currently executing for this runtime.
     /// Incremented in the native `fetch_native::fetch_callback` when a
-    /// fetch task is spawned, decremented when the algorithm chain
-    /// returns (success or failure). Guards against one app exhausting
-    /// the shared cyper client's connection pool — `MAX_PENDING_OPS`
-    /// alone would let this climb into OOM-by-sockets territory when
-    /// the upstream is slow.
-    pub in_flight_fetches: usize,
+    /// fetch task is spawned, and decremented once both the algorithm
+    /// chain has returned and a streamed request body has finished or
+    /// been cancelled (the HTTP client can keep sending a body after the
+    /// response). Guards against one app exhausting the shared cyper
+    /// client's connection pool; `MAX_PENDING_OPS` alone would let this
+    /// climb into OOM-by-sockets territory when the upstream is slow.
+    pub in_flight_fetches: Rc<Cell<usize>>,
+
+    /// The byte budget this runtime's uploads share
+    /// ([`MAX_UPLOAD_BUFFER_BYTES`]).
+    pub upload_share: Rc<crate::channel::StreamShare>,
 
     /// The request currently being executed (None between requests).
     pub executing_request_id: Option<u64>,
@@ -695,7 +711,7 @@ impl RuntimeState {
             timeout_pinned_signals: HashMap::new(),
 
             next_stream_id: 1,
-            response_forwarders: HashMap::new(),
+            stream_forwarders: HashMap::new(),
             forwarder_resumes: VecDeque::new(),
             validate_rpc_output: false,
             startup_declarations_open: false,
@@ -704,7 +720,8 @@ impl RuntimeState {
             tasks: crate::core::tasks::RuntimeTasks::default(),
             spawned_timers: Vec::new(),
             ready_timers: VecDeque::new(),
-            in_flight_fetches: 0,
+            in_flight_fetches: Rc::new(Cell::new(0)),
+            upload_share: crate::channel::StreamShare::new(MAX_UPLOAD_BUFFER_BYTES),
 
             executing_request_id: None,
             executing_request_cancel: None,
@@ -820,7 +837,7 @@ impl RuntimeState {
             if sid == 0 {
                 continue;
             }
-            if self.response_forwarders.contains_key(&sid)
+            if self.stream_forwarders.contains_key(&sid)
                 || self.pending_resolvers.contains_key(&sid)
             {
                 continue;

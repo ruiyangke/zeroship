@@ -147,6 +147,60 @@ struct StreamInner {
     done: bool,
     waker: Option<Waker>,
     consumer_callback: Option<Rc<dyn Fn(StreamConsumerEvent)>>,
+    /// The group budget this stream's bytes also count against, if any.
+    share: Option<Rc<StreamShare>>,
+}
+
+impl StreamInner {
+    /// Take `n` buffered bytes off every ledger they were charged to.
+    fn release(&self, n: usize) {
+        use std::sync::atomic::Ordering;
+        if n == 0 {
+            return;
+        }
+        STREAM_GLOBAL_BUFFERED.fetch_sub(n, Ordering::Relaxed);
+        if let Some(share) = &self.share {
+            share.release(n);
+        }
+    }
+}
+
+/// A byte budget shared by a group of streams: one runtime's uploads. Their
+/// buffered bytes count against it on top of the process-wide cap, so one
+/// app cannot take the process-wide budget from its neighbours. Producers
+/// read [`StreamWriter::room`] and wait instead of pushing past it.
+#[derive(Debug)]
+pub struct StreamShare {
+    used: Cell<usize>,
+    limit: usize,
+}
+
+impl StreamShare {
+    pub fn new(limit: usize) -> Rc<Self> {
+        Rc::new(Self { used: Cell::new(0), limit })
+    }
+
+    /// Bytes still free under the limit.
+    pub fn room(&self) -> usize {
+        self.limit.saturating_sub(self.used.get())
+    }
+
+    /// Bytes currently charged.
+    pub fn used(&self) -> usize {
+        self.used.get()
+    }
+
+    /// Charge `n` bytes held outside any stream buffer (an upload's parked
+    /// chunk), so they count against the same limit.
+    pub fn charge(&self, n: usize) {
+        self.used.set(self.used.get().saturating_add(n));
+    }
+
+    /// Release bytes charged with [`Self::charge`] or pushed into a member
+    /// stream.
+    pub fn release(&self, n: usize) {
+        self.used.set(self.used.get().saturating_sub(n));
+    }
 }
 
 /// Consumer activity that can release producer backpressure or close its source.
@@ -163,10 +217,7 @@ impl Drop for StreamInner {
     /// would leak buffered bytes from the global ledger — eventually
     /// starving other streams even though no real memory was held.
     fn drop(&mut self) {
-        use std::sync::atomic::Ordering;
-        if self.buffered_bytes > 0 {
-            STREAM_GLOBAL_BUFFERED.fetch_sub(self.buffered_bytes, Ordering::Relaxed);
-        }
+        self.release(self.buffered_bytes);
     }
 }
 
@@ -225,7 +276,7 @@ impl StreamWriter {
             let released = inner.buffered_bytes;
             inner.chunks.clear();
             inner.buffered_bytes = 0;
-            STREAM_GLOBAL_BUFFERED.fetch_sub(released, Ordering::Relaxed);
+            inner.release(released);
             inner.overflow = true;
             if let Some(waker) = inner.waker.take() {
                 waker.wake();
@@ -245,7 +296,7 @@ impl StreamWriter {
             let released = inner.buffered_bytes;
             inner.chunks.clear();
             inner.buffered_bytes = 0;
-            STREAM_GLOBAL_BUFFERED.fetch_sub(released, Ordering::Relaxed);
+            inner.release(released);
             inner.overflow = true;
             if let Some(waker) = inner.waker.take() {
                 waker.wake();
@@ -254,6 +305,9 @@ impl StreamWriter {
         }
 
         inner.buffered_bytes += n;
+        if let Some(share) = &inner.share {
+            share.charge(n);
+        }
         inner.chunks.push_back(data);
         if let Some(waker) = inner.waker.take() {
             waker.wake();
@@ -271,6 +325,17 @@ impl StreamWriter {
     /// stream pauses/resumes proportionally, not at the global default.
     pub fn cap(&self) -> usize {
         self.inner.borrow().max_bytes
+    }
+
+    /// Bytes a push can add now without refusal by the per-stream cap or the
+    /// stream's share.
+    pub fn room(&self) -> usize {
+        let inner = self.inner.borrow();
+        let own = inner.max_bytes.saturating_sub(inner.buffered_bytes);
+        match &inner.share {
+            Some(share) => own.min(share.room()),
+            None => own,
+        }
     }
 
     /// True once `push` has rejected a chunk for exceeding the byte cap.
@@ -323,13 +388,11 @@ impl StreamReader {
 
     /// Pop a single available chunk from the buffer.
     pub fn pop(&self) -> Option<Vec<u8>> {
-        use std::sync::atomic::Ordering;
-
         let mut inner = self.inner.borrow_mut();
         let chunk = inner.chunks.pop_front()?;
         let n = chunk.len();
         inner.buffered_bytes = inner.buffered_bytes.saturating_sub(n);
-        STREAM_GLOBAL_BUFFERED.fetch_sub(n, Ordering::Relaxed);
+        inner.release(n);
         let callback = inner.consumer_callback.clone();
         drop(inner);
         if let Some(callback) = callback {
@@ -395,7 +458,6 @@ impl StreamReader {
 
 impl Drop for StreamReader {
     fn drop(&mut self) {
-        use std::sync::atomic::Ordering;
         let mut inner = self.inner.borrow_mut();
         let callback = if inner.done || inner.overflow {
             None
@@ -406,7 +468,7 @@ impl Drop for StreamReader {
         let released = inner.buffered_bytes;
         inner.chunks.clear();
         inner.buffered_bytes = 0;
-        STREAM_GLOBAL_BUFFERED.fetch_sub(released, Ordering::Relaxed);
+        inner.release(released);
         drop(inner);
         if let Some(callback) = callback {
             callback(StreamConsumerEvent::Closed);
@@ -443,6 +505,18 @@ pub fn stream_buffer() -> (StreamWriter, StreamReader) {
 /// tests and for apps that need a tighter bound (e.g. latency-sensitive
 /// paths where even 4 MB of buffering is too much).
 pub fn stream_buffer_with_cap(max_bytes: usize) -> (StreamWriter, StreamReader) {
+    new_stream_buffer(max_bytes, None)
+}
+
+/// [`stream_buffer_with_cap`] whose bytes also count against `share`.
+pub fn stream_buffer_in_share(
+    max_bytes: usize,
+    share: Rc<StreamShare>,
+) -> (StreamWriter, StreamReader) {
+    new_stream_buffer(max_bytes, Some(share))
+}
+
+fn new_stream_buffer(max_bytes: usize, share: Option<Rc<StreamShare>>) -> (StreamWriter, StreamReader) {
     let inner = Rc::new(RefCell::new(StreamInner {
         chunks: VecDeque::new(),
         buffered_bytes: 0,
@@ -452,6 +526,7 @@ pub fn stream_buffer_with_cap(max_bytes: usize) -> (StreamWriter, StreamReader) 
         done: false,
         waker: None,
         consumer_callback: None,
+        share,
     }));
     (
         StreamWriter { inner: inner.clone() },

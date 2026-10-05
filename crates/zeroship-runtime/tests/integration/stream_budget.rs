@@ -85,9 +85,6 @@ export function constructions() {
         "Request.prototype.body": outcome(
             () => new Request("http://localhost/", { method: "POST", body: "body" }).body,
         ),
-        "Request.prototype.clone": outcome(
-            () => new Request("http://localhost/", { method: "POST", body: "body" }).clone(),
-        ),
         "Blob.prototype.stream": outcome(() => new Blob(["body"]).stream()),
         "new CompressionStream": outcome(() => new CompressionStream("gzip")),
         "new TextEncoderStream": outcome(() => new TextEncoderStream()),

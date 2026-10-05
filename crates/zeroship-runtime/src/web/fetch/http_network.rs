@@ -5,22 +5,33 @@
 //!
 //!   1. Validate the URL through SSRF (`crate::fetch::validate_url` plus
 //!      `crate::fetch::SsrfResolver` wired into the cyper client).
-//!   2. Build a `cyper::RequestBuilder` from the FetchRequest.
+//!   2. Build a `cyper::RequestBuilder` from the FetchRequest. A byte body
+//!      is sent with its length; a ReadableStream body is sent as it is
+//!      read, chunk by chunk, with the stream forwarder's backpressure.
 //!   3. Drain the response body fully (subject to MAX_RESPONSE_SIZE),
 //!      since the algorithms layer needs raw bytes for redirect
 //!      response handling and Content-Encoding decoding.
 //!
-//! Streaming responses (chunk-by-chunk into a JS ReadableStream via
-//! stream_id) are deferred to a follow-up — for v1 native fetch we
-//! buffer to keep the algorithm chain straightforward and avoid the
-//! bridge through V8 mid-request.
+//! An abort is raced against every await: sending the request (which
+//! includes the whole of a streamed body) and reading the response.
+
+use std::cell::RefCell;
+use std::future::Future;
+use std::pin::Pin;
+use std::rc::Rc;
+use std::task::{Context, Poll};
+
+use compio::bytes::Bytes;
 
 use super::algorithms::{
     append_origin_if_needed, default_accept_encoding, has_accept_encoding, FetchRequest,
+    RequestBody,
 };
 
+use crate::channel::CancelFlag;
 use crate::fetch::MAX_RESPONSE_SIZE;
-use futures::{FutureExt, StreamExt, pin_mut};
+use crate::streams::stream_forwarder::{UploadControl, UploadReader};
+use futures::{FutureExt, Stream, StreamExt, pin_mut};
 
 /// Network response surfaced to the algorithm chain. Headers come back
 /// as Vec<(name, value)> so the chain can mutate them (e.g. strip
@@ -36,7 +47,7 @@ pub struct NetworkResponse {
 /// Per Fetch §5.8 "HTTP-network fetch". Performs the actual TCP/TLS
 /// round-trip via cyper.
 pub async fn http_network_fetch(
-    request: &FetchRequest,
+    request: &mut FetchRequest,
 ) -> Result<NetworkResponse, String> {
     // SSRF — validate URL. The cyper resolver wraps `is_blocked_ip` for
     // DNS-level filtering; the string-level fast path catches literal
@@ -82,19 +93,40 @@ pub async fn http_network_fetch(
     // Origin header.
     append_origin_if_needed(&mut req_headers, &request.method, &request.url, "");
 
+    // The body is framed once, by the client: a creator's Transfer-Encoding
+    // (a forbidden request header in Fetch) is dropped, so it can never ride
+    // alongside a Content-Length. A creator's Content-Length is kept and
+    // must match the bytes sent.
+    req_headers.retain(|(k, _)| !k.eq_ignore_ascii_case("transfer-encoding"));
+
     for (k, v) in &req_headers {
         builder = builder
             .header(k.as_str(), v.as_str())
             .map_err(|e| format!("network error: invalid header {k}: {e}"))?;
     }
 
-    // Body — pass through if rewindable bytes are available. For
-    // BodySource::Stream the algorithm chain's redirect step would have
-    // erred earlier on a 307/308; on a non-redirect first hop we have
-    // the buffered bytes in `body`.
-    if let Some(bytes) = &request.body {
-        builder = builder.body(bytes.clone());
+    // Body. A byte body is sent again on each hop that keeps it; a stream
+    // body is taken by the hop that sends it.
+    let mut upload_failure = None;
+    let mut upload_control = None;
+    match &mut request.body {
+        RequestBody::Empty => {}
+        RequestBody::Bytes(bytes) => builder = builder.body(bytes.clone()),
+        RequestBody::Stream(slot) => {
+            let upload = slot
+                .take()
+                .ok_or_else(|| "network error: the ReadableStream request body was already sent".to_string())?;
+            upload_failure = Some(upload.failure.clone());
+            upload_control = Some(upload.reader.control());
+            builder = builder.body(cyper::Body::stream(send_wrapper::SendWrapper::new(upload)));
+        }
     }
+    // However this hop ends, a streamed body it has not finished sending
+    // stops with it: an aborted or failed hop, and a response that is
+    // complete while the body is not (the server answered without reading
+    // the rest, and the HTTP client may keep the connection open and go on
+    // sending into it).
+    let _end_upload = upload_control.map(EndUpload);
 
     // Re-check cancellation right before sending.
     if let Some(flag) = &request.cancel
@@ -103,11 +135,19 @@ pub async fn http_network_fetch(
         return Err("network error: aborted".to_string());
     }
 
-    // Send. cyper does not auto-follow redirects; that's our job.
-    let response = builder
-        .send()
+    // Send. cyper does not auto-follow redirects; that's our job. A stream
+    // body is sent inside this await, so an abort must be able to end it.
+    let sent = until_cancelled(request.cancel.as_ref(), builder.send())
         .await
-        .map_err(|e| format!("network error: {e}"))?;
+        .ok_or_else(|| "network error: aborted".to_string())?;
+    let response = sent.map_err(|e| {
+        // A failed stream body is the cause; the client's error only says
+        // the body ended early.
+        match upload_failure.as_ref().and_then(|f| f.borrow().clone()) {
+            Some(reason) => format!("network error: request body {reason}"),
+            None => format!("network error: {e}"),
+        }
+    })?;
 
     if let Some(flag) = &request.cancel
         && flag.is_cancelled()
@@ -144,26 +184,9 @@ pub async fn http_network_fetch(
     let body_stream = response.bytes_stream();
     pin_mut!(body_stream);
     loop {
-        let next_chunk = body_stream.next().fuse();
-        pin_mut!(next_chunk);
-        let maybe_chunk = if let Some(flag) = &request.cancel {
-            let cancel_wait = futures::future::poll_fn(|cx| {
-                if flag.is_cancelled() {
-                    std::task::Poll::Ready(())
-                } else {
-                    flag.register_waker(cx.waker());
-                    std::task::Poll::Pending
-                }
-            })
-            .fuse();
-            pin_mut!(cancel_wait);
-            futures::select! {
-                chunk = next_chunk => chunk,
-                _ = cancel_wait => return Err("network error: aborted".to_string()),
-            }
-        } else {
-            next_chunk.await
-        };
+        let maybe_chunk = until_cancelled(request.cancel.as_ref(), body_stream.next())
+            .await
+            .ok_or_else(|| "network error: aborted".to_string())?;
 
         let Some(chunk) = maybe_chunk else { break };
         let chunk = chunk.map_err(|e| format!("network error: body read failed: {e}"))?;
@@ -184,6 +207,88 @@ pub async fn http_network_fetch(
         headers,
         body,
     })
+}
+
+/// Await `work` unless `cancel` fires first; `None` means it was cancelled.
+async fn until_cancelled<F: Future>(cancel: Option<&CancelFlag>, work: F) -> Option<F::Output> {
+    let Some(flag) = cancel else {
+        return Some(work.await);
+    };
+    let work = work.fuse();
+    pin_mut!(work);
+    let cancelled = futures::future::poll_fn(|cx| {
+        if flag.is_cancelled() {
+            Poll::Ready(())
+        } else {
+            flag.register_waker(cx.waker());
+            Poll::Pending
+        }
+    })
+    .fuse();
+    pin_mut!(cancelled);
+    futures::select! {
+        output = work => Some(output),
+        _ = cancelled => None,
+    }
+}
+
+/// A ReadableStream request body as the HTTP client consumes it.
+///
+/// The stream forwarder's [`UploadReader`], yielding chunks in order. A
+/// failed source ends the body with an error (the request fails rather than
+/// sending a truncated body as complete), and the reason is kept for the
+/// fetch's rejection. Dropping it before the end cancels the source.
+pub struct UploadBody {
+    reader: UploadReader,
+    failure: Rc<RefCell<Option<String>>>,
+    /// The fetch's in-flight slot, held until the client finishes or drops
+    /// the body.
+    slot: Option<Rc<super::FetchSlot>>,
+}
+
+impl UploadBody {
+    pub fn new(reader: UploadReader) -> Self {
+        Self { reader, failure: Rc::new(RefCell::new(None)), slot: None }
+    }
+
+    /// Hold `slot` for as long as the body lives.
+    pub fn hold_slot(&mut self, slot: Rc<super::FetchSlot>) {
+        self.slot = Some(slot);
+    }
+}
+
+/// Cancels a streamed body when the hop that sent it ends.
+struct EndUpload(UploadControl);
+
+impl Drop for EndUpload {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+impl Stream for UploadBody {
+    type Item = Result<Bytes, cyper::Error>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            return match this.reader.poll_next_chunk(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(None) => {
+                    this.slot = None;
+                    Poll::Ready(None)
+                }
+                // An empty chunk carries no bytes: nothing to hand the client.
+                Poll::Ready(Some(Ok(chunk))) if chunk.is_empty() => continue,
+                Poll::Ready(Some(Ok(chunk))) => Poll::Ready(Some(Ok(chunk))),
+                Poll::Ready(Some(Err(err))) => {
+                    let reason = err.to_string();
+                    *this.failure.borrow_mut() = Some(reason.clone());
+                    Poll::Ready(Some(Err(cyper::Error::System(std::io::Error::other(reason)))))
+                }
+            };
+        }
+    }
 }
 
 fn parse_http_method(s: &str) -> Result<http::Method, String> {
