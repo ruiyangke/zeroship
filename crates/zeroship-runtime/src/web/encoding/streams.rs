@@ -99,7 +99,7 @@ impl TextEncoderStream {
 
         // 2. Call new TransformStream(transformer).
         let inner =
-            crate::streams::construct_global(scope, "TransformStream", &[transformer.into()])?;
+            crate::intrinsics::construct(scope, crate::intrinsics::Intrinsic::TransformStream, &[transformer.into()])?;
 
         Ok(Self { inner })
     }
@@ -313,7 +313,7 @@ impl TextDecoderStream {
 
         // 5. Construct the underlying TransformStream.
         let inner =
-            crate::streams::construct_global(scope, "TransformStream", &[transformer.into()])?;
+            crate::intrinsics::construct(scope, crate::intrinsics::Intrinsic::TransformStream, &[transformer.into()])?;
 
         Ok(Self { state, inner })
     }
@@ -425,7 +425,9 @@ fn decoder_transform_callback(
     if out.is_empty() {
         return;
     }
-    let chunk_out = v8::String::new(scope, &out).unwrap();
+    let Some(chunk_out) = crate::strings::new_or_throw(scope, &out) else {
+        return;
+    };
     enqueue_on_controller(scope, controller_v, chunk_out.into());
 }
 
@@ -486,7 +488,9 @@ fn decoder_flush_callback(
     if out.is_empty() {
         return;
     }
-    let chunk_out = v8::String::new(scope, &out).unwrap();
+    let Some(chunk_out) = crate::strings::new_or_throw(scope, &out) else {
+        return;
+    };
     enqueue_on_controller(scope, controller_v, chunk_out.into());
 }
 
@@ -504,14 +508,14 @@ fn decoder_flush_callback(
 fn build_payload_function<'s, P: 'static>(
     scope: &mut v8::PinScope<'s, '_>,
     payload: P,
-    callback: impl v8::MapFnTo<v8::FunctionCallback>,
+    callback: impl crate::callback::Callback,
 ) -> v8::Local<'s, v8::Function> {
     let boxed = Box::new(payload);
     let raw_ptr = Box::into_raw(boxed);
     let raw_addr = raw_ptr as usize;
     let ext = v8::External::new(scope, raw_ptr as *mut std::ffi::c_void);
 
-    let tmpl = v8::FunctionTemplate::builder(callback)
+    let tmpl = crate::callback::template_builder(callback)
         .data(ext.into())
         .build(scope);
     let f = tmpl.get_function(scope).unwrap();

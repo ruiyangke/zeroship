@@ -26,94 +26,18 @@ pub struct ReadOnlyMapIterator {
 #[doc(hidden)]
 #[allow(non_camel_case_types)]
 pub struct __InstallSlot_ReadOnlyMapIterator(::v8::Global<::v8::FunctionTemplate>);
-#[doc(hidden)]
-#[allow(non_camel_case_types)]
-pub struct __BrandSlot_ReadOnlyMapIterator(::v8::Eternal<::v8::Object>);
-/// Brand-check helper for the iterator class: walks the
-/// prototype chain of `obj` looking for the cached
-/// `<Class>Iterator.prototype`. Returns true on match (the
-/// receiver IS a `<Class>Iterator`), false otherwise.
-///
-/// The previous `next()` codegen relied solely on
-/// internal-field-0 being an `External`, which any
-/// `#[v8_class]` wrapper satisfies. A caller could pass a
-/// different wrapper as `this` and the recovery
-/// `__ext.value() as *mut <Class>Iterator` would reinterpret a
-/// `Box<Other>` as `*mut <Class>Iterator` — UB. The brand
-/// check pins the receiver to instances of this iterator class
-/// before the unsafe cast.
-///
-/// Walks at most 1024 prototype links — matches V8's internal
-/// `Object::PrototypeChainLength` sanity bound. Cycle creation
-/// is already blocked by ECMAScript §10.4.7.2 step 8; the cap
-/// is belt-and-braces for proxy-driven prototype chains.
-///
-/// The cached prototype is populated lazily on first call (NOT
-/// at install time) — eager `get_function(scope)` would freeze
-/// the FunctionTemplate's instance shape. Mirrors the parent-
-/// class `__brand_check_<Class>` helper in
-/// `v8_class/emit/brand.rs`.
+/// Brand-check helper for the iterator class: true iff `obj` is
+/// a wrapper the factory branded as holding a `Box<Self>`. Any
+/// other wrapper also has an `External` in internal field 0,
+/// and script can give any object this prototype, so neither
+/// says the field holds an iterator; the brand does.
 #[doc(hidden)]
 #[allow(non_snake_case, dead_code)]
 fn __brand_check_ReadOnlyMapIterator(
     scope: &mut v8::PinScope,
     obj: v8::Local<v8::Object>,
 ) -> bool {
-    let expected_proto: v8::Local<v8::Object> = if let Some(slot) = scope
-        .get_slot::<__BrandSlot_ReadOnlyMapIterator>()
-    {
-        match slot.0.get(scope) {
-            Some(p) => p,
-            None => return false,
-        }
-    } else {
-        let tmpl_global = match scope.get_slot::<__InstallSlot_ReadOnlyMapIterator>() {
-            Some(s) => s.0.clone(),
-            None => return false,
-        };
-        let tmpl_local = v8::Local::new(scope, &tmpl_global);
-        let func = match tmpl_local.get_function(scope) {
-            Some(f) => f,
-            None => return false,
-        };
-        let proto_key = match v8::String::new(scope, "prototype") {
-            Some(s) => s,
-            None => return false,
-        };
-        let proto_v = match func.get(scope, proto_key.into()) {
-            Some(v) => v,
-            None => return false,
-        };
-        let proto: v8::Local<v8::Object> = match proto_v.try_into() {
-            Ok(o) => o,
-            Err(_) => return false,
-        };
-        let eternal: v8::Eternal<v8::Object> = v8::Eternal::empty();
-        eternal.set(scope, proto);
-        scope.set_slot(__BrandSlot_ReadOnlyMapIterator(eternal));
-        proto
-    };
-    let mut current: v8::Local<v8::Value> = match obj.get_prototype(scope) {
-        Some(v) => v,
-        None => return false,
-    };
-    for _ in 0..1024 {
-        if current.is_null_or_undefined() {
-            return false;
-        }
-        let cur_obj: v8::Local<v8::Object> = match current.try_into() {
-            Ok(o) => o,
-            Err(_) => return false,
-        };
-        if cur_obj == expected_proto {
-            return true;
-        }
-        current = match cur_obj.get_prototype(scope) {
-            Some(v) => v,
-            None => return false,
-        };
-    }
-    false
+    ::zeroship_runtime::macro_runtime::brand::is::<ReadOnlyMapIterator>(scope, obj)
 }
 #[allow(non_snake_case, dead_code)]
 impl ReadOnlyMapIterator {
@@ -128,14 +52,20 @@ impl ReadOnlyMapIterator {
         if let Some(cached) = scope.get_slot::<__InstallSlot_ReadOnlyMapIterator>() {
             return v8::Local::new(scope, cached.0.clone());
         }
-        let __ctor_tmpl = v8::FunctionTemplate::new(scope, __zs_iter_construct_throws);
+        let __ctor_tmpl = ::zeroship_runtime::macro_runtime::callback::template(
+            scope,
+            __zs_iter_construct_throws,
+        );
         let __class_name = v8::String::new(scope, "ReadOnlyMapIterator").unwrap();
         __ctor_tmpl.set_class_name(__class_name);
         __ctor_tmpl.instance_template(scope).set_internal_field_count(1);
         let __proto = __ctor_tmpl.prototype_template(scope);
         {
             let __key = v8::String::new(scope, "next").unwrap();
-            let __fn_tmpl = v8::FunctionTemplate::new(scope, __ReadOnlyMap_iter_next);
+            let __fn_tmpl = ::zeroship_runtime::macro_runtime::callback::template(
+                scope,
+                __ReadOnlyMap_iter_next,
+            );
             __proto.set(__key.into(), __fn_tmpl.into());
         }
         {
@@ -153,13 +83,15 @@ impl ReadOnlyMapIterator {
             let __proto_key = v8::String::new(scope, "prototype").unwrap();
             let __ctor_proto_v = __ctor_fn.get(scope, __proto_key.into()).unwrap();
             let __ctor_proto: v8::Local<v8::Object> = __ctor_proto_v.try_into().unwrap();
-            let __js = v8::String::new(
-                    scope,
-                    "Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()))",
-                )
-                .unwrap();
-            let __script = v8::Script::compile(scope, __js, None).unwrap();
-            let __iter_proto = __script.run(scope).unwrap();
+            let __probe = v8::ObjectTemplate::new(scope);
+            __probe
+                .set_intrinsic_data_property(
+                    __proto_key.into(),
+                    v8::Intrinsic::IteratorPrototype,
+                    v8::PropertyAttribute::NONE,
+                );
+            let __probe_obj = __probe.new_instance(scope).unwrap();
+            let __iter_proto = __probe_obj.get(scope, __proto_key.into()).unwrap();
             __ctor_proto.set_prototype(scope, __iter_proto);
         }
         let __global = ::v8::Global::new(scope, __ctor_tmpl);
@@ -254,6 +186,9 @@ fn __zs_iter_factory_impl(
     let __raw_addr = __raw as usize;
     let __ext = v8::External::new(scope, __raw as *mut ::std::ffi::c_void);
     __it_obj.set_internal_field(0, __ext.into());
+    ::zeroship_runtime::macro_runtime::brand::mark::<
+        ReadOnlyMapIterator,
+    >(scope, __it_obj, __ext);
     let __weak = v8::Weak::with_guaranteed_finalizer(
         scope,
         __it_obj,
@@ -346,21 +281,21 @@ pub(crate) fn __ReadOnlyMap_for_each(
     drop(__ext);
     for (__k, __v) in __pairs.into_iter() {
         let __bytes_ref: &[u8] = ::std::convert::AsRef::as_ref(&__k);
-        let __k_v: v8::Local<v8::Value> = v8::String::new_from_one_byte(
-                scope,
-                __bytes_ref,
-                v8::NewStringType::Normal,
-            )
-            .unwrap()
-            .into();
+        let Some(__bytes_v8) = ::zeroship_runtime::macro_runtime::strings::one_byte_or_throw(
+            scope,
+            __bytes_ref,
+        ) else {
+            return;
+        };
+        let __k_v: v8::Local<v8::Value> = __bytes_v8.into();
         let __bytes_ref: &[u8] = ::std::convert::AsRef::as_ref(&__v);
-        let __v_v: v8::Local<v8::Value> = v8::String::new_from_one_byte(
-                scope,
-                __bytes_ref,
-                v8::NewStringType::Normal,
-            )
-            .unwrap()
-            .into();
+        let Some(__bytes_v8) = ::zeroship_runtime::macro_runtime::strings::one_byte_or_throw(
+            scope,
+            __bytes_ref,
+        ) else {
+            return;
+        };
+        let __v_v: v8::Local<v8::Value> = __bytes_v8.into();
         let __cb_args = [__v_v, __k_v, __this.into()];
         if __cb_fn.call(scope, __this_arg, &__cb_args).is_none() {
             return;
@@ -422,21 +357,21 @@ pub(crate) fn __ReadOnlyMap_iter_next(
     let __kind = __it.__kind;
     let _ = __it;
     let __bytes_ref: &[u8] = ::std::convert::AsRef::as_ref(&__k);
-    let __k_v: v8::Local<v8::Value> = v8::String::new_from_one_byte(
-            scope,
-            __bytes_ref,
-            v8::NewStringType::Normal,
-        )
-        .unwrap()
-        .into();
+    let Some(__bytes_v8) = ::zeroship_runtime::macro_runtime::strings::one_byte_or_throw(
+        scope,
+        __bytes_ref,
+    ) else {
+        return;
+    };
+    let __k_v: v8::Local<v8::Value> = __bytes_v8.into();
     let __bytes_ref: &[u8] = ::std::convert::AsRef::as_ref(&__v);
-    let __v_v: v8::Local<v8::Value> = v8::String::new_from_one_byte(
-            scope,
-            __bytes_ref,
-            v8::NewStringType::Normal,
-        )
-        .unwrap()
-        .into();
+    let Some(__bytes_v8) = ::zeroship_runtime::macro_runtime::strings::one_byte_or_throw(
+        scope,
+        __bytes_ref,
+    ) else {
+        return;
+    };
+    let __v_v: v8::Local<v8::Value> = __bytes_v8.into();
     let __value: v8::Local<v8::Value> = match __kind {
         0i32 => __k_v,
         1i32 => __v_v,
@@ -472,7 +407,7 @@ impl ReadOnlyMap {
     ) {
         {
             let __key = v8::String::new(scope, "keys").unwrap();
-            let __tmpl = v8::FunctionTemplate::new(
+            let __tmpl = ::zeroship_runtime::macro_runtime::callback::template(
                 scope,
                 __ReadOnlyMap_iter_factory_keys,
             );
@@ -480,13 +415,13 @@ impl ReadOnlyMap {
         }
         {
             let __key = v8::String::new(scope, "values").unwrap();
-            let __tmpl = v8::FunctionTemplate::new(
+            let __tmpl = ::zeroship_runtime::macro_runtime::callback::template(
                 scope,
                 __ReadOnlyMap_iter_factory_values,
             );
             proto.set(__key.into(), __tmpl.into());
         }
-        let __entries_tmpl = v8::FunctionTemplate::new(
+        let __entries_tmpl = ::zeroship_runtime::macro_runtime::callback::template(
             scope,
             __ReadOnlyMap_iter_factory_entries,
         );
@@ -496,7 +431,10 @@ impl ReadOnlyMap {
         }
         {
             let __key = v8::String::new(scope, "forEach").unwrap();
-            let __tmpl = v8::FunctionTemplate::new(scope, __ReadOnlyMap_for_each);
+            let __tmpl = ::zeroship_runtime::macro_runtime::callback::template(
+                scope,
+                __ReadOnlyMap_for_each,
+            );
             proto.set(__key.into(), __tmpl.into());
         }
         {

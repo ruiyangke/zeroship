@@ -33,14 +33,12 @@ use std::cell::RefCell;
 
 use zeroship_runtime_macros::v8_class;
 
+use crate::callback::Callback;
 use crate::state::OpError;
 use crate::streams::algorithms;
 use crate::streams::promise_resolve;
 use crate::streams::slots::{self, CLOSED_PROMISE, READY_PROMISE, STREAM, WRITER};
 use crate::streams::writable::{is_writable_stream, with_ws_state, WSState};
-
-/// Brand priv-sym for receiver checks.
-const WRITER_BRAND: &str = "[[ws.writer.brand]]";
 
 // ---------------------------------------------------------------------------
 // Writer state — Box<WritableStreamDefaultWriter> in internal field 0
@@ -53,8 +51,8 @@ const WRITER_BRAND: &str = "[[ws.writer.brand]]";
 /// This parallels the readers. Self::new validates the
 /// stream argument and stashes it in `pending_stream` for the post_init
 /// hook (`after_install`) to consume. The hook does box-install-dependent
-/// setup: WRITER_BRAND priv-sym, `[[stream]]` / stream.`[[writer]]` wires,
-/// and the four-way state-driven closedPromise / readyPromise init.
+/// setup: `[[stream]]` / stream.`[[writer]]` wires, and the four-way
+/// state-driven closedPromise / readyPromise init.
 #[allow(missing_debug_implementations)]
 pub struct WritableStreamDefaultWriter {
     /// Resolver paired with the priv-sym `[[closedPromise]]`. Becomes None
@@ -120,21 +118,12 @@ impl WritableStreamDefaultWriter {
     }
 
     /// `SetUpWritableStreamDefaultWriter(writer, stream)` — spec §4.5.4.
-    /// Runs after the macro has installed the Box in field 0 and the
-    /// finalizer is registered.
-    ///
-    /// Set the WRITER_BRAND priv-sym BEFORE the first `with_state` call:
-    /// `with_state` itself runs `is_default_writer` (which checks the
-    /// brand) and returns None if the brand is missing. Without writing
-    /// the brand first, `pending_stream` would be unreachable.
+    /// Runs after the macro has installed and branded the Box in field 0
+    /// and the finalizer is registered.
     pub(crate) fn after_install(
         scope: &mut v8::PinScope,
         this: v8::Local<v8::Object>,
     ) -> Result<(), OpError> {
-        let brand = slots::private_sym(scope, WRITER_BRAND);
-        let true_v: v8::Local<v8::Value> = v8::Boolean::new(scope, true).into();
-        this.set_private(scope, brand, true_v);
-
         let stream_g = with_state(scope, this, |s| s.pending_stream.borrow_mut().take())
             .ok_or_else(|| OpError::error("after_install: with_state returned None"))?
             .ok_or_else(|| OpError::error("after_install: missing pending_stream"))?;
@@ -148,9 +137,10 @@ impl WritableStreamDefaultWriter {
 // Wrapper helpers
 // ---------------------------------------------------------------------------
 
+/// Whether `obj` is a `WritableStreamDefaultWriter` wrapper: one this
+/// runtime branded as holding a `WritableStreamDefaultWriter`.
 pub fn is_default_writer(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> bool {
-    let tag = slots::private_sym(scope, WRITER_BRAND);
-    obj.has_private(scope, tag).unwrap_or(false)
+    crate::brand::is::<WritableStreamDefaultWriter>(scope, obj)
 }
 
 pub fn with_state<R>(
@@ -158,16 +148,11 @@ pub fn with_state<R>(
     writer: v8::Local<v8::Object>,
     f: impl FnOnce(&WritableStreamDefaultWriter) -> R,
 ) -> Option<R> {
-    if !is_default_writer(scope, writer) {
-        return None;
-    }
-    let raw_v8_field = writer.get_internal_field(scope, 0)?;
-    let ext = v8::Local::<v8::External>::try_from(raw_v8_field).ok()?;
-    let ptr = ext.value() as *const WritableStreamDefaultWriter;
-    if ptr.is_null() {
-        return None;
-    }
-    let inst = unsafe { &*ptr };
+    let ptr = crate::brand::state::<WritableStreamDefaultWriter>(scope, writer)?;
+    // SAFETY: the brand proves internal field 0 holds the
+    // Box<WritableStreamDefaultWriter> stored at construction; it is
+    // dropped only by the V8 weak finalizer.
+    let inst = unsafe { ptr.as_ref() };
     Some(f(inst))
 }
 
@@ -195,15 +180,19 @@ pub fn acquire_writable_stream_default_writer<'s>(
     let writer_obj = inst_tmpl
         .new_instance(scope)
         .ok_or_else(|| "alloc writer instance".to_string())?;
-    let class_fn = tmpl.get_function(scope).unwrap();
-    let proto_key = v8::String::new(scope, "prototype").unwrap();
-    let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
+    let proto_v = tmpl
+        .get_function(scope)
+        .and_then(|class_fn| {
+            let proto_key = v8::String::new(scope, "prototype")?;
+            class_fn.get(scope, proto_key.into())
+        })
+        .ok_or_else(|| "resolve writer prototype".to_string())?;
     writer_obj.set_prototype(scope, proto_v);
     setup_writer_internal(scope, writer_obj, stream);
     Ok(writer_obj)
 }
 
-/// Box install + brand priv-sym + `SetUpWritableStreamDefaultWriter`
+/// Box install + brand + `SetUpWritableStreamDefaultWriter`
 /// state dispatch for the Rust-side (`acquire_*`) path. The lock-already
 /// check happens in the caller (`acquire_*`) so this helper is
 /// infallible.
@@ -212,27 +201,7 @@ fn setup_writer_internal(
     writer: v8::Local<v8::Object>,
     stream: v8::Local<v8::Object>,
 ) {
-    // Build state.
-    let state = WritableStreamDefaultWriter::new_for_internal();
-    let boxed = Box::new(state);
-    let raw_ptr = Box::into_raw(boxed);
-    let raw_addr = raw_ptr as usize;
-    let ext = v8::External::new(scope, raw_ptr as *mut std::ffi::c_void);
-    writer.set_internal_field(0, ext.into());
-
-    // Brand for receiver-check.
-    let brand = slots::private_sym(scope, WRITER_BRAND);
-    let true_v: v8::Local<v8::Value> = v8::Boolean::new(scope, true).into();
-    writer.set_private(scope, brand, true_v);
-
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        writer,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut WritableStreamDefaultWriter));
-        }),
-    );
-    std::mem::forget(weak);
+    crate::brand::wrap(scope, writer, WritableStreamDefaultWriter::new_for_internal());
 
     finalize_writer(scope, writer, stream);
 }
@@ -240,9 +209,8 @@ fn setup_writer_internal(
 /// `SetUpWritableStreamDefaultWriter(writer, stream)` step 3+ — wire the
 /// writer ↔ stream slots and dispatch on stream state to initialize the
 /// closedPromise / readyPromise pair. Shared between the JS path's
-/// `after_install` hook (which writes the brand priv-sym before calling
-/// here) and the Rust `setup_writer_internal` path. Runs after the box
-/// has been installed in field 0 AND the brand priv-sym is set, so
+/// `after_install` hook and the Rust `setup_writer_internal` path. Runs
+/// after the box has been installed and branded in field 0, so
 /// `with_state` resolves correctly.
 fn finalize_writer(
     scope: &mut v8::PinScope,
@@ -787,10 +755,10 @@ fn install_proto_getter(
     scope: &mut v8::PinScope,
     proto: v8::Local<v8::Object>,
     name: &str,
-    cb: impl v8::MapFnTo<v8::FunctionCallback>,
+    cb: impl Callback,
 ) {
     let key = v8::String::new(scope, name).unwrap();
-    let getter_tmpl = v8::FunctionTemplate::new(scope, cb);
+    let getter_tmpl = crate::callback::template(scope, cb);
     let getter_fn = getter_tmpl.get_function(scope).unwrap();
     let mut desc = v8::PropertyDescriptor::new_from_get_set(
         getter_fn.into(),
@@ -805,10 +773,10 @@ fn install_proto_method_on_object(
     scope: &mut v8::PinScope,
     proto: v8::Local<v8::Object>,
     name: &str,
-    cb: impl v8::MapFnTo<v8::FunctionCallback>,
+    cb: impl Callback,
 ) {
     let key = v8::String::new(scope, name).unwrap();
-    let tmpl = v8::FunctionTemplate::new(scope, cb);
+    let tmpl = crate::callback::template(scope, cb);
     let func = tmpl.get_function(scope).unwrap();
     proto.set(scope, key.into(), func.into());
 }

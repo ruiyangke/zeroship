@@ -81,7 +81,7 @@ pub(super) fn gen_next_callback(ctx: &EmitCtx<'_>) -> TokenStream2 {
                 }
             };
             // SAFETY: the parent's internal field 0 was populated by
-            // gen_box_and_install_finalizer with a Box<#class_ty>; the
+            // `<Class>::__zs_install` with a Box<#class_ty>; the
             // Global pin keeps the wrapper alive for as long as this
             // iterator lives. value_pairs() may take &Self or &mut Self
             // per the user's signature — the macro promotes the recovery
@@ -169,52 +169,52 @@ pub(super) fn gen_next_callback(ctx: &EmitCtx<'_>) -> TokenStream2 {
             args: v8::FunctionCallbackArguments,
             mut rv: v8::ReturnValue,
         ) {
-            // Brand-check the receiver against `<Class>Iterator
-            // .prototype`. Without this, a caller could
-            // hand any `#[v8_class]` wrapper to
-            // `<Class>Iterator.prototype.next.call(...)` — every
-            // wrapper has `internal_field(0) = External(Box<X>)`, so
-            // the bare External check below would pass and the
-            // recovery `__ext.value() as *mut <Class>Iterator` would
-            // reinterpret a `Box<Other>` as `*mut <Class>Iterator`,
-            // which is UB.
-            #next_brand_check
-            #next_external_recovery
-            let __it: &mut #iter_class_ty =
-                unsafe { &mut *(__ext.value() as *mut #iter_class_ty) };
+        // Brand-check the receiver against `<Class>Iterator
+        // .prototype`. Without this, a caller could
+        // hand any `#[v8_class]` wrapper to
+        // `<Class>Iterator.prototype.next.call(...)`: every
+        // wrapper has `internal_field(0) = External(Box<X>)`, so
+        // the bare External check below would pass and the
+        // recovery `__ext.value() as *mut <Class>Iterator` would
+        // reinterpret a `Box<Other>` as `*mut <Class>Iterator`,
+        // which is UB.
+        #next_brand_check
+        #next_external_recovery
+        let __it: &mut #iter_class_ty =
+            unsafe { &mut *(__ext.value() as *mut #iter_class_ty) };
 
-            // Per-mode pair resolution: snapshot indexes `__it.__pairs`
-            // directly; live re-reads value_pairs() via the stashed
-            // parent Global. After this block, the names in scope are:
-            //   #key_src : #key_ty
-            //   #val_src : #value_ty
-            //   __kind   : i32
-            // and the `done` early-return path has already been taken
-            // if applicable.
-            #next_pair_resolve
+        // Per-mode pair resolution: snapshot indexes `__it.__pairs`
+        // directly; live re-reads value_pairs() via the stashed
+        // parent Global. After this block, the names in scope are:
+        //   #key_src : #key_ty
+        //   #val_src : #value_ty
+        //   __kind   : i32
+        // and the `done` early-return path has already been taken
+        // if applicable.
+        #next_pair_resolve
 
-            #key_to_v8
-            #val_to_v8
+        #key_to_v8
+        #val_to_v8
 
-            let __value: v8::Local<v8::Value> = match __kind {
-                #iter_kind_keys => #key_out,
-                #iter_kind_values => #val_out,
-                _ => {
-                    // Entries: yield a 2-element [k, v] array.
-                    let __arr = v8::Array::new(scope, 2);
-                    __arr.set_index(scope, 0, #key_out);
-                    __arr.set_index(scope, 1, #val_out);
-                    __arr.into()
-                }
-            };
+        let __value: v8::Local<v8::Value> = match __kind {
+            #iter_kind_keys => #key_out,
+            #iter_kind_values => #val_out,
+            _ => {
+                // Entries: yield a 2-element [k, v] array.
+                let __arr = v8::Array::new(scope, 2);
+                __arr.set_index(scope, 0, #key_out);
+                __arr.set_index(scope, 1, #val_out);
+                __arr.into()
+            }
+        };
 
-            let __res = v8::Object::new(scope);
-            let __vk = #value_key_init;
-            let __dk = #done_key_init;
-            let __false = v8::Boolean::new(scope, false);
-            __res.set(scope, __vk.into(), __value);
-            __res.set(scope, __dk.into(), __false.into());
-            rv.set(__res.into());
+        let __res = v8::Object::new(scope);
+        let __vk = #value_key_init;
+        let __dk = #done_key_init;
+        let __false = v8::Boolean::new(scope, false);
+        __res.set(scope, __vk.into(), __value);
+        __res.set(scope, __dk.into(), __false.into());
+        rv.set(__res.into());
         }
     }
 }
@@ -347,28 +347,28 @@ pub(super) fn gen_for_each_callback(ctx: &EmitCtx<'_>) -> TokenStream2 {
             args: v8::FunctionCallbackArguments,
             _rv: v8::ReturnValue,
         ) {
-            #for_each_brand_check
-            #for_each_external_recovery
+        #for_each_brand_check
+        #for_each_external_recovery
 
-            // Snapshot: bind __instance up-front (one read of
-            // value_pairs() before the loop). Live: do not bind here;
-            // the loop re-binds per iteration.
-            #for_each_instance_pre
+        // Snapshot: bind __instance up-front (one read of
+        // value_pairs() before the loop). Live: do not bind here;
+        // the loop re-binds per iteration.
+        #for_each_instance_pre
 
-            // Validate the callback arg.
-            let __cb_arg = args.get(0);
-            let __cb_fn: v8::Local<v8::Function> = match __cb_arg.try_into() {
-                Ok(f) => f,
-                Err(_) => {
-                    let __msg = #foreach_not_callable_init;
-                    let __exc = v8::Exception::type_error(scope, __msg);
-                    scope.throw_exception(__exc);
-                    return;
-                }
-            };
-            let __this_arg = args.get(1);
+        // Validate the callback arg.
+        let __cb_arg = args.get(0);
+        let __cb_fn: v8::Local<v8::Function> = match __cb_arg.try_into() {
+            Ok(f) => f,
+            Err(_) => {
+                let __msg = #foreach_not_callable_init;
+                let __exc = v8::Exception::type_error(scope, __msg);
+                scope.throw_exception(__exc);
+                return;
+            }
+        };
+        let __this_arg = args.get(1);
 
-            #for_each_loop
+        #for_each_loop
         }
     }
 }

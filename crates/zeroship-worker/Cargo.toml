@@ -73,6 +73,8 @@ ed25519-dalek = { workspace = true }
 base64 = { workspace = true }
 # The termination-grace contract reads the compose file the deployment ships.
 serde_yaml = "0.9"
+# The metrics test registers a native callback, whose signature names V8 types.
+v8 = { workspace = true }
 
 [[test]]
 name = "main"

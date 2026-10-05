@@ -144,11 +144,11 @@ fn build_error<'s>(
     message: &str,
     code: &str,
 ) -> v8::Local<'s, v8::Value> {
-    let msg = v8::String::new(scope, message).unwrap();
+    let msg = crate::strings::message(scope, message);
     let err = v8::Exception::error(scope, msg);
     if let Ok(obj) = v8::Local::<v8::Object>::try_from(err) {
         let code_key = v8::String::new(scope, "code").unwrap();
-        let code_val = v8::String::new(scope, code).unwrap();
+        let code_val = crate::strings::message(scope, code);
         obj.set(scope, code_key.into(), code_val.into());
     }
     err

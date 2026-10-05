@@ -9,12 +9,12 @@ fn with_scope(test: impl FnOnce(&mut v8::PinScope)) {
     let context = v8::Context::new(scope, Default::default());
     let scope = &mut v8::ContextScope::new(scope, context);
     let key = v8::String::new(scope, "currentKind").unwrap();
-    let function = v8::Function::new(scope, current_kind).unwrap();
+    let function = crate::callback::function(scope, current_kind).unwrap();
     context
         .global(scope)
         .set(scope, key.into(), function.into());
     let key = v8::String::new(scope, "currentContext").unwrap();
-    let function = v8::Function::new(scope, current_context).unwrap();
+    let function = crate::callback::function(scope, current_context).unwrap();
     context
         .global(scope)
         .set(scope, key.into(), function.into());

@@ -30,27 +30,21 @@ use crate::{first_generic_arg, is_unit_type, is_vec_u8, is_vec_vec_u8, type_iden
 // V8 string + error throw helpers
 // ---------------------------------------------------------------------------
 
-/// Emit `v8::String::new(<scope>, <lit>).unwrap()` for a string literal
-/// or interpolated str token.
+/// Emit `v8::String::new(<scope>, <lit>).unwrap()` for text fixed at
+/// expansion time: a string literal, or a class, member or message name
+/// the macro itself wrote.
 ///
-/// The 50+ call sites of this pattern across the crate's emit code are
-/// noisy — `v8::String::new` returns `Option<Local<String>>` and is
-/// `None` only on V8 string-pool exhaustion (a near-zero probability
-/// event in practice; V8 itself aborts on isolate OOM well before
-/// this), so every site does an `.unwrap()`. Centralising the pattern:
-///   - Reduces visual noise in the generated code's templates.
-///   - Gives one place to switch to a panic-free fallback if we ever
-///     decide to surface OOM as a V8 RangeError instead of aborting.
-///   - Makes drift easier to spot — if a future change wants the
-///     `new_from_onebyte_const` ASCII fast path, it's one helper edit
-///     instead of 50 grep-and-replace sites.
+/// `v8::String::new` returns `None` only for text longer than V8's string
+/// limit, so text whose length the macro chose cannot fail. Text a
+/// callback computes at runtime (a return value, an iterator entry, an
+/// error's message) has a length creator code chooses, and goes through
+/// [`gen_set_text`], [`gen_set_bytes`] or the `strings::message` call in
+/// [`gen_throw_op_error_arms`] instead.
 ///
 /// `scope_expr` is interpolated as the V8 scope binding (almost always
 /// `scope` in callbacks; the parameter form lets factory codegen pass
 /// a different binding without rebinding). `lit` is interpolated
-/// directly — pass either a string literal (`"prototype"`) or a
-/// pre-built token stream that names a `&str` binding (a `String` /
-/// `&str` ident, etc.).
+/// directly.
 ///
 /// Use [`must_str_abs`] when the surrounding emit code uses the
 /// absolute `::v8::` path (e.g. derive macros' emit, where the user's
@@ -65,6 +59,29 @@ pub(crate) fn must_str(scope_expr: &TokenStream2, lit: &TokenStream2) -> TokenSt
 /// imported `v8` directly.
 pub(crate) fn must_str_abs(scope_expr: &TokenStream2, lit: &TokenStream2) -> TokenStream2 {
     quote! { ::v8::String::new(#scope_expr, #lit).unwrap() }
+}
+
+/// Emit `rv.set(<text>)` for a `&str` expression a callback computed.
+///
+/// When V8 refuses text that long, the emitted code throws
+/// `RangeError: Invalid string length` instead and leaves `rv` unset, so
+/// the callback returns with the exception pending.
+pub(crate) fn gen_set_text(text: &TokenStream2) -> TokenStream2 {
+    quote! {
+        if let Some(__v) = ::zeroship_runtime::macro_runtime::strings::new_or_throw(scope, #text) {
+            rv.set(__v.into());
+        }
+    }
+}
+
+/// [`gen_set_text`] for a `&[u8]` expression read as Latin-1 code units
+/// (a WebIDL `ByteString`).
+pub(crate) fn gen_set_bytes(bytes: &TokenStream2) -> TokenStream2 {
+    quote! {
+        if let Some(__v) = ::zeroship_runtime::macro_runtime::strings::one_byte_or_throw(scope, #bytes) {
+            rv.set(__v.into());
+        }
+    }
 }
 
 /// Single source of truth for the OpError → V8 exception dispatch.
@@ -85,7 +102,9 @@ pub(crate) fn gen_throw_op_error_arms(
     scope_expr: &TokenStream2,
     err_expr: &TokenStream2,
 ) -> TokenStream2 {
-    let msg_init = must_str(scope_expr, &quote! { &(#err_expr).message });
+    let msg_init = quote! {
+        ::zeroship_runtime::macro_runtime::strings::message(#scope_expr, &(#err_expr).message)
+    };
     quote! {
         if let ::zeroship_runtime::macro_runtime::state::OpErrorKind::JsValue(__global) = &(#err_expr).kind {
             let __local = v8::Local::new(#scope_expr, __global);
@@ -109,11 +128,11 @@ pub(crate) fn gen_throw_op_error_arms(
                     let __exc = v8::Exception::error(#scope_expr, __msg);
                     if let Ok(__obj) = v8::Local::<v8::Object>::try_from(__exc) {
                         let __ck = v8::String::new(#scope_expr, "code").unwrap();
-                        let __cv = v8::String::new(#scope_expr, __code).unwrap();
+                        let __cv = ::zeroship_runtime::macro_runtime::strings::message(#scope_expr, __code);
                         __obj.set(#scope_expr, __ck.into(), __cv.into());
                         if let Some(__h) = __hint {
                             let __hk = v8::String::new(#scope_expr, "hint").unwrap();
-                            let __hv = v8::String::new(#scope_expr, __h).unwrap();
+                            let __hv = ::zeroship_runtime::macro_runtime::strings::message(#scope_expr, __h);
                             __obj.set(#scope_expr, __hk.into(), __hv.into());
                         }
                         if let Some(&__s) = __status.as_ref() {
@@ -188,8 +207,8 @@ pub(crate) fn gen_vec_u8_set(val: &TokenStream2) -> TokenStream2 {
 
 /// Emit the V8 setter for a scalar value referenced by `val` tokens.
 /// Dispatches on the type's last-segment ident — bool / u32 / i32 / f64
-/// have direct V8 constructors; everything else falls through to a
-/// `to_string`-shaped `must_str` path.
+/// have direct V8 constructors; everything else is text, set through
+/// [`gen_set_text`].
 pub(crate) fn gen_scalar_set(ty: &Type, val: &TokenStream2) -> TokenStream2 {
     if is_vec_u8(ty) {
         return gen_vec_u8_set(val);
@@ -207,14 +226,7 @@ pub(crate) fn gen_scalar_set(ty: &Type, val: &TokenStream2) -> TokenStream2 {
         Some("i32") => quote! { rv.set(v8::Integer::new(scope, #val).into()); },
         Some("f64") => quote! { rv.set(v8::Number::new(scope, #val).into()); },
         // Default: String
-        _ => {
-            let scope = quote! { scope };
-            let v_init = must_str(&scope, &quote! { &#val });
-            quote! {
-                let __v = #v_init;
-                rv.set(__v.into());
-            }
-        }
+        _ => gen_set_text(&quote! { &#val }),
     }
 }
 
@@ -227,60 +239,56 @@ pub(crate) fn gen_option_some_set(ty: &Type) -> TokenStream2 {
         // ByteString?`. Emit a Latin-1 one-byte string so byte fidelity
         // is preserved (encoded session tokens, e.g. high-bit Set-Cookie
         // values, must round-trip).
-        return quote! {
-            let __v = v8::String::new_from_one_byte(
-                scope,
-                __inner.as_slice(),
-                v8::NewStringType::Normal,
-            ).unwrap();
-            rv.set(__v.into());
-        };
+        return gen_set_bytes(&quote! { __inner.as_slice() });
     }
     match type_ident(ty).as_deref() {
         Some("bool") => quote! { rv.set(v8::Boolean::new(scope, __inner).into()); },
         Some("u32") => quote! { rv.set(v8::Integer::new_from_unsigned(scope, __inner).into()); },
-        _ => {
-            let scope = quote! { scope };
-            let v_init = must_str(&scope, &quote! { &__inner });
-            quote! {
-                let __v = #v_init;
-                rv.set(__v.into());
-            }
-        }
+        _ => gen_set_text(&quote! { &__inner }),
     }
 }
 
-/// Emit the V8 setter for `Vec<String>` — a `v8::Array` of strings.
-/// The user method's value is bound to `__vec` by the caller.
+/// Emit the V8 setter for `Vec<String>`, a `v8::Array` of strings.
+/// The user method's value is bound to `__vec` by the caller. An entry V8
+/// refuses as too long throws `RangeError: Invalid string length` and
+/// leaves `rv` unset.
 pub(crate) fn gen_vec_set() -> TokenStream2 {
-    let scope = quote! { scope };
-    let v_init = must_str(&scope, &quote! { __s });
     quote! {
         let __arr = v8::Array::new(scope, __vec.len() as i32);
+        let mut __refused = false;
         for (__i, __s) in __vec.iter().enumerate() {
-            let __v = #v_init;
+            let Some(__v) = ::zeroship_runtime::macro_runtime::strings::new_or_throw(scope, __s) else {
+                __refused = true;
+                break;
+            };
             __arr.set_index(scope, __i as u32, __v.into());
         }
-        rv.set(__arr.into());
+        if !__refused {
+            rv.set(__arr.into());
+        }
     }
 }
 
 /// Emit the V8 setter for `Vec<Vec<u8>>` — a `v8::Array` of Latin-1
 /// one-byte strings (a WebIDL ByteString round-trips faithfully —
 /// bytes 0x80–0xFF survive). Used by methods like
-/// `Headers.getSetCookie() -> sequence<ByteString>`.
+/// `Headers.getSetCookie() -> sequence<ByteString>`. An entry V8 refuses
+/// as too long throws `RangeError: Invalid string length` and leaves `rv`
+/// unset.
 pub(crate) fn gen_vec_vec_u8_set() -> TokenStream2 {
     quote! {
         let __arr = v8::Array::new(scope, __vec.len() as i32);
+        let mut __refused = false;
         for (__i, __bytes) in __vec.iter().enumerate() {
-            let __s = v8::String::new_from_one_byte(
-                scope,
-                __bytes.as_slice(),
-                v8::NewStringType::Normal,
-            ).unwrap();
+            let Some(__s) = ::zeroship_runtime::macro_runtime::strings::one_byte_or_throw(scope, __bytes.as_slice()) else {
+                __refused = true;
+                break;
+            };
             __arr.set_index(scope, __i as u32, __s.into());
         }
-        rv.set(__arr.into());
+        if !__refused {
+            rv.set(__arr.into());
+        }
     }
 }
 
@@ -435,12 +443,10 @@ pub(crate) fn gen_call_return(call: &TokenStream2, output: &ReturnType) -> Token
                     rv.set(v8::Number::new(scope, __r).into());
                 },
                 Some("String") => {
-                    let scope = quote! { scope };
-                    let v_init = must_str(&scope, &quote! { &__r });
+                    let set = gen_set_text(&quote! { &__r });
                     quote! {
                         let __r = #call;
-                        let __v = #v_init;
-                        rv.set(__v.into());
+                        #set
                     }
                 }
 

@@ -53,6 +53,10 @@ fn v8_binding_misuse_does_not_compile() {
     cases.compile_fail("tests/compile_fail_marker_attr/v8_state_marker_missing_path.rs");
     cases.compile_fail("tests/compile_fail_marker_attr/v8_state_marker_non_path.rs");
     cases.compile_fail("tests/compile_fail_marker_attr/v8_constructor_unknown_arg.rs");
+    // `#[v8_inherit]` whose derived state is not provably readable as the
+    // base state: no field named for a non-zero-sized base, and a named
+    // field not at offset zero.
+    cases.compile_fail("tests/compile_fail_marker_attr/v8_inherit_unproven_layout.rs");
 
     // `#[v8_constructor(post_init = "...")]`: the named hook does not exist;
     // its signature is not `(scope, this) -> Result<(), OpError>`; the value is

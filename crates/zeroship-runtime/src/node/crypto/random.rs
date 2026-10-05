@@ -48,19 +48,18 @@ pub(crate) fn random_bytes_callback(
         resolver.resolve(scope, undef.into());
         let cb_global = v8::Global::new(scope, cb);
         let buf_global = v8::Global::new(scope, buffer);
-        let then_key = v8::String::new(scope, "then").unwrap();
-        let then_fn: v8::Local<v8::Function> =
-            promise.get(scope, then_key.into()).unwrap().try_into().unwrap();
         // Build a thunk that calls cb(null, buf):
         let external = v8::External::new(
             scope,
             Box::into_raw(Box::new((cb_global, buf_global))) as *mut std::ffi::c_void,
         );
-        let thunk_tmpl = v8::FunctionTemplate::builder(thunk_callback)
+        let thunk_tmpl = crate::callback::template_builder(thunk_callback)
             .data(external.into())
             .build(scope);
         let thunk = thunk_tmpl.get_function(scope).unwrap();
-        let _ = then_fn.call(scope, promise.into(), &[thunk.into()]);
+        // The V8 API's own `then`, so a `then` script put on
+        // Promise.prototype is never looked up or called here.
+        let _ = promise.then(scope, thunk);
     } else {
         // Sync: return Buffer directly.
         let buffer = buffer::emit_buffer(scope, &buf);
@@ -283,18 +282,17 @@ fn schedule_callback<'s>(
     resolver.resolve(scope, undef.into());
     let cb_global = v8::Global::new(scope, cb);
     let arg_global = v8::Global::new(scope, arg);
-    let then_key = v8::String::new(scope, "then").unwrap();
-    let then_fn: v8::Local<v8::Function> =
-        promise.get(scope, then_key.into()).unwrap().try_into().unwrap();
     let external = v8::External::new(
         scope,
         Box::into_raw(Box::new((cb_global, arg_global))) as *mut std::ffi::c_void,
     );
-    let thunk_tmpl = v8::FunctionTemplate::builder(thunk_callback)
+    let thunk_tmpl = crate::callback::template_builder(thunk_callback)
         .data(external.into())
         .build(scope);
     let thunk = thunk_tmpl.get_function(scope).unwrap();
-    let _ = then_fn.call(scope, promise.into(), &[thunk.into()]);
+    // The V8 API's own `then`, so a `then` script put on
+    // Promise.prototype is never looked up or called here.
+    let _ = promise.then(scope, thunk);
 }
 
 // ---------------------------------------------------------------------------

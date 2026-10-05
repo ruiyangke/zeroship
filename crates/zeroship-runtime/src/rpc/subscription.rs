@@ -558,7 +558,7 @@ fn retain_until_settled(
     ws_id: u32,
 ) -> Result<(), DispatchResult> {
     let id = v8::Integer::new_from_unsigned(scope, ws_id);
-    let callback = v8::FunctionTemplate::builder(wake_subscription_callback)
+    let callback = crate::callback::template_builder(wake_subscription_callback)
         .data(id.into())
         .build(scope)
         .get_function(scope)

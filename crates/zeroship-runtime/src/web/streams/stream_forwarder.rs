@@ -592,12 +592,12 @@ fn schedule_next_read(
 // forwarder avoids rooting its reader through the promise reaction itself.
 fn make_on_chunk_callback<'s>(scope: &mut v8::PinScope<'s, '_>, stream_id: u32) -> v8::Local<'s, v8::Function> {
     let id = v8::Integer::new_from_unsigned(scope, stream_id);
-    v8::FunctionTemplate::builder(on_chunk_callback).data(id.into()).build(scope).get_function(scope).unwrap()
+    crate::callback::template_builder(on_chunk_callback).data(id.into()).build(scope).get_function(scope).unwrap()
 }
 
 fn make_on_error_callback<'s>(scope: &mut v8::PinScope<'s, '_>, stream_id: u32) -> v8::Local<'s, v8::Function> {
     let id = v8::Integer::new_from_unsigned(scope, stream_id);
-    v8::FunctionTemplate::builder(on_error_callback).data(id.into()).build(scope).get_function(scope).unwrap()
+    crate::callback::template_builder(on_error_callback).data(id.into()).build(scope).get_function(scope).unwrap()
 }
 
 fn on_chunk_callback(
@@ -740,7 +740,7 @@ fn reject_chunk(
     error_forwarder(fwd, state, stream_id, msg);
     let Some(reader) = reader else { return };
     let cancel = |scope: &mut v8::PinScope| {
-        let text = crate::web::js_text(scope, msg);
+        let text = crate::strings::message(scope, msg);
         let reason = v8::Exception::type_error(scope, text);
         cancel_source(scope, reader, reason, internal);
     };

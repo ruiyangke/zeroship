@@ -64,13 +64,7 @@ pub(crate) fn gen_static_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenSt
 
     let call_return = gen_call_return(&call, &m.func.sig.output);
 
-    quote! {
-        #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
-        pub(crate) fn #callback_name(
-            scope: &mut v8::PinScope,
-            args: v8::FunctionCallbackArguments,
-            mut rv: v8::ReturnValue,
-        ) {
+    let body = quote! {
             // No brand check: WebIDL §3.7.4 static operations are
             // invoked with no `this` (or `Class` itself as `this`).
             // No internal-field deref: there's no boxed `Self` to
@@ -78,6 +72,16 @@ pub(crate) fn gen_static_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenSt
             // No re-entrancy guard: there's no `&mut self` to alias.
             #(#extractions)*
             #call_return
+        };
+
+    quote! {
+        #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
+        pub(crate) fn #callback_name(
+            scope: &mut v8::PinScope,
+            args: v8::FunctionCallbackArguments,
+            mut rv: v8::ReturnValue,
+        ) {
+            #body
         }
     }
 }

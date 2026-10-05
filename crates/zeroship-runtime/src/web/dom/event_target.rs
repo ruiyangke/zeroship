@@ -117,6 +117,12 @@ pub type ListenersByType = Rc<RefCell<HashMap<String, Vec<RegisteredListener>>>>
 #[derive(Default)]
 pub struct EventTarget;
 
+impl crate::brand::ClassState for EventTarget {
+    type State = Self;
+    // No fastcall methods, so no slot 1; `install` reserves this many.
+    const FIELD_COUNT: usize = 1;
+}
+
 // The `#[v8_class]` cache slot type from the macro convention. We
 // emit this manually since we're hand-rolling install (the macro
 // would emit it but we're not using the macro here).
@@ -142,7 +148,7 @@ impl EventTarget {
             return v8::Local::new(scope, cached.0.clone());
         }
 
-        let ctor_tmpl = v8::FunctionTemplate::new(scope, et_constructor_callback);
+        let ctor_tmpl = crate::callback::template(scope, et_constructor_callback);
         let class_name = v8::String::new(scope, "EventTarget").unwrap();
         ctor_tmpl.set_class_name(class_name);
         ctor_tmpl
@@ -179,6 +185,19 @@ impl EventTarget {
         local
     }
 
+    /// Brand `obj`, whose internal field 0 holds `state`, as an
+    /// `EventTarget` wrapper. The hand-rolled counterpart of the
+    /// `__zs_brand` every `#[v8_class]` emits, so classes declared
+    /// `#[v8_inherit(EventTarget)]` chain here from their own.
+    #[doc(hidden)]
+    pub fn __zs_brand(
+        scope: &mut v8::PinScope,
+        obj: v8::Local<v8::Object>,
+        state: v8::Local<v8::External>,
+    ) {
+        crate::brand::mark::<Self>(scope, obj, state);
+    }
+
     /// Macro-shape `register`. Hand-rolled to match
     /// `Self::install` above, so `register_native_classes!` can drive
     /// EventTarget alongside its `#[v8_class]` siblings.
@@ -194,19 +213,29 @@ impl EventTarget {
 }
 
 // Hand-rolled constructor for `new EventTarget()`. Allocates the
-// boxed state, attaches via internal field 0, registers the GC
-// finalizer.
+// boxed state, attaches via internal field 0, brands the wrapper,
+// registers the GC finalizer. A call without `new` would store the
+// box into whatever object is the receiver, another class's wrapper
+// included, so it throws instead (WebIDL 3.7.1).
 fn et_constructor_callback(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
     _rv: v8::ReturnValue,
 ) {
+    if !args.is_construct_call() {
+        throw_type_error(
+            scope,
+            "Failed to construct 'EventTarget': Please use the 'new' operator, this DOM object constructor cannot be called as a function.",
+        );
+        return;
+    }
     let this = args.this();
     let boxed = Box::new(EventTarget);
     let raw = Box::into_raw(boxed);
     let raw_addr = raw as usize;
     let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
     this.set_internal_field(0, ext.into());
+    EventTarget::__zs_brand(scope, this, ext);
     let weak = v8::Weak::with_guaranteed_finalizer(
         scope,
         this,
@@ -221,10 +250,10 @@ fn install_proto_method<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     proto_tmpl: v8::Local<v8::ObjectTemplate>,
     name: &str,
-    callback: impl v8::MapFnTo<v8::FunctionCallback>,
+    callback: impl crate::callback::Callback,
 ) {
     let key = v8::String::new(scope, name).unwrap();
-    let fn_tmpl = v8::FunctionTemplate::new(scope, callback);
+    let fn_tmpl = crate::callback::template(scope, callback);
     proto_tmpl.set(key.into(), fn_tmpl.into());
 }
 
@@ -389,8 +418,7 @@ pub fn attach_listeners(
     let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
     obj.set_private(scope, sym, ext.into());
 
-    // Finalizer: drop the Box on GC / isolate teardown. Same shape
-    // as the macro's `gen_box_and_install_finalizer`.
+    // Finalizer: drop the Box on GC / isolate teardown.
     let weak = v8::Weak::with_guaranteed_finalizer(
         scope,
         obj,
@@ -814,7 +842,7 @@ fn dispatch_event_callback(
 // ---------------------------------------------------------------------------
 
 fn throw_type_error(scope: &mut v8::PinScope, msg: &str) {
-    let m = v8::String::new(scope, msg).unwrap();
+    let m = crate::strings::message(scope, msg);
     let exc = v8::Exception::type_error(scope, m);
     scope.throw_exception(exc);
 }
@@ -823,7 +851,7 @@ fn throw_invalid_state(scope: &mut v8::PinScope, msg: &str) {
     // Spec name: InvalidStateError DOMException. We don't have a
     // native DOMException yet, so throw a generic Error with the
     // message — matches what the JS polyfill did.
-    let m = v8::String::new(scope, msg).unwrap();
+    let m = crate::strings::message(scope, msg);
     let exc = v8::Exception::error(scope, m);
     scope.throw_exception(exc);
 }
@@ -837,7 +865,7 @@ fn throw_op_error(scope: &mut v8::PinScope, err: &OpError) {
         scope.throw_exception(local);
         return;
     }
-    let m = v8::String::new(scope, &err.message).unwrap();
+    let m = crate::strings::message(scope, &err.message);
     let exc = match &err.kind {
         crate::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, m),
         crate::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, m),

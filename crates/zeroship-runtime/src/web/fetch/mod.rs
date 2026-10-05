@@ -129,7 +129,7 @@ fn build_admission_error<'s>(
     obj.set(scope, key.into(), v.into());
 
     let key = v8::String::new(scope, "message").unwrap();
-    let v = v8::String::new(scope, msg).unwrap();
+    let v = crate::strings::message(scope, msg);
     obj.set(scope, key.into(), v.into());
 
     let key = v8::String::new(scope, "stack").unwrap();
@@ -224,7 +224,7 @@ impl Drop for FetchSlot {
 /// directly. Run AFTER `embed/fetch.js` so the polyfill's
 /// `globalThis.fetch = fetch` is overwritten.
 pub fn install_fetch_global(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
-    let tmpl = v8::FunctionTemplate::new(scope, fetch_callback);
+    let tmpl = crate::callback::template(scope, fetch_callback);
     let func = tmpl.get_function(scope).unwrap();
     let key = v8::String::new(scope, "fetch").unwrap();
     global.set(scope, key.into(), func.into());
@@ -324,7 +324,7 @@ fn fetch_callback(
                 })
             }
             Err(_) => {
-                let m = crate::web::js_text(scope, &format!("fetch: invalid URL: {url_str}"));
+                let m = crate::strings::message(scope, &format!("fetch: invalid URL: {url_str}"));
                 let exc = v8::Exception::type_error(scope, m);
                 resolver.reject(scope, exc);
                 rv.set(promise.into());
@@ -412,7 +412,7 @@ fn fetch_callback(
             let (alg, upload_stream) = match snapshot_request(scope, req_obj) {
                 Ok(r) => r,
                 Err(msg) => {
-                    let m = crate::web::js_text(scope, &msg);
+                    let m = crate::strings::message(scope, &msg);
                     let exc = v8::Exception::type_error(scope, m);
                     resolver.reject(scope, exc);
                     rv.set(promise.into());
@@ -458,7 +458,7 @@ fn fetch_callback(
             // body: the stream is left unread.
             Ok(false) => break 'upload,
             Err(msg) => {
-                let m = crate::web::js_text(scope, &format!("Network request failed: {msg}"));
+                let m = crate::strings::message(scope, &format!("Network request failed: {msg}"));
                 let exc = v8::Exception::type_error(scope, m);
                 resolver.reject(scope, exc);
                 rv.set(promise.into());
@@ -477,7 +477,7 @@ fn fetch_callback(
                 alg_req.body = RequestBody::Stream(Some(http_network::UploadBody::new(reader)));
             }
             Err(msg) => {
-                let m = crate::web::js_text(scope, &format!("fetch: request body: {msg}"));
+                let m = crate::strings::message(scope, &format!("fetch: request body: {msg}"));
                 let exc = v8::Exception::type_error(scope, m);
                 resolver.reject(scope, exc);
                 rv.set(promise.into());
@@ -533,17 +533,16 @@ fn fetch_callback(
 // Helpers — coercion & snapshot
 // ===========================================================================
 
-/// Run `new Request(input, init)` to coerce arbitrary inputs.
-/// Returns None if the constructor threw (exception left on isolate).
+/// Run `new Request(input, init)` through the realm's own `Request` (never
+/// whatever script stored at `globalThis.Request`) to coerce arbitrary
+/// inputs. Returns None if the constructor threw (exception left on
+/// isolate).
 fn coerce_to_request<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     input: v8::Local<v8::Value>,
     init: v8::Local<v8::Value>,
 ) -> Option<v8::Local<'s, v8::Object>> {
-    let global = scope.get_current_context().global(scope);
-    let key = v8::String::new(scope, "Request")?;
-    let class_v = global.get(scope, key.into())?;
-    let class_fn: v8::Local<v8::Function> = class_v.try_into().ok()?;
+    let class_fn = crate::intrinsics::constructor(scope, crate::intrinsics::Intrinsic::Request)?;
 
     let undef = v8::undefined(scope);
     let init_arg: v8::Local<v8::Value> = if init.is_undefined() {
@@ -589,16 +588,11 @@ fn snapshot_request<'s>(
     use crate::fetch_request::RequestState;
 
     // Reach the boxed RequestState via internal field 0.
-    let raw = req
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-        .map(|ext| ext.value() as *const RequestState)
+    let raw = crate::brand::state::<RequestState>(scope, req)
         .ok_or_else(|| "fetch: input is not a native Request".to_string())?;
-    if raw.is_null() {
-        return Err("fetch: Request has null state".to_string());
-    }
-    // SAFETY: pointer stable for the lifetime of the wrapper.
-    let state: &RequestState = unsafe { &*raw };
+    // SAFETY: the brand proves the pointer is the wrapper's live box,
+    // stable for the lifetime of the wrapper.
+    let state: &RequestState = unsafe { raw.as_ref() };
 
     let method = state.method.borrow().clone();
     let url = state.url.borrow().clone();
@@ -761,7 +755,8 @@ impl FetchSettlement {
                         return Err(reason);
                     }
                 }
-                let m = crate::web::js_text(scope, &format!("Network request failed: {msg}"));
+                let m =
+                    crate::strings::message(scope, &format!("Network request failed: {msg}"));
                 Err(v8::Exception::type_error(scope, m))
             }
         }
@@ -790,10 +785,10 @@ impl FetchSettlement {
 /// for Response, one for Headers, one Box::into_raw + finalizer wiring per
 /// each.
 ///
-/// Falls back to the legacy `globalThis.Response` constructor invocation
-/// if the `ResponseTemplateSlot` isn't present (shouldn't happen at
-/// runtime — `install_global` always sets it — but the fallback keeps the
-/// path correct in tests that bypass install_global).
+/// Falls back to the realm's `Response` constructor if the
+/// `ResponseTemplateSlot` isn't present (shouldn't happen at runtime:
+/// `install_global` always sets it, but the fallback keeps the path
+/// correct in tests that bypass `install_global`).
 fn build_response_object<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     alg: AlgorithmResponse,
@@ -841,21 +836,16 @@ fn build_response_object<'s>(
         url,
         redirected,
     };
-    let global = scope.get_current_context().global(scope);
-    let class_key = v8::String::new(scope, "Response").unwrap();
-    let class_v = global.get(scope, class_key.into()).unwrap();
-    let class_fn: v8::Local<v8::Function> = class_v.try_into().unwrap();
-
     let init = v8::Object::new(scope);
     {
         let key = v8::String::new(scope, "status").unwrap();
         let v = v8::Integer::new_from_unsigned(scope, alg.status as u32);
-        init.set(scope, key.into(), v.into());
+        init.create_data_property(scope, key.into(), v.into());
     }
     if !alg.status_text.is_empty() {
         let key = v8::String::new(scope, "statusText").unwrap();
         let v = v8::String::new(scope, &alg.status_text).unwrap();
-        init.set(scope, key.into(), v.into());
+        init.create_data_property(scope, key.into(), v.into());
     }
     {
         let arr = v8::Array::new(scope, alg.headers.len() as i32);
@@ -868,13 +858,20 @@ fn build_response_object<'s>(
             arr.set_index(scope, i as u32, pair.into());
         }
         let key = v8::String::new(scope, "headers").unwrap();
-        init.set(scope, key.into(), arr.into());
+        init.create_data_property(scope, key.into(), arr.into());
     }
 
     let null_body = v8::null(scope);
-    let result = class_fn
-        .new_instance(scope, &[null_body.into(), init.into()])
-        .unwrap();
+    let Ok(result) = crate::intrinsics::construct(
+        scope,
+        crate::intrinsics::Intrinsic::Response,
+        &[null_body.into(), init.into()],
+    ) else {
+        // Same sentinel as the fast path's: the caller observes a value
+        // that is not a Response and rejects the promise.
+        return v8::Object::new(scope);
+    };
+    let result = v8::Local::new(scope, result);
 
     if let Some(raw) = response_state_ptr_mut(scope, result) {
         let state: &crate::fetch_response::ResponseState = unsafe { &*raw };
@@ -899,12 +896,6 @@ fn response_state_ptr_mut<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     obj: v8::Local<'s, v8::Object>,
 ) -> Option<*mut crate::fetch_response::ResponseState> {
-    let ext = obj
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())?;
-    let ptr = ext.value() as *mut crate::fetch_response::ResponseState;
-    if ptr.is_null() {
-        return None;
-    }
-    Some(ptr)
+    crate::brand::state::<crate::fetch_response::ResponseState>(scope, obj)
+        .map(std::ptr::NonNull::as_ptr)
 }

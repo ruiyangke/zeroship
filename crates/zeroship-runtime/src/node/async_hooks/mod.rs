@@ -73,20 +73,20 @@ fn evaluate<'s>(
     // variadic param. No manual proto.set step here —
     // `AsyncLocalStorage::install` does it all.
     let als_tmpl = als::AsyncLocalStorage::install(scope);
-    let als_fn = als_tmpl.get_function(scope).unwrap();
+    let als_fn = als_tmpl.get_function(scope)?;
 
     set_export(scope, module, "AsyncLocalStorage", als_fn.into());
 
-    let async_resource = make_not_implemented_ctor(scope, "AsyncResource");
+    let async_resource = make_not_implemented_ctor(scope, "AsyncResource")?;
     set_export(scope, module, "AsyncResource", async_resource.into());
 
-    let create_hook = not_implemented_fn(scope, "createHook");
+    let create_hook = not_implemented_fn(scope, "createHook")?;
     set_export(scope, module, "createHook", create_hook.into());
-    let exec_id = not_implemented_fn(scope, "executionAsyncId");
+    let exec_id = not_implemented_fn(scope, "executionAsyncId")?;
     set_export(scope, module, "executionAsyncId", exec_id.into());
-    let trig_id = not_implemented_fn(scope, "triggerAsyncId");
+    let trig_id = not_implemented_fn(scope, "triggerAsyncId")?;
     set_export(scope, module, "triggerAsyncId", trig_id.into());
-    let exec_res = not_implemented_fn(scope, "executionAsyncResource");
+    let exec_res = not_implemented_fn(scope, "executionAsyncResource")?;
     set_export(scope, module, "executionAsyncResource", exec_res.into());
 
     let providers = v8::Object::new(scope);
@@ -115,24 +115,28 @@ fn set_export<'s>(
 }
 
 /// `class X { constructor() { throw Error("X is not implemented...") } }`
+///
+/// `None` when the script cannot run: the module is evaluated on first
+/// import, possibly with a termination already requested, and the pending
+/// exception is left for V8 to reject the import with.
 fn make_not_implemented_ctor<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     name: &'static str,
-) -> v8::Local<'s, v8::Function> {
+) -> Option<v8::Local<'s, v8::Function>> {
     // Inline a tiny JS factory — simpler than wiring a Rust constructor
     // template just to throw.
     let src = format!(
         r#"(function() {{ throw Object.assign(new Error("{name} is not implemented in zeroship's V8 runtime"), {{ code: "ERR_METHOD_NOT_IMPLEMENTED" }}); }})"#
     );
-    let src_v8 = v8::String::new(scope, &src).unwrap();
-    let script = v8::Script::compile(scope, src_v8, None).unwrap();
-    let val = script.run(scope).unwrap();
-    val.try_into().unwrap()
+    let src_v8 = v8::String::new(scope, &src)?;
+    let script = v8::Script::compile(scope, src_v8, None)?;
+    let val = script.run(scope)?;
+    val.try_into().ok()
 }
 
 fn not_implemented_fn<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     name: &'static str,
-) -> v8::Local<'s, v8::Function> {
+) -> Option<v8::Local<'s, v8::Function>> {
     make_not_implemented_ctor(scope, name)
 }

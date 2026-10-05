@@ -226,27 +226,14 @@ pub fn build<'s>(
         message: message.to_string(),
         code: legacy_code_for_name(name),
     };
-    let boxed: Box<DOMException> = Box::new(state);
-    let raw = Box::into_raw(boxed);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    obj.set_internal_field(0, ext.into());
+    DOMException::__zs_install(scope, obj, state)
+        .expect("a fresh instance of the class's own template takes its state");
 
     // Wire prototype to DOMException.prototype.
     let class_fn = tmpl.get_function(scope).unwrap();
     let proto_key = v8::String::new(scope, "prototype").unwrap();
     let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
     obj.set_prototype(scope, proto_v);
-
-    // Finalizer: reclaim the Box on GC or isolate teardown.
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut DOMException));
-        }),
-    );
-    std::mem::forget(weak);
 
     obj
 }

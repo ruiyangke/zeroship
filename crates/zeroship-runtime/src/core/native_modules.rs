@@ -76,7 +76,7 @@ pub fn install_global_bridge<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     global: v8::Local<v8::Object>,
 ) {
-    let f = v8::Function::new(scope, bridge_callback).unwrap();
+    let f = crate::callback::function(scope, bridge_callback).unwrap();
     let key = v8::String::new(scope, "__zeroshipNodeBuiltin").unwrap();
     global.set(scope, key.into(), f.into());
 }
@@ -96,11 +96,10 @@ fn bridge_callback(
     let module = match resolve_native(scope, &specifier) {
         Some(m) => m,
         None => {
-            let msg = v8::String::new(
+            let msg = crate::strings::message(
                 scope,
                 &format!("__zeroshipNodeBuiltin: unknown specifier '{specifier}'"),
-            )
-            .unwrap();
+            );
             let exc = v8::Exception::error(scope, msg);
             scope.throw_exception(exc);
             return;

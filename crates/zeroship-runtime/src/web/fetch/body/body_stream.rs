@@ -149,7 +149,7 @@ fn build_on_fulfilled<'s>(
     let raw_addr = raw as usize;
     let ext = v8::External::new(scope, raw);
 
-    let tmpl = v8::FunctionTemplate::builder(on_fulfilled_raw_callback)
+    let tmpl = crate::callback::template_builder(on_fulfilled_raw_callback)
         .data(ext.into())
         .build(scope);
     let func = tmpl.get_function(scope).unwrap();
@@ -178,7 +178,7 @@ fn build_on_rejected<'s>(
     let raw_addr = raw as usize;
     let ext = v8::External::new(scope, raw);
 
-    let tmpl = v8::FunctionTemplate::builder(on_rejected_raw_callback)
+    let tmpl = crate::callback::template_builder(on_rejected_raw_callback)
         .data(ext.into())
         .build(scope);
     let func = tmpl.get_function(scope).unwrap();
@@ -402,6 +402,6 @@ fn build_type_error<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     msg: &str,
 ) -> v8::Local<'s, v8::Value> {
-    let m = v8::String::new(scope, msg).unwrap();
+    let m = crate::strings::message(scope, msg);
     v8::Exception::type_error(scope, m)
 }

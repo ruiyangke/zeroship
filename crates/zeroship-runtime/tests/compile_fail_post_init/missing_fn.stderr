@@ -23,9 +23,9 @@ error[E0308]: mismatched types
    | expected `&str`, found `String`
    | arguments to this function are incorrect
    |
-note: associated function defined here
-  --> $CARGO/v8-$VERSION/src/string.rs
+note: function defined here
+  --> src/core/strings.rs
    |
-   |   pub fn new<'s>(
-   |          ^^^
+   | pub fn message<'s>(scope: &v8::PinScope<'s, '_>, text: &str) -> v8::Local<'s, v8::String> {
+   |        ^^^^^^^
    = note: this error originates in the attribute macro `v8_class` (in Nightly builds, run with -Z macro-backtrace for more info)

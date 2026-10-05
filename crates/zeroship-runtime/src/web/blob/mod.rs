@@ -202,10 +202,9 @@ pub fn create_blob<'s>(
     wrap_blob_in_v8(scope, blob)
 }
 
-/// True if `obj` is an instance of `globalThis.Blob` (or a subclass —
-/// like File). Public form of `is_blob_instance` for use by other
-/// modules that need to brand-check Blob values (FormData, fetch_body
-/// extract).
+/// True if `obj` is a Blob wrapper (a File included). Public form of
+/// `is_blob_instance` for use by other modules that need to brand-check
+/// Blob values (`FormData`, `fetch_body` extract).
 pub fn is_blob_instance_public(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> bool {
     is_blob_instance(scope, obj)
 }
@@ -216,41 +215,18 @@ pub fn is_blob_instance_public(scope: &mut v8::PinScope, obj: v8::Local<v8::Obje
 /// Used by `WebSocket.send(blob)` to bump `bufferedAmount`
 /// synchronously, per WHATWG §3.1 step 4.
 pub fn blob_size_public(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> u64 {
-    if !is_blob_instance(scope, obj) {
-        return 0;
-    }
-    let Some(ext) = obj
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-    else {
+    let Some(ptr) = crate::brand::state::<Blob>(scope, obj) else {
         return 0;
     };
-    let ptr = ext.value() as *const Blob;
-    if ptr.is_null() {
-        return 0;
-    }
-    // SAFETY: the External points at a Box<Blob> created in
-    // `wrap_blob_in_v8`; the boxed state lives for the wrapper's lifetime.
-    unsafe { (*ptr).len as u64 }
+    // SAFETY: the brand proves the pointer is a live box whose state
+    // starts with a `Blob`; it lives for the wrapper's lifetime.
+    unsafe { ptr.as_ref().len as u64 }
 }
 
-/// True if `obj` is an instance of `globalThis.File`. Used by FormData
-/// to distinguish a File from a plain Blob when storing values.
+/// True if `obj` is a File wrapper. Used by `FormData` to distinguish a File
+/// from a plain Blob when storing values.
 pub fn is_file_instance_public(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> bool {
-    let global = scope.get_current_context().global(scope);
-    let key = match v8::String::new(scope, "File") {
-        Some(s) => s,
-        None => return false,
-    };
-    let class_v = match global.get(scope, key.into()) {
-        Some(v) => v,
-        None => return false,
-    };
-    let class_obj: v8::Local<v8::Object> = match class_v.try_into() {
-        Ok(o) => o,
-        Err(_) => return false,
-    };
-    obj.instance_of(scope, class_obj).unwrap_or(false)
+    crate::brand::is::<File>(scope, obj)
 }
 
 /// Read the bytes out of a Blob (or File, since File is layout-prefix
@@ -260,20 +236,10 @@ pub fn is_file_instance_public(scope: &mut v8::PinScope, obj: v8::Local<v8::Obje
 /// Caller must hold a Local handle for the lifetime of use; the bytes
 /// are copied out of the Rc-shared backing and own a fresh Vec.
 pub fn read_blob_bytes(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> Option<Vec<u8>> {
-    if !is_blob_instance(scope, obj) {
-        return None;
-    }
-    let ext = obj
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())?;
-    let ptr = ext.value() as *const Blob;
-    if ptr.is_null() {
-        return None;
-    }
-    // SAFETY: same as `append_part_bytes` — the External points at a
-    // Box<Blob> created in `wrap_blob_in_v8` that stays alive while V8
-    // holds the wrapper.
-    let blob: &Blob = unsafe { &*ptr };
+    let ptr = crate::brand::state::<Blob>(scope, obj)?;
+    // SAFETY: the brand proves the pointer is a live box whose state
+    // starts with a `Blob`, alive while V8 holds the wrapper.
+    let blob: &Blob = unsafe { ptr.as_ref() };
     Some(blob.as_bytes().to_vec())
 }
 
@@ -283,17 +249,10 @@ pub fn read_blob_bytes_and_type(
     scope: &mut v8::PinScope,
     obj: v8::Local<v8::Object>,
 ) -> Option<(Vec<u8>, String)> {
-    if !is_blob_instance(scope, obj) {
-        return None;
-    }
-    let ext = obj
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())?;
-    let ptr = ext.value() as *const Blob;
-    if ptr.is_null() {
-        return None;
-    }
-    let blob: &Blob = unsafe { &*ptr };
+    let ptr = crate::brand::state::<Blob>(scope, obj)?;
+    // SAFETY: the brand proves the pointer is a live box whose state
+    // starts with a `Blob`, alive while V8 holds the wrapper.
+    let blob: &Blob = unsafe { ptr.as_ref() };
     Some((blob.as_bytes().to_vec(), blob.type_.clone()))
 }
 
@@ -311,32 +270,16 @@ fn append_part_bytes(
     val: v8::Local<v8::Value>,
     out: &mut Vec<u8>,
 ) -> Result<(), OpError> {
-    // BlobPart variant 1: Blob (or File via inheritance).
-    // We detect Blob by reading internal field 0 and seeing if the
-    // External resolves to our Box<Blob>. We can't do a strict type
-    // check without storing a brand; the brand IS the External pointer
-    // existing on a known internal-field slot. To minimise false hits,
-    // we additionally check the prototype chain via the instanceof
-    // operation against globalThis.Blob.
+    // BlobPart variant 1: Blob (or File, branded as a Blob too).
     if let Ok(obj) = v8::Local::<v8::Object>::try_from(val)
-        && is_blob_instance(scope, obj)
+        && let Some(ptr) = crate::brand::state::<Blob>(scope, obj)
     {
-        // Read the boxed Blob bytes via internal field 0.
-        if let Some(ext) = obj
-            .get_internal_field(scope, 0)
-            .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-        {
-            let ptr = ext.value() as *const Blob;
-            if !ptr.is_null() {
-                // SAFETY: the External was set during construction
-                // to a Box<Blob>; the box stays alive while V8
-                // holds the wrapper, and we don't keep the
-                // reference past this scope.
-                let blob: &Blob = unsafe { &*ptr };
-                out.extend_from_slice(blob.as_bytes());
-                return Ok(());
-            }
-        }
+        // SAFETY: the brand proves the pointer is a live box whose state
+        // starts with a `Blob`; the box stays alive while V8 holds the
+        // wrapper, and we don't keep the reference past this scope.
+        let blob: &Blob = unsafe { ptr.as_ref() };
+        out.extend_from_slice(blob.as_bytes());
+        return Ok(());
     }
 
     // BlobPart variant 2: BufferSource.
@@ -369,26 +312,10 @@ fn append_part_bytes(
     Ok(())
 }
 
-/// True if `obj` is an instance of `globalThis.Blob` per ES `instanceof`.
-/// Used as the brand check inside the `BlobPart` union dispatch — we
-/// can't rely solely on internal-field 0 being an External (other
-/// classes use the same slot pattern), so we additionally verify the
-/// prototype chain.
+/// True if `obj` is a wrapper this runtime branded as holding a Blob (a
+/// File carries the Blob brand as well; see `file::brand_as_blob`).
 fn is_blob_instance(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> bool {
-    let global = scope.get_current_context().global(scope);
-    let key = match v8::String::new(scope, "Blob") {
-        Some(s) => s,
-        None => return false,
-    };
-    let class_v = match global.get(scope, key.into()) {
-        Some(v) => v,
-        None => return false,
-    };
-    let class_obj: v8::Local<v8::Object> = match class_v.try_into() {
-        Ok(o) => o,
-        Err(_) => return false,
-    };
-    obj.instance_of(scope, class_obj).unwrap_or(false)
+    crate::brand::is::<Blob>(scope, obj)
 }
 
 // ---------------------------------------------------------------------------
@@ -631,8 +558,7 @@ impl Blob {
         let s = String::from_utf8_lossy(self.as_bytes()).into_owned();
         let resolver = v8::PromiseResolver::new(scope).unwrap();
         let promise = resolver.get_promise(scope);
-        let v = v8::String::new(scope, &s).unwrap();
-        resolver.resolve(scope, v.into());
+        crate::strings::resolve_text(scope, resolver, &s);
         promise.into()
     }
 
@@ -744,7 +670,7 @@ fn build_blob_stream<'s>(
     let data_ext = v8::External::new(scope, raw_ptr as *mut std::ffi::c_void);
 
     // Build the start function via FunctionTemplate.
-    let start_tmpl = v8::FunctionTemplate::builder(blob_stream_start_callback)
+    let start_tmpl = crate::callback::template_builder(blob_stream_start_callback)
         .data(data_ext.into())
         .build(scope);
     let start_fn = start_tmpl.get_function(scope).unwrap();
@@ -769,7 +695,7 @@ fn build_blob_stream<'s>(
     let start_key = v8::String::new(scope, "start").unwrap();
     us.set(scope, start_key.into(), start_fn.into());
 
-    let stream = crate::streams::construct_global(scope, "ReadableStream", &[us.into()])?;
+    let stream = crate::intrinsics::construct(scope, crate::intrinsics::Intrinsic::ReadableStream, &[us.into()])?;
     Ok(v8::Local::new(scope, stream).into())
 }
 
@@ -831,57 +757,40 @@ fn blob_stream_start_callback(
 // External wrap helper — used by slice() to return a fresh Blob wrapper
 // ---------------------------------------------------------------------------
 
-/// Wrap a Rust-built `Blob` into a JS object whose prototype chain is
-/// the user-visible `globalThis.Blob.prototype`. Used by `slice()` so
-/// the returned object passes `instanceof Blob`.
+/// Wrap a Rust-built `Blob` into a JS object whose prototype is the
+/// realm's `Blob.prototype`. Used by `slice()` so the returned object
+/// passes `instanceof Blob`. `undefined` when V8 cannot allocate the
+/// wrapper, which happens only with an exception or a termination already
+/// pending.
 pub(crate) fn wrap_blob_in_v8<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     blob: Blob,
 ) -> v8::Local<'s, v8::Value> {
     let tmpl = Blob::install(scope);
     let inst_tmpl = tmpl.instance_template(scope);
-    let obj = inst_tmpl.new_instance(scope).unwrap();
+    let Some(obj) = inst_tmpl.new_instance(scope) else {
+        return v8::undefined(scope).into();
+    };
 
-    // Wire the prototype to the user-visible class so `instanceof`
-    // works and the prototype method set matches.
-    let proto = global_class_prototype(scope, "Blob").unwrap_or_else(|| {
-        let class_fn = tmpl.get_function(scope).unwrap();
-        let proto_key = v8::String::new(scope, "prototype").unwrap();
-        class_fn.get(scope, proto_key.into()).unwrap()
-    });
-    obj.set_prototype(scope, proto);
-
-    // Box the Blob, store in internal field 0, install finalizer.
-    let boxed = Box::new(blob);
-    let raw_ptr = Box::into_raw(boxed);
-    let raw_addr = raw_ptr as usize;
-    let ext = v8::External::new(scope, raw_ptr as *mut std::ffi::c_void);
-    obj.set_internal_field(0, ext.into());
-
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut Blob));
+    // The prototype captured when Blob was installed, so `instanceof`
+    // works and the prototype method set matches whatever script has
+    // since stored at `globalThis.Blob`.
+    let proto = match crate::intrinsics::prototype(scope, crate::intrinsics::Intrinsic::Blob) {
+        Some(proto) => Some(proto.into()),
+        None => tmpl.get_function(scope).and_then(|class_fn| {
+            let proto_key = v8::String::new(scope, "prototype")?;
+            class_fn.get(scope, proto_key.into())
         }),
-    );
-    std::mem::forget(weak);
+    };
+    if let Some(proto) = proto {
+        obj.set_prototype(scope, proto);
+    }
+
+    if Blob::__zs_install(scope, obj, blob).is_none() {
+        return v8::undefined(scope).into();
+    }
 
     obj.into()
-}
-
-/// Look up `globalThis[name].prototype`. Mirrors the helper in
-/// `streams/readable.rs`.
-fn global_class_prototype<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    name: &str,
-) -> Option<v8::Local<'s, v8::Value>> {
-    let global = scope.get_current_context().global(scope);
-    let key = v8::String::new(scope, name)?;
-    let class_v = global.get(scope, key.into())?;
-    let class_obj = v8::Local::<v8::Object>::try_from(class_v).ok()?;
-    let proto_key = v8::String::new(scope, "prototype")?;
-    class_obj.get(scope, proto_key.into())
 }
 
 pub mod file;
@@ -907,6 +816,7 @@ pub fn install_globals(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) 
     let blob_class_fn = blob_tmpl.get_function(scope).unwrap();
     let blob_key = v8::String::new(scope, "Blob").unwrap();
     global.set(scope, blob_key.into(), blob_class_fn.into());
+    crate::intrinsics::capture(scope, crate::intrinsics::Intrinsic::Blob, blob_class_fn);
 
     // ----- Install File -----
     let file_tmpl = File::install(scope);
@@ -933,4 +843,5 @@ pub fn install_globals(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) 
 
     let file_key = v8::String::new(scope, "File").unwrap();
     global.set(scope, file_key.into(), file_class_fn.into());
+    crate::intrinsics::capture(scope, crate::intrinsics::Intrinsic::File, file_class_fn);
 }

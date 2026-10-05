@@ -43,7 +43,7 @@ pub(crate) struct ClassConfig<'a> {
     /// Whether at least one method is `#[v8_method(fastcall)]` /
     /// `#[v8_getter(fastcall)]`. Set on the install path's
     /// internal-field count (1 → 2 slots), threaded into
-    /// `gen_box_and_install_finalizer`'s aligned-pointer install, and
+    /// `__zs_install`'s aligned-pointer install, and
     /// switches install's per-method emit between `FunctionTemplate::new`
     /// and `FunctionTemplate::builder().build_fast()`.
     pub has_any_fastcall: bool,
@@ -60,6 +60,10 @@ pub(crate) struct ClassConfig<'a> {
     /// `#[v8_inherit(BasePath)]` — parent class whose install template
     /// the derived class chains via `FunctionTemplate::inherit`.
     pub inherit_base: Option<syn::Path>,
+    /// `#[v8_inherit(BasePath, state_field = field)]`: the field of the
+    /// derived state that holds the base class's state. `None` when the
+    /// base state is zero-sized and needs no field.
+    pub inherit_state_field: Option<syn::Ident>,
     /// `#[v8_async_iterable(method = "name")]` — JS-visible method
     /// name to alias under `[Symbol.asyncIterator]`.
     pub async_iterable_method: Option<String>,
@@ -117,6 +121,7 @@ impl<'a> ClassConfig<'a> {
             to_string_tag,
             inherit_intrinsic,
             inherit_base,
+            inherit_state_field: None,
             async_iterable_method,
             consts,
             iterable_codegen,

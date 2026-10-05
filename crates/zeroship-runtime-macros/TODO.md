@@ -13,9 +13,11 @@ Consumer-side migrations: `crates/zeroship-runtime/TODO.md`.
 
 ### Core `#[v8_class]`
 
-- **Brand check** via cached prototype walk (WebIDL §3.7) — `c95915e1`,
-  lazy-capture follow-up `b0339e23`. Per-class `__brand_check_<Class>`
-  walks ≤32 prototype links; subclasses (`#[v8_inherit]`) match.
+- **Brand check** (WebIDL 3.7): per-class `__brand_check_<Class>` tests
+  the state type's brand (`zeroship_runtime::brand`: a per-isolate private
+  symbol carrying internal field 0's External, set by the constructor and
+  `<Class>::__zs_brand`); subclasses (`#[v8_inherit]`) carry their base
+  classes' brands and match.
 - **`must_new`** constructor TypeError for `Foo()` without `new` — default-on,
   opt-out via `#[v8_constructor(callable_no_new)]` — `5b16b016`.
 - **`[SameObject]` getter cache** — `#[v8_getter(same_object)]` stashes
@@ -141,10 +143,12 @@ Consumer-side migrations: `crates/zeroship-runtime/TODO.md`.
     pointer in slot 1; fastcall shim reads via
     `get_aligned_pointer_from_internal_field(1, 0)` — single load,
     no scope.
-  - Brand check on fast path: trust V8's CFunction-typed receiver
-    (TurboFan inserts hidden-class shape check before dispatch;
-    cross-class deception deopts to the slow callback's prototype-walk
-    brand check). One load saved per fast call.
+  - Brand check on fast path: none. The method's `v8::Signature` limits
+    the receiver to instances of the class's template (any other receiver
+    takes the slow callback's brand check), and `<Class>::__zs_install`,
+    the only state installer, sets slot 1, so every such instance the
+    runtime hands to script has it. Both halves are driven under an
+    optimised call in `tests/v8_fastcall_smoke.rs`.
   - Compile-time validation: rejects `&mut self`, `String`/`Vec<u8>`/
     `Option<T>` returns, unsupported arg types. Compile-fail doctests
     in `runtime/src/lib.rs` document the rules.

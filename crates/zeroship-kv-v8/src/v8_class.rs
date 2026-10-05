@@ -397,23 +397,7 @@ pub fn mint_kv<'s>(
     obj.set_prototype(scope, proto_v);
 
     let state = Kv { kv, meter };
-    let boxed: Box<Kv> = Box::new(state);
-    let raw = Box::into_raw(boxed);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    obj.set_internal_field(0, ext.into());
-
-    // SAFETY: `raw_addr` was Box::into_raw'd from `Box<Kv>`; the
-    // finalizer casts back to the same type and drops the Box exactly
-    // once when V8 reclaims the wrapper, releasing the scoped Rust handle.
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut Kv));
-        }),
-    );
-    std::mem::forget(weak);
+    Kv::__zs_install(scope, obj, state)?;
 
     Some(obj)
 }

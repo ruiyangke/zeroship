@@ -129,13 +129,7 @@ pub(crate) fn gen_same_object_getter_callback(
         }
     };
 
-    quote! {
-        #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
-        pub(crate) fn #callback_name(
-            scope: &mut v8::PinScope,
-            args: v8::FunctionCallbackArguments,
-            mut rv: v8::ReturnValue,
-        ) {
+    let body = quote! {
             // 1. Brand check before touching internal fields. Same
             //    contract as every other generated callback — see
             //    `__brand_check_<ClassTy>`'s doc-comment.
@@ -215,6 +209,16 @@ pub(crate) fn gen_same_object_getter_callback(
             let _ = __this.set_private(scope, __priv, __local.into());
 
             rv.set(__local.into());
+        };
+
+    quote! {
+        #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
+        pub(crate) fn #callback_name(
+            scope: &mut v8::PinScope,
+            args: v8::FunctionCallbackArguments,
+            mut rv: v8::ReturnValue,
+        ) {
+            #body
         }
     }
 }

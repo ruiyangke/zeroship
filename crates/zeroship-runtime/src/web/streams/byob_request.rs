@@ -19,10 +19,11 @@
 //! the nested-RefCell deadlock risk InvalidateBYOBRequest could otherwise
 //! create when the controller is mid-borrow.
 
+use crate::callback::Callback;
+use crate::intrinsics::{self, Intrinsic};
 use crate::streams::slots::{self, VIEW};
 
 const CONTROLLER_OBJ_SLOT: &str = "[[controllerObj]]";
-const TAG_SLOT: &str = "[[byobRequest.tag]]";
 
 // ---------------------------------------------------------------------------
 // State (empty marker — see module doc)
@@ -42,25 +43,25 @@ pub struct BYOBRequestState {
 // ---------------------------------------------------------------------------
 
 pub fn is_byob_request(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> bool {
-    if obj
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-        .map(|e| e.value().is_null())
-        .unwrap_or(true)
-    {
-        return false;
-    }
-    !slots::slot_is_empty(scope, obj, TAG_SLOT)
+    crate::brand::is::<BYOBRequestState>(scope, obj)
 }
 
 // ---------------------------------------------------------------------------
 // Class template
 // ---------------------------------------------------------------------------
 
+/// The isolate's `ReadableStreamBYOBRequest` template: the one the global
+/// exposes and every request is an instance of.
 fn request_class_template<'s>(
     scope: &mut v8::PinScope<'s, '_>,
 ) -> v8::Local<'s, v8::FunctionTemplate> {
-    let ctor_tmpl = v8::FunctionTemplate::new(scope, illegal_constructor_callback);
+    intrinsics::template(scope, Intrinsic::ReadableStreamBYOBRequest, build_request_class_template)
+}
+
+fn build_request_class_template<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+) -> v8::Local<'s, v8::FunctionTemplate> {
+    let ctor_tmpl = crate::callback::template(scope, illegal_constructor_callback);
     let class_name = v8::String::new(scope, "ReadableStreamBYOBRequest").unwrap();
     ctor_tmpl.set_class_name(class_name);
     ctor_tmpl
@@ -71,7 +72,7 @@ fn request_class_template<'s>(
 
     {
         let key = v8::String::new(scope, "view").unwrap();
-        let getter_tmpl = v8::FunctionTemplate::new(scope, view_getter_callback);
+        let getter_tmpl = crate::callback::template(scope, view_getter_callback);
         proto.set_accessor_property(
             key.into(),
             Some(getter_tmpl),
@@ -102,10 +103,10 @@ fn install_proto_method(
     scope: &mut v8::PinScope,
     proto: v8::Local<v8::ObjectTemplate>,
     name: &str,
-    cb: impl v8::MapFnTo<v8::FunctionCallback>,
+    cb: impl Callback,
 ) {
     let key = v8::String::new(scope, name).unwrap();
-    let tmpl = v8::FunctionTemplate::new(scope, cb);
+    let tmpl = crate::callback::template(scope, cb);
     proto.set(key.into(), tmpl.into());
 }
 
@@ -124,41 +125,26 @@ fn illegal_constructor_callback(
 // ---------------------------------------------------------------------------
 
 /// Build a fresh BYOBRequest wrapper bound to `controller` + `view`.
+/// `None` when V8 cannot allocate the wrapper, which happens only with an
+/// exception or a termination already pending.
 pub fn build<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     controller: v8::Local<v8::Object>,
     view: v8::Local<v8::ArrayBufferView>,
-) -> v8::Local<'s, v8::Object> {
+) -> Option<v8::Local<'s, v8::Object>> {
     let tmpl = request_class_template(scope);
     let inst_tmpl = tmpl.instance_template(scope);
-    let req = inst_tmpl.new_instance(scope).unwrap();
-    let class_fn = tmpl.get_function(scope).unwrap();
-    let proto_key = v8::String::new(scope, "prototype").unwrap();
-    let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
-    req.set_prototype(scope, proto_v);
+    let req = inst_tmpl.new_instance(scope)?;
+    if let Some(proto) = intrinsics::prototype(scope, Intrinsic::ReadableStreamBYOBRequest) {
+        req.set_prototype(scope, proto.into());
+    }
 
-    let state = BYOBRequestState { _marker: () };
-    let boxed = Box::new(state);
-    let raw_ptr = Box::into_raw(boxed);
-    let raw_addr = raw_ptr as usize;
-    let ext = v8::External::new(scope, raw_ptr as *mut std::ffi::c_void);
-    req.set_internal_field(0, ext.into());
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        req,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut BYOBRequestState));
-        }),
-    );
-    std::mem::forget(weak);
-
-    let tag = v8::Boolean::new(scope, true);
-    slots::write_slot(scope, req, TAG_SLOT, tag.into());
+    crate::brand::wrap(scope, req, BYOBRequestState { _marker: () });
     slots::write_slot(scope, req, CONTROLLER_OBJ_SLOT, controller.into());
     let view_v: v8::Local<v8::Value> = view.into();
     slots::write_slot(scope, req, VIEW, view_v);
 
-    req
+    Some(req)
 }
 
 /// `InvalidateBYOBRequest(request)` per spec §3.7.5.4. Reference impl:
@@ -319,4 +305,5 @@ pub fn install(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     let class_fn = tmpl.get_function(scope).unwrap();
     let key = v8::String::new(scope, "ReadableStreamBYOBRequest").unwrap();
     global.set(scope, key.into(), class_fn.into());
+    intrinsics::capture(scope, Intrinsic::ReadableStreamBYOBRequest, class_fn);
 }

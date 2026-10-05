@@ -36,14 +36,14 @@ pub(super) fn start<'s>(
         ],
     );
     let reader = v8::Object::new(scope);
-    let read = v8::FunctionTemplate::builder(read_callback)
+    let read = crate::callback::template_builder(read_callback)
         .data(data.into())
         .build(scope)
         .get_function(scope)
         .ok_or(InvocationError::Engine(
             "could not create RPC stream reader",
         ))?;
-    let cancel = v8::FunctionTemplate::builder(cancel_callback)
+    let cancel = crate::callback::template_builder(cancel_callback)
         .data(data.into())
         .build(scope)
         .get_function(scope)
@@ -153,11 +153,11 @@ fn read_callback<'s>(
             }
         };
         resolver.resolve(scope, value)?;
-        let on_result = v8::FunctionTemplate::builder(result_callback)
+        let on_result = crate::callback::template_builder(result_callback)
             .data(data.into())
             .build(scope)
             .get_function(scope)?;
-        let on_error = v8::FunctionTemplate::builder(error_callback)
+        let on_error = crate::callback::template_builder(error_callback)
             .data(data.into())
             .build(scope)
             .get_function(scope)?;

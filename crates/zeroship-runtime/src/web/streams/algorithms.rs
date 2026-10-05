@@ -891,7 +891,7 @@ pub fn writable_stream_close<'s>(
                 _ => "errored",
             }
         );
-        let v8_msg = v8::String::new(scope, &msg).unwrap();
+        let v8_msg = crate::strings::message(scope, &msg);
         let exc = v8::Exception::type_error(scope, v8_msg);
         return rejected_with_promise(scope, exc);
     }
@@ -1175,13 +1175,21 @@ pub fn initialize_transform_stream<'s>(
 
     // Build the readable (read side of the TS) — pull = waits on
     // backpressureChangePromise; cancel = TransformStreamSourceCancel.
-    let readable =
-        crate::streams::transform::build_readable_for_ts(scope, stream, start_promise, readable);
+    // Either half is None only with an exception or termination already
+    // pending, which the caller leaves pending.
+    let Some(readable) =
+        crate::streams::transform::build_readable_for_ts(scope, stream, start_promise, readable)
+    else {
+        return;
+    };
 
     // Build the writable (write side of the TS) — write = perform_transform;
     // close = perform flush + close readable; abort = error TS.
-    let writable =
-        crate::streams::transform::build_writable_for_ts(scope, stream, start_promise, writable);
+    let Some(writable) =
+        crate::streams::transform::build_writable_for_ts(scope, stream, start_promise, writable)
+    else {
+        return;
+    };
 
     // Stash both halves in priv-syms on the TS wrapper.
     crate::streams::slots::write_slot(scope, stream, slots::READABLE, readable.into());

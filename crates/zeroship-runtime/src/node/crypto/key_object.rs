@@ -42,8 +42,6 @@ use zeroship_runtime_macros::v8_class;
 // State + brand
 // ---------------------------------------------------------------------------
 
-pub const KEY_OBJECT_TAG: u8 = 0xC2;
-
 #[derive(Clone)]
 pub struct KeyObjectState {
     pub key_type: KeyType,
@@ -107,18 +105,16 @@ impl KeyObjectState {
     }
 }
 
-#[repr(C)]
+/// A `KeyObject` wrapper's boxed state, shared by the Public / Private /
+/// Secret subclasses. `is_key_object` tells a `KeyObject` wrapper apart by
+/// its brand (`crate::brand`).
 pub struct KeyObject {
-    pub tag: u8,
     pub state: KeyObjectState,
 }
 
 impl KeyObject {
     pub fn new_box(state: KeyObjectState) -> Self {
-        Self {
-            tag: KEY_OBJECT_TAG,
-            state,
-        }
+        Self { state }
     }
 }
 
@@ -208,7 +204,7 @@ impl KeyObject {
 }
 
 #[v8_class]
-#[v8_inherit(KeyObject)]
+#[v8_inherit(KeyObject, state_field = key)]
 #[v8_to_string_tag = "PublicKeyObject"]
 impl PublicKeyObject {
     #[v8_constructor]
@@ -218,7 +214,7 @@ impl PublicKeyObject {
 }
 
 #[v8_class]
-#[v8_inherit(KeyObject)]
+#[v8_inherit(KeyObject, state_field = key)]
 #[v8_to_string_tag = "PrivateKeyObject"]
 impl PrivateKeyObject {
     #[v8_constructor]
@@ -228,7 +224,7 @@ impl PrivateKeyObject {
 }
 
 #[v8_class]
-#[v8_inherit(KeyObject)]
+#[v8_inherit(KeyObject, state_field = key)]
 #[v8_to_string_tag = "SecretKeyObject"]
 impl SecretKeyObject {
     #[v8_constructor]
@@ -237,46 +233,41 @@ impl SecretKeyObject {
     }
 }
 
-pub struct PublicKeyObject;
-pub struct PrivateKeyObject;
-pub struct SecretKeyObject;
+// The subclasses exist for `instanceof` and their prototypes; their
+// constructors always throw, and key wrappers hold a `KeyObject`. Each state
+// still carries one, first, so the KeyObject callbacks a subclass inherits
+// could read a subclass state as a KeyObject.
+pub struct PublicKeyObject {
+    key: KeyObject,
+}
+pub struct PrivateKeyObject {
+    key: KeyObject,
+}
+pub struct SecretKeyObject {
+    key: KeyObject,
+}
 
 // ---------------------------------------------------------------------------
 // Brand check + state extraction
 // ---------------------------------------------------------------------------
 
+/// Whether `value` is a `KeyObject` wrapper: one this runtime branded as
+/// holding a `KeyObject`.
 pub fn is_key_object(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> bool {
-    let obj = match v8::Local::<v8::Object>::try_from(value) {
-        Ok(o) => o,
-        Err(_) => return false,
-    };
-    if obj.internal_field_count() != 1 {
-        return false;
-    }
-    let field = match obj.get_internal_field(scope, 0) {
-        Some(f) => f,
-        None => return false,
-    };
-    let ext = match v8::Local::<v8::External>::try_from(field) {
-        Ok(e) => e,
-        Err(_) => return false,
-    };
-    let ptr = ext.value() as *const u8;
-    if ptr.is_null() {
-        return false;
-    }
-    let tag = unsafe { *ptr };
-    tag == KEY_OBJECT_TAG
+    crate::brand::value_state::<KeyObject>(scope, value).is_some()
 }
 
+/// Read `&KeyObjectState` from a wrapper the caller has already brand
+/// checked with [`is_key_object`].
 pub fn state_unchecked<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     this: v8::Local<v8::Object>,
 ) -> &'s KeyObjectState {
-    let field = this.get_internal_field(scope, 0).unwrap();
-    let ext: v8::Local<v8::External> = field.try_into().unwrap();
-    let ptr = ext.value() as *const KeyObject;
-    unsafe { &(*ptr).state }
+    let ptr = crate::brand::state::<KeyObject>(scope, this)
+        .expect("state_unchecked: the caller checked is_key_object");
+    // SAFETY: the brand proves the pointer is the wrapper's live
+    // Box<KeyObject>, alive while the wrapper is.
+    unsafe { &ptr.as_ref().state }
 }
 
 pub fn downcast_state<'s>(
@@ -319,19 +310,8 @@ fn build_with_template<'s>(
     let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
     inst.set_prototype(scope, proto_v);
 
-    let boxed: Box<KeyObject> = Box::new(KeyObject::new_box(state));
-    let raw = Box::into_raw(boxed);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    inst.set_internal_field(0, ext.into());
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        inst,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut KeyObject));
-        }),
-    );
-    std::mem::forget(weak);
+    KeyObject::__zs_install(scope, inst, KeyObject::new_box(state))
+        .expect("a fresh instance of the class's own template takes its state");
     inst
 }
 
@@ -923,7 +903,9 @@ fn unpack_input_options(
             passphrase: None,
         });
     }
-    let key_value = obj.get(scope, key_attr.into()).unwrap();
+    let key_value = obj
+        .get(scope, key_attr.into())
+        .ok_or_else(|| OpError::node("ERR_INVALID_ARG_VALUE", "options.key could not be read"))?;
 
     let infer_buffer_format = format_str.is_none() && !key_value.is_string();
     let mut format = match format_str.as_deref() {
@@ -2070,7 +2052,7 @@ fn export_impl<'s>(
     let opts = parse_export_options(scope, options, state.key_type)?;
     if let KeyMaterial::Symmetric(ref bytes) = state.material {
         return match opts.format {
-            ExportFormat::Jwk => Ok(jwk_export_secret(scope, bytes)),
+            ExportFormat::Jwk => jwk_export_secret(scope, bytes),
             _ => Ok(buffer::emit_buffer(scope, bytes)),
         };
     }
@@ -2090,7 +2072,7 @@ fn export_impl<'s>(
     match opts.format {
         ExportFormat::Pem => {
             let pem = pem_encode(&label, &der);
-            Ok(buffer::emit_string(scope, &pem).into())
+            Ok(buffer::emit_string(scope, &pem)?.into())
         }
         ExportFormat::Der => Ok(buffer::emit_buffer(scope, &der)),
         ExportFormat::Jwk => unreachable!(),
@@ -2226,14 +2208,18 @@ fn encode_to_der(
     }
 }
 
+/// A secret key as a JWK. A secret key can be any length, so its base64url
+/// form can be longer than V8 holds as a string: that is a `RangeError`.
 fn jwk_export_secret<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     bytes: &[u8],
-) -> v8::Local<'s, v8::Value> {
+) -> Result<v8::Local<'s, v8::Value>, OpError> {
     let obj = v8::Object::new(scope);
     set_str(scope, obj, "kty", "oct");
-    set_str(scope, obj, "k", &base64url_encode(bytes));
-    obj.into()
+    let k_key = v8::String::new(scope, "k").unwrap();
+    let k_value = crate::strings::new(scope, &base64url_encode(bytes))?;
+    obj.set(scope, k_key.into(), k_value.into());
+    Ok(obj.into())
 }
 
 fn jwk_export_asymmetric<'s>(
@@ -2467,7 +2453,9 @@ fn parse_key_usages(
     })?;
     let mut out = Vec::with_capacity(arr.length() as usize);
     for i in 0..arr.length() {
-        let v = arr.get_index(scope, i).unwrap();
+        let v = arr
+            .get_index(scope, i)
+            .ok_or_else(|| OpError::node("ERR_INVALID_ARG_VALUE", "keyUsages could not be read"))?;
         let s = v.to_rust_string_lossy(scope);
         let usage = KeyUsage::from_str(&s).ok_or_else(|| {
             OpError::node("ERR_INVALID_ARG_VALUE", format!("Unknown key usage: {s}"))

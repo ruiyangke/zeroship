@@ -38,13 +38,13 @@
 
 use std::cell::RefCell;
 
+use crate::callback::Callback;
+use crate::intrinsics::{self, Intrinsic};
 use crate::streams::algorithms;
 use crate::streams::promise_resolve;
 use crate::streams::readable_default_controller::AlgorithmFn;
 use crate::streams::slots;
 use crate::streams::transform::TransformHalves;
-
-const TS_CTRL_BRAND: &str = "[[ts.ctrl.brand]]";
 
 // ---------------------------------------------------------------------------
 // Controller state
@@ -124,12 +124,13 @@ fn ensure_finish_promise<'s>(
 // V8 wrapper helpers
 // ---------------------------------------------------------------------------
 
+/// Whether `obj` is a `TransformStreamDefaultController` wrapper: one this
+/// runtime branded as holding a `TSControllerState`.
 pub fn is_ts_default_controller(
     scope: &mut v8::PinScope,
     obj: v8::Local<v8::Object>,
 ) -> bool {
-    let tag = slots::private_sym(scope, TS_CTRL_BRAND);
-    obj.has_private(scope, tag).unwrap_or(false)
+    crate::brand::is::<TSControllerState>(scope, obj)
 }
 
 pub fn with_state<R>(
@@ -137,16 +138,11 @@ pub fn with_state<R>(
     controller: v8::Local<v8::Object>,
     f: impl FnOnce(&TSControllerState) -> R,
 ) -> Option<R> {
-    if !is_ts_default_controller(scope, controller) {
-        return None;
-    }
-    let raw_v8_field = controller.get_internal_field(scope, 0)?;
-    let ext = v8::Local::<v8::External>::try_from(raw_v8_field).ok()?;
-    let ptr = ext.value() as *const TSControllerState;
-    if ptr.is_null() {
-        return None;
-    }
-    let inst = unsafe { &*ptr };
+    let ptr = crate::brand::state::<TSControllerState>(scope, controller)?;
+    // SAFETY: the brand proves internal field 0 holds the
+    // Box<TSControllerState> stored at construction; it is dropped only by
+    // the V8 weak finalizer.
+    let inst = unsafe { ptr.as_ref() };
     Some(f(inst))
 }
 
@@ -163,10 +159,22 @@ pub fn ts_stream_obj<'s>(
 // Class template
 // ---------------------------------------------------------------------------
 
+/// The isolate's `TransformStreamDefaultController` template: the one the
+/// global exposes and every controller is an instance of.
 fn controller_class_template<'s>(
     scope: &mut v8::PinScope<'s, '_>,
 ) -> v8::Local<'s, v8::FunctionTemplate> {
-    let ctor_tmpl = v8::FunctionTemplate::new(scope, illegal_constructor_callback);
+    intrinsics::template(
+        scope,
+        Intrinsic::TransformStreamDefaultController,
+        build_controller_class_template,
+    )
+}
+
+fn build_controller_class_template<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+) -> v8::Local<'s, v8::FunctionTemplate> {
+    let ctor_tmpl = crate::callback::template(scope, illegal_constructor_callback);
     let class_name = v8::String::new(scope, "TransformStreamDefaultController").unwrap();
     ctor_tmpl.set_class_name(class_name);
     ctor_tmpl
@@ -178,7 +186,7 @@ fn controller_class_template<'s>(
     // desiredSize getter (§5.3.5.1)
     {
         let key = v8::String::new(scope, "desiredSize").unwrap();
-        let getter_tmpl = v8::FunctionTemplate::new(scope, desired_size_getter_callback);
+        let getter_tmpl = crate::callback::template(scope, desired_size_getter_callback);
         proto.set_accessor_property(
             key.into(),
             Some(getter_tmpl),
@@ -206,10 +214,10 @@ fn install_proto_method(
     scope: &mut v8::PinScope,
     proto: v8::Local<v8::ObjectTemplate>,
     name: &str,
-    cb: impl v8::MapFnTo<v8::FunctionCallback>,
+    cb: impl Callback,
 ) {
     let key = v8::String::new(scope, name).unwrap();
-    let tmpl = v8::FunctionTemplate::new(scope, cb);
+    let tmpl = crate::callback::template(scope, cb);
     proto.set(key.into(), tmpl.into());
 }
 
@@ -472,17 +480,12 @@ pub fn transform_stream_default_controller_clear_algorithms(
     scope: &mut v8::PinScope,
     controller: v8::Local<v8::Object>,
 ) {
-    let raw = match controller
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-    {
-        Some(e) => e.value() as *mut TSControllerState,
-        None => return,
-    };
-    if raw.is_null() {
+    let Some(mut ptr) = crate::brand::state::<TSControllerState>(scope, controller) else {
         return;
-    }
-    let state = unsafe { &mut *raw };
+    };
+    // SAFETY: the brand proves the pointer is the controller's live
+    // Box<TSControllerState>; we need `&mut` to drop the algorithms.
+    let state = unsafe { ptr.as_mut() };
     state.transform_algorithm = AlgorithmFn::Noop;
     state.flush_algorithm = AlgorithmFn::Noop;
     state.cancel_algorithm = AlgorithmFn::Noop;
@@ -994,42 +997,26 @@ fn algorithm_snapshot(af: &AlgorithmFn) -> Option<AlgorithmSnapshot> {
 // SetUp* — §5.4.1, §5.4.2, §5.4.3
 // ---------------------------------------------------------------------------
 
-/// Build the TS controller wrapper (no algorithms wired yet).
+/// Build the TS controller wrapper (no algorithms wired yet). `None` when
+/// V8 cannot allocate the wrapper, which happens only with an exception or
+/// a termination already pending.
 fn build_controller<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     transform_alg: AlgorithmFn,
     flush_alg: AlgorithmFn,
     cancel_alg: AlgorithmFn,
-) -> v8::Local<'s, v8::Object> {
+) -> Option<v8::Local<'s, v8::Object>> {
     let tmpl = controller_class_template(scope);
     let inst_tmpl = tmpl.instance_template(scope);
-    let controller_obj = inst_tmpl.new_instance(scope).unwrap();
-    let class_fn = tmpl.get_function(scope).unwrap();
-    let proto_key = v8::String::new(scope, "prototype").unwrap();
-    let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
-    controller_obj.set_prototype(scope, proto_v);
+    let controller_obj = inst_tmpl.new_instance(scope)?;
+    if let Some(proto) = intrinsics::prototype(scope, Intrinsic::TransformStreamDefaultController) {
+        controller_obj.set_prototype(scope, proto.into());
+    }
 
     let state = TSControllerState::new(transform_alg, flush_alg, cancel_alg);
-    let boxed = Box::new(state);
-    let raw_ptr = Box::into_raw(boxed);
-    let raw_addr = raw_ptr as usize;
-    let ext = v8::External::new(scope, raw_ptr as *mut std::ffi::c_void);
-    controller_obj.set_internal_field(0, ext.into());
+    crate::brand::wrap(scope, controller_obj, state);
 
-    let brand = slots::private_sym(scope, TS_CTRL_BRAND);
-    let true_v: v8::Local<v8::Value> = v8::Boolean::new(scope, true).into();
-    controller_obj.set_private(scope, brand, true_v);
-
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        controller_obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut TSControllerState));
-        }),
-    );
-    std::mem::forget(weak);
-
-    controller_obj
+    Some(controller_obj)
 }
 
 /// `SetUpTransformStreamDefaultController(stream, controller, transformAlgorithm,
@@ -1050,11 +1037,11 @@ fn set_up_transform_stream_default_controller<'s>(
     transform_alg: AlgorithmFn,
     flush_alg: AlgorithmFn,
     cancel_alg: AlgorithmFn,
-) -> v8::Local<'s, v8::Object> {
-    let controller = build_controller(scope, transform_alg, flush_alg, cancel_alg);
+) -> Option<v8::Local<'s, v8::Object>> {
+    let controller = build_controller(scope, transform_alg, flush_alg, cancel_alg)?;
     slots::write_slot(scope, stream, slots::TS_CONTROLLER, controller.into());
     slots::write_slot(scope, controller, slots::TS_STREAM_OBJ, stream.into());
-    controller
+    Some(controller)
 }
 
 /// `SetUpTransformStreamDefaultControllerFromTransformer(stream, transformer,
@@ -1172,7 +1159,8 @@ pub fn set_up_transform_stream_default_controller_from_transformer<'s>(
         transform_alg,
         flush_alg,
         cancel_alg,
-    );
+    )
+    .ok_or_else(|| OpError::error("TransformStream: controller allocation failed"))?;
 
     // start(controller). Run via tc_scope so a synchronous throw is
     // captured cleanly (no double pending exception in V8 — caller's
@@ -1263,7 +1251,7 @@ enum StartOutcome {
 // ---------------------------------------------------------------------------
 
 fn build_identity_transform_alg(scope: &mut v8::PinScope) -> AlgorithmFn {
-    let tmpl = v8::FunctionTemplate::new(scope, identity_transform_callback);
+    let tmpl = crate::callback::template(scope, identity_transform_callback);
     let f = tmpl.get_function(scope).unwrap();
     let undef: v8::Local<v8::Value> = v8::undefined(scope).into();
     AlgorithmFn::Js {
@@ -1299,4 +1287,5 @@ pub fn install(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     let class_fn = tmpl.get_function(scope).unwrap();
     let key = v8::String::new(scope, "TransformStreamDefaultController").unwrap();
     global.set(scope, key.into(), class_fn.into());
+    intrinsics::capture(scope, Intrinsic::TransformStreamDefaultController, class_fn);
 }

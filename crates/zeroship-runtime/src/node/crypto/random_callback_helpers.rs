@@ -20,12 +20,6 @@ pub(crate) fn schedule_node_cb<'s>(
     let promise = resolver.get_promise(scope);
     let undef = v8::undefined(scope);
     resolver.resolve(scope, undef.into());
-    let then_key = v8::String::new(scope, "then").unwrap();
-    let then_fn: v8::Local<v8::Function> =
-        match promise.get(scope, then_key.into()).and_then(|v| v.try_into().ok()) {
-            Some(f) => f,
-            None => return,
-        };
 
     // Box (cb, err_global, value_global) — recovered in the thunk.
     let cb_global = v8::Global::new(scope, cb);
@@ -38,11 +32,13 @@ pub(crate) fn schedule_node_cb<'s>(
     });
     let raw = Box::into_raw(payload);
     let external = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    let thunk_tmpl = v8::FunctionTemplate::builder(thunk_callback)
+    let thunk_tmpl = crate::callback::template_builder(thunk_callback)
         .data(external.into())
         .build(scope);
     let thunk = thunk_tmpl.get_function(scope).unwrap();
-    let _ = then_fn.call(scope, promise.into(), &[thunk.into()]);
+    // The V8 API's own `then`, so a `then` script put on
+    // Promise.prototype is never looked up or called here.
+    let _ = promise.then(scope, thunk);
 }
 
 struct NodeCallbackPayload {

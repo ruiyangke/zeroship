@@ -62,38 +62,13 @@ pub use readable::{
 };
 pub use transform::{readable_slot, writable_slot};
 
-/// `new globalThis[class_name](...args)` for a stream class, returning what
-/// the constructor threw verbatim: a budget refusal stays the `RangeError`
-/// the constructor raised, for the caller to rethrow or reject with.
-pub(crate) fn construct_global(
-    scope: &mut v8::PinScope,
-    class_name: &str,
-    args: &[v8::Local<v8::Value>],
-) -> Result<v8::Global<v8::Object>, crate::state::OpError> {
-    use crate::state::OpError;
-    let global = scope.get_current_context().global(scope);
-    let key = v8::String::new(scope, class_name)
-        .ok_or_else(|| OpError::error(format!("{class_name}: name allocation failed")))?;
-    let class = global
-        .get(scope, key.into())
-        .and_then(|v| v8::Local::<v8::Function>::try_from(v).ok())
-        .ok_or_else(|| OpError::type_error(format!("globalThis.{class_name} is not a constructor")))?;
-    v8::tc_scope!(let tc, scope);
-    if let Some(instance) = class.new_instance(tc, args) {
-        return Ok(v8::Global::new(tc, instance));
-    }
-    Err(tc.exception().map_or_else(
-        || OpError::error(format!("new {class_name} did not complete")),
-        |exception| OpError::js_value(tc, exception, format!("new {class_name} threw")),
-    ))
-}
-
 /// Install all native stream classes onto `globalThis`. Entry point used
 /// by the runtime's `setup_globals` and by test harnesses.
 pub fn install_native_streams(
     scope: &mut v8::PinScope,
     global: v8::Local<v8::Object>,
 ) {
+    pull_into::capture_view_constructors(scope, global);
     readable::install_native_streams(scope, global);
     readable_byte_controller::install(scope, global);
     readable_byob_reader::install(scope, global);

@@ -42,7 +42,8 @@ pub(crate) struct IterableAttr {
     pub mode: IterMode,
     /// Optional `value_marshal = some_fn` — a free-function path that
     /// the macro calls per-yield to convert a `&V` to
-    /// `v8::Local<v8::Value>`. Skips the built-in
+    /// `v8::Local<v8::Value>`, or to throw and return `None` (a string
+    /// longer than V8 allows, say). Skips the built-in
     /// USVString/ByteString/u32/Vec<u8> classification so users can
     /// surface arbitrary types (e.g. FormData's
     /// `(USVString or File)` union or any v8 Local).
@@ -52,7 +53,7 @@ pub(crate) struct IterableAttr {
     /// fn some_fn<'s>(
     ///     scope: &mut v8::PinScope<'s, '_>,
     ///     v: &V,
-    /// ) -> v8::Local<'s, v8::Value>
+    /// ) -> Option<v8::Local<'s, v8::Value>>
     /// ```
     pub value_marshal: Option<syn::Path>,
 }

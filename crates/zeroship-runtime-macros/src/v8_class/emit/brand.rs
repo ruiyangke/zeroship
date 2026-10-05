@@ -1,188 +1,189 @@
-//! Brand-check helper codegen.
+//! Brand and state-installer codegen.
 //!
 //! Emits the per-class `__brand_check_<Class>` fn used by every
 //! method/getter/setter callback prologue (via
-//! `shared::recover_box`) before the unsafe internal-field deref.
+//! `shared::recover_box`) before the unsafe internal-field deref,
+//! `<Class>::__zs_brand`, which marks a wrapper with the brand the check
+//! looks for, and `<Class>::__zs_install`, the one way a wrapper of the
+//! class gets its native state.
 
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{format_ident, quote};
+use quote::quote;
 
 use super::super::shared::class_config::ClassConfig;
 
-/// Emit the `__brand_check_<Class>` helper fn — the WebIDL §3.7
-/// brand-identity check that walks the receiver's prototype chain
-/// looking for the cached `Foo.prototype`. Returns `true` if the
-/// receiver IS a Foo (or a subclass via `#[v8_inherit]`); `false`
-/// otherwise.
+/// The class's internal field count, as a const expression: 1, or 2 for slot
+/// 1 when the class has fastcall methods. A derived class takes the larger of
+/// its own count and its base's, so a base's fastcall shim always finds slot 1
+/// on it.
+fn field_count(cfg: &ClassConfig) -> TokenStream2 {
+    let own: usize = if cfg.has_any_fastcall { 2 } else { 1 };
+    cfg.inherit_base.as_ref().map_or_else(
+        || quote! { #own },
+        |base| quote! {{
+            let __own: usize = #own;
+            let __base: usize =
+                <#base as ::zeroship_runtime::macro_runtime::brand::ClassState>::FIELD_COUNT;
+            if __own > __base { __own } else { __base }
+        }},
+    )
+}
+
+/// Emit `__brand_check_<Class>`, `<Class>::__zs_brand` and
+/// `<Class>::__zs_install`.
 ///
-/// Walks at most 1024 prototype links — matches V8's internal
-/// `Object::PrototypeChainLength` sanity bound. The cap is NOT a
-/// cycle defence (ECMAScript §10.4.7.2 step 8 already rejects cycle
-/// creation in `Object.setPrototypeOf`); it exists as belt-and-braces
-/// against future proxy-driven prototype chains that might fake
-/// infinite linear depth.
+/// The check asks `zeroship_runtime::brand` whether the receiver is a
+/// wrapper this runtime branded as holding a `Box<State>`. The brand is
+/// a per-isolate private symbol carrying the same `External` as
+/// internal field 0, so script can neither forge it (`Object.create`,
+/// `Object.setPrototypeOf`) nor move it onto another class's wrapper,
+/// which a prototype-chain walk cannot rule out.
 ///
-/// The cached prototype is populated lazily on first call, NOT in
-/// `install` — eager `get_function(scope)` at install time would
-/// freeze the FunctionTemplate's instance shape and silently no-op
-/// any subsequent `prototype_template().set_accessor_property(...)`.
-/// URL hand-installs `searchParams` on the prototype_template after
-/// `URL::install` returns; we must not break that.
+/// `__zs_brand` marks a wrapper for the class's own state type and,
+/// under `#[v8_inherit(Base)]`, for every base state type as well, so
+/// the base class's callbacks read the derived box as their own. That is
+/// sound only when the base state sits at offset zero of the derived
+/// state, and the emitted constants prove it at compile time: with
+/// `state_field = f`, field `f` has exactly the base class's state type
+/// (`ClassState::State`, compared through a raw pointer so no deref
+/// coercion can stand in for it) and offset zero; without it, the base state is
+/// zero-sized. Either way the derived state is at least as aligned.
+///
+/// `__zs_install` writes everything a wrapper's native state consists
+/// of: the box in internal field 0, the same pointer in slot 1 when the
+/// class has fastcall methods (the fast shim reads it there with no
+/// brand check), the brand, and the finalizer that drops the box. The
+/// constructor callback and every wrapper the runtime builds by hand go
+/// through it, so no path can leave the fast shim's slot unset.
 pub(super) fn gen_brand_check_helpers(cfg: &ClassConfig) -> TokenStream2 {
     let class_ty = cfg.class_ty;
-    let install_slot_ty = format_ident!("__InstallSlot_{}", class_ty);
-    let brand_slot_ty = format_ident!("__BrandSlot_{}", class_ty);
-    // brand-check ident from ClassConfig (computed once at
-    // ClassConfig::new). This emit site DEFINES the fn — the cached
-    // ident is what every consumer reads.
+    let state_ty = cfg.state_ty;
     let brand_check_fn = &cfg.brand_check_ident;
+    let base_brand = cfg.inherit_base.as_ref().map(|base| {
+        quote! { <#base>::__zs_brand(scope, obj, state); }
+    });
+    let base_layout = cfg.inherit_base.as_ref().map(|base| {
+        let base_state = quote! {
+            <#base as ::zeroship_runtime::macro_runtime::brand::ClassState>::State
+        };
+        let placement = cfg.inherit_state_field.as_ref().map_or_else(
+            || quote! {
+                const _: () = ::core::assert!(
+                    ::core::mem::size_of::<#base_state>() == 0,
+                    "#[v8_inherit(Base)]: the base state is not zero-sized; name the derived state's field holding it with state_field = f",
+                );
+            },
+            |field| quote! {
+                // The base state is field `#field` itself, at offset zero. A raw
+                // pointer, unlike a reference, never deref-coerces, so a field
+                // that only points at a base state (a `Box`, an `Rc`, a
+                // reference) does not pass for one.
+                const _: fn(&#state_ty) -> *const #base_state =
+                    |__state| ::core::ptr::addr_of!(__state.#field);
+                const _: () = ::core::assert!(
+                    ::core::mem::offset_of!(#state_ty, #field) == 0,
+                    "#[v8_inherit(Base, state_field = f)]: f must be the derived state's field at offset zero",
+                );
+            },
+        );
+        quote! {
+            #placement
+            const _: () = ::core::assert!(
+                ::core::mem::align_of::<#base_state>() <= ::core::mem::align_of::<#state_ty>(),
+                "#[v8_inherit]: the derived state must be at least as aligned as the base state",
+            );
+        }
+    });
+    let field_count = field_count(cfg);
 
     quote! {
-        /// Brand-check helper: walks the prototype chain of `this`
-        /// looking for the cached `Foo.prototype`. Returns true on
-        /// match (the receiver IS a Foo, or a subclass via
-        /// `#[v8_inherit]`), false otherwise.
-        ///
-        /// Walks at most 1024 prototype links — matching V8's own
-        /// internal `Object::PrototypeChainLength` sanity bound. The
-        /// cap is NOT a cycle defence: ECMAScript §10.4.7.2 step 8
-        /// already requires `Object.setPrototypeOf` to reject any
-        /// assignment that would create a cycle, so user JS cannot
-        /// construct one. The cap exists purely as a defence-in-depth
-        /// belt-and-braces against an underlying V8 bug or future
-        /// proxy-driven prototype chain that fakes infinite linear
-        /// depth. Real WebIDL inheritance chains are 1-3 hops; pure
-        /// prototypal chains rarely exceed 5; reaching the cap is a
-        /// pathological case for which "false" is the conservative
-        /// answer.
-        ///
-        /// The cost is dwarfed by the V8 callback overhead —
-        /// the brand check itself is O(depth) Local pointer
-        /// comparisons.
-        ///
-        /// The cached prototype is populated lazily on first call —
-        /// NOT in `install` — because eager `get_function(scope)` at
-        /// install time would freeze the FunctionTemplate's instance
-        /// shape and silently no-op any subsequent
-        /// `prototype_template().set_accessor_property(...)` calls.
-        /// Several classes (URL.searchParams, etc.) install accessors
-        /// on the prototype_template AFTER `Self::install` returns; we
-        /// must not break those.
-        ///
-        /// First-call cost (one-time per isolate): one `get_function`
-        /// + one `.get(prototype)` + one `Eternal::set`. Steady state:
-        /// an isolate-slot read followed by `Eternal::get` (which
-        /// materialises the `Local` straight from the isolate's
-        /// eternal handles cell — NO `GlobalHandles::Create`/`Release`
-        /// per call), plus the chain walk.
-        ///
-        /// Lifetimes are elided here on purpose. An explicit `<'s>`
-        /// would tie the `Local<Object>` argument's lifetime to the
-        /// `&mut PinScope` lifetime in an invariant way (mutable
-        /// references are invariant over their type param), which
-        /// then conflicts with `args.this()`'s callsite-derived
-        /// lifetime. Elision lets each Local pick its own appropriate
-        /// (and shorter) lifetime — the helper body never returns a
-        /// `Local` so there's no need to relate them outside the
-        /// function.
+        /// Brand-check helper: true iff `obj` is a wrapper this runtime
+        /// branded as holding this class's state (or a derived class's,
+        /// via `#[v8_inherit]`).
         #[doc(hidden)]
         #[allow(non_snake_case, dead_code)]
         fn #brand_check_fn(
             scope: &mut v8::PinScope,
             obj: v8::Local<v8::Object>,
         ) -> bool {
-            // Resolve the cached prototype, lazily populating the
-            // brand slot on first call.
-            //
-            // Steady-state: the slot holds an `Eternal<Object>` whose
-            // `get(scope)` materialises a `Local` directly from the
-            // isolate-lifetime cell — NO `GlobalHandles::Create` and
-            // NO matching `Release` on drop.
-            //
-            // Cache-miss path: walk the install slot to materialise
-            // the prototype, then write a populated `Eternal` into a
-            // fresh brand slot. `Eternal::set` only needs `&scope`,
-            // but `scope.set_slot` needs `&mut scope` — we therefore
-            // can't hold any prior `&__BrandSlot_…` / `&__InstallSlot_…`
-            // borrow across the `set_slot` call. The else arm clones
-            // the install template `Global` (one-time cost on first
-            // call per isolate) to release the install-slot borrow
-            // before `set_slot` is invoked.
-            let expected_proto: v8::Local<v8::Object> =
-                if let Some(slot) = scope.get_slot::<#brand_slot_ty>() {
-                    match slot.0.get(scope) {
-                        Some(p) => p,
-                        // Defensive: an empty Eternal in the slot would
-                        // mean someone constructed `__BrandSlot_…(Eternal::empty())`
-                        // and stored it without populating. The macro's
-                        // own lazy-init path always populates before
-                        // `set_slot`, so this branch is unreachable in
-                        // practice — but returning false is the safe
-                        // answer if it ever happens.
-                        None => return false,
-                    }
-                } else {
-                    // Lazy fetch from the install slot. If that slot
-                    // is missing too, the class wasn't installed in
-                    // this isolate — fall through to false.
-                    let tmpl_global = match scope.get_slot::<#install_slot_ty>() {
-                        Some(s) => s.0.clone(),
-                        None => return false,
-                    };
-                    let tmpl_local = v8::Local::new(scope, &tmpl_global);
-                    let func = match tmpl_local.get_function(scope) {
-                        Some(f) => f,
-                        None => return false,
-                    };
-                    let proto_key = match v8::String::new(scope, "prototype") {
-                        Some(s) => s,
-                        None => return false,
-                    };
-                    let proto_v = match func.get(scope, proto_key.into()) {
-                        Some(v) => v,
-                        None => return false,
-                    };
-                    let proto: v8::Local<v8::Object> = match proto_v.try_into() {
-                        Ok(o) => o,
-                        Err(_) => return false,
-                    };
-                    let eternal: v8::Eternal<v8::Object> = v8::Eternal::empty();
-                    eternal.set(scope, proto);
-                    scope.set_slot(#brand_slot_ty(eternal));
-                    proto
-                };
-            // Walk the [[Prototype]] chain. Each `get_prototype` call
-            // can return null (chain root) or a Value (potentially an
-            // Object). The 1024 cap matches V8's internal sanity
-            // bound; cycle creation is already blocked by V8 (see
-            // doc-comment).
-            let mut current: v8::Local<v8::Value> = match obj.get_prototype(scope) {
-                Some(v) => v,
-                None => return false,
-            };
-            for _ in 0..1024 {
-                if current.is_null_or_undefined() {
-                    return false;
-                }
-                let cur_obj: v8::Local<v8::Object> = match current.try_into() {
-                    Ok(o) => o,
-                    Err(_) => return false,
-                };
-                // V8 Locals compare by handle equality, which matches
-                // pointer identity for Persistent-derived Locals. The
-                // cached prototype is the exact Object the install
-                // captured at first-install time; any genuine `new
-                // Foo()` (or instance of a class inheriting Foo) has
-                // that Object on its chain.
-                if cur_obj == expected_proto {
-                    return true;
-                }
-                current = match cur_obj.get_prototype(scope) {
-                    Some(v) => v,
-                    None => return false,
-                };
+            ::zeroship_runtime::macro_runtime::brand::is::<#state_ty>(scope, obj)
+        }
+
+        impl ::zeroship_runtime::macro_runtime::brand::ClassState for #class_ty {
+            type State = #state_ty;
+            const FIELD_COUNT: usize = #field_count;
+        }
+
+        #base_layout
+
+        impl #class_ty {
+            /// Brand `obj`, whose internal field 0 holds `state` (a
+            /// `Box` of this class's state), as a wrapper of this class
+            /// and of every class it inherits from. Only
+            /// `__zs_install` and a derived class's `__zs_brand` call
+            /// it.
+            #[doc(hidden)]
+            pub fn __zs_brand(
+                scope: &mut v8::PinScope,
+                obj: v8::Local<v8::Object>,
+                state: v8::Local<v8::External>,
+            ) {
+                ::zeroship_runtime::macro_runtime::brand::mark::<#state_ty>(scope, obj, state);
+                #base_brand
             }
-            false
+
+            /// Install `state` as the native state of `obj`, a wrapper
+            /// made from this class's template: box it into internal
+            /// field 0 (and slot 1, for a class with fastcall methods),
+            /// brand the wrapper, and drop the box when V8 collects it.
+            ///
+            /// `None`, with nothing installed, when `obj` lacks this
+            /// class's internal fields or already holds a state.
+            #[doc(hidden)]
+            pub fn __zs_install<'__zs>(
+                scope: &mut v8::PinScope<'__zs, '_>,
+                obj: v8::Local<v8::Object>,
+                state: #state_ty,
+            ) -> ::core::option::Option<v8::Local<'__zs, v8::External>> {
+                const __FIELD_COUNT: usize =
+                    <#class_ty as ::zeroship_runtime::macro_runtime::brand::ClassState>::FIELD_COUNT;
+                if obj.internal_field_count() < __FIELD_COUNT {
+                    return ::core::option::Option::None;
+                }
+                if obj
+                    .get_internal_field(scope, 0)
+                    .is_some_and(|__field| v8::Local::<v8::External>::try_from(__field).is_ok())
+                {
+                    return ::core::option::Option::None;
+                }
+                let __raw = ::std::boxed::Box::into_raw(::std::boxed::Box::new(state));
+                let __raw_addr = __raw as usize;
+                let __ext = v8::External::new(scope, __raw.cast());
+                obj.set_internal_field(0, __ext.into());
+                if __FIELD_COUNT > 1 {
+                    // The fastcall shim of this class, or of a class it
+                    // inherits from, reads the state here. tag = 0: must
+                    // match the tag the shim passes to
+                    // get_aligned_pointer_from_internal_field.
+                    obj.set_aligned_pointer_in_internal_field(1, __raw.cast(), 0);
+                }
+                Self::__zs_brand(scope, obj, __ext);
+                // SAFETY: __raw_addr was Box::into_raw'd from a Box of
+                // this class's state; the finalizer is the only code that
+                // frees it, once, when V8 reclaims `obj`.
+                let __weak = v8::Weak::with_guaranteed_finalizer(
+                    scope,
+                    obj,
+                    ::std::boxed::Box::new(move || unsafe {
+                        drop(::std::boxed::Box::from_raw(__raw_addr as *mut #state_ty));
+                    }),
+                );
+                // Dropping the handle would cancel the finalizer; the
+                // guaranteed variant fires on collection or isolate
+                // disposal either way.
+                ::std::mem::forget(__weak);
+                ::core::option::Option::Some(__ext)
+            }
         }
     }
 }

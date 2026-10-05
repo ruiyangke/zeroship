@@ -301,24 +301,9 @@ pub fn mint_subscription<'s>(
         cdc_lease: RefCell::new(Some(cdc_lease)),
         route: route.clone(),
     };
-    let boxed: Box<Subscription> = Box::new(state);
-    let raw = Box::into_raw(boxed);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    obj.set_internal_field(0, ext.into());
-
-    // SAFETY: `raw_addr` was Box::into_raw'd from `Box<Subscription>`;
-    // the finalizer closure casts back to the same type and drops the
-    // Box exactly once when V8 reclaims the wrapper. `Subscription`'s
-    // `Drop` impl closes the broker entry.
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut Subscription));
-        }),
-    );
-    std::mem::forget(weak);
+    if Subscription::__zs_install(scope, obj, state).is_none() {
+        return Err(OpError::error("Subscription: the wrapper already holds a state"));
+    }
 
     Ok(obj)
 }

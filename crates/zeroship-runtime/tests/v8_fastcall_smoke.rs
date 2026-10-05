@@ -38,21 +38,25 @@ use zeroship_runtime_macros::v8_class;
 // %OptimizeFunctionOnNextCall inside test scripts.
 // ---------------------------------------------------------------------------
 
-fn run_in_v8<F, R>(install: impl FnOnce(&mut v8::PinScope, v8::Local<v8::Object>), src: &str, f: F) -> R
-where
-    F: FnOnce(v8::Local<v8::Value>, &mut v8::PinScope) -> R,
-{
-    // Enable %PrepareFunctionForOptimization etc. before V8 initialises —
-    // these intrinsics are gated on --allow-natives-syntax. Setting flags
-    // AFTER initialize() is silently ignored. We install the flags via a
-    // Once that races init_v8's own Once: whichever runs first wins, but
-    // both are idempotent.
+/// Initialise V8 with %PrepareFunctionForOptimization and friends enabled.
+///
+/// These intrinsics are gated on --allow-natives-syntax, and setting flags
+/// AFTER initialize() is silently ignored, so the flags go in through a Once
+/// that runs before init_v8's own Once.
+fn init_v8_with_natives() {
     use std::sync::Once;
     static FLAGS: Once = Once::new();
     FLAGS.call_once(|| {
         v8::V8::set_flags_from_string("--allow-natives-syntax --turbofan --expose-gc");
     });
     init_v8();
+}
+
+fn run_in_v8<F, R>(install: impl FnOnce(&mut v8::PinScope, v8::Local<v8::Object>), src: &str, f: F) -> R
+where
+    F: FnOnce(v8::Local<v8::Value>, &mut v8::PinScope) -> R,
+{
+    init_v8_with_natives();
     let mut isolate = v8::Isolate::new(v8::CreateParams::default());
     v8::scope!(let handle_scope, &mut isolate);
     let context = v8::Context::new(handle_scope, Default::default());
@@ -662,4 +666,140 @@ fn fastcall_method_compiles_via_turbofan() {
     assert_eq!(parsed["result"], serde_json::json!(11), "got: {s}");
     assert_eq!(parsed["is_optimized"], serde_json::json!(true),
         "fastcall method must compile via TurboFan; status: {s}");
+}
+
+// ---------------------------------------------------------------------------
+// Fastcall on a wrapper the runtime built by hand
+// ---------------------------------------------------------------------------
+//
+// The fast shim recovers `*const Self` from internal-field slot 1 with no
+// brand check, trusting that every wrapper of the class has the slot set.
+// The runtime builds an inbound request's `headers` (and a fetch response's)
+// by hand, from the class's own template, so it passes V8's receiver
+// signature and reaches the fast shim. Every fastcall method in the runtime
+// is driven here, optimised, on such a wrapper.
+
+/// `Headers.prototype.has` optimised over an inbound request's headers,
+/// which the runtime builds natively rather than through `new Headers`.
+#[test]
+fn fastcall_has_on_kernel_built_request_headers() {
+    init_v8_with_natives();
+    let runtime = zeroship_runtime::runtime::Runtime::builder()
+        .modules(vec![zeroship_runtime::ModuleEntry {
+            specifier: "index.js".into(),
+            source: r#"
+            export default {
+                fetch(req) {
+                    const headers = req.headers;
+                    function has(name) { return headers.has(name); }
+                    %PrepareFunctionForOptimization(has);
+                    has("x-present"); has("absent");
+                    %OptimizeFunctionOnNextCall(has);
+                    has("x-present");
+                    let present = 0, absent = 0;
+                    for (let i = 0; i < 200000; i++) {
+                        if (has("x-present")) present++;
+                        if (has("absent")) absent++;
+                    }
+                    const optimized = (%GetOptimizationStatus(has) & (1 << 3)) !== 0;
+                    return new Response(JSON.stringify({ present, absent, optimized }));
+                }
+            };
+            "#
+            .into(),
+        }])
+        .build();
+    let env = zeroship_runtime::EnvSnapshot::empty();
+    let ctx = zeroship_runtime::RequestCtx::new(zeroship_runtime::channel::CancelFlag::new());
+    let headers = [("x-present".to_owned(), "1".to_owned())];
+    let outcome = runtime.call_fetch_handler("GET", "http://localhost/", &headers, "", &env, ctx);
+    let zeroship_runtime::FetchOutcome::Response { status, body, .. } = outcome else {
+        panic!("the handler answers synchronously");
+    };
+    let text = String::from_utf8_lossy(&body).into_owned();
+    assert_eq!(status, 200, "{text}");
+    let parsed: serde_json::Value = serde_json::from_str(&text).expect("json");
+    assert_eq!(parsed["present"], serde_json::json!(200000), "got: {text}");
+    assert_eq!(parsed["absent"], serde_json::json!(0), "got: {text}");
+    assert_eq!(parsed["optimized"], serde_json::json!(true), "the loop must run optimised: {text}");
+}
+
+// ---------------------------------------------------------------------------
+// Fastcall inherited by a class with no fastcall method of its own
+// ---------------------------------------------------------------------------
+//
+// A derived class's instances pass its base's `v8::Signature`, so the base's
+// fastcall shim runs on them and reads slot 1 of the derived wrapper. The
+// derived class must have that slot even when it declares no fastcall method.
+
+mod inherited_fastcall {
+    use super::*;
+
+    pub struct Counter {
+        pub base: u32,
+    }
+
+    #[v8_class]
+    impl Counter {
+        #[v8_constructor]
+        fn new(base: Option<u32>) -> Self {
+            Self { base: base.unwrap_or(0) }
+        }
+
+        #[v8_method(fastcall)]
+        fn add(&self, n: u32) -> u32 {
+            self.base + n
+        }
+    }
+
+    pub struct NamedCounter {
+        counter: Counter,
+    }
+
+    #[v8_class]
+    #[v8_inherit(Counter, state_field = counter)]
+    impl NamedCounter {
+        #[v8_constructor]
+        fn new(base: Option<u32>) -> Self {
+            Self { counter: Counter { base: base.unwrap_or(0) } }
+        }
+
+        #[v8_method]
+        fn label(&self) -> String {
+            "named".to_owned()
+        }
+    }
+}
+
+/// The base's fastcall `add`, optimised on instances of a derived class that
+/// declares no fastcall method, answers from the derived wrapper's own state.
+#[test]
+fn inherited_fastcall_runs_on_a_derived_instance() {
+    let s = run_in_v8(
+        |scope, global| {
+            install_class::<inherited_fastcall::Counter>(
+                inherited_fastcall::Counter::install, "Counter", scope, global,
+            );
+            install_class::<inherited_fastcall::NamedCounter>(
+                inherited_fastcall::NamedCounter::install, "NamedCounter", scope, global,
+            );
+        },
+        r"
+        const named = new NamedCounter(100);
+        function call(x, n) { return x.add(n); }
+        %PrepareFunctionForOptimization(call);
+        call(named, 1); call(named, 2);
+        %OptimizeFunctionOnNextCall(call);
+        call(named, 3);
+        let total = 0;
+        for (let i = 0; i < 10000; i++) total += call(named, 1);
+        const optimized = (%GetOptimizationStatus(call) & (1 << 3)) !== 0;
+        JSON.stringify({ total, optimized, label: named.label() });
+        ",
+        js_string,
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&s).expect("json");
+    assert_eq!(parsed["total"], serde_json::json!(1_010_000), "got: {s}");
+    assert_eq!(parsed["optimized"], serde_json::json!(true), "the loop must run optimised: {s}");
+    assert_eq!(parsed["label"], serde_json::json!("named"), "got: {s}");
 }

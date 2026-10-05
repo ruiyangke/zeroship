@@ -1,7 +1,8 @@
-//! `CryptoKey` — V8 class with internal field 0 holding a tag byte
-//! followed by the `CryptoKeyState`. The Rust-side struct IS the
-//! box (so the macro's `&self` cast lines up with the storage we
-//! produce in `build`).
+//! `CryptoKey`, the V8 class whose internal field 0 holds a pointer to its
+//! boxed `CryptoKey` state, which wraps the `CryptoKeyState`. The class
+//! brand (`crate::brand`) proves a wrapper holds one before that pointer is
+//! read, so the macro's `&self` cast lines up with the storage `build`
+//! produces.
 //!
 //! The class is platform-constructed per spec §13 — the constructor
 //! throws if called from JS; real instances come from
@@ -9,7 +10,7 @@
 
 #![allow(unsafe_code)]
 
-use super::key_material::{CryptoKeyState, KeyAlgorithm, KeyUsage, CRYPTO_KEY_TAG};
+use super::key_material::{CryptoKeyState, KeyAlgorithm, KeyUsage};
 use crate::state::OpError;
 
 use zeroship_runtime_macros::v8_class;
@@ -18,15 +19,9 @@ use zeroship_runtime_macros::v8_class;
 // CryptoKey IDL surface
 // ---------------------------------------------------------------------------
 
-/// `#[repr(C)]` so the tag byte sits at offset 0 — the brand check
-/// (`is_crypto_key`) reads it via raw pointer.
-#[repr(C)]
+/// A `CryptoKey` wrapper's boxed state. `is_crypto_key` tells a `CryptoKey`
+/// wrapper apart by its brand (`crate::brand`).
 pub struct CryptoKey {
-    /// First byte of the box. Set to `CRYPTO_KEY_TAG` (`0xC1`) by the
-    /// constructor / `build` helpers; never mutated. Reading it via
-    /// the brand check from a non-CryptoKey allocation is bounded
-    /// safely (single-byte read) — see SAFETY notes on `is_crypto_key`.
-    pub tag: u8,
     /// The spec's `[[type]]` / `[[extractable]]` / `[[algorithm]]` /
     /// `[[usages]]` / `[[handle]]` slots, all bundled.
     pub state: CryptoKeyState,
@@ -83,10 +78,7 @@ impl CryptoKey {
 
 impl CryptoKey {
     pub fn new_box(state: CryptoKeyState) -> Self {
-        CryptoKey {
-            tag: CRYPTO_KEY_TAG,
-            state,
-        }
+        Self { state }
     }
 }
 
@@ -94,40 +86,14 @@ impl CryptoKey {
 // Brand check + state accessor
 // ---------------------------------------------------------------------------
 
-/// Unspoofable instanceof check — read internal-field 0's tag byte.
-/// Returns true iff `value` is a V8 Object with one internal field
-/// whose External value points to a `Box<CryptoKey>` with the
-/// expected `CRYPTO_KEY_TAG` byte at offset 0.
+/// Whether `value` is a `CryptoKey` wrapper: one this runtime branded as
+/// holding a `CryptoKey` (see `crate::brand`).
 pub fn is_crypto_key(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> bool {
-    let obj = match v8::Local::<v8::Object>::try_from(value) {
-        Ok(o) => o,
-        Err(_) => return false,
-    };
-    if obj.internal_field_count() != 1 {
-        return false;
-    }
-    let field = match obj.get_internal_field(scope, 0) {
-        Some(f) => f,
-        None => return false,
-    };
-    let ext = match v8::Local::<v8::External>::try_from(field) {
-        Ok(e) => e,
-        Err(_) => return false,
-    };
-    let ptr = ext.value() as *const u8;
-    if ptr.is_null() {
-        return false;
-    }
-    // SAFETY: We never mutate the brand byte; the External keeps the
-    // box alive while the wrapper is alive. Reading the first byte of
-    // an arbitrary allocation we own is sound — at worst we read a
-    // non-`0xC1` byte from a different #[v8_class] wrapper and reject.
-    let tag = unsafe { *ptr };
-    tag == CRYPTO_KEY_TAG
+    crate::brand::value_state::<CryptoKey>(scope, value).is_some()
 }
 
-/// Read `&CryptoKeyState` without re-running the brand check. Caller
-/// MUST have verified `this` is a CryptoKey first.
+/// Read `&CryptoKeyState` from a wrapper the caller has already brand
+/// checked with [`is_crypto_key`].
 ///
 /// SAFETY of the returned reference's lifetime: the box behind the
 /// External pointer lives as long as the JS wrapper Object. Callers
@@ -138,15 +104,12 @@ pub fn state_unchecked<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     this: v8::Local<v8::Object>,
 ) -> &'s CryptoKeyState {
-    let field = this.get_internal_field(scope, 0).unwrap();
-    let ext: v8::Local<v8::External> = field.try_into().unwrap();
-    let ptr = ext.value() as *const CryptoKey;
-    // SAFETY: `ptr` was Box::into_raw'd from Box<CryptoKey> by build()
-    // (or by the macro-emitted constructor finalizer); the GC
-    // finalizer owns the drop, so the box is alive while the wrapper
-    // is alive (the wrapper itself is reachable via the input Local
-    // and outlives this scope).
-    unsafe { &(*ptr).state }
+    let ptr = crate::brand::state::<CryptoKey>(scope, this)
+        .expect("state_unchecked: the caller checked is_crypto_key");
+    // SAFETY: the brand proves the pointer is the wrapper's live
+    // Box<CryptoKey>, owned by the GC finalizer and alive while the
+    // wrapper is (it is reachable via the input Local).
+    unsafe { &ptr.as_ref().state }
 }
 
 /// Read `&CryptoKeyState` from a `v8::Local<v8::Value>` after running
@@ -194,20 +157,8 @@ pub fn build<'s>(
     let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
     inst.set_prototype(scope, proto_v);
 
-    let boxed: Box<CryptoKey> = Box::new(CryptoKey::new_box(state));
-    let raw = Box::into_raw(boxed);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    inst.set_internal_field(0, ext.into());
-
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        inst,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut CryptoKey));
-        }),
-    );
-    std::mem::forget(weak);
+    CryptoKey::__zs_install(scope, inst, CryptoKey::new_box(state))
+        .expect("a fresh instance of the class's own template takes its state");
 
     inst
 }

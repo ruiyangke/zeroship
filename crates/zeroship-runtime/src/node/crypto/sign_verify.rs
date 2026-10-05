@@ -211,19 +211,8 @@ fn build_sign<'s>(scope: &mut v8::PinScope<'s, '_>, sign: Sign) -> v8::Local<'s,
     let proto_key = v8::String::new(scope, "prototype").unwrap();
     let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
     inst.set_prototype(scope, proto_v);
-    let boxed: Box<Sign> = Box::new(sign);
-    let raw = Box::into_raw(boxed);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    inst.set_internal_field(0, ext.into());
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        inst,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut Sign));
-        }),
-    );
-    std::mem::forget(weak);
+    Sign::__zs_install(scope, inst, sign)
+        .expect("a fresh instance of the class's own template takes its state");
     inst
 }
 
@@ -235,19 +224,8 @@ fn build_verify<'s>(scope: &mut v8::PinScope<'s, '_>, verify: Verify) -> v8::Loc
     let proto_key = v8::String::new(scope, "prototype").unwrap();
     let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
     inst.set_prototype(scope, proto_v);
-    let boxed: Box<Verify> = Box::new(verify);
-    let raw = Box::into_raw(boxed);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    inst.set_internal_field(0, ext.into());
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        inst,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut Verify));
-        }),
-    );
-    std::mem::forget(weak);
+    Verify::__zs_install(scope, inst, verify)
+        .expect("a fresh instance of the class's own template takes its state");
     inst
 }
 
@@ -295,7 +273,9 @@ pub fn parse_sign_key_input(
         if obj.has(scope, key_attr.into()).unwrap_or(false) {
             let padding = read_optional_u32(scope, obj, "padding")?;
             let salt_length = read_optional_i32(scope, obj, "saltLength")?;
-            let key_v = obj.get(scope, key_attr.into()).unwrap();
+            let key_v = obj.get(scope, key_attr.into()).ok_or_else(|| {
+                OpError::node("ERR_INVALID_ARG_VALUE", "options.key could not be read")
+            })?;
             let (material, key_type) = if let Some(state) = key_object::downcast_state(scope, key_v)
             {
                 (state.material.clone(), state.key_type)
@@ -774,7 +754,9 @@ fn parse_oaep_key(
     if let Ok(obj) = v8::Local::<v8::Object>::try_from(input) {
         let key_attr = v8::String::new(scope, "key").unwrap();
         if obj.has(scope, key_attr.into()).unwrap_or(false) {
-            let key_v = obj.get(scope, key_attr.into()).unwrap();
+            let key_v = obj.get(scope, key_attr.into()).ok_or_else(|| {
+                OpError::node("ERR_INVALID_ARG_VALUE", "options.key could not be read")
+            })?;
             let oaep_hash_attr = v8::String::new(scope, "oaepHash").unwrap();
             if let Some(h) = obj.get(scope, oaep_hash_attr.into())
                 && h.is_string()

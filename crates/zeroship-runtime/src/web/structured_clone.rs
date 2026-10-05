@@ -125,7 +125,7 @@ pub fn install_global<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     global: v8::Local<v8::Object>,
 ) {
-    let f = v8::Function::new(scope, structured_clone_callback).unwrap();
+    let f = crate::callback::function(scope, structured_clone_callback).unwrap();
     let key = v8::String::new(scope, "structuredClone").unwrap();
     global.set(scope, key.into(), f.into());
 }

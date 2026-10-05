@@ -136,7 +136,6 @@ pub(super) struct EmitCtx<'a> {
     // Derived idents.
     pub iter_class_ty: Ident,
     pub iter_install_slot_ty: Ident,
-    pub iter_brand_slot_ty: Ident,
     pub iter_brand_check_fn: Ident,
     pub factory_keys_ident: Ident,
     pub factory_values_ident: Ident,
@@ -199,7 +198,6 @@ pub(super) struct EmitCtx<'a> {
     pub foreach_key_init: TokenStream2,
     pub alloc_fail_msg_init: TokenStream2,
     pub foreach_not_callable_init: TokenStream2,
-    pub iter_proto_walk_js_init: TokenStream2,
     pub illegal_ctor_msg_init: TokenStream2,
 }
 
@@ -344,14 +342,8 @@ fn build_ctx<'a>(
         value_marshal::gen_to_v8(value_ty, &val_src, &val_out, attr.value_marshal.as_ref())?;
 
     let iter_install_slot_ty = format_ident!("__InstallSlot_{}", iter_class_ty);
-    let iter_brand_slot_ty = format_ident!("__BrandSlot_{}", iter_class_ty);
-    // Iterator-class brand-check helper. Walks `__this`'s prototype
-    // chain looking for the cached `<Class>Iterator.prototype`. A
-    // caller could previously hand `<Class>Iterator
-    // .prototype.next` a *different* `#[v8_class]` wrapper as `this`
-    // (any wrapper has `internal_field(0) = External(Box<X>)`), causing
-    // the recovery `__ext.value() as *mut <Class>Iterator` to
-    // reinterpret a `Box<Other>` as `*mut <Class>Iterator` — UB.
+    // Iterator-class brand-check helper: tests the brand the factory
+    // marks each iterator with before `next()` casts field 0.
     let iter_brand_check_fn = format_ident!("__brand_check_{}", iter_class_ty);
 
     // Parent class's brand-check ident (see the note in
@@ -404,10 +396,6 @@ fn build_ctx<'a>(
         &scope_tok,
         &quote! { "forEach callback is not callable" },
     );
-    let iter_proto_walk_js_init = must_str(
-        &scope_tok,
-        &quote! { "Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()))" },
-    );
     let illegal_ctor_msg_init = must_str(
         &scope_tok,
         &quote! {
@@ -426,7 +414,6 @@ fn build_ctx<'a>(
         live,
         iter_class_ty,
         iter_install_slot_ty,
-        iter_brand_slot_ty,
         iter_brand_check_fn,
         factory_keys_ident,
         factory_values_ident,
@@ -465,7 +452,6 @@ fn build_ctx<'a>(
         foreach_key_init,
         alloc_fail_msg_init,
         foreach_not_callable_init,
-        iter_proto_walk_js_init,
         illegal_ctor_msg_init,
     })
 }

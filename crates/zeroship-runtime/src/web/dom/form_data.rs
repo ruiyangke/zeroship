@@ -179,21 +179,19 @@ impl FormData {
 /// (preserving JS object identity across `get` calls per WHATWG XHR
 /// §5).
 ///
+/// A string V8 refuses as too long throws `RangeError: Invalid string
+/// length` and yields `None`.
+///
 /// Wired into the macro via `value_marshal = entry_value_to_v8` on the
-/// `#[v8_iterable]` attribute. Per yield (live mode), the macro
-/// emits `let __v_v: Local<Value> = entry_value_to_v8(scope, &__v);`,
-/// so the union shape `(USVString or File)` doesn't need to live in
-/// the macro's built-in classifier.
+/// `#[v8_iterable]` attribute, so the union shape `(USVString or File)`
+/// doesn't need to live in the macro's built-in classifier.
 fn entry_value_to_v8<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     v: &FormDataValue,
-) -> v8::Local<'s, v8::Value> {
+) -> Option<v8::Local<'s, v8::Value>> {
     match v {
-        FormDataValue::String(s) => v8::String::new(scope, s).unwrap().into(),
-        FormDataValue::File(g) => {
-            let local = v8::Local::new(scope, g);
-            local.into()
-        }
+        FormDataValue::String(s) => crate::strings::new_or_throw(scope, s).map(Into::into),
+        FormDataValue::File(g) => Some(v8::Local::new(scope, g).into()),
     }
 }
 
@@ -224,15 +222,16 @@ pub fn install_global<'s>(
 
     let key = v8::String::new(scope, "FormData").unwrap();
     global.set(scope, key.into(), class_fn.into());
+    crate::intrinsics::capture(scope, crate::intrinsics::Intrinsic::FormData, class_fn);
 }
 
 fn install_method<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     proto: v8::Local<v8::Object>,
     name: &str,
-    cb: impl v8::MapFnTo<v8::FunctionCallback>,
+    cb: impl crate::callback::Callback,
 ) {
-    let tmpl = v8::FunctionTemplate::new(scope, cb);
+    let tmpl = crate::callback::template(scope, cb);
     let func = tmpl.get_function(scope).unwrap();
     let key = v8::String::new(scope, name).unwrap();
     proto.set(scope, key.into(), func.into());
@@ -261,7 +260,7 @@ fn append_callback(
     let entry = match build_entry(scope, value_v, filename_v) {
         Ok(e) => e,
         Err(msg) => {
-            let m = v8::String::new(scope, &msg).unwrap();
+            let m = crate::strings::message(scope, &msg);
             let exc = v8::Exception::type_error(scope, m);
             scope.throw_exception(exc);
             return;
@@ -289,7 +288,7 @@ fn set_callback(
     let entry = match build_entry(scope, value_v, filename_v) {
         Ok(e) => e,
         Err(msg) => {
-            let m = v8::String::new(scope, &msg).unwrap();
+            let m = crate::strings::message(scope, &msg);
             let exc = v8::Exception::type_error(scope, m);
             scope.throw_exception(exc);
             return;
@@ -383,8 +382,9 @@ fn get_callback(
     let name = args.get(0).to_rust_string_lossy(scope);
     for (n, v) in &fd.entries {
         if *n == name {
-            let local = entry_value_to_v8(scope, v);
-            rv.set(local);
+            if let Some(local) = entry_value_to_v8(scope, v) {
+                rv.set(local);
+            }
             return;
         }
     }
@@ -409,7 +409,9 @@ fn get_all_callback(
     let mut i: u32 = 0;
     for (n, v) in &fd.entries {
         if *n == name {
-            let local = entry_value_to_v8(scope, v);
+            let Some(local) = entry_value_to_v8(scope, v) else {
+                return;
+            };
             arr.set_index(scope, i, local);
             i += 1;
         }
@@ -425,18 +427,12 @@ fn fd_from_this<'a>(
     scope: &mut v8::PinScope,
     this_obj: v8::Local<v8::Object>,
 ) -> Option<&'a mut FormData> {
-    let ext = this_obj
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())?;
-    let ptr = ext.value() as *mut FormData;
-    if ptr.is_null() {
-        return None;
-    }
-    // SAFETY: Each FormData wrapper carries a unique boxed FormData
-    // (the macro's gen_box_and_install_finalizer ensures finalizer
-    // ownership). V8 isolates are single-threaded by invariant, and we don't
+    let mut ptr = crate::brand::state::<FormData>(scope, this_obj)?;
+    // SAFETY: The brand proves the pointer is this wrapper's boxed
+    // FormData. Each FormData wrapper carries a unique boxed FormData
+    // (`FormData::__zs_install` registers the one finalizer that owns it). V8 isolates are single-threaded by invariant, and we don't
     // yield across the borrow.
-    Some(unsafe { &mut *ptr })
+    Some(unsafe { ptr.as_mut() })
 }
 
 fn throw_illegal_invocation(scope: &mut v8::PinScope) {

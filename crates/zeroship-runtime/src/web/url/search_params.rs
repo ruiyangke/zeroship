@@ -183,10 +183,7 @@ pub(crate) fn url_ptr_from_object(
     obj: v8::Local<v8::Object>,
     scope: &mut v8::PinScope,
 ) -> Option<*mut URL> {
-    let ext = obj
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())?;
-    Some(ext.value() as *mut URL)
+    crate::brand::state::<URL>(scope, obj).map(std::ptr::NonNull::as_ptr)
 }
 
 // ---------------------------------------------------------------------------

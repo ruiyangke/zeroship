@@ -62,6 +62,7 @@ use super::enums::ResponseType;
 use crate::fetch_body::{Body, BodyImpl, BodySource};
 use crate::fetch_body::consumers::{install_body_methods, BodyMarker};
 use crate::fetch_body::extract::extract_body;
+use crate::intrinsics::Intrinsic;
 use crate::state::OpError;
 
 // ---------------------------------------------------------------------------
@@ -184,22 +185,15 @@ impl Body for Response {
 }
 
 /// Recover the boxed `ResponseState` raw pointer from V8 internal
-/// field 0. Returns `None` when the receiver isn't a native Response
-/// (the `is_native_response` / `try_native_response_*` consumers below
-/// rely on this lax check — the design §7.3.2 settles that the
-/// state-pointer accessor stays hand-rolled, NOT macro-emitted).
+/// field 0. Returns `None` unless `obj` is a wrapper this runtime
+/// branded as holding a `ResponseState` (see `crate::brand`), so an
+/// object some other code hands over (a handler's return value, what a
+/// constructor produced) is never read as a Response unless it is one.
 pub(crate) fn state_ptr(
     scope: &mut v8::PinScope,
     obj: v8::Local<v8::Object>,
 ) -> Option<*mut ResponseState> {
-    let ext = obj
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())?;
-    let ptr = ext.value() as *mut ResponseState;
-    if ptr.is_null() {
-        return None;
-    }
-    Some(ptr)
+    crate::brand::state::<ResponseState>(scope, obj).map(std::ptr::NonNull::as_ptr)
 }
 
 // ---------------------------------------------------------------------------
@@ -310,7 +304,7 @@ pub fn try_native_response_websocket(
 /// `v8__Global__New` — a fresh `GlobalHandles` slot) on every call to
 /// drop the slot borrow before `v8::Local::new`. Eternals are isolate-
 /// lifetime handles whose `get(scope)` returns the `Local` directly
-/// without allocating. Mirrors the `__BrandSlot_*` Eternals.
+/// without allocating.
 pub struct ResponseTemplateSlot {
     pub class_tmpl: v8::Eternal<v8::FunctionTemplate>,
     pub prototype: v8::Eternal<v8::Object>,
@@ -335,6 +329,7 @@ pub fn install_global(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
 
     let key = v8::String::new(scope, "Response").unwrap();
     global.set(scope, key.into(), class_fn.into());
+    crate::intrinsics::capture(scope, crate::intrinsics::Intrinsic::Response, class_fn);
 
     // Stash the template + prototype for the kernel-side fast-path
     // Response builder. See `ResponseTemplateSlot`. Eternal slots are
@@ -420,21 +415,7 @@ pub fn build_kernel_response<'s>(
         ..ResponseState::default()
     };
 
-    // 5. Box, install in internal field 0, register finalizer.
-    let boxed = Box::new(state);
-    let raw = Box::into_raw(boxed);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    this_obj.set_internal_field(0, ext.into());
-
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        this_obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut ResponseState));
-        }),
-    );
-    std::mem::forget(weak);
+    Response::__zs_install(scope, this_obj, state)?;
 
     Some(this_obj)
 }
@@ -523,23 +504,9 @@ fn build_response_json_fast<'s>(
         ..ResponseState::default()
     };
 
-    // 5. Box, install in internal field 0, register finalizer. Same
-    // shape as build_kernel_response and the macro-emitted constructor's
-    // gen_box_and_install_finalizer.
-    let boxed = Box::new(state);
-    let raw = Box::into_raw(boxed);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    this_obj.set_internal_field(0, ext.into());
-
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        this_obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut ResponseState));
-        }),
-    );
-    std::mem::forget(weak);
+    if Response::__zs_install(scope, this_obj, state).is_none() {
+        return Err(OpError::error("Response: the wrapper already holds a state"));
+    }
 
     Ok(this_obj)
 }
@@ -706,30 +673,23 @@ impl ResponseState {
     /// either tee the stream-bodied body or rebuild from the
     /// rewindable source. We can't go through `new Response(this)`
     /// since that constructor doesn't accept Response as input — so we
-    /// build via `globalThis.Response(body, init)` and patch the
+    /// build through the realm's own `Response(body, init)` (never
+    /// whatever script stored at `globalThis.Response`) and patch the
     /// type/url/redirected fields directly.
     #[v8_method]
     fn clone<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
     ) -> Result<v8::Local<'s, v8::Object>, OpError> {
-        if let Some(stream_g) = self.body.borrow().stream.borrow().clone() {
+        let stream_g = self.body.borrow().stream.borrow().clone();
+        if let Some(stream_g) = stream_g {
+            // Read the lock natively: a `locked` getter script put on
+            // ReadableStream.prototype must not run in the middle of clone.
             let stream = v8::Local::new(scope, stream_g);
-            let key = v8::String::new(scope, "locked").unwrap();
-            if let Some(v) = stream.get(scope, key.into())
-                && v.boolean_value(scope)
-            {
+            if crate::streams::algorithms::is_readable_stream_locked(scope, stream) {
                 return Err(OpError::type_error("Cannot clone a disturbed Response"));
             }
         }
-
-        // For Response, we can't go through `new Response(this)` since
-        // the Response constructor doesn't accept Response as input.
-        // Build the clone field-by-field via `globalThis.Response`.
-        let global = scope.get_current_context().global(scope);
-        let class_key = v8::String::new(scope, "Response").unwrap();
-        let class_v = global.get(scope, class_key.into()).unwrap();
-        let class_fn: v8::Local<v8::Function> = class_v.try_into().unwrap();
 
         // Body: tee if stream-bodied, re-build from source otherwise.
         let body_is_stream = matches!(
@@ -765,28 +725,28 @@ impl ResponseState {
             v8::null(scope).into()
         };
 
-        // Build init: { status, statusText, headers }.
+        // Build init: { status, statusText, headers }, as own data
+        // properties so no setter script put on Object.prototype runs.
         let init = v8::Object::new(scope);
         {
             let key = v8::String::new(scope, "status").unwrap();
             let v = v8::Integer::new_from_unsigned(scope, self.status.get() as u32);
-            init.set(scope, key.into(), v.into());
+            init.create_data_property(scope, key.into(), v.into());
         }
         {
             let key = v8::String::new(scope, "statusText").unwrap();
-            let v = v8::String::new(scope, &self.status_text.borrow()).unwrap();
-            init.set(scope, key.into(), v.into());
+            let v = crate::strings::new(scope, &self.status_text.borrow())?;
+            init.create_data_property(scope, key.into(), v.into());
         }
         if let Some(h_g) = self.headers.borrow().clone() {
             let key = v8::String::new(scope, "headers").unwrap();
             let v = v8::Local::new(scope, h_g);
-            init.set(scope, key.into(), v.into());
+            init.create_data_property(scope, key.into(), v.into());
         }
 
         let args2 = [body_arg, init.into()];
-        let clone_obj = class_fn
-            .new_instance(scope, &args2)
-            .ok_or_else(|| OpError::error("Response constructor failed"))?;
+        let clone_g = crate::intrinsics::construct(scope, Intrinsic::Response, &args2)?;
+        let clone_obj = v8::Local::new(scope, clone_g);
 
         // Copy over `type`, `url`, `redirected`.
         if let Some(clone_raw) = state_ptr(scope, clone_obj) {
@@ -815,22 +775,16 @@ impl ResponseState {
         scope: &mut v8::PinScope<'s, '_>,
     ) -> Result<v8::Local<'s, v8::Object>, OpError> {
         // We can't call our constructor with status=0 (range check
-        // rejects). Build via a fresh instance (default 200/null body),
-        // then patch state to "error"/0.
-        let global = scope.get_current_context().global(scope);
-        let class_key = v8::String::new(scope, "Response").unwrap();
-        let class_v = global
-            .get(scope, class_key.into())
-            .ok_or_else(|| OpError::error("Response constructor missing"))?;
-        let class_fn: v8::Local<v8::Function> = class_v
-            .try_into()
-            .map_err(|_| OpError::error("Response is not a function"))?;
-
+        // rejects). Build via a fresh instance (default 200/null body)
+        // of the realm's own Response, then patch state to "error"/0.
         let null_v = v8::null(scope);
         let init = v8::Object::new(scope);
-        let obj = class_fn
-            .new_instance(scope, &[null_v.into(), init.into()])
-            .ok_or_else(|| OpError::error("Response constructor failed"))?;
+        let obj_g = crate::intrinsics::construct(
+            scope,
+            Intrinsic::Response,
+            &[null_v.into(), init.into()],
+        )?;
+        let obj = v8::Local::new(scope, obj_g);
 
         let Some(raw) = state_ptr(scope, obj) else {
             return Ok(obj);
@@ -879,24 +833,18 @@ impl ResponseState {
             return Err(OpError::range_error("Invalid status code for redirect"));
         }
 
-        let global = scope.get_current_context().global(scope);
-        let class_key = v8::String::new(scope, "Response").unwrap();
-        let class_v = global
-            .get(scope, class_key.into())
-            .ok_or_else(|| OpError::error("Response constructor missing"))?;
-        let class_fn: v8::Local<v8::Function> = class_v
-            .try_into()
-            .map_err(|_| OpError::error("Response is not a function"))?;
-
         let init = v8::Object::new(scope);
         let st_key = v8::String::new(scope, "status").unwrap();
         let st_val = v8::Integer::new_from_unsigned(scope, status_code as u32);
-        init.set(scope, st_key.into(), st_val.into());
+        init.create_data_property(scope, st_key.into(), st_val.into());
 
         let null_v = v8::null(scope);
-        let obj = class_fn
-            .new_instance(scope, &[null_v.into(), init.into()])
-            .ok_or_else(|| OpError::error("Response constructor failed"))?;
+        let obj_g = crate::intrinsics::construct(
+            scope,
+            Intrinsic::Response,
+            &[null_v.into(), init.into()],
+        )?;
+        let obj = v8::Local::new(scope, obj_g);
 
         // Set Location header.
         if let Some(raw) = state_ptr(scope, obj) {
@@ -908,7 +856,7 @@ impl ResponseState {
                     && let Ok(set_fn) = v8::Local::<v8::Function>::try_from(set_v)
                 {
                     let n = v8::String::new(scope, "Location").unwrap();
-                    let v = v8::String::new(scope, &url_str).unwrap();
+                    let v = crate::strings::new(scope, &url_str)?;
                     let _ = set_fn.call(scope, h.into(), &[n.into(), v.into()]);
                 }
             }
@@ -1056,21 +1004,12 @@ impl ResponseState {
             return build_response_json_fast(scope, json_str, status, status_text);
         }
 
-        // Slow path: user supplied init.headers. Reuse the JS Response
-        // constructor so the spec WebIDL-union dispatch on HeadersInit
-        // covers Headers / record / sequence-of-pairs verbatim.
-        let global = scope.get_current_context().global(scope);
-        let class_key = v8::String::new(scope, "Response").unwrap();
-        let class_v = global
-            .get(scope, class_key.into())
-            .ok_or_else(|| OpError::error("Response constructor missing"))?;
-        let class_fn: v8::Local<v8::Function> = class_v
-            .try_into()
-            .map_err(|_| OpError::error("Response is not a function"))?;
-
-        let obj = class_fn
-            .new_instance(scope, &[json_str.into(), init])
-            .ok_or_else(|| OpError::error("Response constructor failed"))?;
+        // Slow path: user supplied init.headers. Reuse the realm's own
+        // Response constructor so the spec WebIDL-union dispatch on
+        // HeadersInit covers Headers / record / sequence-of-pairs verbatim.
+        let obj_g =
+            crate::intrinsics::construct(scope, Intrinsic::Response, &[json_str.into(), init])?;
+        let obj = v8::Local::new(scope, obj_g);
 
         // Set Content-Type to "application/json" unless the user already
         // supplied one in init.headers. set_default_content_type is a
@@ -1123,22 +1062,13 @@ fn build_response_headers<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     init_headers: Option<v8::Local<v8::Value>>,
 ) -> Result<v8::Local<'s, v8::Object>, String> {
-    let global = scope.get_current_context().global(scope);
-    let headers_class_key = v8::String::new(scope, "Headers").unwrap();
-    let class_v = global
-        .get(scope, headers_class_key.into())
-        .ok_or_else(|| "Headers class missing".to_string())?;
-    let class_fn: v8::Local<v8::Function> = class_v
-        .try_into()
-        .map_err(|_| "Headers is not a function".to_string())?;
     let init: v8::Local<v8::Value> = match init_headers {
         Some(v) if !v.is_undefined() => v,
         _ => v8::undefined(scope).into(),
     };
-    let args = [init];
-    class_fn
-        .new_instance(scope, &args)
-        .ok_or_else(|| "Headers constructor failed".to_string())
+    let headers = crate::intrinsics::construct(scope, Intrinsic::Headers, &[init])
+        .map_err(|_| "Headers constructor failed".to_string())?;
+    Ok(v8::Local::new(scope, headers))
 }
 
 fn set_default_content_type(scope: &mut v8::PinScope, headers: v8::Local<v8::Object>, ct: &str) {
@@ -1173,17 +1103,12 @@ fn set_default_content_type(scope: &mut v8::PinScope, headers: v8::Local<v8::Obj
     let _ = set_fn.call(scope, headers.into(), &[n.into(), v.into()]);
 }
 
+/// Tee a body stream natively, so a `tee` script put on
+/// `ReadableStream.prototype` never runs inside `clone()`.
 fn tee_stream<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     stream: v8::Local<'s, v8::Object>,
 ) -> Option<(v8::Local<'s, v8::Object>, v8::Local<'s, v8::Object>)> {
-    let key = v8::String::new(scope, "tee")?;
-    let fn_v = stream.get(scope, key.into())?;
-    let fn_l: v8::Local<v8::Function> = fn_v.try_into().ok()?;
-    let result = fn_l.call(scope, stream.into(), &[])?;
-    let arr: v8::Local<v8::Array> = result.try_into().ok()?;
-    let a = arr.get_index(scope, 0)?;
-    let b = arr.get_index(scope, 1)?;
-    Some((a.try_into().ok()?, b.try_into().ok()?))
+    crate::streams::readable::tee(scope, stream).ok().map(Into::into)
 }
 

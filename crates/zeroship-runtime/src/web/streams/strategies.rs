@@ -194,7 +194,7 @@ fn count_size_callback(
 fn get_or_create_shared_size_fn<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     slot_name: &'static str,
-    callback: impl v8::MapFnTo<v8::FunctionCallback>,
+    callback: impl crate::callback::Callback,
 ) -> v8::Local<'s, v8::Value> {
     let global = scope.get_current_context().global(scope);
     let priv_ = crate::streams::slots::private_sym(scope, slot_name);
@@ -206,7 +206,7 @@ fn get_or_create_shared_size_fn<'s>(
     }
 
     // First call in this realm: build the Function and cache.
-    let tmpl = v8::FunctionTemplate::new(scope, callback);
+    let tmpl = crate::callback::template(scope, callback);
     let func = tmpl.get_function(scope).unwrap();
     global.set_private(scope, priv_, func.into());
     func.into()

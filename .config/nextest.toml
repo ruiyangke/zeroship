@@ -14,3 +14,13 @@ slow-timeout = { period = "60s", terminate-after = 10, grace-period = "30s" }
 
 [profile.ci.junit]
 path = "junit.xml"
+
+# The cases that build a string past V8's length limit from creator code
+# allocate it for real, several times over. One at a time keeps their peak
+# memory from stacking.
+[test-groups]
+v8-string-limit = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'package(zeroship-runtime) and test(/callback_safety::an_oversized_/)'
+test-group = 'v8-string-limit'

@@ -15,8 +15,6 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::Ident;
 
-use crate::must_str;
-
 /// Recognised string / byte / integer types that we know how to
 /// marshal back to V8 from the iterator's `next()` snapshot. Returns
 /// the codegen branch token-stream for a single value.
@@ -57,11 +55,17 @@ pub(super) fn classify_ty(ty: &syn::Type) -> Option<SupportedTy> {
 /// `v8::Local<v8::Value>` named `out_ident`. Caller bound the source
 /// value to `src_ident` already.
 ///
+/// Text V8 refuses as too long throws `RangeError: Invalid string
+/// length`, and the emitted code returns from the callback with it
+/// pending.
+///
 /// When `marshal` is `Some(path)`, the macro emits a call to the
 /// user-supplied free function instead of selecting a built-in
 /// classifier. Used for the `value_marshal = ident` attribute so
 /// consumers like `FormDataIterator` can yield a
 /// `(USVString or File)` union without baking that into the macro.
+/// The function returns `Option<v8::Local<v8::Value>>`, `None` once it
+/// has thrown.
 pub(super) fn gen_to_v8(
     ty: &syn::Type,
     src_ident: &Ident,
@@ -69,11 +73,13 @@ pub(super) fn gen_to_v8(
     marshal: Option<&syn::Path>,
 ) -> Result<TokenStream2, syn::Error> {
     if let Some(path) = marshal {
-        // Custom marshal — bypass type classification entirely. The
-        // user's function is responsible for producing a valid
-        // `v8::Local<v8::Value>` from `&V`.
+        // Custom marshal: bypass type classification entirely. The
+        // user's function produces the `v8::Local<v8::Value>` for `&V`,
+        // or throws and returns `None`.
         return Ok(quote! {
-            let #out_ident: v8::Local<v8::Value> = #path(scope, &#src_ident);
+            let Some(#out_ident) = #path(scope, &#src_ident) else {
+                return;
+            };
         });
     }
     let kind = classify_ty(ty).ok_or_else(|| {
@@ -85,24 +91,21 @@ pub(super) fn gen_to_v8(
     })?;
     let scope_tok = quote! { scope };
     Ok(match kind {
-        SupportedTy::Utf8 => {
-            let s_ref_init = must_str(&scope_tok, &quote! { __s_ref });
-            quote! {
-                let __s_ref: &str = ::std::convert::AsRef::as_ref(&#src_ident);
-                let #out_ident: v8::Local<v8::Value> = #s_ref_init.into();
-            }
+        SupportedTy::Utf8 => quote! {
+            let __s_ref: &str = ::std::convert::AsRef::as_ref(&#src_ident);
+            let Some(__s_v8) = ::zeroship_runtime::macro_runtime::strings::new_or_throw(#scope_tok, __s_ref) else {
+                return;
+            };
+            let #out_ident: v8::Local<v8::Value> = __s_v8.into();
         },
         SupportedTy::ByteStr => quote! {
             // ByteString → Latin-1 one-byte string. The snapshot stores
             // ByteString (which derefs to &[u8]); copy bytes verbatim.
             let __bytes_ref: &[u8] = ::std::convert::AsRef::as_ref(&#src_ident);
-            let #out_ident: v8::Local<v8::Value> = v8::String::new_from_one_byte(
-                scope,
-                __bytes_ref,
-                v8::NewStringType::Normal,
-            )
-            .unwrap()
-            .into();
+            let Some(__bytes_v8) = ::zeroship_runtime::macro_runtime::strings::one_byte_or_throw(scope, __bytes_ref) else {
+                return;
+            };
+            let #out_ident: v8::Local<v8::Value> = __bytes_v8.into();
         },
         SupportedTy::U32 => quote! {
             let __n: u32 = #src_ident;

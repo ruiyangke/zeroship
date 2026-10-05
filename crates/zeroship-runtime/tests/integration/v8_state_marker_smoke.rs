@@ -484,9 +484,8 @@ mod inherit_with_state {
             Vehicle { _wheels: 0 }
         }
 
-        // Marker for inherit chain checks. We don't dispatch this onto
-        // `Bike` instances (Box<BikeState> can't be cast as
-        // Box<Vehicle>).
+        // Marker for inherit chain checks; a Bike's state holds its
+        // Vehicle state first, so this runs on Bike instances too.
         #[v8_method]
         fn kind(&self) -> String {
             "vehicle".into()
@@ -494,17 +493,20 @@ mod inherit_with_state {
     }
 
     pub struct Bike;
+    #[repr(C)]
     pub struct BikeState {
+        vehicle: Vehicle,
         pub bell_rings: Cell<u32>,
     }
 
     #[v8_class]
     #[v8_state_marker(Bike)]
-    #[v8_inherit(Vehicle)]
+    #[v8_inherit(Vehicle, state_field = vehicle)]
     impl BikeState {
         #[v8_constructor]
         fn new() -> BikeState {
             BikeState {
+                vehicle: Vehicle { _wheels: 2 },
                 bell_rings: Cell::new(0),
             }
         }
@@ -547,8 +549,10 @@ fn state_marker_composes_with_inherit() {
             // Bike's own method works through state projection.
             ringOnce: bike.ring(),
             ringTwice: bike.ring(),
-            // Vehicle's prototype property is reachable.
+            // Vehicle's prototype property is reachable, and runs on the
+            // Vehicle state inside a Bike's.
             kindReachable: typeof Vehicle.prototype.kind === "function",
+            kind: bike.kind(),
             // Class names come from the markers.
             bikeName: bike.constructor.name,
         });
@@ -557,7 +561,7 @@ fn state_marker_composes_with_inherit() {
     );
     assert_eq!(
         s,
-        r#"{"isBike":true,"isVehicle":true,"chainOk":true,"ringOnce":1,"ringTwice":2,"kindReachable":true,"bikeName":"Bike"}"#
+        r#"{"isBike":true,"isVehicle":true,"chainOk":true,"ringOnce":1,"ringTwice":2,"kindReachable":true,"kind":"vehicle","bikeName":"Bike"}"#
     );
 }
 

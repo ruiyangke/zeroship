@@ -281,21 +281,8 @@ fn build_paired_wrapper<'s>(
         .native_ws_wrappers
         .insert(ws_id, wrapper_global);
 
-    // Box + finalizer (matches the macro pattern).
-    let boxed = Box::new(impl_);
-    let raw = Box::into_raw(boxed);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    obj.set_internal_field(0, ext.into());
-
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut WebSocketImpl));
-        }),
-    );
-    std::mem::forget(weak);
+    WebSocketImpl::__zs_install(scope, obj, impl_)
+        .expect("a fresh instance of the class's own template takes its state");
 
     // Attach the EventTarget listener Rc so addEventListener works.
     crate::dom::event_target::attach_listeners(scope, obj);
@@ -309,7 +296,7 @@ pub fn install_global<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     global: v8::Local<v8::Object>,
 ) {
-    let f = v8::Function::new(scope, websocket_pair_callback).unwrap();
+    let f = crate::callback::function(scope, websocket_pair_callback).unwrap();
     let key = v8::String::new(scope, "WebSocketPair").unwrap();
     global.set(scope, key.into(), f.into());
 }

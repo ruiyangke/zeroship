@@ -55,6 +55,7 @@
 
 use std::cell::Cell;
 
+use crate::callback::Callback;
 use crate::streams::algorithms;
 use crate::streams::readable_default_reader::{
     self as default_reader, ReadRequest, ReadRequestKind, ReadRequestNative,
@@ -68,10 +69,6 @@ use crate::streams::slots;
 /// `ReadableStreamAsyncIterator.[[reader]]` — the default reader the
 /// iterator drives.
 const ITER_READER: &str = "[[asyncIter.reader]]";
-
-/// Tag bit so `is_async_iterator` can confirm the wrapper type without
-/// risking a false positive against another single-internal-field class.
-const ITER_TAG: &str = "[[asyncIter.tag]]";
 
 // ---------------------------------------------------------------------------
 // State
@@ -106,16 +103,10 @@ impl AsyncIterState {
 // V8 wrapper helpers
 // ---------------------------------------------------------------------------
 
+/// Whether `obj` is a `ReadableStream` async iterator: one this runtime
+/// branded as holding an `AsyncIterState`.
 fn is_async_iterator(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> bool {
-    let has_state = obj
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-        .map(|e| !e.value().is_null())
-        .unwrap_or(false);
-    if !has_state {
-        return false;
-    }
-    !slots::slot_is_empty(scope, obj, ITER_TAG)
+    crate::brand::is::<AsyncIterState>(scope, obj)
 }
 
 fn with_state<R>(
@@ -123,34 +114,33 @@ fn with_state<R>(
     iter: v8::Local<v8::Object>,
     f: impl FnOnce(&AsyncIterState) -> R,
 ) -> Option<R> {
-    let raw_v8_field = iter.get_internal_field(scope, 0)?;
-    let ext = v8::Local::<v8::External>::try_from(raw_v8_field).ok()?;
-    let ptr = ext.value() as *const AsyncIterState;
-    if ptr.is_null() {
-        return None;
-    }
-    // SAFETY: External pointer set during `build` to a Box<AsyncIterState>;
-    // dropped only by the V8 weak finalizer.
-    let inst = unsafe { &*ptr };
+    let ptr = crate::brand::state::<AsyncIterState>(scope, iter)?;
+    // SAFETY: the brand proves internal field 0 holds the
+    // Box<AsyncIterState> `build` stored there; it is dropped only by the
+    // V8 weak finalizer.
+    let inst = unsafe { ptr.as_ref() };
     Some(f(inst))
 }
 
 /// Returns the AsyncIteratorPrototype intrinsic for this realm.
 ///
 /// `%AsyncIteratorPrototype%` is the prototype of all async iterators (and
-/// async generator instances). It's not directly exposed on `globalThis`
-/// but is reachable by walking the prototype chain of an async-generator
-/// instance: `async function*(){}.prototype.__proto__ ===
-/// %AsyncIteratorPrototype%`.
+/// async generator instances). It's not exposed on `globalThis`, so it is
+/// read through a template's intrinsic data property rather than by
+/// running script: the first `values()` call may come after creator code
+/// replaced `Object.getPrototypeOf`, which a script walk would call.
 fn async_iterator_prototype<'s>(
     scope: &mut v8::PinScope<'s, '_>,
 ) -> Option<v8::Local<'s, v8::Value>> {
-    let src = v8::String::new(
-        scope,
-        "Object.getPrototypeOf(Object.getPrototypeOf(async function*(){}).prototype)",
-    )?;
-    let script = v8::Script::compile(scope, src, None)?;
-    script.run(scope)
+    let key = v8::String::new(scope, "prototype")?;
+    let probe = v8::ObjectTemplate::new(scope);
+    probe.set_intrinsic_data_property(
+        key.into(),
+        v8::Intrinsic::AsyncIteratorPrototype,
+        v8::PropertyAttribute::NONE,
+    );
+    let holder = probe.new_instance(scope)?;
+    holder.get(scope, key.into())
 }
 
 // ---------------------------------------------------------------------------
@@ -221,11 +211,11 @@ fn install_iter_proto_method(
     scope: &mut v8::PinScope,
     proto: v8::Local<v8::Object>,
     name: &str,
-    cb: impl v8::MapFnTo<v8::FunctionCallback>,
+    cb: impl Callback,
     length: usize,
 ) {
     let name_v = v8::String::new(scope, name).unwrap();
-    let tmpl = v8::FunctionTemplate::builder(cb)
+    let tmpl = crate::callback::template_builder(cb)
         .length(length as i32)
         .build(scope);
     tmpl.set_class_name(name_v);
@@ -264,13 +254,15 @@ fn iterator_instance_template<'s>(
 // ---------------------------------------------------------------------------
 
 /// Build a fresh async iterator wrapper bound to `reader` + `prevent_cancel`.
+/// `None` when V8 cannot allocate the wrapper, which happens only with an
+/// exception or a termination already pending.
 fn build<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     reader: v8::Local<v8::Object>,
     prevent_cancel: bool,
-) -> v8::Local<'s, v8::Object> {
+) -> Option<v8::Local<'s, v8::Object>> {
     let inst_tmpl = iterator_instance_template(scope);
-    let iter = inst_tmpl.new_instance(scope).unwrap();
+    let iter = inst_tmpl.new_instance(scope)?;
 
     // Set [[Prototype]] to the iterator-class prototype object (which in
     // turn inherits from %AsyncIteratorPrototype%).
@@ -278,27 +270,12 @@ fn build<'s>(
     iter.set_prototype(scope, proto.into());
 
     // Allocate state.
-    let state = AsyncIterState::new(prevent_cancel);
-    let boxed = Box::new(state);
-    let raw_ptr = Box::into_raw(boxed);
-    let raw_addr = raw_ptr as usize;
-    let ext = v8::External::new(scope, raw_ptr as *mut std::ffi::c_void);
-    iter.set_internal_field(0, ext.into());
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        iter,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut AsyncIterState));
-        }),
-    );
-    std::mem::forget(weak);
+    crate::brand::wrap(scope, iter, AsyncIterState::new(prevent_cancel));
 
     // Wire the slots.
-    let tag = v8::Boolean::new(scope, true);
-    slots::write_slot(scope, iter, ITER_TAG, tag.into());
     slots::write_slot(scope, iter, ITER_READER, reader.into());
 
-    iter
+    Some(iter)
 }
 
 // ---------------------------------------------------------------------------
@@ -321,7 +298,7 @@ pub fn create_async_iterator<'s>(
     // Spec step 3: AcquireReadableStreamDefaultReader. Errors propagate
     // (e.g. "stream is locked").
     let reader = default_reader::acquire_readable_stream_default_reader(scope, stream)?;
-    Ok(build(scope, reader, prevent_cancel))
+    build(scope, reader, prevent_cancel).ok_or_else(|| "allocate async iterator".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -395,7 +372,7 @@ fn sequenced_call<'s>(
             IterOp::Next => "ReadableStreamAsyncIterator.next: invalid receiver",
             IterOp::Return => "ReadableStreamAsyncIterator.return: invalid receiver",
         };
-        let msg = v8::String::new(scope, msg_text).unwrap();
+        let msg = crate::strings::message(scope, msg_text);
         let exc = v8::Exception::type_error(scope, msg);
         return algorithms::rejected_with_promise(scope, exc);
     }

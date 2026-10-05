@@ -198,9 +198,34 @@ impl MarkerAttr for V8InheritIntrinsicAttr {
 // At-most-one path-valued attributes
 // ===========================================================================
 
-/// `#[v8_inherit(BasePath)]` on the impl block.
+/// `#[v8_inherit(BasePath)]` or `#[v8_inherit(BasePath, state_field = field)]`
+/// on the impl block. `state_field` names the field of the derived state that
+/// holds the base class's state; without it the base state must be zero-sized.
 #[derive(Default)]
-pub(crate) struct V8InheritBaseAttr(pub Option<syn::Path>);
+pub(crate) struct V8InheritBaseAttr(pub Option<(syn::Path, Option<syn::Ident>)>);
+
+/// The arguments of `#[v8_inherit(...)]`.
+struct InheritArgs {
+    path: syn::Path,
+    state_field: Option<syn::Ident>,
+}
+
+impl syn::parse::Parse for InheritArgs {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let path: syn::Path = input.parse()?;
+        let mut state_field = None;
+        if input.peek(syn::Token![,]) {
+            input.parse::<syn::Token![,]>()?;
+            let key: syn::Ident = input.parse()?;
+            if key != "state_field" {
+                return Err(syn::Error::new(key.span(), "expected `state_field = <field>`"));
+            }
+            input.parse::<syn::Token![=]>()?;
+            state_field = Some(input.parse()?);
+        }
+        Ok(Self { path, state_field })
+    }
+}
 
 impl MarkerAttr for V8InheritBaseAttr {
     const NAMES: &'static [&'static str] = &["v8_inherit"];
@@ -211,14 +236,15 @@ impl MarkerAttr for V8InheritBaseAttr {
                 "#[v8_inherit]: duplicate attribute (only one base class supported)",
             ));
         }
-        let path: syn::Path = attr.parse_args().map_err(|e| {
+        let args: InheritArgs = attr.parse_args().map_err(|e| {
             syn::Error::new(
                 e.span(),
                 "#[v8_inherit(BaseClass)]: expected a type path (e.g. `EventTarget` or \
-                 `super::event_target::EventTarget`)",
+                 `super::event_target::EventTarget`), optionally followed by \
+                 `, state_field = <field>`",
             )
         })?;
-        self.0 = Some(path);
+        self.0 = Some((args.path, args.state_field));
         Ok(())
     }
 }

@@ -36,6 +36,8 @@ use std::pin::Pin;
 
 use zeroship_runtime_macros::WebIdlDict;
 
+use crate::callback::Callback;
+use crate::intrinsics::{self, Intrinsic};
 use crate::state::OpError;
 use crate::streams::budget::{try_alloc_stream, try_alloc_streams, StreamBudgetGuard};
 use crate::streams::readable_default_controller as ctlr;
@@ -80,40 +82,41 @@ impl RSState {
 // V8 wrapper helpers
 // ---------------------------------------------------------------------------
 
-/// Confirm `obj` is a ReadableStream wrapper (its internal field 0 is
-/// an External pointing at an `RSState`). Used by the public method
-/// callbacks for the spec's "If !IsReadableStream(this) throw TypeError"
-/// receiver check.
+/// Confirm `obj` is a `ReadableStream` wrapper: one this runtime branded
+/// as holding an `RSState` (see `crate::brand`). Used by the public
+/// method callbacks for the spec's "If !IsReadableStream(this) throw
+/// `TypeError`" receiver check, and by every algorithm that takes a stream
+/// from script.
 pub fn is_readable_stream(
     scope: &mut v8::PinScope,
     obj: v8::Local<v8::Object>,
 ) -> bool {
-    obj.get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-        .map(|ext| !ext.value().is_null())
-        .unwrap_or(false)
+    crate::brand::is::<RSState>(scope, obj)
 }
 
 /// Reach into a JS ReadableStream wrapper's RSState. Returns None if the
-/// object is not a ReadableStream (its internal field 0 isn't an External
-/// or the External is a null pointer — should never happen in practice).
+/// object is not a `ReadableStream`.
 pub fn with_rs_state<R>(
     scope: &mut v8::PinScope,
     stream: v8::Local<v8::Object>,
     f: impl FnOnce(&RSState) -> R,
 ) -> Option<R> {
-    let raw_v8_field = stream.get_internal_field(scope, 0)?;
-    let ext = v8::Local::<v8::External>::try_from(raw_v8_field).ok()?;
-    let ptr = ext.value() as *const RSState;
-    if ptr.is_null() {
-        return None;
-    }
-    // SAFETY: the External was set during construction to a Box<RSState>
-    // (see `build_stream_wrapper` and `constructor_callback`). The Box is
-    // dropped only by the V8 weak finalizer, which fires after all JS
-    // callbacks complete (single-threaded per isolate).
-    let inst = unsafe { &*ptr };
+    let ptr = crate::brand::state::<RSState>(scope, stream)?;
+    // SAFETY: the brand proves internal field 0 holds the Box<RSState>
+    // `install_state` stored there. The Box is dropped only by the V8
+    // weak finalizer, which cannot run while `stream` is reachable.
+    let inst = unsafe { ptr.as_ref() };
     Some(f(inst))
+}
+
+/// Box a fresh `RSState` (holding `budget`) into `stream_obj` and brand
+/// it as a `ReadableStream`.
+fn install_state(
+    scope: &mut v8::PinScope,
+    stream_obj: v8::Local<v8::Object>,
+    budget: StreamBudgetGuard,
+) {
+    crate::brand::wrap(scope, stream_obj, RSState::new(budget));
 }
 
 // ---------------------------------------------------------------------------
@@ -139,7 +142,8 @@ pub fn from_native_source<'s, S: NativeSource + 'static>(
     hwm: f64,
 ) -> Result<v8::Local<'s, v8::Object>, OpError> {
     let budget = try_alloc_stream(scope)?;
-    let stream = build_stream_wrapper(scope, budget);
+    let stream = build_stream_wrapper(scope, budget)
+        .ok_or_else(|| OpError::error("ReadableStream: wrapper allocation failed"))?;
     ctlr::set_up_readable_stream_default_controller_native(scope, stream, source, hwm);
     Ok(stream)
 }
@@ -155,81 +159,55 @@ pub fn from_native_source<'s, S: NativeSource + 'static>(
 pub fn build_value_stream_wrapper_for_internal<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     budget: StreamBudgetGuard,
-) -> v8::Local<'s, v8::Object> {
+) -> Option<v8::Local<'s, v8::Object>> {
     build_stream_wrapper(scope, budget)
 }
 
 /// Construct the bare `ReadableStream` JS wrapper — no controller wired.
 /// Used by `from_native_source` and the internal builders. `budget` is the
 /// stream's already-charged unit, which the wrapper's Box holds.
+/// `None` when V8 cannot allocate the wrapper, which happens only with an
+/// exception or a termination already pending; the caller returns and leaves
+/// it pending.
 fn build_stream_wrapper<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     budget: StreamBudgetGuard,
-) -> v8::Local<'s, v8::Object> {
+) -> Option<v8::Local<'s, v8::Object>> {
     let tmpl = stream_class_template(scope);
     let inst_tmpl = tmpl.instance_template(scope);
-    let stream_obj = inst_tmpl.new_instance(scope).unwrap();
+    let stream_obj = inst_tmpl.new_instance(scope)?;
 
-    let inst = RSState::new(budget);
-    let boxed = Box::new(inst);
-    let raw_ptr = Box::into_raw(boxed);
-    let raw_addr = raw_ptr as usize;
-    let ext = v8::External::new(scope, raw_ptr as *mut std::ffi::c_void);
-    stream_obj.set_internal_field(0, ext.into());
+    install_state(scope, stream_obj, budget);
 
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        stream_obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut RSState));
-        }),
-    );
-    std::mem::forget(weak);
+    // The class's own prototype, captured with its template, so a tee
+    // branch or a TransformStream half is `instanceof ReadableStream`
+    // whatever script has since stored at `globalThis.ReadableStream`.
+    if let Some(proto) = intrinsics::prototype(scope, Intrinsic::ReadableStream) {
+        stream_obj.set_prototype(scope, proto.into());
+    }
 
-    // Wire the prototype. Prefer `globalThis.ReadableStream.prototype`
-    // when available (so `branch instanceof ReadableStream` works for
-    // tee branches and TS halves). Fall back to the just-built template
-    // for tests that call this path before install_native_streams.
-    let proto_v = global_class_prototype(scope, "ReadableStream").unwrap_or_else(|| {
-        let class_fn = tmpl.get_function(scope).unwrap();
-        let proto_key = v8::String::new(scope, "prototype").unwrap();
-        class_fn.get(scope, proto_key.into()).unwrap()
-    });
-    stream_obj.set_prototype(scope, proto_v);
-
-    stream_obj
-}
-
-/// Return `globalThis[name].prototype` if globalThis has a `name`
-/// property and that property is a Function. Used to wire up
-/// internally-built stream wrappers so they share the user-visible
-/// class identity (instanceof works).
-fn global_class_prototype<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    name: &str,
-) -> Option<v8::Local<'s, v8::Value>> {
-    let global = scope.get_current_context().global(scope);
-    let key = v8::String::new(scope, name)?;
-    let class_v = global.get(scope, key.into())?;
-    let class_obj = v8::Local::<v8::Object>::try_from(class_v).ok()?;
-    let proto_key = v8::String::new(scope, "prototype")?;
-    class_obj.get(scope, proto_key.into())
+    Some(stream_obj)
 }
 
 // ---------------------------------------------------------------------------
 // Class template construction
 // ---------------------------------------------------------------------------
 
-/// Build the ReadableStream FunctionTemplate. Includes one internal
-/// field (Box<RSState>), the constructor callback, and prototype
-/// methods.
-///
-/// We don't cache: per `headers.rs::iter_template`'s notes, FunctionTemplates
-/// can't outlive their isolate, and the cost is negligible.
+/// The isolate's `ReadableStream` `FunctionTemplate`: the one `globalThis`
+/// exposes and the one internally built streams are instances of.
 fn stream_class_template<'s>(
     scope: &mut v8::PinScope<'s, '_>,
 ) -> v8::Local<'s, v8::FunctionTemplate> {
-    let ctor_tmpl = v8::FunctionTemplate::new(scope, constructor_callback);
+    intrinsics::template(scope, Intrinsic::ReadableStream, build_stream_class_template)
+}
+
+/// Build the ReadableStream FunctionTemplate. Includes one internal
+/// field (Box<RSState>), the constructor callback, and prototype
+/// methods.
+fn build_stream_class_template<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+) -> v8::Local<'s, v8::FunctionTemplate> {
+    let ctor_tmpl = crate::callback::template(scope, constructor_callback);
     let class_name = v8::String::new(scope, "ReadableStream").unwrap();
     ctor_tmpl.set_class_name(class_name);
     ctor_tmpl
@@ -241,7 +219,7 @@ fn stream_class_template<'s>(
     // locked getter (§3.2.5.1)
     {
         let key = v8::String::new(scope, "locked").unwrap();
-        let getter_tmpl = v8::FunctionTemplate::new(scope, locked_getter_callback);
+        let getter_tmpl = crate::callback::template(scope, locked_getter_callback);
         proto.set_accessor_property(
             key.into(),
             Some(getter_tmpl),
@@ -266,7 +244,7 @@ fn stream_class_template<'s>(
     // [Symbol.asyncIterator] — per WebIDL §3.7.10, aliases `values()`.
     {
         let sym = v8::Symbol::get_async_iterator(scope);
-        let tmpl = v8::FunctionTemplate::new(scope, values_method_callback);
+        let tmpl = crate::callback::template(scope, values_method_callback);
         // Set the function name to "values" to match WebIDL semantics
         // (the @@asyncIterator method shares the same impl as `values`).
         let name_v = v8::String::new(scope, "values").unwrap();
@@ -290,10 +268,10 @@ fn install_method(
     scope: &mut v8::PinScope,
     proto: v8::Local<v8::ObjectTemplate>,
     name: &str,
-    cb: impl v8::MapFnTo<v8::FunctionCallback>,
+    cb: impl Callback,
 ) {
     let key = v8::String::new(scope, name).unwrap();
-    let tmpl = v8::FunctionTemplate::new(scope, cb);
+    let tmpl = crate::callback::template(scope, cb);
     proto.set(key.into(), tmpl.into());
 }
 
@@ -412,20 +390,7 @@ fn constructor_callback(
                 return;
             }
         };
-        let inst = RSState::new(budget);
-        let boxed = Box::new(inst);
-        let raw_ptr = Box::into_raw(boxed);
-        let raw_addr = raw_ptr as usize;
-        let ext = v8::External::new(scope, raw_ptr as *mut std::ffi::c_void);
-        stream_obj.set_internal_field(0, ext.into());
-        let weak = v8::Weak::with_guaranteed_finalizer(
-            scope,
-            stream_obj,
-            Box::new(move || unsafe {
-                drop(Box::from_raw(raw_addr as *mut RSState));
-            }),
-        );
-        std::mem::forget(weak);
+        install_state(scope, stream_obj, budget);
 
         if let Err(msg) = crate::streams::readable_byte_controller::set_up_readable_byte_stream_controller_from_underlying_source(
             scope,
@@ -433,7 +398,7 @@ fn constructor_callback(
             underlying_source,
             hwm,
         ) {
-            let v8_msg = v8::String::new(scope, &msg).unwrap();
+            let v8_msg = crate::strings::message(scope, &msg);
             let exc = v8::Exception::type_error(scope, v8_msg);
             scope.throw_exception(exc);
         }
@@ -448,20 +413,7 @@ fn constructor_callback(
             return;
         }
     };
-    let inst = RSState::new(budget);
-    let boxed = Box::new(inst);
-    let raw_ptr = Box::into_raw(boxed);
-    let raw_addr = raw_ptr as usize;
-    let ext = v8::External::new(scope, raw_ptr as *mut std::ffi::c_void);
-    stream_obj.set_internal_field(0, ext.into());
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        stream_obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut RSState));
-        }),
-    );
-    std::mem::forget(weak);
+    install_state(scope, stream_obj, budget);
 
     // Wire the controller (default-only in this dispatch). Errors are
     // surfaced as TypeError per spec; the boxed RSState is retained so the
@@ -473,7 +425,7 @@ fn constructor_callback(
         hwm,
         size_algo,
     ) {
-        let v8_msg = v8::String::new(scope, &msg).unwrap();
+        let v8_msg = crate::strings::message(scope, &msg);
         let exc = v8::Exception::type_error(scope, v8_msg);
         scope.throw_exception(exc);
     }
@@ -605,7 +557,7 @@ fn get_reader_method_callback(
         ) {
             Ok(r) => r,
             Err(err) => {
-                let msg = v8::String::new(scope, &err).unwrap();
+                let msg = crate::strings::message(scope, &err);
                 let exc = v8::Exception::type_error(scope, msg);
                 scope.throw_exception(exc);
                 return;
@@ -620,7 +572,7 @@ fn get_reader_method_callback(
     ) {
         Ok(r) => r,
         Err(err) => {
-            let msg = v8::String::new(scope, &err).unwrap();
+            let msg = crate::strings::message(scope, &err);
             let exc = v8::Exception::type_error(scope, msg);
             scope.throw_exception(exc);
             return;
@@ -836,44 +788,41 @@ fn tee_method_callback<'s>(
         scope.throw_exception(exc);
         return;
     }
-    if crate::streams::algorithms::is_readable_stream_locked(scope, this) {
-        let msg = v8::String::new(scope, "tee: stream is locked").unwrap();
-        let exc = v8::Exception::type_error(scope, msg);
-        scope.throw_exception(exc);
-        return;
-    }
-    // Charge both branches before either tee locks the source, so a tee the
-    // budget cannot cover is refused with the source still unlocked.
-    let branch_budgets = match try_alloc_streams::<2>(scope) {
-        Ok(budgets) => budgets,
-        Err(e) => {
-            throw_op_error(scope, &e);
-            return;
-        }
-    };
-    // Dispatch to byte-tee or default-tee based on the controller class.
-    let controller_v = slots::read_slot(scope, this, slots::CONTROLLER);
-    let is_byte = v8::Local::<v8::Object>::try_from(controller_v)
-        .map(|c| crate::streams::readable_byte_controller::is_byte_controller(scope, c))
-        .unwrap_or(false);
-    let res = if is_byte {
-        crate::streams::byte_tee::readable_byte_stream_tee(scope, this, branch_budgets, false)
-    } else {
-        crate::streams::tee::readable_stream_default_tee(scope, this, branch_budgets, false)
-    };
-    match res {
+    match tee(scope, this) {
         Ok([b1, b2]) => {
             let arr = v8::Array::new(scope, 2);
             arr.set_index(scope, 0, b1.into());
             arr.set_index(scope, 1, b2.into());
             rv.set(arr.into());
         }
-        Err(msg) => {
-            let v8_msg = v8::String::new(scope, &msg).unwrap();
-            let exc = v8::Exception::type_error(scope, v8_msg);
-            scope.throw_exception(exc);
-        }
+        Err(e) => throw_op_error(scope, &e),
     }
+}
+
+/// `ReadableStreamTee(stream, false)`: the two branches `stream.tee()`
+/// returns. Runtime-internal callers (a body's `clone()`) call this rather
+/// than looking `tee` up on a prototype script may have replaced.
+pub(crate) fn tee<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    stream: v8::Local<'s, v8::Object>,
+) -> Result<[v8::Local<'s, v8::Object>; 2], OpError> {
+    if crate::streams::algorithms::is_readable_stream_locked(scope, stream) {
+        return Err(OpError::type_error("tee: stream is locked"));
+    }
+    // Charge both branches before either tee locks the source, so a tee the
+    // budget cannot cover is refused with the source still unlocked.
+    let branch_budgets = try_alloc_streams::<2>(scope)?;
+    // Dispatch to byte-tee or default-tee based on the controller class.
+    let controller_v = slots::read_slot(scope, stream, slots::CONTROLLER);
+    let is_byte = v8::Local::<v8::Object>::try_from(controller_v)
+        .map(|c| crate::streams::readable_byte_controller::is_byte_controller(scope, c))
+        .unwrap_or(false);
+    let res = if is_byte {
+        crate::streams::byte_tee::readable_byte_stream_tee(scope, stream, branch_budgets, false)
+    } else {
+        crate::streams::tee::readable_stream_default_tee(scope, stream, branch_budgets, false)
+    };
+    res.map_err(OpError::type_error)
 }
 
 /// `ReadableStreamIteratorOptions` per Streams §3.2:
@@ -922,7 +871,7 @@ fn values_method_callback<'s>(
     let prevent_cancel = match ReadableStreamIteratorOptions::from_v8(scope, options) {
         Ok(opts) => opts.prevent_cancel,
         Err(err) => {
-            let msg = v8::String::new(scope, &err.message).unwrap();
+            let msg = crate::strings::message(scope, &err.message);
             let exc = v8::Exception::type_error(scope, msg);
             scope.throw_exception(exc);
             return;
@@ -932,7 +881,7 @@ fn values_method_callback<'s>(
     match crate::streams::async_iter::create_async_iterator(scope, this, prevent_cancel) {
         Ok(iter) => rv.set(iter.into()),
         Err(msg) => {
-            let v8_msg = v8::String::new(scope, &msg).unwrap();
+            let v8_msg = crate::strings::message(scope, &msg);
             let exc = v8::Exception::type_error(scope, v8_msg);
             scope.throw_exception(exc);
         }
@@ -1143,7 +1092,7 @@ pub(crate) fn throw_op_error(scope: &mut v8::PinScope, err: &OpError) {
         scope.throw_exception(local);
         return;
     }
-    let msg = v8::String::new(scope, &err.message).unwrap();
+    let msg = crate::strings::message(scope, &err.message);
     let exc: v8::Local<v8::Value> = match &err.kind {
         crate::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, msg),
         crate::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, msg),
@@ -1157,11 +1106,11 @@ pub(crate) fn throw_op_error(scope: &mut v8::PinScope, err: &OpError) {
             let e = v8::Exception::error(scope, msg);
             if let Ok(obj) = v8::Local::<v8::Object>::try_from(e) {
                 let ck = v8::String::new(scope, "code").unwrap();
-                let cv = v8::String::new(scope, code).unwrap();
+                let cv = crate::strings::message(scope, code);
                 obj.set(scope, ck.into(), cv.into());
                 if let Some(h) = hint {
                     let hk = v8::String::new(scope, "hint").unwrap();
-                    let hv = v8::String::new(scope, h).unwrap();
+                    let hv = crate::strings::message(scope, h);
                     obj.set(scope, hk.into(), hv.into());
                 }
                 if let Some(status) = status {
@@ -1349,6 +1298,7 @@ pub fn install_native_streams(
     let stream_class_fn = stream_tmpl.get_function(scope).unwrap();
     let key = v8::String::new(scope, "ReadableStream").unwrap();
     global.set(scope, key.into(), stream_class_fn.into());
+    intrinsics::capture(scope, Intrinsic::ReadableStream, stream_class_fn);
 
     // ReadableStream.from(asyncIterable) — static method, spec §3.2.1.
     install_readable_stream_from(scope, stream_class_fn);

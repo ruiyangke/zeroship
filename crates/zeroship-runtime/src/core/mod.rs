@@ -5,6 +5,8 @@
 //! wires V8 to the compio event loop.
 
 pub(crate) mod application_entry;
+pub mod brand;
+pub mod callback;
 pub mod channel;
 pub mod databases;
 pub mod dev_auth;
@@ -23,6 +25,7 @@ pub mod runtime;
 pub mod serve;
 pub(crate) mod startup;
 pub mod state;
+pub mod strings;
 pub(crate) mod tasks;
 mod zeroship_module;
 

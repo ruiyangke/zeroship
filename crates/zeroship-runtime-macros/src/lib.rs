@@ -237,14 +237,24 @@ pub fn v8_inherit_intrinsic(_attr: TokenStream, item: TokenStream) -> TokenStrea
 /// #[v8_class]
 /// #[v8_inherit(EventTarget)]
 /// impl AbortSignal { /* ... */ }
+///
+/// #[v8_class]
+/// #[v8_inherit(Event, state_field = event)]
+/// impl MessageEventState { /* ... */ }
 /// ```
 ///
 /// Codegen calls `__ctor_tmpl.inherit(BaseClass::install(scope))` after
 /// reserving internal-field slots; the base class's `install` is invoked
 /// fresh per realm, which is fine because the template chain is per-
-/// realm anyway. Per design fetch-native §XIV.1, this is the only
-/// `#[v8_inherit]` user in v1; future users include WebSocket /
-/// EventSource / MessagePort / XMLHttpRequest.
+/// realm anyway.
+///
+/// A derived wrapper is branded for the base state type too, so the base
+/// class's methods run on it, reading the derived state as a base state.
+/// The macro proves at compile time that this is sound: without
+/// `state_field`, the base state must be zero-sized; with
+/// `state_field = f`, field `f` of the derived state must have the base
+/// class's state type and sit at offset zero. Either way the derived state
+/// must be at least as aligned as the base state.
 #[proc_macro_attribute]
 pub fn v8_inherit(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item

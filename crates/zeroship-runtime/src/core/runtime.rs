@@ -417,15 +417,22 @@ impl Runtime {
     ///
     /// The worker calls this at load time so corrupt boot artifacts (including
     /// a present-but-invalid `manifest.runtime_descriptor`) reject the load
-    /// instead of producing a stored schema-less isolate that fails later.
+    /// instead of producing a stored schema-less isolate that fails later. An
+    /// evaluation in which a native callback panicked is refused too: the
+    /// isolate is quarantined and its startup fails, even when the creator
+    /// caught the error the panic became.
     pub async fn initialize(&self, env: &crate::EnvSnapshot) -> Result<(), String> {
-        let ready = {
+        {
             let mut inner = self.inner.borrow_mut();
             inner.enter_isolate();
-            let result = inner.initialize_modules(self.modules.as_slice(), env);
+            // The answer is read below, after the panic check: a callback that
+            // panicked during evaluation stops the isolate and fails its
+            // startup even when the creator caught the error it threw.
+            let _ = inner.initialize_modules(self.modules.as_slice(), env);
             inner.exit_isolate();
-            result?
-        };
+        }
+        self.stop_if_a_callback_panicked();
+        let ready = self.inner.borrow().startup_result()?;
         if ready { return Ok(()); }
         self.start_pump();
         futures::future::poll_fn(|cx| {
@@ -498,6 +505,8 @@ impl Runtime {
         if entered_for_scope {
             inner.exit_isolate();
         }
+        drop(inner);
+        self.stop_if_a_callback_panicked();
         r
     }
 
@@ -601,7 +610,7 @@ impl Runtime {
         user_json: Option<String>,
     ) -> crate::FetchOutcome {
         let body = body.as_ref();
-        self.inner.borrow_mut().call_fetch_handler(
+        let outcome = self.inner.borrow_mut().call_fetch_handler(
             self.modules.as_slice(),
             method,
             url,
@@ -610,7 +619,9 @@ impl Runtime {
             env,
             ctx,
             user_json,
-        )
+        );
+        self.stop_if_a_callback_panicked();
+        outcome
     }
 
     /// Durable-workflow replay dispatch. Invokes the `dispatch` export of the
@@ -622,9 +633,23 @@ impl Runtime {
         env: &crate::EnvSnapshot,
         ctx: crate::RequestCtx,
     ) -> crate::WorkflowOutcome {
-        self.inner
+        let outcome = self
+            .inner
             .borrow_mut()
-            .call_workflow_dispatch(self.modules.as_slice(), envelope_json, env, ctx)
+            .call_workflow_dispatch(self.modules.as_slice(), envelope_json, env, ctx);
+        self.stop_if_a_callback_panicked();
+        outcome
+    }
+
+    /// Stop this isolate if a native callback panicked in the window that just
+    /// ended (see [`RuntimeInner::stop_for_caught_panic`]). Every entry point
+    /// that runs script calls it once the isolate is released; the pump checks
+    /// after each of its own windows.
+    fn stop_if_a_callback_panicked(&self) {
+        let panicked = self.inner.borrow().take_caught_panic();
+        if panicked {
+            RuntimeInner::stop_for_caught_panic(&self.inner);
+        }
     }
 
     /// Enter the V8 isolate on this thread. Multi-tenant workers that keep
@@ -1428,6 +1453,7 @@ impl RuntimeInner {
         state.borrow_mut().runtime_descriptor = runtime_descriptor;
         isolate.set_slot(state.clone());
         isolate.set_slot(crate::plugin::RuntimeAppIdentity(app_id.clone()));
+        isolate.set_slot(crate::callback::CaughtPanicMark::default());
 
         let context = {
             v8::scope!(let handle_scope, &mut isolate);
@@ -1711,10 +1737,24 @@ impl RuntimeInner {
                         rt.advance_startup();
                         rt.exit_isolate();
                     }
-                    if matches!(rt.startup, StartupState::Failed(_)) { return; }
-                    let cancellation_cpu_start = crate::core::init::thread_cpu_time();
-                    rt.cleanup_cancelled_requests();
-                    rt.bill_pump_cpu(crate::core::init::thread_cpu_time().saturating_sub(cancellation_cpu_start));
+                    let startup_failed = matches!(rt.startup, StartupState::Failed(_));
+                    if !startup_failed {
+                        // The one place the pump settles cancelled requests.
+                        // An RPC's cancellation aborts its signal, which runs
+                        // the creator's abort listeners and a microtask
+                        // checkpoint.
+                        let cancellation_cpu_start = crate::core::init::thread_cpu_time();
+                        rt.cleanup_cancelled_requests();
+                        rt.bill_pump_cpu(crate::core::init::thread_cpu_time().saturating_sub(cancellation_cpu_start));
+                    }
+                    // After the startup advance and the cleanup, and before
+                    // anything else this iteration dispatches.
+                    if rt.take_caught_panic() {
+                        drop(rt);
+                        Self::stop_for_caught_panic(&runtime);
+                        return;
+                    }
+                    if startup_failed { return; }
                     let scan_now = rt.state.borrow().deadline_now();
                     crate::streams::stream_forwarder::queue_cancellations(&rt.state, scan_now);
                     request_deadline = rt.startup_deadline().into_iter()
@@ -1784,6 +1824,11 @@ impl RuntimeInner {
                     rt.bill_pump_cpu(
                         crate::core::init::thread_cpu_time().saturating_sub(cpu_start),
                     );
+                    if rt.take_caught_panic() {
+                        drop(rt);
+                        Self::stop_for_caught_panic(&runtime);
+                        return;
+                    }
                     ready_timers_pending = !rt.state().borrow().ready_timers.is_empty();
                 }
                 // Read the deadline clock once here, after PHASE 1, so the
@@ -1915,6 +1960,13 @@ impl RuntimeInner {
                 }
             };
 
+            // No event (`None`) is a bare pump notification, a request
+            // cancelled or past its deadline, or the `READY_TIMER_PASS_TICK`
+            // ceiling expiring with more zero-delay timers still queued. Each
+            // goes straight to the next iteration, whose top settles the
+            // cancellations and re-runs PHASE 1. No yield is needed for it:
+            // reaching this point means the wait above already awaited a real
+            // deadline.
             if let Some(first_event) = event {
                 // Event batching. After the first event fires, greedily drain
                 // every OTHER ready event from pending_ops/timers (via
@@ -1988,6 +2040,11 @@ impl RuntimeInner {
                     rt.bill_pump_cpu(
                         crate::core::init::thread_cpu_time().saturating_sub(cpu_start),
                     );
+                    if rt.take_caught_panic() {
+                        drop(rt);
+                        Self::stop_for_caught_panic(&runtime);
+                        return;
+                    }
                     if let Some(exceeded) = rt.record_pump_cpu(v8_start.elapsed()) {
                         // This pump is the only thing that drives the
                         // isolate's pending requests, timers and native work,
@@ -2028,17 +2085,6 @@ impl RuntimeInner {
                 if should_yield {
                     compio::time::sleep(Duration::ZERO).await;
                 }
-            } else {
-                // No event: either a bare pump notification, or the
-                // `READY_TIMER_PASS_TICK` ceiling expiring with more zero-delay
-                // timers still queued. Both fall through to the next iteration,
-                // which re-runs PHASE 1. No yield is needed here — reaching this
-                // point means the wait above already awaited a real deadline.
-                let Some(runtime) = runtime.upgrade() else { return; };
-                let mut rt = runtime.borrow_mut();
-                let cancellation_cpu_start = crate::core::init::thread_cpu_time();
-                rt.cleanup_cancelled_requests();
-                rt.bill_pump_cpu(crate::core::init::thread_cpu_time().saturating_sub(cancellation_cpu_start));
             }
         }
     }
@@ -3116,8 +3162,7 @@ impl RuntimeInner {
                             r.reject(scope, v);
                         }
                         ResolveValue::String(s) => {
-                            let v = v8::String::new(scope, &s).unwrap();
-                            r.resolve(scope, v.into());
+                            crate::strings::resolve_text(scope, r, &s);
                         }
                         ResolveValue::Json(s) => {
                             let v = v8::String::new(scope, &s)
@@ -3714,6 +3759,42 @@ impl RuntimeInner {
         None
     }
 
+    /// Whether a native callback panicked in this isolate since the last
+    /// call. The panic boundary in `crate::callback` caught the panic and
+    /// threw in its place, but whatever the callback was updating may be
+    /// half done.
+    fn take_caught_panic(&self) -> bool {
+        crate::callback::CaughtPanicMark::take(&self.isolate)
+    }
+
+    /// Stop this isolate after a native callback panicked in it.
+    ///
+    /// The panic was answered inside the isolate, but the callback may have
+    /// left its native state half updated, so the isolate serves nothing more:
+    /// every request still pending on it is failed with `internal error` and
+    /// it is quarantined, so [`Runtime::is_quarantined`] tells a caching host
+    /// to replace it before the next request.
+    fn stop_for_caught_panic(this: &Rc<RefCell<Self>>) {
+        const CAUSE: &str = "internal error";
+        let (failed, app_id) = {
+            let mut rt = this.borrow_mut();
+            let pending: Vec<(u64, PendingRequest)> = rt.pending_requests.drain().collect();
+            let failed = pending.len();
+            for (id, request) in pending {
+                rt.drain_request_logs(id);
+                rt.drop_timers_owned_by(id);
+                send_pending_error(request, CAUSE);
+            }
+            (failed, rt.app_id.clone())
+        };
+        Self::quarantine(this, CAUSE);
+        tracing::error!(
+            app_id = app_id.as_ref().map(AppId::as_str),
+            failed_requests = failed,
+            "a native callback panicked; isolate quarantined and its pending requests failed"
+        );
+    }
+
     /// Stop this isolate for exceeding its pump CPU share, the way a CPU
     /// overrun stops a request.
     ///
@@ -4006,7 +4087,7 @@ fn wait_until_noop_callback(
     // Empty rust closure marshalled as a V8 function — nothing to do,
     // we just need to register *some* rejection handler so V8 doesn't
     // flag the promise as unhandled.
-    let Some(noop) = v8::Function::new(scope, pass_through_on_exception_noop_callback) else {
+    let Some(noop) = crate::callback::function(scope, pass_through_on_exception_noop_callback) else {
         return;
     };
     let _ = promise.catch(scope, noop);

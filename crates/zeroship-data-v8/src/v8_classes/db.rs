@@ -318,27 +318,7 @@ pub(crate) fn mint_db_for_binding<'s>(
         binding: binding.clone(),
         collection_cache: RefCell::new(HashMap::new()),
     };
-    let boxed: Box<Db> = Box::new(state);
-    let raw = Box::into_raw(boxed);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    obj.set_internal_field(0, ext.into());
-
-    // SAFETY: `raw_addr` was Box::into_raw'd from `Box<Db>`; the
-    // finalizer closure casts back to the same type and drops the Box
-    // exactly once when V8 reclaims the wrapper. There are no native
-    // resources to release; the Collection cache holds
-    // `v8::Global<v8::Object>` handles that are dropped together with
-    // the Box, and each Collection's own Weak finalizer reclaims its
-    // state.
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut Db));
-        }),
-    );
-    std::mem::forget(weak);
+    Db::__zs_install(scope, obj, state)?;
 
     Some(obj)
 }

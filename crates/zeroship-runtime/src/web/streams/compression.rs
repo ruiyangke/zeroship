@@ -78,14 +78,14 @@ struct CodecPayload {
 fn build_payload_function<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     state: Rc<RefCell<CodecState>>,
-    callback: impl v8::MapFnTo<v8::FunctionCallback>,
+    callback: impl crate::callback::Callback,
 ) -> v8::Local<'s, v8::Function> {
     let boxed = Box::new(CodecPayload { state });
     let raw_ptr = Box::into_raw(boxed);
     let raw_addr = raw_ptr as usize;
     let ext = v8::External::new(scope, raw_ptr as *mut std::ffi::c_void);
 
-    let tmpl = v8::FunctionTemplate::builder(callback)
+    let tmpl = crate::callback::template_builder(callback)
         .data(ext.into())
         .build(scope);
     let f = tmpl.get_function(scope).unwrap();
@@ -145,7 +145,7 @@ fn read_buffer_source(
 }
 
 fn throw_type_error(scope: &mut v8::PinScope, msg: &str) {
-    let m = v8::String::new(scope, msg).unwrap();
+    let m = crate::strings::message(scope, msg);
     let exc = v8::Exception::type_error(scope, m);
     scope.throw_exception(exc);
 }
@@ -289,7 +289,7 @@ fn construct_transform_stream(
     let key = v8::String::new(scope, "flush").unwrap();
     transformer.set(scope, key.into(), flush_fn.into());
 
-    crate::streams::construct_global(scope, "TransformStream", &[transformer.into()])
+    crate::intrinsics::construct(scope, crate::intrinsics::Intrinsic::TransformStream, &[transformer.into()])
 }
 
 // ---------------------------------------------------------------------------

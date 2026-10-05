@@ -72,6 +72,13 @@ pub(crate) fn gen_method_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenSt
         &cfg.brand_check_ident,
     );
 
+    let body = quote! {
+            #recover
+
+            #(#extractions)*
+            #call_return
+        };
+
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
         pub(crate) fn #callback_name(
@@ -79,10 +86,7 @@ pub(crate) fn gen_method_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenSt
             args: v8::FunctionCallbackArguments,
             mut rv: v8::ReturnValue,
         ) {
-            #recover
-
-            #(#extractions)*
-            #call_return
+            #body
         }
     }
 }
@@ -162,13 +166,7 @@ pub(crate) fn gen_setter_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenSt
         }
     };
 
-    quote! {
-        #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
-        pub(crate) fn #callback_name(
-            scope: &mut v8::PinScope,
-            args: v8::FunctionCallbackArguments,
-            mut rv: v8::ReturnValue,
-        ) {
+    let body = quote! {
             #recover
 
             #(#extractions)*
@@ -178,6 +176,16 @@ pub(crate) fn gen_setter_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenSt
             // §3.7.6 says the setter return value is unobservable to JS,
             // so we never write to `rv`.
             #invoke
+        };
+
+    quote! {
+        #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
+        pub(crate) fn #callback_name(
+            scope: &mut v8::PinScope,
+            args: v8::FunctionCallbackArguments,
+            mut rv: v8::ReturnValue,
+        ) {
+            #body
         }
     }
 }
@@ -274,20 +282,14 @@ pub(crate) fn gen_async_method_callback(cfg: &ClassConfig, m: &ClassMethod) -> T
         &quote! { "internal error: SharedState not installed on isolate" },
     );
 
-    quote! {
-        #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
-        pub(crate) fn #callback_name(
-            scope: &mut v8::PinScope,
-            args: v8::FunctionCallbackArguments,
-            mut rv: v8::ReturnValue,
-        ) {
+    let body = quote! {
             // 1. Recover the `Box<Self>` pointer from internal field 0.
             //    On illegal invocation (receiver is not a wrapper), fail
             //    *synchronously* with a TypeError — same contract as the
             //    sync method path. The user code never runs. The brand
-            //    check (WebIDL §3.7) walks the prototype chain rather
-            //    than just verifying internal-field 0 is an External,
-            //    so cross-class calls (`Foo.prototype.method.call(bar)`)
+            //    check (WebIDL 3.7) tests the class brand rather than
+            //    just verifying internal-field 0 is an External, so
+            //    cross-class calls (`Foo.prototype.method.call(bar)`)
             //    fail before the unsafe deref.
             #brand_check
             #recover_external
@@ -381,6 +383,16 @@ pub(crate) fn gen_async_method_callback(cfg: &ClassConfig, m: &ClassMethod) -> T
             // 7. Return the unsettled Promise. JS sees this as the
             //    method's return value and `await`s on it.
             rv.set(__promise.into());
+        };
+
+    quote! {
+        #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
+        pub(crate) fn #callback_name(
+            scope: &mut v8::PinScope,
+            args: v8::FunctionCallbackArguments,
+            mut rv: v8::ReturnValue,
+        ) {
+            #body
         }
     }
 }

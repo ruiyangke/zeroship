@@ -2157,6 +2157,145 @@ mod tests {
         .expect("quarantined metadata test thread panicked");
     }
 
+    /// A plugin whose one callback panics, reachable from creator code as
+    /// `env.boom.explode()`, standing in for any native callback with a
+    /// defect a creator can reach.
+    struct PanickingPlugin;
+
+    fn panicking_callback(
+        _scope: &mut v8::PinScope,
+        _args: v8::FunctionCallbackArguments,
+        _rv: v8::ReturnValue,
+    ) {
+        panic!("a native callback panicked");
+    }
+
+    impl NativePlugin for PanickingPlugin {
+        fn namespace(&self) -> &str {
+            "boom"
+        }
+
+        fn register(&self, r: &mut zeroship_runtime::NativeRegistrar) {
+            r.add("explode", panicking_callback);
+        }
+    }
+
+    /// Install a cache on this thread whose kernel is [`PanickingPlugin`]
+    /// alone, so every isolate loaded afterwards can reach that callback.
+    fn init_cache_with_a_panicking_callback() {
+        init_cache(4, KernelConfig {
+            workflows: None,
+            db_service: None,
+            kv_store: None,
+            storage_backend: None,
+            meter: Arc::new(zeroship_metering::Meter::new()),
+            residency: None,
+        });
+        PLUGIN_SET.with(|p| *p.borrow_mut() = Some(vec![Arc::new(PanickingPlugin) as Arc<dyn NativePlugin>]));
+    }
+
+    async fn load_source(app_id: &AppId, source: &[u8]) -> Result<(), String> {
+        load_app(
+            hold(app_id),
+            test_modules(source),
+            AppRuntimeLimits::default(),
+            AppNetPolicy::default(),
+            Some("deploy"),
+            None,
+            &Manifest::default(),
+            &EnvSnapshot::empty(),
+        )
+        .await
+    }
+
+    /// A load whose module graph reaches a panicking callback while it
+    /// evaluates is refused, though the module caught the error the panic
+    /// became, and leaves no isolate in the cache.
+    #[test]
+    fn a_callback_panic_while_the_modules_evaluate_fails_the_load() {
+        std::thread::spawn(|| {
+            compio::runtime::Runtime::new().unwrap().block_on(async {
+                zeroship_runtime::init::init_v8();
+                init_cache_with_a_panicking_callback();
+                let app_id = AppId::mint();
+                let error = load_source(&app_id, br#"
+                    import { env } from "zeroship";
+                    try { env.boom.explode(); } catch {}
+                    export default { fetch() { return new Response("served"); } };
+                "#)
+                .await
+                .expect_err("a load a callback panicked in is refused");
+                assert!(error.contains("internal error"), "the callback's panic stopped the isolate: {error}");
+                assert!(get_runtime(&app_id).is_none(), "nothing is cached for the refused load");
+                assert!(!all_app_ids().contains(&app_id), "the app is not resident");
+            });
+        })
+        .join()
+        .expect("panicking load test thread panicked");
+    }
+
+    /// A callback that panics in an RPC's `abort` listener, which the pump
+    /// runs when it settles the cancelled request, stops the isolate before
+    /// the request's answer is out. The next lookup is refused that isolate,
+    /// and the next load serves on a fresh one.
+    #[test]
+    fn the_request_after_an_abort_listener_panic_lands_on_a_fresh_isolate() {
+        const SOURCE: &[u8] = br#"
+            import { currentSignal, env } from "zeroship";
+            export async function pending() {
+                currentSignal().addEventListener("abort", () => {
+                    try { env.boom.explode(); } catch {}
+                });
+                await new Promise(() => {});
+            }
+            export function ping() { return "pong"; }
+            export default { rpc: { pending, ping } };
+        "#;
+        std::thread::spawn(|| {
+            compio::runtime::Runtime::new().unwrap().block_on(async {
+                zeroship_runtime::init::init_v8();
+                init_cache_with_a_panicking_callback();
+                let app_id = AppId::mint();
+                load_source(&app_id, SOURCE).await.expect("the app loads");
+                let panicked = get_runtime(&app_id).expect("the loaded isolate is cached");
+
+                panicked.enter_isolate();
+                let outcome = start_rpc(&panicked, "pending", "[]");
+                panicked.exit_isolate();
+                let zeroship_runtime::FetchOutcome::Pending { rx, cancel } = outcome else {
+                    panic!("the procedure is still running once its listener is registered");
+                };
+                cancel.cancel();
+                panicked.notify_pump();
+                let cancelled = compio::time::timeout(Duration::from_secs(5), rx.recv())
+                    .await
+                    .expect("the cancelled request is answered");
+                assert!(
+                    matches!(cancelled, Ok(zeroship_runtime::SettledFetch::Response { status: 499, .. })),
+                    "the cancellation is answered as a cancellation"
+                );
+                assert!(
+                    panicked.is_quarantined(),
+                    "the cancellation ran the listener, whose callback panicked and stopped the isolate"
+                );
+                drop(panicked);
+                assert!(get_runtime(&app_id).is_none(), "the next lookup is refused the stopped isolate");
+
+                load_source(&app_id, SOURCE).await.expect("the app loads again");
+                let fresh = get_runtime(&app_id).expect("the fresh isolate is cached");
+                assert!(!fresh.is_quarantined(), "the next request lands on a fresh isolate");
+                fresh.enter_isolate();
+                let (status, body) = read_rpc(&fresh, "ping").await;
+                fresh.exit_isolate();
+                assert_eq!(status, 200, "the fresh isolate serves: {body}");
+                let answered: serde_json::Value = serde_json::from_str(&body).expect("an RPC answer is JSON");
+                assert_eq!(answered["json"], "pong", "with the procedure's result: {body}");
+            });
+        })
+        .join()
+        .expect("abort listener replacement test thread panicked");
+    }
+
     #[test]
     fn evict_lru_never_evicts_leased_isolate() {
         std::thread::spawn(|| {
@@ -2528,17 +2667,17 @@ mod tests {
         )
     }
 
-    /// Dispatch the synthetic `readFlag` procedure and return `(status, body)`.
-    async fn read_flag(runtime: &Runtime) -> (u16, String) {
-        match start_rpc(runtime, "readFlag", "[]") {
+    /// Dispatch the procedure `id` with no input and return `(status, body)`.
+    async fn read_rpc(runtime: &Runtime, id: &str) -> (u16, String) {
+        match start_rpc(runtime, id, "[]") {
             zeroship_runtime::FetchOutcome::Response { status, body, .. } => {
                 (status, String::from_utf8_lossy(&body).into_owned())
             }
             zeroship_runtime::FetchOutcome::Pending { rx, cancel: _ } => {
                 let settled = compio::time::timeout(Duration::from_secs(2), rx.recv())
                     .await
-                    .expect("readFlag timed out")
-                    .expect("readFlag dispatch error");
+                    .expect("the procedure timed out")
+                    .expect("the procedure's dispatch failed");
                 match settled {
                     zeroship_runtime::SettledFetch::Response { status, body, .. } => {
                         (status, String::from_utf8_lossy(&body).into_owned())
@@ -2592,7 +2731,7 @@ mod tests {
                     "evicted runtime's own signal must fire and clear"
                 );
                 newer.enter_isolate();
-                let (status, body) = read_flag(&newer).await;
+                let (status, body) = read_rpc(&newer, "readFlag").await;
                 newer.exit_isolate();
                 assert_eq!(status, 200, "newer readFlag failed: {body}");
                 assert!(
@@ -2607,7 +2746,7 @@ mod tests {
                     "neighbouring runtime's signal must survive the eviction"
                 );
                 older.enter_isolate();
-                let (status, body) = read_flag(&older).await;
+                let (status, body) = read_rpc(&older, "readFlag").await;
                 older.exit_isolate();
                 assert_eq!(status, 200, "older readFlag failed: {body}");
                 assert!(

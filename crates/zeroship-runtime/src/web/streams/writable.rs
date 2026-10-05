@@ -33,6 +33,8 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
+use crate::callback::Callback;
+use crate::intrinsics::{self, Intrinsic};
 use crate::streams::budget::{try_alloc_stream, StreamBudgetGuard};
 use crate::streams::writable_controller as ctlr;
 
@@ -122,18 +124,13 @@ impl WSStreamState {
 // V8 wrapper helpers
 // ---------------------------------------------------------------------------
 
-/// Confirm `obj` is a WritableStream wrapper (its internal field 0 is
-/// an External pointing at a `WSStreamState`). The discriminator is
-/// the presence of the WS-specific class brand on the prototype, but
-/// for a single-class context we use the External-non-null sentinel.
+/// Confirm `obj` is a `WritableStream` wrapper: one this runtime branded
+/// as holding a `WSStreamState` (see `crate::brand`).
 pub fn is_writable_stream(
     scope: &mut v8::PinScope,
     obj: v8::Local<v8::Object>,
 ) -> bool {
-    // Tag via private symbol — set during construction. Prevents confusion
-    // with other classes that also have an External in field 0.
-    let tag = crate::streams::slots::private_sym(scope, "[[ws.brand]]");
-    obj.has_private(scope, tag).unwrap_or(false)
+    crate::brand::is::<WSStreamState>(scope, obj)
 }
 
 /// Reach into a JS WritableStream wrapper's WSStreamState. Returns None if
@@ -143,20 +140,12 @@ pub fn with_ws_state<R>(
     stream: v8::Local<v8::Object>,
     f: impl FnOnce(&WSStreamState) -> R,
 ) -> Option<R> {
-    if !is_writable_stream(scope, stream) {
-        return None;
-    }
-    let raw_v8_field = stream.get_internal_field(scope, 0)?;
-    let ext = v8::Local::<v8::External>::try_from(raw_v8_field).ok()?;
-    let ptr = ext.value() as *const WSStreamState;
-    if ptr.is_null() {
-        return None;
-    }
-    // SAFETY: the External was set during construction to a Box<WSStreamState>
-    // (see `build_stream_wrapper` and `constructor_callback`). The Box is
-    // dropped only by the V8 weak finalizer, which fires after all JS
-    // callbacks complete (single-threaded per isolate).
-    let inst = unsafe { &*ptr };
+    let ptr = crate::brand::state::<WSStreamState>(scope, stream)?;
+    // SAFETY: the brand proves internal field 0 holds the
+    // Box<WSStreamState> `brand::wrap` stored there. The Box is dropped
+    // only by the V8 weak finalizer, which cannot run while `stream` is
+    // reachable.
+    let inst = unsafe { ptr.as_ref() };
     Some(f(inst))
 }
 
@@ -172,76 +161,50 @@ pub fn with_ws_state<R>(
 pub fn build_value_stream_wrapper_for_internal<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     budget: StreamBudgetGuard,
-) -> v8::Local<'s, v8::Object> {
+) -> Option<v8::Local<'s, v8::Object>> {
     build_stream_wrapper(scope, budget)
 }
 
 /// Construct the bare `WritableStream` JS wrapper — no controller wired.
 /// `budget` is the stream's already-charged unit, which the wrapper's Box
-/// holds.
+/// holds. `None` when V8 cannot allocate the wrapper, which happens only
+/// with an exception or a termination already pending.
 fn build_stream_wrapper<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     budget: StreamBudgetGuard,
-) -> v8::Local<'s, v8::Object> {
+) -> Option<v8::Local<'s, v8::Object>> {
     let tmpl = stream_class_template(scope);
     let inst_tmpl = tmpl.instance_template(scope);
-    let stream_obj = inst_tmpl.new_instance(scope).unwrap();
+    let stream_obj = inst_tmpl.new_instance(scope)?;
 
-    let inst = WSStreamState::new(budget);
-    let boxed = Box::new(inst);
-    let raw_ptr = Box::into_raw(boxed);
-    let raw_addr = raw_ptr as usize;
-    let ext = v8::External::new(scope, raw_ptr as *mut std::ffi::c_void);
-    stream_obj.set_internal_field(0, ext.into());
+    crate::brand::wrap(scope, stream_obj, WSStreamState::new(budget));
 
-    // Tag with brand priv-sym so receiver checks can distinguish from
-    // other classes that also embed an External in field 0.
-    let tag = crate::streams::slots::private_sym(scope, "[[ws.brand]]");
-    let true_v: v8::Local<v8::Value> = v8::Boolean::new(scope, true).into();
-    stream_obj.set_private(scope, tag, true_v);
+    // The class's own prototype, captured with its template, so an
+    // internally built wrapper is `instanceof WritableStream` whatever
+    // script has since stored at `globalThis.WritableStream`.
+    if let Some(proto) = intrinsics::prototype(scope, Intrinsic::WritableStream) {
+        stream_obj.set_prototype(scope, proto.into());
+    }
 
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        stream_obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut WSStreamState));
-        }),
-    );
-    std::mem::forget(weak);
-
-    // Prefer `globalThis.WritableStream.prototype` so internally-built
-    // wrappers share JS class identity. Fall back to the just-built
-    // template when install_native_writable_stream hasn't run yet.
-    let proto_v = global_class_prototype_ws(scope, "WritableStream").unwrap_or_else(|| {
-        let class_fn = tmpl.get_function(scope).unwrap();
-        let proto_key = v8::String::new(scope, "prototype").unwrap();
-        class_fn.get(scope, proto_key.into()).unwrap()
-    });
-    stream_obj.set_prototype(scope, proto_v);
-
-    stream_obj
-}
-
-fn global_class_prototype_ws<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    name: &str,
-) -> Option<v8::Local<'s, v8::Value>> {
-    let global = scope.get_current_context().global(scope);
-    let key = v8::String::new(scope, name)?;
-    let class_v = global.get(scope, key.into())?;
-    let class_obj = v8::Local::<v8::Object>::try_from(class_v).ok()?;
-    let proto_key = v8::String::new(scope, "prototype")?;
-    class_obj.get(scope, proto_key.into())
+    Some(stream_obj)
 }
 
 // ---------------------------------------------------------------------------
 // Class template construction
 // ---------------------------------------------------------------------------
 
+/// The isolate's `WritableStream` `FunctionTemplate`: the one `globalThis`
+/// exposes and the one internally built streams are instances of.
 fn stream_class_template<'s>(
     scope: &mut v8::PinScope<'s, '_>,
 ) -> v8::Local<'s, v8::FunctionTemplate> {
-    let ctor_tmpl = v8::FunctionTemplate::new(scope, constructor_callback);
+    intrinsics::template(scope, Intrinsic::WritableStream, build_stream_class_template)
+}
+
+fn build_stream_class_template<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+) -> v8::Local<'s, v8::FunctionTemplate> {
+    let ctor_tmpl = crate::callback::template(scope, constructor_callback);
     let class_name = v8::String::new(scope, "WritableStream").unwrap();
     ctor_tmpl.set_class_name(class_name);
     ctor_tmpl
@@ -253,7 +216,7 @@ fn stream_class_template<'s>(
     // locked getter (§4.2.5.1)
     {
         let key = v8::String::new(scope, "locked").unwrap();
-        let getter_tmpl = v8::FunctionTemplate::new(scope, locked_getter_callback);
+        let getter_tmpl = crate::callback::template(scope, locked_getter_callback);
         proto.set_accessor_property(
             key.into(),
             Some(getter_tmpl),
@@ -281,10 +244,10 @@ fn install_method(
     scope: &mut v8::PinScope,
     proto: v8::Local<v8::ObjectTemplate>,
     name: &str,
-    cb: impl v8::MapFnTo<v8::FunctionCallback>,
+    cb: impl Callback,
 ) {
     let key = v8::String::new(scope, name).unwrap();
-    let tmpl = v8::FunctionTemplate::new(scope, cb);
+    let tmpl = crate::callback::template(scope, cb);
     proto.set(key.into(), tmpl.into());
 }
 
@@ -348,26 +311,7 @@ fn constructor_callback(
             return;
         }
     };
-    let inst = WSStreamState::new(budget);
-    let boxed = Box::new(inst);
-    let raw_ptr = Box::into_raw(boxed);
-    let raw_addr = raw_ptr as usize;
-    let ext = v8::External::new(scope, raw_ptr as *mut std::ffi::c_void);
-    stream_obj.set_internal_field(0, ext.into());
-
-    // Tag for receiver-check.
-    let tag = crate::streams::slots::private_sym(scope, "[[ws.brand]]");
-    let true_v: v8::Local<v8::Value> = v8::Boolean::new(scope, true).into();
-    stream_obj.set_private(scope, tag, true_v);
-
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        stream_obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut WSStreamState));
-        }),
-    );
-    std::mem::forget(weak);
+    crate::brand::wrap(scope, stream_obj, WSStreamState::new(budget));
 
     if let Err(msg) = ctlr::set_up_writable_stream_default_controller_from_underlying_sink_with_strategy(
         scope,
@@ -376,7 +320,7 @@ fn constructor_callback(
         hwm,
         size_algo,
     ) {
-        let v8_msg = v8::String::new(scope, &msg).unwrap();
+        let v8_msg = crate::strings::message(scope, &msg);
         let exc = v8::Exception::type_error(scope, v8_msg);
         scope.throw_exception(exc);
     }
@@ -497,7 +441,7 @@ fn get_writer_method_callback(
     let writer = match crate::streams::writable_writer::acquire_writable_stream_default_writer(scope, this) {
         Ok(w) => w,
         Err(err) => {
-            let msg = v8::String::new(scope, &err).unwrap();
+            let msg = crate::strings::message(scope, &err);
             let exc = v8::Exception::type_error(scope, msg);
             scope.throw_exception(exc);
             return;
@@ -520,4 +464,5 @@ pub fn install_native_writable_stream(
     let stream_class_fn = stream_tmpl.get_function(scope).unwrap();
     let key = v8::String::new(scope, "WritableStream").unwrap();
     global.set(scope, key.into(), stream_class_fn.into());
+    intrinsics::capture(scope, Intrinsic::WritableStream, stream_class_fn);
 }

@@ -22,8 +22,10 @@ breaking changes via this file plus `runtime-macros/TODO.md`.
 | `<ClassTy>` impl `__private::Sealed` | trait impl | private | Sealing supertrait of `V8ClassInstance`. User code MUST NOT impl this. |
 | ~~`__zs_is_<ClassTy>` (free fn)~~ | ~~`pub` `#[doc(hidden)]`~~ | **removed in Wave 8** | Pre-Wave-5c grep target. Removed per the deprecation policy below. Any remaining call site MUST migrate to `<ClassTy>::is_instance`. |
 | `__InstallSlot_<ClassTy>` (newtype) | `pub` `#[doc(hidden)]` | private; do not grep | Per-isolate slot wrapper for the cached `Global<FunctionTemplate>`. The hand-rolled `EventTarget` mirror in `crates/zeroship-runtime/src/web/dom/event_target.rs` is the only known external consumer; new consumers MUST go through `<ClassTy>::install`. |
-| `__BrandSlot_<ClassTy>` (newtype) | `pub` `#[doc(hidden)]` | private; do not grep | Per-isolate slot for the cached prototype handle (used by `__brand_check_<ClassTy>`). Internal to the macro; never call. |
-| `__brand_check_<ClassTy>` | `pub(crate)` | private | Inner brand-check walker. Operates on `Local<Object>` (no value-shape gate). Internal helper for `<ClassTy>::is_instance`. |
+| `<ClassTy>::__zs_install(scope, obj, state) -> Option<Local<External>>` | `pub` (inherent) `#[doc(hidden)]` | private | The only way a wrapper of the class gets its state: boxes `state` into internal field 0, sets slot 1 for a class that has or inherits a fastcall method, brands the wrapper and registers the finalizer. `None` when `obj` lacks the class's fields or already holds a state. The emitted constructor calls it, and so MUST every wrapper built by hand. |
+| `<ClassTy>::__zs_brand(scope, obj, state)` | `pub` (inherent) `#[doc(hidden)]` | private | Marks a wrapper whose internal field 0 holds `state` with the class brand, and with every `#[v8_inherit]` base brand. Called by `__zs_install` and by a derived class's `__zs_brand`. |
+| `<ClassTy>` impl `brand::ClassState` | trait impl | private | Names the class's state type and its internal field count, so `#[v8_inherit]` can prove at compile time that a derived state reads as the base's (zero-sized base, or `state_field` at offset zero) and give a derived wrapper the slot a base's fastcall shim reads. |
+| `__brand_check_<ClassTy>` | `pub(crate)` | private | Inner brand check: `zeroship_runtime::brand::is::<State>`. Operates on `Local<Object>` (no value-shape gate). Internal helper for `<ClassTy>::is_instance`. |
 
 ### Brand-check API choice
 
@@ -118,6 +120,9 @@ The full list of currently-emitted facade paths (Wave 5b):
 | `macro_runtime::convert::WebIdlConvertible` | `crate::convert::WebIdlConvertible` |
 | `macro_runtime::dom::exception::build` | `crate::dom::exception::build` |
 | `macro_runtime::node_error::build_node_exception` | `crate::node_error::build_node_exception` |
+| `macro_runtime::brand::{is, mark, ClassState}` | `crate::brand::{is, mark, ClassState}` |
+| `macro_runtime::callback::{template, template_builder}` | `crate::callback::{template, template_builder}` |
+| `macro_runtime::strings::{message, new_or_throw, one_byte_or_throw}` | `crate::strings::*` |
 | `macro_runtime::V8ClassInstance` | (no canonical — defined in macro_runtime) |
 | `macro_runtime::__private::Sealed` | (no canonical — defined in macro_runtime) |
 

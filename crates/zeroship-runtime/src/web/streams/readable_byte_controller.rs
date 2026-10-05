@@ -34,6 +34,8 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
+use crate::callback::Callback;
+use crate::intrinsics::{self, Intrinsic};
 use crate::streams::algorithms;
 use crate::streams::promise_resolve;
 use crate::streams::pull_into::{
@@ -96,22 +98,10 @@ impl ByteControllerState {
 // V8 wrapper helpers
 // ---------------------------------------------------------------------------
 
-/// True iff `obj` looks like a ReadableByteStreamController wrapper (its
-/// internal field 0 holds a non-null External pointing at our state). We
-/// distinguish from default controllers via a class-tag priv sym set at
-/// `set_up_*` time.
-const BC_TAG_SLOT: &str = "[[bc.tag]]";
-
+/// True iff `obj` is a `ReadableByteStreamController` wrapper: one this
+/// runtime branded as holding a `ByteControllerState`.
 pub fn is_byte_controller(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> bool {
-    if obj
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-        .map(|e| e.value().is_null())
-        .unwrap_or(true)
-    {
-        return false;
-    }
-    !slots::slot_is_empty(scope, obj, BC_TAG_SLOT)
+    crate::brand::is::<ByteControllerState>(scope, obj)
 }
 
 pub fn with_controller_state<R>(
@@ -119,15 +109,11 @@ pub fn with_controller_state<R>(
     controller: v8::Local<v8::Object>,
     f: impl FnOnce(&ByteControllerState) -> R,
 ) -> Option<R> {
-    let raw = controller.get_internal_field(scope, 0)?;
-    let ext = v8::Local::<v8::External>::try_from(raw).ok()?;
-    let ptr = ext.value() as *const ByteControllerState;
-    if ptr.is_null() {
-        return None;
-    }
-    // SAFETY: External points at a Box<ByteControllerState> set during
-    // construction; dropped only by the V8 weak finalizer.
-    let inst = unsafe { &*ptr };
+    let ptr = crate::brand::state::<ByteControllerState>(scope, controller)?;
+    // SAFETY: the brand proves internal field 0 holds the
+    // Box<ByteControllerState> stored at construction; it is dropped only
+    // by the V8 weak finalizer.
+    let inst = unsafe { ptr.as_ref() };
     Some(f(inst))
 }
 
@@ -321,17 +307,12 @@ pub fn readable_byte_stream_controller_clear_algorithms(
     scope: &mut v8::PinScope,
     controller: v8::Local<v8::Object>,
 ) {
-    let raw = match controller
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-    {
-        Some(e) => e.value() as *mut ByteControllerState,
-        None => return,
-    };
-    if raw.is_null() {
+    let Some(mut ptr) = crate::brand::state::<ByteControllerState>(scope, controller) else {
         return;
-    }
-    let state = unsafe { &mut *raw };
+    };
+    // SAFETY: the brand proves the pointer is the controller's live
+    // Box<ByteControllerState>; we need `&mut` to drop the algorithms.
+    let state = unsafe { ptr.as_mut() };
     state.pull_algorithm = AlgorithmFn::Noop;
     state.cancel_algorithm = AlgorithmFn::Noop;
 }
@@ -1629,7 +1610,9 @@ pub fn readable_byte_stream_controller_get_byob_request<'s>(
         None => return v8::null(scope).into(),
     };
     let view_v: v8::Local<v8::ArrayBufferView> = view.into();
-    let req = crate::streams::byob_request::build(scope, controller, view_v);
+    let Some(req) = crate::streams::byob_request::build(scope, controller, view_v) else {
+        return v8::null(scope).into();
+    };
     slots::write_slot(scope, controller, BYOB_REQUEST, req.into());
     req.into()
 }
@@ -1655,29 +1638,12 @@ fn set_up_readable_byte_stream_controller(
         .new_instance(scope)
         .ok_or_else(|| "alloc byte controller instance".to_string())?;
 
-    let class_fn = tmpl.get_function(scope).unwrap();
-    let proto_key = v8::String::new(scope, "prototype").unwrap();
-    let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
-    controller_obj.set_prototype(scope, proto_v);
+    if let Some(proto) = intrinsics::prototype(scope, Intrinsic::ReadableByteStreamController) {
+        controller_obj.set_prototype(scope, proto.into());
+    }
 
     let state = ByteControllerState::new(hwm, auto_allocate_chunk_size, pull_algorithm, cancel_algorithm);
-    let boxed = Box::new(state);
-    let raw_ptr = Box::into_raw(boxed);
-    let raw_addr = raw_ptr as usize;
-    let ext = v8::External::new(scope, raw_ptr as *mut std::ffi::c_void);
-    controller_obj.set_internal_field(0, ext.into());
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        controller_obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut ByteControllerState));
-        }),
-    );
-    std::mem::forget(weak);
-
-    // Class tag for is_byte_controller.
-    let tag = v8::Boolean::new(scope, true);
-    slots::write_slot(scope, controller_obj, BC_TAG_SLOT, tag.into());
+    crate::brand::wrap(scope, controller_obj, state);
 
     // Wire bidirectional refs.
     slots::write_slot(scope, stream, CONTROLLER, controller_obj.into());
@@ -1935,10 +1901,22 @@ pub fn release_steps(scope: &mut v8::PinScope, stream: v8::Local<v8::Object>) {
 // Class template construction
 // ---------------------------------------------------------------------------
 
+/// The isolate's `ReadableByteStreamController` template: the one the global
+/// exposes and every byte controller is an instance of.
 fn controller_class_template<'s>(
     scope: &mut v8::PinScope<'s, '_>,
 ) -> v8::Local<'s, v8::FunctionTemplate> {
-    let ctor_tmpl = v8::FunctionTemplate::new(scope, illegal_constructor_callback);
+    intrinsics::template(
+        scope,
+        Intrinsic::ReadableByteStreamController,
+        build_controller_class_template,
+    )
+}
+
+fn build_controller_class_template<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+) -> v8::Local<'s, v8::FunctionTemplate> {
+    let ctor_tmpl = crate::callback::template(scope, illegal_constructor_callback);
     let class_name = v8::String::new(scope, "ReadableByteStreamController").unwrap();
     ctor_tmpl.set_class_name(class_name);
     ctor_tmpl
@@ -1949,12 +1927,12 @@ fn controller_class_template<'s>(
 
     {
         let key = v8::String::new(scope, "byobRequest").unwrap();
-        let getter_tmpl = v8::FunctionTemplate::new(scope, byob_request_getter_callback);
+        let getter_tmpl = crate::callback::template(scope, byob_request_getter_callback);
         proto.set_accessor_property(key.into(), Some(getter_tmpl), None, v8::PropertyAttribute::NONE);
     }
     {
         let key = v8::String::new(scope, "desiredSize").unwrap();
-        let getter_tmpl = v8::FunctionTemplate::new(scope, desired_size_getter_callback);
+        let getter_tmpl = crate::callback::template(scope, desired_size_getter_callback);
         proto.set_accessor_property(key.into(), Some(getter_tmpl), None, v8::PropertyAttribute::NONE);
     }
 
@@ -1977,10 +1955,10 @@ fn install_proto_method(
     scope: &mut v8::PinScope,
     proto: v8::Local<v8::ObjectTemplate>,
     name: &str,
-    cb: impl v8::MapFnTo<v8::FunctionCallback>,
+    cb: impl Callback,
 ) {
     let key = v8::String::new(scope, name).unwrap();
-    let tmpl = v8::FunctionTemplate::new(scope, cb);
+    let tmpl = crate::callback::template(scope, cb);
     proto.set(key.into(), tmpl.into());
 }
 
@@ -2148,7 +2126,7 @@ fn make_type_error_g<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     msg: &str,
 ) -> v8::Global<v8::Value> {
-    let msg_v = v8::String::new(scope, msg).unwrap();
+    let msg_v = crate::strings::message(scope, msg);
     let exc = v8::Exception::type_error(scope, msg_v);
     v8::Global::new(scope, exc)
 }
@@ -2157,7 +2135,7 @@ fn make_range_error_g<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     msg: &str,
 ) -> v8::Global<v8::Value> {
-    let msg_v = v8::String::new(scope, msg).unwrap();
+    let msg_v = crate::strings::message(scope, msg);
     let exc = v8::Exception::range_error(scope, msg_v);
     v8::Global::new(scope, exc)
 }
@@ -2171,4 +2149,5 @@ pub fn install(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     let class_fn = tmpl.get_function(scope).unwrap();
     let key = v8::String::new(scope, "ReadableByteStreamController").unwrap();
     global.set(scope, key.into(), class_fn.into());
+    intrinsics::capture(scope, Intrinsic::ReadableByteStreamController, class_fn);
 }

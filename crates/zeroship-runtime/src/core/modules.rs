@@ -386,7 +386,7 @@ pub fn invoke_module_export(
     let name = v8::String::new(scope, export).ok_or("could not allocate export name")?;
     let args = v8::Array::new_with_elements(scope, args);
     let data = v8::Array::new_with_elements(scope, &[namespace, name.into(), args.into()]);
-    let callback = v8::Function::builder(invoke_export_callback).data(data.into())
+    let callback = crate::callback::function_builder(invoke_export_callback).data(data.into())
         .build(scope).ok_or("could not allocate export invocation")?;
     let promise = if let Some(promise) = evaluation.promise {
         v8::Local::new(scope, promise)
@@ -413,7 +413,7 @@ fn invoke_export_callback(
     let Some(value) = namespace.get(scope, name) else { return; };
     let Ok(function) = v8::Local::<v8::Function>::try_from(value) else {
         let name = name.to_rust_string_lossy(scope);
-        let message = v8::String::new(scope, &format!("module export {name:?} is not callable")).unwrap();
+        let message = crate::strings::message(scope, &format!("module export {name:?} is not callable"));
         let error = v8::Exception::type_error(scope, message);
         scope.throw_exception(error);
         return;

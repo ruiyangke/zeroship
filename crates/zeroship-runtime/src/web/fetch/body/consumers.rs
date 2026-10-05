@@ -88,10 +88,10 @@ fn install_method<'s, F>(
     name: &str,
     cb: F,
 ) where
-    F: v8::MapFnTo<v8::FunctionCallback>,
+    F: crate::callback::Callback,
 {
     let key = v8::String::new(scope, name).unwrap();
-    let tmpl = v8::FunctionTemplate::new(scope, cb);
+    let tmpl = crate::callback::template(scope, cb);
     let func = tmpl.get_function(scope).unwrap();
     proto.set(scope, key.into(), func.into());
 }
@@ -105,7 +105,7 @@ fn install_body_used<'s, T: Body + BodyMarker + 'static>(
     proto: v8::Local<v8::Object>,
 ) {
     let key = v8::String::new(scope, "bodyUsed").unwrap();
-    let getter_tmpl = v8::FunctionTemplate::new(scope, body_used_getter::<T>);
+    let getter_tmpl = crate::callback::template(scope, body_used_getter::<T>);
     let getter_fn = getter_tmpl.get_function(scope).unwrap();
     let mut desc = v8::PropertyDescriptor::new_from_get_set(getter_fn.into(), v8::undefined(scope).into());
     desc.set_configurable(true);
@@ -212,7 +212,7 @@ fn install_body_getter<'s, T: Body + BodyMarker + 'static>(
     proto: v8::Local<v8::Object>,
 ) {
     let key = v8::String::new(scope, "body").unwrap();
-    let getter_tmpl = v8::FunctionTemplate::new(scope, body_getter::<T>);
+    let getter_tmpl = crate::callback::template(scope, body_getter::<T>);
     let getter_fn = getter_tmpl.get_function(scope).unwrap();
     let mut desc = v8::PropertyDescriptor::new_from_get_set(getter_fn.into(), v8::undefined(scope).into());
     desc.set_configurable(true);
@@ -408,7 +408,7 @@ fn rejected_promise_global(
 ) -> v8::Global<v8::Promise> {
     let resolver = v8::PromiseResolver::new(scope).unwrap();
     let promise = resolver.get_promise(scope);
-    let m = v8::String::new(scope, msg).unwrap();
+    let m = crate::strings::message(scope, msg);
     let exc = v8::Exception::type_error(scope, m);
     resolver.reject(scope, exc);
     v8::Global::new(scope, promise)
@@ -445,8 +445,7 @@ fn consumer_text<T: Body + BodyMarker + 'static>(
             let resolver = v8::PromiseResolver::new(scope).unwrap();
             let promise = resolver.get_promise(scope);
             let s = String::from_utf8_lossy(&rc).into_owned();
-            let v = v8::String::new(scope, &s).unwrap();
-            resolver.resolve(scope, v.into());
+            crate::strings::resolve_text(scope, resolver, &s);
             rv.set(promise.into());
         }
         PreFlight::HasBody { stream_global } => {
@@ -456,7 +455,7 @@ fn consumer_text<T: Body + BodyMarker + 'static>(
                 Err(e) => {
                     let resolver = v8::PromiseResolver::new(scope).unwrap();
                     let promise = resolver.get_promise(scope);
-                    let m = v8::String::new(scope, &e.message).unwrap();
+                    let m = crate::strings::message(scope, &e.message);
                     let exc = v8::Exception::type_error(scope, m);
                     resolver.reject(scope, exc);
                     rv.set(promise.into());
@@ -511,7 +510,7 @@ fn consumer_json<T: Body + BodyMarker + 'static>(
                 Err(e) => {
                     let resolver = v8::PromiseResolver::new(scope).unwrap();
                     let promise = resolver.get_promise(scope);
-                    let m = v8::String::new(scope, &e.message).unwrap();
+                    let m = crate::strings::message(scope, &e.message);
                     let exc = v8::Exception::type_error(scope, m);
                     resolver.reject(scope, exc);
                     rv.set(promise.into());
@@ -618,7 +617,7 @@ fn consumer_array_buffer<T: Body + BodyMarker + 'static>(
                 Err(e) => {
                     let resolver = v8::PromiseResolver::new(scope).unwrap();
                     let promise = resolver.get_promise(scope);
-                    let m = v8::String::new(scope, &e.message).unwrap();
+                    let m = crate::strings::message(scope, &e.message);
                     let exc = v8::Exception::type_error(scope, m);
                     resolver.reject(scope, exc);
                     rv.set(promise.into());
@@ -687,7 +686,7 @@ fn consumer_bytes<T: Body + BodyMarker + 'static>(
                 Err(e) => {
                     let resolver = v8::PromiseResolver::new(scope).unwrap();
                     let promise = resolver.get_promise(scope);
-                    let m = v8::String::new(scope, &e.message).unwrap();
+                    let m = crate::strings::message(scope, &e.message);
                     let exc = v8::Exception::type_error(scope, m);
                     resolver.reject(scope, exc);
                     rv.set(promise.into());
@@ -757,7 +756,7 @@ fn consumer_blob<T: Body + BodyMarker + 'static>(
                 Err(e) => {
                     let resolver = v8::PromiseResolver::new(scope).unwrap();
                     let promise = resolver.get_promise(scope);
-                    let m = v8::String::new(scope, &e.message).unwrap();
+                    let m = crate::strings::message(scope, &e.message);
                     let exc = v8::Exception::type_error(scope, m);
                     resolver.reject(scope, exc);
                     rv.set(promise.into());
@@ -878,7 +877,7 @@ fn consumer_form_data<T: Body + BodyMarker + 'static>(
                 Err(e) => {
                     let resolver = v8::PromiseResolver::new(scope).unwrap();
                     let promise = resolver.get_promise(scope);
-                    let m = v8::String::new(scope, &e.message).unwrap();
+                    let m = crate::strings::message(scope, &e.message);
                     let exc = v8::Exception::type_error(scope, m);
                     resolver.reject(scope, exc);
                     rv.set(promise.into());
@@ -1257,12 +1256,15 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     None
 }
 
+/// `new FormData()` through the realm's own constructor, never whatever
+/// script stored at `globalThis.FormData`. If even that fails (an exception
+/// or termination is pending) the promise still needs a value, and a plain
+/// object is all that is left to give.
 fn build_empty_form_data<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Object> {
-    let global = scope.get_current_context().global(scope);
-    let key = v8::String::new(scope, "FormData").unwrap();
-    let class_v = global.get(scope, key.into()).expect("FormData missing");
-    let class_fn: v8::Local<v8::Function> = class_v.try_into().unwrap();
-    class_fn.new_instance(scope, &[]).unwrap()
+    match crate::intrinsics::construct(scope, crate::intrinsics::Intrinsic::FormData, &[]) {
+        Ok(form_data) => v8::Local::new(scope, form_data),
+        Err(_) => v8::Object::new(scope),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1346,7 +1348,7 @@ fn build_map_fulfilled<'s>(
     let raw_addr = raw as usize;
     let ext = v8::External::new(scope, raw);
 
-    let tmpl = v8::FunctionTemplate::builder(map_fulfilled_callback)
+    let tmpl = crate::callback::template_builder(map_fulfilled_callback)
         .data(ext.into())
         .build(scope);
     let func = tmpl.get_function(scope).unwrap();
@@ -1372,7 +1374,7 @@ fn build_map_rejected<'s>(
     let raw_addr = raw as usize;
     let ext = v8::External::new(scope, raw);
 
-    let tmpl = v8::FunctionTemplate::builder(map_rejected_callback)
+    let tmpl = crate::callback::template_builder(map_rejected_callback)
         .data(ext.into())
         .build(scope);
     let func = tmpl.get_function(scope).unwrap();
@@ -1449,8 +1451,7 @@ fn settle_outer(scope: &mut v8::PinScope, state: &MapState, bytes: Vec<u8>) {
     match &state.kind {
         MapKind::Text => {
             let s = String::from_utf8_lossy(&bytes).into_owned();
-            let v = v8::String::new(scope, &s).unwrap();
-            resolver.resolve(scope, v.into());
+            crate::strings::resolve_text(scope, resolver, &s);
         }
         MapKind::Json => {
             let s = String::from_utf8_lossy(&bytes).into_owned();
@@ -1531,7 +1532,11 @@ fn settle_outer(scope: &mut v8::PinScope, state: &MapState, bytes: Vec<u8>) {
                 };
                 let name = url_decode_form(name);
                 let value = url_decode_form(value);
-                form_data_append(scope, fd, &name, &value);
+                if form_data_append(scope, fd, &name, &value).is_none() {
+                    let error = crate::strings::invalid_length_error(scope);
+                    resolver.reject(scope, error);
+                    return;
+                }
             }
             resolver.resolve(scope, fd.into());
         }
@@ -1552,7 +1557,11 @@ fn settle_outer(scope: &mut v8::PinScope, state: &MapState, bytes: Vec<u8>) {
                     for part in parsed {
                         match part {
                             MultipartEntry::Text { name, value } => {
-                                form_data_append(scope, fd, &name, &value);
+                                if form_data_append(scope, fd, &name, &value).is_none() {
+                                    let error = crate::strings::invalid_length_error(scope);
+                                    resolver.reject(scope, error);
+                                    return;
+                                }
                             }
                             MultipartEntry::File {
                                 name,
@@ -1560,7 +1569,7 @@ fn settle_outer(scope: &mut v8::PinScope, state: &MapState, bytes: Vec<u8>) {
                                 content_type,
                                 bytes,
                             } => {
-                                form_data_append_file(
+                                let appended = form_data_append_file(
                                     scope,
                                     fd,
                                     &name,
@@ -1568,13 +1577,18 @@ fn settle_outer(scope: &mut v8::PinScope, state: &MapState, bytes: Vec<u8>) {
                                     filename,
                                     &content_type,
                                 );
+                                if appended.is_none() {
+                                    let error = crate::strings::invalid_length_error(scope);
+                                    resolver.reject(scope, error);
+                                    return;
+                                }
                             }
                         }
                     }
                     resolver.resolve(scope, fd.into());
                 }
                 Err(msg) => {
-                    let m = v8::String::new(scope, &msg).unwrap();
+                    let m = crate::strings::message(scope, &msg);
                     let exc = v8::Exception::type_error(scope, m);
                     resolver.reject(scope, exc);
                 }
@@ -1586,7 +1600,8 @@ fn settle_outer(scope: &mut v8::PinScope, state: &MapState, bytes: Vec<u8>) {
 /// Append a File-typed entry to a FormData via its prototype `append`.
 /// We construct the File via `blob_native::file::create_file` and
 /// call `append(name, file)` with two args (the spec says the filename
-/// is already part of the File).
+/// is already part of the File). `None` when V8 refuses `name` as too
+/// long, and nothing was appended.
 fn form_data_append_file(
     scope: &mut v8::PinScope,
     fd: v8::Local<v8::Object>,
@@ -1594,18 +1609,19 @@ fn form_data_append_file(
     bytes: Vec<u8>,
     filename: String,
     content_type: &str,
-) {
+) -> Option<()> {
     let file = crate::blob_native::file::create_file(scope, bytes, filename, content_type);
     let key = v8::String::new(scope, "append").unwrap();
     let Some(fn_v) = fd.get(scope, key.into()) else {
-        return;
+        return Some(());
     };
     let Ok(fn_l) = v8::Local::<v8::Function>::try_from(fn_v) else {
-        return;
+        return Some(());
     };
-    let n = v8::String::new(scope, name).unwrap();
+    let n = v8::String::new(scope, name)?;
     let args = [n.into(), file];
     let _ = fn_l.call(scope, fd.into(), &args);
+    Some(())
 }
 
 fn ab_to_vec(ab: v8::Local<v8::ArrayBuffer>) -> Vec<u8> {
@@ -1622,23 +1638,27 @@ fn ab_to_vec(ab: v8::Local<v8::ArrayBuffer>) -> Vec<u8> {
     out
 }
 
+/// Append a text entry to a FormData via its prototype `append`. `None`
+/// when V8 refuses `name` or `value` as too long, and nothing was
+/// appended.
 fn form_data_append(
     scope: &mut v8::PinScope,
     fd: v8::Local<v8::Object>,
     name: &str,
     value: &str,
-) {
+) -> Option<()> {
     let key = v8::String::new(scope, "append").unwrap();
     let Some(fn_v) = fd.get(scope, key.into()) else {
-        return;
+        return Some(());
     };
     let Ok(fn_l) = v8::Local::<v8::Function>::try_from(fn_v) else {
-        return;
+        return Some(());
     };
-    let n = v8::String::new(scope, name).unwrap();
-    let v = v8::String::new(scope, value).unwrap();
+    let n = v8::String::new(scope, name)?;
+    let v = v8::String::new(scope, value)?;
     let args = [n.into(), v.into()];
     let _ = fn_l.call(scope, fd.into(), &args);
+    Some(())
 }
 
 fn url_decode_form(s: &str) -> String {
@@ -1673,7 +1693,7 @@ fn build_syntax_error<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     msg: &str,
 ) -> v8::Local<'s, v8::Value> {
-    let m = v8::String::new(scope, msg).unwrap();
+    let m = crate::strings::message(scope, msg);
     v8::Exception::syntax_error(scope, m)
 }
 
@@ -1681,6 +1701,6 @@ fn build_range_error<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     msg: &str,
 ) -> v8::Local<'s, v8::Value> {
-    let m = v8::String::new(scope, msg).unwrap();
+    let m = crate::strings::message(scope, msg);
     v8::Exception::range_error(scope, m)
 }

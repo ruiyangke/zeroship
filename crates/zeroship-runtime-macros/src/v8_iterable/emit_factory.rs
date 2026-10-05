@@ -17,13 +17,12 @@ use super::EmitCtx;
 
 /// Emit the companion `<Class>Iterator` struct + its
 /// `__InstallSlot_<Class>Iterator` marker + the iterator class's
-/// `install` method (FunctionTemplate cache, prototype walk to
-/// %IteratorPrototype%) + the `__BrandSlot_<Class>Iterator` marker +
-/// `__brand_check_<Class>Iterator` helper used by `next()`.
+/// `install` method (`FunctionTemplate` cache, prototype chained to
+/// %`IteratorPrototype%`) + the `__brand_check_<Class>Iterator` helper
+/// used by `next()`.
 pub(super) fn gen_iterator_companion(ctx: &EmitCtx<'_>) -> TokenStream2 {
     let iter_class_ty = &ctx.iter_class_ty;
     let iter_install_slot_ty = &ctx.iter_install_slot_ty;
-    let iter_brand_slot_ty = &ctx.iter_brand_slot_ty;
     let iter_brand_check_fn = &ctx.iter_brand_check_fn;
     let key_ty = ctx.key_ty;
     let value_ty = ctx.value_ty;
@@ -32,7 +31,6 @@ pub(super) fn gen_iterator_companion(ctx: &EmitCtx<'_>) -> TokenStream2 {
     let to_string_tag_init = &ctx.to_string_tag_init;
     let next_key_init = &ctx.next_key_init;
     let proto_key_init = &ctx.proto_key_init;
-    let iter_proto_walk_js_init = &ctx.iter_proto_walk_js_init;
 
     // Per-mode iterator struct definition. Snapshot stashes
     // `__pairs: Vec<(K, V)>`; live stashes a `Global<Object>`
@@ -103,105 +101,18 @@ pub(super) fn gen_iterator_companion(ctx: &EmitCtx<'_>) -> TokenStream2 {
         #[allow(non_camel_case_types)]
         pub struct #iter_install_slot_ty(::v8::Global<::v8::FunctionTemplate>);
 
-        // Per-isolate slot for the cached `<Class>Iterator.prototype`
-        // (used by `__brand_check_<Class>Iterator`). Lazily populated
-        // on first brand-check call.
-        //
-        // Storage: `v8::Eternal<v8::Object>`. Mirrors the parent-class
-        // brand slot — see `v8_class/emit/slot_types.rs` for the
-        // rationale (set-once isolate-lifetime data; `Eternal::get`
-        // materialises a Local without `GlobalHandles::Create`).
-        #[doc(hidden)]
-        #[allow(non_camel_case_types)]
-        pub struct #iter_brand_slot_ty(::v8::Eternal<::v8::Object>);
-
-        /// Brand-check helper for the iterator class: walks the
-        /// prototype chain of `obj` looking for the cached
-        /// `<Class>Iterator.prototype`. Returns true on match (the
-        /// receiver IS a `<Class>Iterator`), false otherwise.
-        ///
-        /// The previous `next()` codegen relied solely on
-        /// internal-field-0 being an `External`, which any
-        /// `#[v8_class]` wrapper satisfies. A caller could pass a
-        /// different wrapper as `this` and the recovery
-        /// `__ext.value() as *mut <Class>Iterator` would reinterpret a
-        /// `Box<Other>` as `*mut <Class>Iterator` — UB. The brand
-        /// check pins the receiver to instances of this iterator class
-        /// before the unsafe cast.
-        ///
-        /// Walks at most 1024 prototype links — matches V8's internal
-        /// `Object::PrototypeChainLength` sanity bound. Cycle creation
-        /// is already blocked by ECMAScript §10.4.7.2 step 8; the cap
-        /// is belt-and-braces for proxy-driven prototype chains.
-        ///
-        /// The cached prototype is populated lazily on first call (NOT
-        /// at install time) — eager `get_function(scope)` would freeze
-        /// the FunctionTemplate's instance shape. Mirrors the parent-
-        /// class `__brand_check_<Class>` helper in
-        /// `v8_class/emit/brand.rs`.
+        /// Brand-check helper for the iterator class: true iff `obj` is
+        /// a wrapper the factory branded as holding a `Box<Self>`. Any
+        /// other wrapper also has an `External` in internal field 0,
+        /// and script can give any object this prototype, so neither
+        /// says the field holds an iterator; the brand does.
         #[doc(hidden)]
         #[allow(non_snake_case, dead_code)]
         fn #iter_brand_check_fn(
             scope: &mut v8::PinScope,
             obj: v8::Local<v8::Object>,
         ) -> bool {
-            let expected_proto: v8::Local<v8::Object> =
-                if let Some(slot) = scope.get_slot::<#iter_brand_slot_ty>() {
-                    match slot.0.get(scope) {
-                        Some(p) => p,
-                        None => return false,
-                    }
-                } else {
-                    // Lazy fetch from the install slot. If that slot is
-                    // missing too, the iterator class wasn't installed
-                    // in this isolate — fall through to false.
-                    let tmpl_global = match scope.get_slot::<#iter_install_slot_ty>() {
-                        Some(s) => s.0.clone(),
-                        None => return false,
-                    };
-                    let tmpl_local = v8::Local::new(scope, &tmpl_global);
-                    let func = match tmpl_local.get_function(scope) {
-                        Some(f) => f,
-                        None => return false,
-                    };
-                    let proto_key = match v8::String::new(scope, "prototype") {
-                        Some(s) => s,
-                        None => return false,
-                    };
-                    let proto_v = match func.get(scope, proto_key.into()) {
-                        Some(v) => v,
-                        None => return false,
-                    };
-                    let proto: v8::Local<v8::Object> = match proto_v.try_into() {
-                        Ok(o) => o,
-                        Err(_) => return false,
-                    };
-                    let eternal: v8::Eternal<v8::Object> = v8::Eternal::empty();
-                    eternal.set(scope, proto);
-                    scope.set_slot(#iter_brand_slot_ty(eternal));
-                    proto
-                };
-            let mut current: v8::Local<v8::Value> = match obj.get_prototype(scope) {
-                Some(v) => v,
-                None => return false,
-            };
-            for _ in 0..1024 {
-                if current.is_null_or_undefined() {
-                    return false;
-                }
-                let cur_obj: v8::Local<v8::Object> = match current.try_into() {
-                    Ok(o) => o,
-                    Err(_) => return false,
-                };
-                if cur_obj == expected_proto {
-                    return true;
-                }
-                current = match cur_obj.get_prototype(scope) {
-                    Some(v) => v,
-                    None => return false,
-                };
-            }
-            false
+            ::zeroship_runtime::macro_runtime::brand::is::<#iter_class_ty>(scope, obj)
         }
 
         #[allow(non_snake_case, dead_code)]
@@ -217,7 +128,7 @@ pub(super) fn gen_iterator_companion(ctx: &EmitCtx<'_>) -> TokenStream2 {
                 if let Some(cached) = scope.get_slot::<#iter_install_slot_ty>() {
                     return v8::Local::new(scope, cached.0.clone());
                 }
-                let __ctor_tmpl = v8::FunctionTemplate::new(scope, __zs_iter_construct_throws);
+                let __ctor_tmpl = ::zeroship_runtime::macro_runtime::callback::template(scope, __zs_iter_construct_throws);
                 let __class_name = #class_name_init;
                 __ctor_tmpl.set_class_name(__class_name);
                 __ctor_tmpl
@@ -229,7 +140,7 @@ pub(super) fn gen_iterator_companion(ctx: &EmitCtx<'_>) -> TokenStream2 {
                 // next()
                 {
                     let __key = #next_key_init;
-                    let __fn_tmpl = v8::FunctionTemplate::new(scope, #next_ident);
+                    let __fn_tmpl = ::zeroship_runtime::macro_runtime::callback::template(scope, #next_ident);
                     __proto.set(__key.into(), __fn_tmpl.into());
                 }
 
@@ -245,15 +156,25 @@ pub(super) fn gen_iterator_companion(ctx: &EmitCtx<'_>) -> TokenStream2 {
                 }
 
                 // Chain prototype to %IteratorPrototype% per
-                // WebIDL §3.7.10.2 default iterator [[Prototype]].
+                // WebIDL 3.7.10.2 default iterator [[Prototype]]. The
+                // intrinsic is read through a template, not by running
+                // script: the first iterator may be minted after
+                // creator code replaced `Array.prototype[Symbol.iterator]`,
+                // and a script walk would then throw or hand this class
+                // a prototype the creator chose.
                 {
                     let __ctor_fn = __ctor_tmpl.get_function(scope).unwrap();
                     let __proto_key = #proto_key_init;
                     let __ctor_proto_v = __ctor_fn.get(scope, __proto_key.into()).unwrap();
                     let __ctor_proto: v8::Local<v8::Object> = __ctor_proto_v.try_into().unwrap();
-                    let __js = #iter_proto_walk_js_init;
-                    let __script = v8::Script::compile(scope, __js, None).unwrap();
-                    let __iter_proto = __script.run(scope).unwrap();
+                    let __probe = v8::ObjectTemplate::new(scope);
+                    __probe.set_intrinsic_data_property(
+                        __proto_key.into(),
+                        v8::Intrinsic::IteratorPrototype,
+                        v8::PropertyAttribute::NONE,
+                    );
+                    let __probe_obj = __probe.new_instance(scope).unwrap();
+                    let __iter_proto = __probe_obj.get(scope, __proto_key.into()).unwrap();
                     __ctor_proto.set_prototype(scope, __iter_proto);
                 }
 
@@ -335,7 +256,7 @@ pub(super) fn gen_factory_callbacks(ctx: &EmitCtx<'_>) -> TokenStream2 {
         quote! {
             // SAFETY: the brand check above passed, so internal field
             // 0 holds a Box<#class_ty> raw pointer placed there by
-            // gen_box_and_install_finalizer. The borrow ends before we
+            // `<Class>::__zs_install`. The borrow ends before we
             // touch `scope` again (the snapshot clone is the last use).
             // For `&mut self` value_pairs we promote to *mut + &mut *.
             let __inflight_addr = __ext.value() as usize;
@@ -389,66 +310,62 @@ pub(super) fn gen_factory_callbacks(ctx: &EmitCtx<'_>) -> TokenStream2 {
             mut rv: v8::ReturnValue,
             __kind: i32,
         ) {
-            // Brand check: the receiver MUST be a parent-class
-            // instance. Reuses the parent's cached prototype chain
-            // walk emitted by `#[v8_class]`. Recovery preamble
-            // delegates to the shared helpers (design §3.8).
-            #factory_brand_check
-            // Recover Box<#class_ty> from internal field 0.
-            #factory_external_recovery
+        // Brand check: the receiver MUST be a parent-class
+        // instance. Reuses the parent class brand check emitted
+        // by `#[v8_class]`. Recovery preamble delegates to the
+        // shared helpers (design section 3.8).
+        #factory_brand_check
+        // Recover Box<#class_ty> from internal field 0.
+        #factory_external_recovery
 
-            // Per-mode state-fetch: snapshot clones value_pairs() now;
-            // live captures a Global<Object> of the parent.
-            #factory_state_pre
+        // Per-mode state-fetch: snapshot clones value_pairs() now;
+        // live captures a Global<Object> of the parent.
+        #factory_state_pre
 
-            // Create the iterator instance + bind state.
-            let __it_tmpl = #iter_class_ty::install(scope);
-            let __it_inst_tmpl = __it_tmpl.instance_template(scope);
-            let __it_obj = match __it_inst_tmpl.new_instance(scope) {
-                Some(o) => o,
-                None => {
-                    let __msg = #alloc_fail_msg_init;
-                    let __exc = v8::Exception::error(scope, __msg);
-                    scope.throw_exception(__exc);
-                    return;
-                }
-            };
-            // Set its prototype explicitly — `new_instance` from an
-            // instance_template doesn't auto-chain to the
-            // FunctionTemplate's prototype. Match the hand-rolled
-            // URLSearchParams iterator shape (see search_params.rs::
-            // iter_factory_callback).
-            let __it_class_fn = __it_tmpl.get_function(scope).unwrap();
-            let __proto_key = #proto_key_init;
-            let __it_proto_v = __it_class_fn.get(scope, __proto_key.into()).unwrap();
-            __it_obj.set_prototype(scope, __it_proto_v);
+        // Create the iterator instance + bind state.
+        let __it_tmpl = #iter_class_ty::install(scope);
+        let __it_inst_tmpl = __it_tmpl.instance_template(scope);
+        let __it_obj = match __it_inst_tmpl.new_instance(scope) {
+            Some(o) => o,
+            None => {
+                let __msg = #alloc_fail_msg_init;
+                let __exc = v8::Exception::error(scope, __msg);
+                scope.throw_exception(__exc);
+                return;
+            }
+        };
+        // Set its prototype explicitly: `new_instance` from an
+        // instance_template doesn't auto-chain to the
+        // FunctionTemplate's prototype. Match the hand-rolled
+        // URLSearchParams iterator shape (see search_params.rs::
+        // iter_factory_callback).
+        let __it_class_fn = __it_tmpl.get_function(scope).unwrap();
+        let __proto_key = #proto_key_init;
+        let __it_proto_v = __it_class_fn.get(scope, __proto_key.into()).unwrap();
+        __it_obj.set_prototype(scope, __it_proto_v);
 
-            let __boxed = #iter_box_construct;
-            let __raw = ::std::boxed::Box::into_raw(__boxed);
-            let __raw_addr = __raw as usize;
-            let __ext = v8::External::new(scope, __raw as *mut ::std::ffi::c_void);
-            __it_obj.set_internal_field(0, __ext.into());
+        let __boxed = #iter_box_construct;
+        let __raw = ::std::boxed::Box::into_raw(__boxed);
+        let __raw_addr = __raw as usize;
+        let __ext = v8::External::new(scope, __raw as *mut ::std::ffi::c_void);
+        __it_obj.set_internal_field(0, __ext.into());
+        // The brand `next()` checks before casting field 0.
+        ::zeroship_runtime::macro_runtime::brand::mark::<#iter_class_ty>(scope, __it_obj, __ext);
 
-            // Guaranteed finalizer to reclaim the Box on GC. Same shape
-            // as `gen_box_and_install_finalizer` in
-            // `v8_class/emit/constructor.rs` — including the deliberate
-            // `mem::forget(__weak)` that leaks ~32 bytes of WeakData
-            // per iterator instance (closes design §13.5 / §13.7).
-            // Measurement protocol + accepted-leak rationale documented
-            // verbatim on the v8_class helper. Iterator instances are
-            // typically transient (1-5 lifetime per parent), so the
-            // resident overhead per app is dominated by the parent
-            // class's leak, not this one.
-            let __weak = v8::Weak::with_guaranteed_finalizer(
-                scope,
-                __it_obj,
-                ::std::boxed::Box::new(move || unsafe {
-                    drop(::std::boxed::Box::from_raw(__raw_addr as *mut #iter_class_ty));
-                }),
-            );
-            ::std::mem::forget(__weak);
+        // Guaranteed finalizer to reclaim the Box on GC, the same
+        // shape as `<Class>::__zs_install`: dropping the Weak handle
+        // would cancel the finalizer, so it is forgotten, and the
+        // guaranteed variant fires on collection or isolate disposal.
+        let __weak = v8::Weak::with_guaranteed_finalizer(
+            scope,
+            __it_obj,
+            ::std::boxed::Box::new(move || unsafe {
+                drop(::std::boxed::Box::from_raw(__raw_addr as *mut #iter_class_ty));
+            }),
+        );
+        ::std::mem::forget(__weak);
 
-            rv.set(__it_obj.into());
+        rv.set(__it_obj.into());
         }
 
         #[doc(hidden)]
@@ -520,12 +437,12 @@ pub(super) fn gen_install_bridge(ctx: &EmitCtx<'_>) -> TokenStream2 {
             ) {
                 {
                     let __key = #keys_key_init;
-                    let __tmpl = v8::FunctionTemplate::new(scope, #factory_keys_ident);
+                    let __tmpl = ::zeroship_runtime::macro_runtime::callback::template(scope, #factory_keys_ident);
                     proto.set(__key.into(), __tmpl.into());
                 }
                 {
                     let __key = #values_key_init;
-                    let __tmpl = v8::FunctionTemplate::new(scope, #factory_values_ident);
+                    let __tmpl = ::zeroship_runtime::macro_runtime::callback::template(scope, #factory_values_ident);
                     proto.set(__key.into(), __tmpl.into());
                 }
                 // `entries` and `[Symbol.iterator]` MUST resolve to the
@@ -534,14 +451,14 @@ pub(super) fn gen_install_bridge(ctx: &EmitCtx<'_>) -> TokenStream2 {
                 // `fd.entries === fd[Symbol.iterator]` and the answer
                 // has to be `true`. Build the template once and bind
                 // it under both keys.
-                let __entries_tmpl = v8::FunctionTemplate::new(scope, #factory_entries_ident);
+                let __entries_tmpl = ::zeroship_runtime::macro_runtime::callback::template(scope, #factory_entries_ident);
                 {
                     let __key = #entries_key_init;
                     proto.set(__key.into(), __entries_tmpl.into());
                 }
                 {
                     let __key = #foreach_key_init;
-                    let __tmpl = v8::FunctionTemplate::new(scope, #for_each_ident);
+                    let __tmpl = ::zeroship_runtime::macro_runtime::callback::template(scope, #for_each_ident);
                     proto.set(__key.into(), __tmpl.into());
                 }
                 {

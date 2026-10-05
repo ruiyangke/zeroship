@@ -149,7 +149,7 @@ impl File {
     /// `new File([])` throws TypeError. We detect "missing" by
     /// `is_undefined()` — JS callers passing `undefined` explicitly
     /// or omitting the arg both end up the same.
-    #[v8_constructor]
+    #[v8_constructor(post_init = "after_install")]
     fn new(
         scope: &mut v8::PinScope,
         file_bits: v8::Local<v8::Value>,
@@ -191,6 +191,20 @@ impl File {
             name,
             last_modified,
         })
+    }
+
+    /// The post-init hook: brand the new File as a Blob as well (see
+    /// [`brand_as_blob`]).
+    pub(crate) fn after_install(
+        scope: &mut v8::PinScope,
+        this: v8::Local<v8::Object>,
+    ) -> Result<(), OpError> {
+        let state = this
+            .get_internal_field(scope, 0)
+            .and_then(|field| v8::Local::<v8::External>::try_from(field).ok())
+            .ok_or_else(|| OpError::error("File: state not installed"))?;
+        brand_as_blob(scope, this, state);
+        Ok(())
     }
 
     /// `name` getter — §4.1.2.
@@ -288,8 +302,7 @@ impl File {
         let s = String::from_utf8_lossy(self.blob.as_bytes()).into_owned();
         let resolver = v8::PromiseResolver::new(scope).unwrap();
         let promise = resolver.get_promise(scope);
-        let v = v8::String::new(scope, &s).unwrap();
-        resolver.resolve(scope, v.into());
+        crate::strings::resolve_text(scope, resolver, &s);
         promise.into()
     }
 
@@ -382,50 +395,40 @@ pub fn create_file_with_last_modified<'s>(
     wrap_file_in_v8(scope, file)
 }
 
-/// Wrap a Rust-built `File` into a JS object whose prototype chain is
-/// `globalThis.File.prototype` (which inherits from Blob.prototype).
-/// Mirrors `wrap_blob_in_v8` for the File class.
+/// Brand a File wrapper, whose internal field 0 holds `state`, as a Blob
+/// too. `File` is `#[repr(C)]` with its `Blob` first, so the Blob
+/// callbacks a File inherits through the prototype chain, and the Blob
+/// helpers `FormData` and body extraction use, may read the box as a Blob.
+fn brand_as_blob(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>, state: v8::Local<v8::External>) {
+    crate::brand::mark::<crate::blob_native::Blob>(scope, obj, state);
+}
+
+/// Wrap a Rust-built `File` into a JS object whose prototype is the
+/// realm's `File.prototype` (which inherits from Blob.prototype).
+/// Mirrors `wrap_blob_in_v8` for the File class. `undefined` when V8
+/// cannot allocate the wrapper, which happens only with an exception or a
+/// termination already pending.
 fn wrap_file_in_v8<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     file: File,
 ) -> v8::Local<'s, v8::Value> {
     let tmpl = File::install(scope);
     let inst_tmpl = tmpl.instance_template(scope);
-    let obj = inst_tmpl.new_instance(scope).unwrap();
-
-    // Wire prototype to globalThis.File.prototype so `instanceof File`
-    // and `instanceof Blob` both work.
-    let global = scope.get_current_context().global(scope);
-    let file_class_key = v8::String::new(scope, "File").unwrap();
-    let proto = match global.get(scope, file_class_key.into()) {
-        Some(class_v) => match v8::Local::<v8::Object>::try_from(class_v) {
-            Ok(class_obj) => {
-                let proto_key = v8::String::new(scope, "prototype").unwrap();
-                class_obj.get(scope, proto_key.into())
-            }
-            Err(_) => None,
-        },
-        None => None,
+    let Some(obj) = inst_tmpl.new_instance(scope) else {
+        return v8::undefined(scope).into();
     };
-    if let Some(proto) = proto {
-        obj.set_prototype(scope, proto);
+
+    // The prototype captured when File was installed, so `instanceof File`
+    // and `instanceof Blob` both work whatever script has since stored at
+    // `globalThis.File`.
+    if let Some(proto) = crate::intrinsics::prototype(scope, crate::intrinsics::Intrinsic::File) {
+        obj.set_prototype(scope, proto.into());
     }
 
-    // Box the File, store in internal field 0, install finalizer.
-    let boxed = Box::new(file);
-    let raw_ptr = Box::into_raw(boxed);
-    let raw_addr = raw_ptr as usize;
-    let ext = v8::External::new(scope, raw_ptr as *mut std::ffi::c_void);
-    obj.set_internal_field(0, ext.into());
-
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut File));
-        }),
-    );
-    std::mem::forget(weak);
+    let Some(state) = File::__zs_install(scope, obj, file) else {
+        return v8::undefined(scope).into();
+    };
+    brand_as_blob(scope, obj, state);
 
     obj.into()
 }

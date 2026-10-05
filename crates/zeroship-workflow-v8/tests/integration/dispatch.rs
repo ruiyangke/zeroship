@@ -128,4 +128,64 @@ fn unawaited_step_frontier_fails_closed() {
     );
 }
 
+/// A plugin whose one callback panics, reachable from workflow code as
+/// `env.boom.explode()`, standing in for any native callback with a defect a
+/// creator can reach.
+struct PanickingPlugin;
+
+fn panicking_callback(
+    _scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    panic!("a native callback panicked");
+}
+
+impl NativePlugin for PanickingPlugin {
+    fn namespace(&self) -> &str {
+        "boom"
+    }
+
+    fn register(&self, r: &mut zeroship_runtime::NativeRegistrar) {
+        r.add("explode", panicking_callback);
+    }
+}
+
+/// A native callback that panics while a workflow replays is answered inside
+/// the isolate as a thrown error, and the isolate is quarantined once the
+/// dispatch returns: whatever the callback was updating may be half done.
+#[test]
+fn a_callback_panic_during_replay_quarantines_the_isolate() {
+    let runtime = workflow_builder()
+        .plugin(PanickingPlugin)
+        .modules(vec![ModuleEntry {
+            specifier: "index.js".into(),
+            source: r#"
+            import { env } from "zeroship";
+            export class Exploding {
+                run() {
+                    try { env.boom.explode(); return "nothing thrown"; }
+                    catch (e) { return `${e.name}: ${e.message}`; }
+                }
+            }
+            export default { workflows: { Exploding } };
+            "#
+            .into(),
+        }])
+        .build();
+    let panics_before = zeroship_runtime::callback::caught_panics();
+    let result = dispatch_workflow(
+        &runtime,
+        r#"{"runId":"wfr_test","nonce":"nonce_test","workflowName":"Exploding","journal":[],"phase":"running","trigger":{"input":null}}"#,
+    );
+    assert_eq!(
+        zeroship_runtime::callback::caught_panics() - panics_before,
+        1,
+        "the workflow reached the callback: {result}"
+    );
+    assert_eq!(result["kind"], "RunCompleted", "workflow result: {result}");
+    assert_eq!(result["output"], "Error: internal error", "workflow result: {result}");
+    assert!(runtime.is_quarantined(), "the isolate the panic happened in is quarantined");
+}
+
 mod lookup;

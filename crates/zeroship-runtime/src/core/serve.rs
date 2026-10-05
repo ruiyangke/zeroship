@@ -2757,6 +2757,93 @@ mod dev_isolate_replacement_tests {
         );
         assert_eq!(after_body, "served", "it runs on an isolate that answers");
     }
+
+    /// A plugin whose one callback panics, standing in for any native
+    /// callback with a defect creator code can reach.
+    struct PanickingPlugin;
+
+    impl NativePlugin for PanickingPlugin {
+        fn namespace(&self) -> &str {
+            "boom"
+        }
+
+        fn register(&self, r: &mut crate::plugin::NativeRegistrar) {
+            r.add("explode", explode);
+        }
+    }
+
+    fn explode(
+        _scope: &mut v8::PinScope,
+        _args: v8::FunctionCallbackArguments,
+        _rv: v8::ReturnValue,
+    ) {
+        panic!("a plugin callback panicked");
+    }
+
+    /// The app counts the requests its isolate served; `/panic` reaches the
+    /// panicking callback.
+    const PANIC_APP: &str = r#"
+        let served = 0;
+        export default {
+            fetch(request, env) {
+                served += 1;
+                if (new URL(request.url).pathname === "/panic") {
+                    env.boom.explode();
+                }
+                return new Response(`served ${served}`);
+            }
+        }
+    "#;
+
+    /// A native callback panics while serving a request, then the next
+    /// request arrives on the same server. The panic is answered as an error
+    /// rather than aborting the process, and the isolate it happened in,
+    /// whose native state the callback may have left half updated, serves
+    /// nothing more: the next request runs on a fresh isolate, whose count
+    /// starts over.
+    #[test]
+    fn the_request_after_a_callback_panic_runs_on_a_fresh_isolate() {
+        init_v8();
+        const PANIC_REQUEST: &str = "GET /panic HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        const ROOT_REQUEST: &str = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+
+        let (panicked, after) = block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let client = compio::runtime::spawn(async move {
+                let mut stream = TcpStream::connect(address).await.unwrap();
+                let mut pending = Vec::new();
+                let BufResult(wrote, _) = stream.write_all(PANIC_REQUEST.as_bytes().to_vec()).await;
+                wrote.expect("the panicking request is written");
+                let panicked = read_response(&mut stream, &mut pending).await;
+                let BufResult(wrote, _) = stream.write_all(ROOT_REQUEST.as_bytes().to_vec()).await;
+                wrote.expect("the follow-up request is written");
+                let after = read_response(&mut stream, &mut pending).await;
+                (panicked, after)
+            });
+
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut plan = spin_plan();
+            plan.modules = vec![ModuleEntry {
+                specifier: "index.js".into(),
+                source: PANIC_APP.into(),
+            }];
+            plan.plugins = vec![Arc::new(PanickingPlugin)];
+            plan.pump_cpu_budget = None;
+            let slot = Rc::new(RuntimeSlot::new(plan));
+            let env = Rc::new(EnvSnapshot::empty());
+            let dev_auth = Rc::new(crate::dev_auth::DevAuthSettings::default());
+            handle_connection(stream, slot, env, dev_auth).await;
+            client.await.unwrap()
+        });
+
+        let (panicked_status, panicked_body) = panicked;
+        assert_ne!(panicked_status, 200, "the panicking request is answered as an error: {panicked_body}");
+
+        let (after_status, after_body) = after;
+        assert_eq!(after_status, 200, "the request after the panic is served: {after_body}");
+        assert_eq!(after_body, "served 1", "it runs on a fresh isolate");
+    }
 }
 
 #[cfg(test)]

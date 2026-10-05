@@ -37,6 +37,8 @@ use crate::streams::algorithms;
 use crate::streams::promise_resolve;
 use crate::streams::queue::{is_non_negative_number, ValueQueue};
 use crate::streams::readable::{NativeReadableController, NativeSource, StreamState};
+use crate::callback::Callback;
+use crate::intrinsics::{self, Intrinsic};
 use crate::streams::slots::{self, CONTROLLER};
 
 const STREAM_OBJ_SLOT: &str = "[[ctrl.streamObj]]";
@@ -319,22 +321,20 @@ impl AlgorithmFn {
 // V8 wrapper helpers
 // ---------------------------------------------------------------------------
 
-/// Reach into a controller wrapper's boxed state.
+/// Reach into a controller wrapper's boxed state. `None` unless
+/// `controller` is a wrapper this runtime branded as holding a
+/// `DefaultControllerState`.
 pub fn with_controller_state<R>(
     scope: &mut v8::PinScope,
     controller: v8::Local<v8::Object>,
     f: impl FnOnce(&DefaultControllerState) -> R,
 ) -> Option<R> {
-    let raw_v8_field = controller.get_internal_field(scope, 0)?;
-    let ext = v8::Local::<v8::External>::try_from(raw_v8_field).ok()?;
-    let ptr = ext.value() as *const DefaultControllerState;
-    if ptr.is_null() {
-        return None;
-    }
-    // SAFETY: External points at a Box<DefaultControllerState> set during
-    // construction; dropped only by the V8 weak finalizer which fires
-    // after all callbacks complete.
-    let inst = unsafe { &*ptr };
+    let ptr = crate::brand::state::<DefaultControllerState>(scope, controller)?;
+    // SAFETY: the brand proves internal field 0 holds the
+    // Box<DefaultControllerState> stored at construction; it is dropped
+    // only by the V8 weak finalizer, which cannot run while
+    // `controller` is reachable.
+    let inst = unsafe { ptr.as_ref() };
     Some(f(inst))
 }
 
@@ -350,10 +350,22 @@ fn stream_obj<'s>(
 // Class template construction
 // ---------------------------------------------------------------------------
 
+/// The isolate's `ReadableStreamDefaultController` template: the one the
+/// global exposes and every controller is an instance of.
 fn controller_class_template<'s>(
     scope: &mut v8::PinScope<'s, '_>,
 ) -> v8::Local<'s, v8::FunctionTemplate> {
-    let ctor_tmpl = v8::FunctionTemplate::new(scope, illegal_constructor_callback);
+    intrinsics::template(
+        scope,
+        Intrinsic::ReadableStreamDefaultController,
+        build_controller_class_template,
+    )
+}
+
+fn build_controller_class_template<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+) -> v8::Local<'s, v8::FunctionTemplate> {
+    let ctor_tmpl = crate::callback::template(scope, illegal_constructor_callback);
     let class_name = v8::String::new(scope, "ReadableStreamDefaultController").unwrap();
     ctor_tmpl.set_class_name(class_name);
     ctor_tmpl
@@ -365,7 +377,7 @@ fn controller_class_template<'s>(
     // desiredSize getter (§3.6.5.1)
     {
         let key = v8::String::new(scope, "desiredSize").unwrap();
-        let getter_tmpl = v8::FunctionTemplate::new(scope, desired_size_getter_callback);
+        let getter_tmpl = crate::callback::template(scope, desired_size_getter_callback);
         proto.set_accessor_property(
             key.into(),
             Some(getter_tmpl),
@@ -393,10 +405,10 @@ fn install_proto_method(
     scope: &mut v8::PinScope,
     proto: v8::Local<v8::ObjectTemplate>,
     name: &str,
-    cb: impl v8::MapFnTo<v8::FunctionCallback>,
+    cb: impl Callback,
 ) {
     let key = v8::String::new(scope, name).unwrap();
-    let tmpl = v8::FunctionTemplate::new(scope, cb);
+    let tmpl = crate::callback::template(scope, cb);
     proto.set(key.into(), tmpl.into());
 }
 
@@ -852,20 +864,12 @@ fn readable_stream_default_controller_clear_algorithms(
     scope: &mut v8::PinScope,
     controller: v8::Local<v8::Object>,
 ) {
-    // SAFETY: we need &mut access to the state to drop the algorithms.
-    // Use the same External pointer dance as `with_controller_state` but
-    // produce a `&mut`.
-    let raw = match controller
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-    {
-        Some(e) => e.value() as *mut DefaultControllerState,
-        None => return,
-    };
-    if raw.is_null() {
+    let Some(mut ptr) = crate::brand::state::<DefaultControllerState>(scope, controller) else {
         return;
-    }
-    let state = unsafe { &mut *raw };
+    };
+    // SAFETY: the brand proves the pointer is the controller's live
+    // Box<DefaultControllerState>; we need `&mut` to drop the algorithms.
+    let state = unsafe { ptr.as_mut() };
     state.pull_algorithm = AlgorithmFn::Noop;
     state.cancel_algorithm = AlgorithmFn::Noop;
     state.strategy_size = SizeAlgorithm::DefaultCount;
@@ -979,26 +983,14 @@ fn set_up_readable_stream_default_controller(
         .new_instance(scope)
         .ok_or_else(|| "alloc controller instance".to_string())?;
 
-    // Wire the prototype manually so methods are visible.
-    let class_fn = tmpl.get_function(scope).unwrap();
-    let proto_key = v8::String::new(scope, "prototype").unwrap();
-    let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
-    controller_obj.set_prototype(scope, proto_v);
+    // The class prototype captured with the template, so every
+    // controller shares `ReadableStreamDefaultController.prototype`.
+    if let Some(proto) = intrinsics::prototype(scope, Intrinsic::ReadableStreamDefaultController) {
+        controller_obj.set_prototype(scope, proto.into());
+    }
 
     let state = DefaultControllerState::new(hwm, size_algorithm, pull_algorithm, cancel_algorithm);
-    let boxed = Box::new(state);
-    let raw_ptr = Box::into_raw(boxed);
-    let raw_addr = raw_ptr as usize;
-    let ext = v8::External::new(scope, raw_ptr as *mut std::ffi::c_void);
-    controller_obj.set_internal_field(0, ext.into());
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        controller_obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut DefaultControllerState));
-        }),
-    );
-    std::mem::forget(weak);
+    crate::brand::wrap(scope, controller_obj, state);
 
     // Wire bidirectional refs:
     //  stream.[[controller]] = controller_obj  (via priv sym CONTROLLER)
@@ -1233,20 +1225,13 @@ fn unreachable_sentinel() -> v8::Global<v8::Value> {
 // is_default_controller — sentinel check for receiver type
 // ---------------------------------------------------------------------------
 
-/// True iff `obj` looks like a ReadableStreamDefaultController wrapper.
-/// Best-effort: returns true if internal field 0 has a non-null External.
-/// In a multi-class context, we'd need a class-tag check; for this dispatch
-/// the only class with an internal field 0 is our controller class
-/// (modulo the stream/reader, which are also tagged but accessed
-/// elsewhere).
+/// True iff `obj` is a `ReadableStreamDefaultController` wrapper: one this
+/// runtime branded as holding a `DefaultControllerState`.
 pub(crate) fn is_default_controller(
     scope: &mut v8::PinScope,
     obj: v8::Local<v8::Object>,
 ) -> bool {
-    obj.get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-        .map(|e| !e.value().is_null())
-        .unwrap_or(false)
+    crate::brand::is::<DefaultControllerState>(scope, obj)
 }
 
 // ---------------------------------------------------------------------------
@@ -1258,4 +1243,5 @@ pub fn install(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     let class_fn = tmpl.get_function(scope).unwrap();
     let key = v8::String::new(scope, "ReadableStreamDefaultController").unwrap();
     global.set(scope, key.into(), class_fn.into());
+    intrinsics::capture(scope, Intrinsic::ReadableStreamDefaultController, class_fn);
 }

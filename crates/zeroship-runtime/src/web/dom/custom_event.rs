@@ -97,7 +97,7 @@ struct CustomEventInit<'s> {
 }
 
 #[v8_class]
-#[v8_inherit(super::event::Event)]
+#[v8_inherit(super::event::Event, state_field = event)]
 impl CustomEvent {
     /// `new CustomEvent(type, eventInitDict?)` per DOM §2.4. Reads
     /// `bubbles`/`cancelable`/`composed` (inherited EventInit) plus

@@ -1,0 +1,37 @@
+error[E0080]: evaluation panicked: #[v8_inherit(Base)]: the base state is not zero-sized; name the derived state's field holding it with state_field = f
+  --> tests/compile_fail_marker_attr/v8_inherit_unproven_layout.rs:29:1
+   |
+29 | #[v8_class]
+   | ^^^^^^^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: #[v8_inherit]: the derived state must be at least as aligned as the base state
+  --> tests/compile_fail_marker_attr/v8_inherit_unproven_layout.rs:29:1
+   |
+29 | #[v8_class]
+   | ^^^^^^^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: #[v8_inherit(Base, state_field = f)]: f must be the derived state's field at offset zero
+  --> tests/compile_fail_marker_attr/v8_inherit_unproven_layout.rs:44:1
+   |
+44 | #[v8_class]
+   | ^^^^^^^^^^^ evaluation of `_` failed here
+
+error[E0308]: mismatched types
+  --> tests/compile_fail_marker_attr/v8_inherit_unproven_layout.rs:57:1
+   |
+57 | #[v8_class]
+   | ^^^^^^^^^^^ expected `*const Base`, found `*const Box<Base>`
+   |
+   = note: expected raw pointer `*const Base`
+              found raw pointer `*const Box<Base>`
+   = note: this error originates in the macro `::core::ptr::addr_of` which comes from the expansion of the attribute macro `v8_class` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0308]: mismatched types
+  --> tests/compile_fail_marker_attr/v8_inherit_unproven_layout.rs:70:1
+   |
+70 | #[v8_class]
+   | ^^^^^^^^^^^ expected `*const Base`, found `*const &Base`
+   |
+   = note: expected raw pointer `*const Base`
+              found raw pointer `*const &'static Base`
+   = note: this error originates in the macro `::core::ptr::addr_of` which comes from the expansion of the attribute macro `v8_class` (in Nightly builds, run with -Z macro-backtrace for more info)

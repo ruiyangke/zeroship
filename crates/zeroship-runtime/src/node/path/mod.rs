@@ -50,11 +50,14 @@ fn evaluate<'s>(
 ) -> Option<v8::Local<'s, v8::Value>> {
     v8::callback_scope!(unsafe scope, context);
 
-    // Compile + run the JS IIFE — returns the namespace object.
-    let src = v8::String::new(scope, PATH_JS).unwrap();
-    let script = v8::Script::compile(scope, src, None).unwrap();
-    let ns_val = script.run(scope).unwrap();
-    let ns: v8::Local<v8::Object> = ns_val.try_into().unwrap();
+    // Compile + run the JS IIFE, which returns the namespace object. The module
+    // is evaluated when first imported, after earlier modules' script ran,
+    // so the IIFE can throw (or be terminated); `None` leaves that pending
+    // for V8 to reject the import with.
+    let src = v8::String::new(scope, PATH_JS)?;
+    let script = v8::Script::compile(scope, src, None)?;
+    let ns_val = script.run(scope)?;
+    let ns = v8::Local::<v8::Object>::try_from(ns_val).ok()?;
 
     // Mirror named properties into module exports, plus default.
     for name in export_names() {

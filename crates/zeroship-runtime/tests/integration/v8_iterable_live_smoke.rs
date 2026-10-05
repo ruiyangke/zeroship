@@ -668,16 +668,16 @@ mod custom_marshal {
     }
 
     /// Marshal hook — `value_marshal = either_to_v8` on the iterable
-    /// attribute. Macro emits `let __v_v = either_to_v8(scope, &__v);`
-    /// per yield. Signature is fixed: `fn(&mut PinScope, &V) ->
-    /// Local<Value>`.
+    /// attribute, called once per yield. Signature is fixed:
+    /// `fn(&mut PinScope, &V) -> Option<Local<Value>>`, `None` once it
+    /// has thrown.
     pub fn either_to_v8<'s>(
         scope: &mut v8::PinScope<'s, '_>,
         v: &Either,
-    ) -> v8::Local<'s, v8::Value> {
+    ) -> Option<v8::Local<'s, v8::Value>> {
         match v {
-            Either::Str(s) => v8::String::new(scope, s).unwrap().into(),
-            Either::Num(n) => v8::Number::new(scope, *n).into(),
+            Either::Str(s) => zeroship_runtime::strings::new_or_throw(scope, s).map(Into::into),
+            Either::Num(n) => Some(v8::Number::new(scope, *n).into()),
         }
     }
 

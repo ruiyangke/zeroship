@@ -578,19 +578,8 @@ fn build_cipher<'s>(scope: &mut v8::PinScope<'s, '_>, c: Cipher) -> v8::Local<'s
     let proto_key = v8::String::new(scope, "prototype").unwrap();
     let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
     inst.set_prototype(scope, proto_v);
-    let boxed: Box<Cipher> = Box::new(c);
-    let raw = Box::into_raw(boxed);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    inst.set_internal_field(0, ext.into());
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        inst,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut Cipher));
-        }),
-    );
-    std::mem::forget(weak);
+    Cipher::__zs_install(scope, inst, c)
+        .expect("a fresh instance of the class's own template takes its state");
     inst
 }
 

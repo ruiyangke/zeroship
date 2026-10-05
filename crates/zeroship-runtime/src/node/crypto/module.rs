@@ -150,7 +150,7 @@ pub fn populate<'s>(
         let ko_tmpl = key_object::KeyObject::install(scope);
         let ko_fn = ko_tmpl.get_function(scope).unwrap();
         let from_key = v8::String::new(scope, "from").unwrap();
-        let from_fn = v8::Function::new(scope, key_object::key_object_from_callback).unwrap();
+        let from_fn = crate::callback::function(scope, key_object::key_object_from_callback).unwrap();
         ko_fn.set(scope, from_key.into(), from_fn.into());
         let k = v8::String::new(scope, "KeyObject").unwrap();
         obj.set(scope, k.into(), ko_fn.into());
@@ -246,9 +246,9 @@ fn set_fn<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     obj: v8::Local<v8::Object>,
     name: &str,
-    callback: impl v8::MapFnTo<v8::FunctionCallback>,
+    callback: impl crate::callback::Callback,
 ) {
-    let f = v8::Function::new(scope, callback).unwrap();
+    let f = crate::callback::function(scope, callback).unwrap();
     let k = v8::String::new(scope, name).unwrap();
     obj.set(scope, k.into(), f.into());
 }

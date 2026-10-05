@@ -745,20 +745,9 @@ pub(crate) fn mint_collection<'s>(
         binding,
         transaction_scope,
     };
-    let boxed: Box<Collection> = Box::new(state);
-    let raw = Box::into_raw(boxed);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    obj.set_internal_field(0, ext.into());
-
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut Collection));
-        }),
-    );
-    std::mem::forget(weak);
+    if Collection::__zs_install(scope, obj, state).is_none() {
+        return Err(OpError::error("Collection: the wrapper already holds a state"));
+    }
 
     Ok(obj)
 }

@@ -57,7 +57,7 @@ pub fn build_node_exception<'s>(
     code: &'static str,
     message: &str,
 ) -> v8::Local<'s, v8::Value> {
-    let msg = v8::String::new(scope, message).unwrap();
+    let msg = crate::strings::message(scope, message);
     let exc: v8::Local<v8::Value> = match class_for(code) {
         NodeErrorClass::TypeError => v8::Exception::type_error(scope, msg),
         NodeErrorClass::RangeError => v8::Exception::range_error(scope, msg),
@@ -68,7 +68,7 @@ pub fn build_node_exception<'s>(
     // assignment so the throw still proceeds.
     if let Ok(obj) = v8::Local::<v8::Object>::try_from(exc) {
         let code_key = v8::String::new(scope, "code").unwrap();
-        let code_val = v8::String::new(scope, code).unwrap();
+        let code_val = crate::strings::message(scope, code);
         obj.set(scope, code_key.into(), code_val.into());
     }
     exc

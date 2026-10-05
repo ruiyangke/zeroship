@@ -32,4 +32,18 @@ disallowed-methods = [
     { path = "std::env::vars_os", reason = "use zeroship_core::read_process_env_snapshot!" },
     { path = "std::env::set_var", reason = "process-global and racy; pass typed config or Command::env for a child" },
     { path = "std::env::remove_var", reason = "process-global and racy; pass typed config or Command::env for a child" },
+    # Every V8 function and function template is built through
+    # zeroship_runtime::callback, whose constructors run the callback under the
+    # panic boundary that keeps a Rust panic from aborting the process. These
+    # are V8's own constructors, which take a bare callback.
+    { path = "v8::Function::new", reason = "register through zeroship_runtime::callback, which runs every callback under its panic boundary" },
+    { path = "v8::Function::builder", reason = "register through zeroship_runtime::callback, which runs every callback under its panic boundary" },
+    { path = "v8::FunctionTemplate::new", reason = "register through zeroship_runtime::callback, which runs every callback under its panic boundary" },
+    { path = "v8::FunctionTemplate::builder", reason = "register through zeroship_runtime::callback, which runs every callback under its panic boundary" },
+    { path = "v8::Function::new_raw", reason = "register through zeroship_runtime::callback, which runs every callback under its panic boundary" },
+    { path = "v8::Function::builder_raw", reason = "register through zeroship_runtime::callback, which runs every callback under its panic boundary" },
+    { path = "v8::FunctionTemplate::new_raw", reason = "register through zeroship_runtime::callback, which runs every callback under its panic boundary" },
+    { path = "v8::FunctionTemplate::builder_raw", reason = "register through zeroship_runtime::callback, which runs every callback under its panic boundary" },
+    { path = "v8::FunctionBuilder::new", reason = "register through zeroship_runtime::callback, which runs every callback under its panic boundary" },
+    { path = "v8::FunctionBuilder::new_raw", reason = "register through zeroship_runtime::callback, which runs every callback under its panic boundary" },
 ]

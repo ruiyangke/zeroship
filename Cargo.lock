@@ -8767,6 +8767,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "v8",
  "zeroship-bundle",
  "zeroship-core",
  "zeroship-data-orm",

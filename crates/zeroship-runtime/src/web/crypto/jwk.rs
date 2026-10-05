@@ -212,10 +212,10 @@ pub fn export_aes<'s>(
     let alg_name = AlgorithmName::from_spec_name(alg.name).unwrap_or(AlgorithmName::AesGcm);
     let jwk_alg = expected_aes_alg(alg_name, alg.length);
     let obj = v8::Object::new(scope);
-    set_str(scope, obj, "kty", "oct");
-    set_str(scope, obj, "k", &base64url_encode(raw));
+    set_str(scope, obj, "kty", "oct")?;
+    set_str(scope, obj, "k", &base64url_encode(raw))?;
     if !jwk_alg.is_empty() {
-        set_str(scope, obj, "alg", &jwk_alg);
+        set_str(scope, obj, "alg", &jwk_alg)?;
     }
     write_key_ops(scope, obj, &key.usages);
     set_bool(scope, obj, "ext", key.extractable);
@@ -287,9 +287,9 @@ pub fn export_hmac<'s>(
         HashAlgo::Sha512 => "HS512",
     };
     let obj = v8::Object::new(scope);
-    set_str(scope, obj, "kty", "oct");
-    set_str(scope, obj, "k", &base64url_encode(raw));
-    set_str(scope, obj, "alg", alg);
+    set_str(scope, obj, "kty", "oct")?;
+    set_str(scope, obj, "k", &base64url_encode(raw))?;
+    set_str(scope, obj, "alg", alg)?;
     write_key_ops(scope, obj, &key.usages);
     set_bool(scope, obj, "ext", key.extractable);
     Ok(obj.into())
@@ -406,10 +406,10 @@ pub fn export_ec<'s>(
     let x_part = &raw_xy[1..1 + n];
     let y_part = &raw_xy[1 + n..];
     let obj = v8::Object::new(scope);
-    set_str(scope, obj, "kty", "EC");
-    set_str(scope, obj, "crv", ec.named_curve.as_str());
-    set_str(scope, obj, "x", &base64url_encode(x_part));
-    set_str(scope, obj, "y", &base64url_encode(y_part));
+    set_str(scope, obj, "kty", "EC")?;
+    set_str(scope, obj, "crv", ec.named_curve.as_str())?;
+    set_str(scope, obj, "x", &base64url_encode(x_part))?;
+    set_str(scope, obj, "y", &base64url_encode(y_part))?;
     if let KeyMaterial::EcPrivate { raw_d, pkcs8_der, .. } = &key.material {
         // Generated keys store an empty raw_d (aws-lc-rs hides the
         // scalar). Walk the PKCS#8 lazily to recover it. JWK-imported
@@ -424,7 +424,7 @@ pub fn export_ec<'s>(
                 )
             })?
         };
-        set_str(scope, obj, "d", &base64url_encode(&scalar));
+        set_str(scope, obj, "d", &base64url_encode(&scalar))?;
     }
     write_key_ops(scope, obj, &key.usages);
     set_bool(scope, obj, "ext", key.extractable);
@@ -677,9 +677,9 @@ pub fn export_rsa<'s>(
     let alg = AlgorithmName::from_spec_name(r.name).unwrap_or(AlgorithmName::RsaOaep);
     let jwk_alg = expected_rsa_alg(alg, r.hash);
     let obj = v8::Object::new(scope);
-    set_str(scope, obj, "kty", "RSA");
+    set_str(scope, obj, "kty", "RSA")?;
     if !jwk_alg.is_empty() {
-        set_str(scope, obj, "alg", &jwk_alg);
+        set_str(scope, obj, "alg", &jwk_alg)?;
     }
     match &key.material {
         KeyMaterial::RsaPublic { components, .. } => {
@@ -689,8 +689,8 @@ pub fn export_rsa<'s>(
                     "RSA JWK export requires component data (only stored on JWK-imported keys)",
                 ));
             }
-            set_str(scope, obj, "n", &base64url_encode(&components.n));
-            set_str(scope, obj, "e", &base64url_encode(&components.e));
+            set_str(scope, obj, "n", &base64url_encode(&components.n))?;
+            set_str(scope, obj, "e", &base64url_encode(&components.e))?;
         }
         KeyMaterial::RsaPrivate { components, .. } => {
             if components.n.is_empty() {
@@ -699,14 +699,14 @@ pub fn export_rsa<'s>(
                     "RSA JWK export requires component data (only stored on JWK-imported keys)",
                 ));
             }
-            set_str(scope, obj, "n", &base64url_encode(&components.n));
-            set_str(scope, obj, "e", &base64url_encode(&components.e));
-            set_str(scope, obj, "d", &base64url_encode(&components.d));
-            set_str(scope, obj, "p", &base64url_encode(&components.p));
-            set_str(scope, obj, "q", &base64url_encode(&components.q));
-            set_str(scope, obj, "dp", &base64url_encode(&components.dp));
-            set_str(scope, obj, "dq", &base64url_encode(&components.dq));
-            set_str(scope, obj, "qi", &base64url_encode(&components.qi));
+            set_str(scope, obj, "n", &base64url_encode(&components.n))?;
+            set_str(scope, obj, "e", &base64url_encode(&components.e))?;
+            set_str(scope, obj, "d", &base64url_encode(&components.d))?;
+            set_str(scope, obj, "p", &base64url_encode(&components.p))?;
+            set_str(scope, obj, "q", &base64url_encode(&components.q))?;
+            set_str(scope, obj, "dp", &base64url_encode(&components.dp))?;
+            set_str(scope, obj, "dq", &base64url_encode(&components.dq))?;
+            set_str(scope, obj, "qi", &base64url_encode(&components.qi))?;
         }
         _ => {
             return Err(OpError::dom(
@@ -890,17 +890,17 @@ pub fn export_ed25519<'s>(
     key: &CryptoKeyState,
 ) -> Result<v8::Local<'s, v8::Value>, OpError> {
     let obj = v8::Object::new(scope);
-    set_str(scope, obj, "kty", "OKP");
-    set_str(scope, obj, "crv", "Ed25519");
+    set_str(scope, obj, "kty", "OKP")?;
+    set_str(scope, obj, "crv", "Ed25519")?;
     // RFC 8037 §2 + WebCrypto §35: include `alg: "Ed25519"`. (X25519
     // does NOT have an alg per RFC 8037 §5.)
-    set_str(scope, obj, "alg", "Ed25519");
+    set_str(scope, obj, "alg", "Ed25519")?;
     match &key.material {
         KeyMaterial::Ed25519Public { raw_x, .. } => {
-            set_str(scope, obj, "x", &base64url_encode(raw_x));
+            set_str(scope, obj, "x", &base64url_encode(raw_x))?;
         }
         KeyMaterial::Ed25519Private { raw_x, raw_d, pkcs8_der } => {
-            set_str(scope, obj, "x", &base64url_encode(raw_x));
+            set_str(scope, obj, "x", &base64url_encode(raw_x))?;
             // Generated keys: aws-lc-rs hides the seed and we stored
             // [0; 32] as a placeholder. Walk the PKCS#8 (RFC 8410) to
             // recover the actual seed for JWK export.
@@ -914,7 +914,7 @@ pub fn export_ed25519<'s>(
                     )
                 })?
             };
-            set_str(scope, obj, "d", &base64url_encode(&seed));
+            set_str(scope, obj, "d", &base64url_encode(&seed))?;
         }
         _ => return Err(OpError::dom("OperationError", "Not Ed25519")),
     }
@@ -995,15 +995,15 @@ pub fn export_x25519<'s>(
     key: &CryptoKeyState,
 ) -> Result<v8::Local<'s, v8::Value>, OpError> {
     let obj = v8::Object::new(scope);
-    set_str(scope, obj, "kty", "OKP");
-    set_str(scope, obj, "crv", "X25519");
+    set_str(scope, obj, "kty", "OKP")?;
+    set_str(scope, obj, "crv", "X25519")?;
     match &key.material {
         KeyMaterial::X25519Public { raw_x, .. } => {
-            set_str(scope, obj, "x", &base64url_encode(raw_x));
+            set_str(scope, obj, "x", &base64url_encode(raw_x))?;
         }
         KeyMaterial::X25519Private { raw_x, raw_d, .. } => {
-            set_str(scope, obj, "x", &base64url_encode(raw_x));
-            set_str(scope, obj, "d", &base64url_encode(raw_d));
+            set_str(scope, obj, "x", &base64url_encode(raw_x))?;
+            set_str(scope, obj, "d", &base64url_encode(raw_d))?;
         }
         _ => return Err(OpError::dom("OperationError", "Not X25519")),
     }
@@ -1016,15 +1016,22 @@ pub fn export_x25519<'s>(
 // Common JS helpers
 // =============================================================================
 
+/// Set `obj[name] = value` for a literal `name`.
+///
+/// # Errors
+///
+/// A `RangeError` when V8 refuses `value` as too long: a raw HMAC or AES
+/// key can be any length, and its base64url form is longer still.
 fn set_str<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     obj: v8::Local<v8::Object>,
     name: &str,
     value: &str,
-) {
+) -> Result<(), OpError> {
     let k = v8::String::new(scope, name).unwrap();
-    let v = v8::String::new(scope, value).unwrap();
+    let v = crate::strings::new(scope, value)?;
     obj.set(scope, k.into(), v.into());
+    Ok(())
 }
 
 fn set_bool<'s>(

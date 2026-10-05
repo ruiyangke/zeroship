@@ -505,24 +505,7 @@ pub(crate) fn mint_masked_value<'s>(
         classification,
         masked_string,
     };
-    let boxed: Box<MaskedValue> = Box::new(state);
-    let raw = Box::into_raw(boxed);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    obj.set_internal_field(0, ext.into());
-
-    // SAFETY: `raw_addr` was Box::into_raw'd from `Box<MaskedValue>`;
-    // the finalizer drops the Box exactly once when V8 reclaims the
-    // wrapper. There are no native resources to release in Drop —
-    // every field is owned `String`.
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut MaskedValue));
-        }),
-    );
-    std::mem::forget(weak);
+    MaskedValue::__zs_install(scope, obj, state)?;
 
     Some(obj)
 }

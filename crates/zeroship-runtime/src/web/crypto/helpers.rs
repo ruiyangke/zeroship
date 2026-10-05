@@ -247,7 +247,7 @@ pub fn op_error_to_v8<'s>(
     if let crate::state::OpErrorKind::JsValue(global) = &err.kind {
         return v8::Local::new(scope, global);
     }
-    let msg = v8::String::new(scope, &err.message).unwrap();
+    let msg = crate::strings::message(scope, &err.message);
     match &err.kind {
         crate::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, msg),
         crate::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, msg),
@@ -262,11 +262,11 @@ pub fn op_error_to_v8<'s>(
             let exc = v8::Exception::error(scope, msg);
             if let Ok(obj) = v8::Local::<v8::Object>::try_from(exc) {
                 let code_key = v8::String::new(scope, "code").unwrap();
-                let code_val = v8::String::new(scope, code).unwrap();
+                let code_val = crate::strings::message(scope, code);
                 obj.set(scope, code_key.into(), code_val.into());
                 if let Some(h) = hint {
                     let hint_key = v8::String::new(scope, "hint").unwrap();
-                    let hint_val = v8::String::new(scope, h).unwrap();
+                    let hint_val = crate::strings::message(scope, h);
                     obj.set(scope, hint_key.into(), hint_val.into());
                 }
                 if let Some(status) = status {

@@ -27,6 +27,8 @@
 //! backing store, then detaches the source. Used by enqueue and respond
 //! paths to make the V8-side buffer JS-inaccessible during transfer.
 
+use crate::intrinsics::Intrinsic;
+
 // ---------------------------------------------------------------------------
 // ViewConstructor — typed-array kind enum
 // ---------------------------------------------------------------------------
@@ -37,7 +39,8 @@
 /// constructor directly: the constructor is a per-realm function and
 /// keeping a `Global<Function>` would force us to thread realm info into
 /// every descriptor. Instead we re-construct the view via the matching
-/// `v8::Uint8Array::new` / `v8::DataView::new` etc. when fulfilling a read.
+/// `v8::Uint8Array::new` etc. when fulfilling a read, or, for `DataView` and
+/// `Float16Array`, through the realm's own constructor captured at install.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewConstructor {
     Uint8,
@@ -145,8 +148,8 @@ impl ViewConstructor {
                 .map(Into::<v8::Local<'s, v8::ArrayBufferView>>::into),
             ViewConstructor::Float16 => {
                 // V8 Rust binding doesn't expose Float16Array → ArrayBufferView
-                // From; build via the JS Float16Array constructor.
-                build_typed_array(scope, "Float16Array", buffer, byte_offset, length)
+                // From; build via the realm's own Float16Array constructor.
+                build_typed_array(scope, Intrinsic::Float16Array, buffer, byte_offset, length)
             }
             ViewConstructor::Float32 => v8::Float32Array::new(scope, buffer, byte_offset, length)
                 .map(Into::<v8::Local<'s, v8::ArrayBufferView>>::into),
@@ -161,26 +164,47 @@ impl ViewConstructor {
                     .map(Into::<v8::Local<'s, v8::ArrayBufferView>>::into)
             }
             ViewConstructor::DataView => {
-                // V8's bindings don't expose a Rust DataView::new helper;
-                // build via the JS `DataView` constructor.
+                // Built through the realm's own `DataView` constructor, which
+                // validates the offset and length.
                 build_data_view(scope, buffer, byte_offset, byte_length)
             }
         }
     }
 }
 
-/// Build a DataView via the JS constructor (V8 Rust bindings don't expose a
-/// DataView::new). Returns `None` if construction throws.
+/// Record the realm's `DataView` and `Float16Array` from `global` before
+/// script can replace them there. The other view kinds have native
+/// constructors; these two are built through their JS constructors, which
+/// validate the offset and length, and a read must not build its view with
+/// whatever script later put on the global.
+pub(crate) fn capture_view_constructors(
+    scope: &mut v8::PinScope,
+    global: v8::Local<v8::Object>,
+) {
+    for which in [Intrinsic::DataView, Intrinsic::Float16Array] {
+        let Some(key) = v8::String::new(scope, which.name()) else {
+            continue;
+        };
+        let Some(constructor) = global
+            .get(scope, key.into())
+            .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
+        else {
+            continue;
+        };
+        crate::intrinsics::capture(scope, which, constructor);
+    }
+}
+
+/// Build a DataView via the realm's own constructor (V8 Rust bindings
+/// don't expose a validating DataView::new). Returns `None` if construction
+/// throws.
 fn build_data_view<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     buffer: v8::Local<v8::ArrayBuffer>,
     byte_offset: usize,
     byte_length: usize,
 ) -> Option<v8::Local<'s, v8::ArrayBufferView>> {
-    let global = scope.get_current_context().global(scope);
-    let key = v8::String::new(scope, "DataView")?;
-    let ctor_v = global.get(scope, key.into())?;
-    let ctor = v8::Local::<v8::Function>::try_from(ctor_v).ok()?;
+    let ctor = crate::intrinsics::constructor(scope, Intrinsic::DataView)?;
     let buf_v: v8::Local<v8::Value> = buffer.into();
     let off = v8::Number::new(scope, byte_offset as f64).into();
     let len = v8::Number::new(scope, byte_length as f64).into();
@@ -190,7 +214,7 @@ fn build_data_view<'s>(
     v8::Local::<v8::ArrayBufferView>::try_from(v).ok()
 }
 
-/// Build a TypedArray via its global JS constructor name. Used for
+/// Build a TypedArray via the realm's own constructor for `which`. Used for
 /// Float16Array (V8 Rust bindings lack the From<Local<Float16Array>>
 /// conversion).
 ///
@@ -198,15 +222,12 @@ fn build_data_view<'s>(
 /// divided by element_size where appropriate.
 fn build_typed_array<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    ctor_name: &str,
+    which: Intrinsic,
     buffer: v8::Local<v8::ArrayBuffer>,
     byte_offset: usize,
     length: usize,
 ) -> Option<v8::Local<'s, v8::ArrayBufferView>> {
-    let global = scope.get_current_context().global(scope);
-    let key = v8::String::new(scope, ctor_name)?;
-    let ctor_v = global.get(scope, key.into())?;
-    let ctor = v8::Local::<v8::Function>::try_from(ctor_v).ok()?;
+    let ctor = crate::intrinsics::constructor(scope, which)?;
     let buf_v: v8::Local<v8::Value> = buffer.into();
     let off = v8::Number::new(scope, byte_offset as f64).into();
     let len = v8::Number::new(scope, length as f64).into();

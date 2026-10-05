@@ -37,6 +37,8 @@
 
 use std::cell::{Cell, RefCell};
 
+use crate::callback::Callback;
+use crate::intrinsics::{self, Intrinsic};
 use crate::streams::algorithms;
 use crate::streams::promise_resolve;
 use crate::streams::queue::is_non_negative_number;
@@ -45,9 +47,6 @@ use crate::streams::writable::WSState;
 
 const STREAM_OBJ_SLOT: &str = "[[ws.ctrl.streamObj]]";
 const ABORT_CONTROLLER_SLOT: &str = "[[ws.ctrl.abortController]]";
-/// Brand priv-sym to distinguish a WS controller from other classes that
-/// may share the "External in field 0" shape.
-const CTRL_BRAND: &str = "[[ws.ctrl.brand]]";
 
 // ---------------------------------------------------------------------------
 // Close sentinel
@@ -150,12 +149,13 @@ impl WSControllerState {
 // V8 wrapper helpers
 // ---------------------------------------------------------------------------
 
+/// Whether `obj` is a `WritableStreamDefaultController` wrapper: one this
+/// runtime branded as holding a `WSControllerState`.
 pub fn is_ws_default_controller(
     scope: &mut v8::PinScope,
     obj: v8::Local<v8::Object>,
 ) -> bool {
-    let tag = crate::streams::slots::private_sym(scope, CTRL_BRAND);
-    obj.has_private(scope, tag).unwrap_or(false)
+    crate::brand::is::<WSControllerState>(scope, obj)
 }
 
 pub fn with_controller_state<R>(
@@ -163,16 +163,11 @@ pub fn with_controller_state<R>(
     controller: v8::Local<v8::Object>,
     f: impl FnOnce(&WSControllerState) -> R,
 ) -> Option<R> {
-    if !is_ws_default_controller(scope, controller) {
-        return None;
-    }
-    let raw_v8_field = controller.get_internal_field(scope, 0)?;
-    let ext = v8::Local::<v8::External>::try_from(raw_v8_field).ok()?;
-    let ptr = ext.value() as *const WSControllerState;
-    if ptr.is_null() {
-        return None;
-    }
-    let inst = unsafe { &*ptr };
+    let ptr = crate::brand::state::<WSControllerState>(scope, controller)?;
+    // SAFETY: the brand proves internal field 0 holds the
+    // Box<WSControllerState> stored at construction; it is dropped only by
+    // the V8 weak finalizer.
+    let inst = unsafe { ptr.as_ref() };
     Some(f(inst))
 }
 
@@ -195,10 +190,22 @@ pub(crate) fn signal_value<'s>(
 // Class template
 // ---------------------------------------------------------------------------
 
+/// The isolate's `WritableStreamDefaultController` template: the one the
+/// global exposes and every controller is an instance of.
 fn controller_class_template<'s>(
     scope: &mut v8::PinScope<'s, '_>,
 ) -> v8::Local<'s, v8::FunctionTemplate> {
-    let ctor_tmpl = v8::FunctionTemplate::new(scope, illegal_constructor_callback);
+    intrinsics::template(
+        scope,
+        Intrinsic::WritableStreamDefaultController,
+        build_controller_class_template,
+    )
+}
+
+fn build_controller_class_template<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+) -> v8::Local<'s, v8::FunctionTemplate> {
+    let ctor_tmpl = crate::callback::template(scope, illegal_constructor_callback);
     let class_name = v8::String::new(scope, "WritableStreamDefaultController").unwrap();
     ctor_tmpl.set_class_name(class_name);
     ctor_tmpl
@@ -210,7 +217,7 @@ fn controller_class_template<'s>(
     // signal getter (§4.3.5.1)
     {
         let key = v8::String::new(scope, "signal").unwrap();
-        let getter_tmpl = v8::FunctionTemplate::new(scope, signal_getter_callback);
+        let getter_tmpl = crate::callback::template(scope, signal_getter_callback);
         proto.set_accessor_property(
             key.into(),
             Some(getter_tmpl),
@@ -236,10 +243,10 @@ fn install_proto_method(
     scope: &mut v8::PinScope,
     proto: v8::Local<v8::ObjectTemplate>,
     name: &str,
-    cb: impl v8::MapFnTo<v8::FunctionCallback>,
+    cb: impl Callback,
 ) {
     let key = v8::String::new(scope, name).unwrap();
-    let tmpl = v8::FunctionTemplate::new(scope, cb);
+    let tmpl = crate::callback::template(scope, cb);
     proto.set(key.into(), tmpl.into());
 }
 
@@ -453,17 +460,12 @@ pub fn writable_stream_default_controller_clear_algorithms(
     scope: &mut v8::PinScope,
     controller: v8::Local<v8::Object>,
 ) {
-    let raw = match controller
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-    {
-        Some(e) => e.value() as *mut WSControllerState,
-        None => return,
-    };
-    if raw.is_null() {
+    let Some(mut ptr) = crate::brand::state::<WSControllerState>(scope, controller) else {
         return;
-    }
-    let state = unsafe { &mut *raw };
+    };
+    // SAFETY: the brand proves the pointer is the controller's live
+    // Box<WSControllerState>; we need `&mut` to drop the algorithms.
+    let state = unsafe { ptr.as_mut() };
     state.write_algorithm = SinkAlgorithm::Noop;
     state.close_algorithm = SinkAlgorithm::Noop;
     state.abort_algorithm = SinkAlgorithm::Noop;
@@ -821,11 +823,9 @@ fn set_up_writable_stream_default_controller(
         .new_instance(scope)
         .ok_or_else(|| "alloc controller instance".to_string())?;
 
-    // Wire prototype.
-    let class_fn = tmpl.get_function(scope).unwrap();
-    let proto_key = v8::String::new(scope, "prototype").unwrap();
-    let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
-    controller_obj.set_prototype(scope, proto_v);
+    if let Some(proto) = intrinsics::prototype(scope, Intrinsic::WritableStreamDefaultController) {
+        controller_obj.set_prototype(scope, proto.into());
+    }
 
     let state = WSControllerState::new(
         hwm,
@@ -834,25 +834,7 @@ fn set_up_writable_stream_default_controller(
         close_algorithm,
         abort_algorithm,
     );
-    let boxed = Box::new(state);
-    let raw_ptr = Box::into_raw(boxed);
-    let raw_addr = raw_ptr as usize;
-    let ext = v8::External::new(scope, raw_ptr as *mut std::ffi::c_void);
-    controller_obj.set_internal_field(0, ext.into());
-
-    // Brand priv-sym.
-    let brand = crate::streams::slots::private_sym(scope, CTRL_BRAND);
-    let true_v: v8::Local<v8::Value> = v8::Boolean::new(scope, true).into();
-    controller_obj.set_private(scope, brand, true_v);
-
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        controller_obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut WSControllerState));
-        }),
-    );
-    std::mem::forget(weak);
+    crate::brand::wrap(scope, controller_obj, state);
 
     // Wire bidirectional refs.
     crate::streams::slots::write_slot(
@@ -981,4 +963,5 @@ pub fn install(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     let class_fn = tmpl.get_function(scope).unwrap();
     let key = v8::String::new(scope, "WritableStreamDefaultController").unwrap();
     global.set(scope, key.into(), class_fn.into());
+    intrinsics::capture(scope, Intrinsic::WritableStreamDefaultController, class_fn);
 }

@@ -74,6 +74,7 @@ pub(super) fn analyze<'a>(
     let to_string_tag_override = parsed_class_attrs.to_string_tag;
     let inherit_intrinsic = parsed_class_attrs.inherit_intrinsic;
     let inherit_base = parsed_class_attrs.inherit_base;
+    let inherit_state_field = parsed_class_attrs.inherit_state_field;
     let async_iterable_method = parsed_class_attrs.async_iterable;
     let const_decls = parsed_class_attrs.consts;
 
@@ -145,7 +146,7 @@ pub(super) fn analyze<'a>(
         None
     };
 
-    let cfg = ClassConfig::new(
+    let mut cfg = ClassConfig::new(
         class_ty,
         state_ty,
         methods,
@@ -158,6 +159,7 @@ pub(super) fn analyze<'a>(
         iterable_codegen,
         install_iterable_call,
     );
+    cfg.inherit_state_field = inherit_state_field;
 
     let stripped_impl = strip_marker_attrs(input.clone());
     Ok((cfg, stripped_impl))

@@ -101,7 +101,13 @@ pub fn render() -> String {
         "Reconcile-loop iterations (per-thread)",
         &RECONCILE_ITERATIONS_TOTAL);
 
-    // Gauges sourced live from the runtime.
+    // Sourced live from the runtime.
+    emit_counter_value(
+        &mut out,
+        "zeroship_runtime_callback_panics_total",
+        "Panics inside native V8 callbacks, each answered inside its isolate as an error and the isolate quarantined",
+        zeroship_runtime::callback::caught_panics(),
+    );
     emit_gauge(
         &mut out,
         "zeroship_runtime_stream_buffered_bytes",
@@ -113,6 +119,10 @@ pub fn render() -> String {
 }
 
 fn emit_counter(out: &mut String, name: &str, help: &str, c: &AtomicU64) {
+    emit_counter_value(out, name, help, c.load(Ordering::Relaxed));
+}
+
+fn emit_counter_value(out: &mut String, name: &str, help: &str, value: u64) {
     out.push_str("# HELP ");
     out.push_str(name);
     out.push(' ');
@@ -123,7 +133,7 @@ fn emit_counter(out: &mut String, name: &str, help: &str, c: &AtomicU64) {
     out.push_str(" counter\n");
     out.push_str(name);
     out.push(' ');
-    out.push_str(&c.load(Ordering::Relaxed).to_string());
+    out.push_str(&value.to_string());
     out.push('\n');
 }
 
@@ -140,4 +150,68 @@ fn emit_gauge(out: &mut String, name: &str, help: &str, value: u64) {
     out.push(' ');
     out.push_str(&value.to_string());
     out.push('\n');
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render;
+
+    /// A plugin whose one callback panics.
+    struct PanickingPlugin;
+
+    impl zeroship_runtime::NativePlugin for PanickingPlugin {
+        fn namespace(&self) -> &str {
+            "boom"
+        }
+
+        fn register(&self, r: &mut zeroship_runtime::NativeRegistrar) {
+            r.add("explode", explode);
+        }
+    }
+
+    fn explode(
+        _scope: &mut v8::PinScope,
+        _args: v8::FunctionCallbackArguments,
+        _rv: v8::ReturnValue,
+    ) {
+        panic!("a plugin callback panicked");
+    }
+
+    fn exported_panics() -> u64 {
+        let text = render();
+        assert!(text.contains("# TYPE zeroship_runtime_callback_panics_total counter\n"), "{text}");
+        text.lines()
+            .find_map(|line| line.strip_prefix("zeroship_runtime_callback_panics_total "))
+            .expect("a sample line")
+            .parse()
+            .expect("a count")
+    }
+
+    /// A callback panic an isolate answered shows up in the exposition: the
+    /// counter rises across a request that reached the panic.
+    #[test]
+    fn a_caught_callback_panic_reaches_the_exposition() {
+        zeroship_runtime::init_v8();
+        let runtime = zeroship_runtime::runtime::Runtime::builder()
+            .plugin(PanickingPlugin)
+            .modules(vec![zeroship_runtime::ModuleEntry {
+                specifier: "index.js".into(),
+                source: "export default { fetch(request, env) { try { env.boom.explode(); } catch {} return new Response(\"ok\"); } };".into(),
+            }])
+            .build();
+        let before = exported_panics();
+        let outcome = runtime.call_fetch_handler(
+            "GET",
+            "http://localhost/",
+            &[],
+            "",
+            &zeroship_runtime::EnvSnapshot::empty(),
+            zeroship_runtime::RequestCtx::new(zeroship_runtime::channel::CancelFlag::new()),
+        );
+        assert!(matches!(outcome, zeroship_runtime::FetchOutcome::Response { status: 200, .. }));
+        // The counter is process-wide, and a sibling test sharing the process
+        // can panic a callback in the same window, so this one is at least
+        // counted rather than exactly.
+        assert!(exported_panics() - before >= 1, "the panic is counted where an operator scrapes");
+    }
 }

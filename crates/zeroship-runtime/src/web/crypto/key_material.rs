@@ -6,35 +6,6 @@
 use zeroship_runtime_macros::WebIdlEnum;
 
 // ---------------------------------------------------------------------------
-// Branded box — unspoofable instanceof check
-// ---------------------------------------------------------------------------
-
-/// Tag byte at the head of every `Box<BrandedBox<CryptoKeyState>>`.
-/// The brand check (`crypto_key::is_crypto_key`) reads the first byte
-/// of the External pointer and compares against this constant. Spoofing
-/// requires an attacker to construct a V8 External pointing at memory
-/// with the right tag byte — equivalent to memory-corruption-grade
-/// access in a single-isolate runtime.
-pub const CRYPTO_KEY_TAG: u8 = 0xC1;
-
-/// `#[repr(C)]` wrapper that puts the tag byte at offset 0, before the
-/// boxed body. Read via `*(ptr as *const u8)` from the brand check.
-#[repr(C)]
-pub struct BrandedBox<T> {
-    pub tag: u8,
-    pub body: T,
-}
-
-impl<T> BrandedBox<T> {
-    pub fn new(body: T) -> Self {
-        BrandedBox {
-            tag: CRYPTO_KEY_TAG,
-            body,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // CryptoKey state — the spec [[type]] / [[extractable]] / [[algorithm]] /
 // [[usages]] / [[handle]] slots.
 // ---------------------------------------------------------------------------

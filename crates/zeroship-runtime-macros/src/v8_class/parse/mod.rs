@@ -124,6 +124,7 @@ pub(super) struct ParsedAttrs {
     pub to_string_tag: Option<String>,
     pub inherit_intrinsic: Option<String>,
     pub inherit_base: Option<syn::Path>,
+    pub inherit_state_field: Option<syn::Ident>,
     pub state_marker: Option<syn::Path>,
     pub async_iterable: Option<String>,
     pub consts: Vec<ConstDecl>,
@@ -188,7 +189,10 @@ pub(super) fn parse_attrs(attrs: &[Attribute]) -> syn::Result<ParsedAttrs> {
 
     out.to_string_tag = to_string_tag.0;
     out.inherit_intrinsic = inherit_intrinsic.0;
-    out.inherit_base = inherit_base.0;
+    if let Some((base, state_field)) = inherit_base.0 {
+        out.inherit_base = Some(base);
+        out.inherit_state_field = state_field;
+    }
     out.state_marker = state_marker.0;
     out.async_iterable = async_iterable.0;
     out.consts = consts.0;

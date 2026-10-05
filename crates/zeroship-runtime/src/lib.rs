@@ -150,6 +150,7 @@ pub use web::fetch::body as fetch_body;
 pub use web::fetch::request as fetch_request;
 pub use web::fetch::response as fetch_response;
 pub use web::headers;
+pub use web::intrinsics;
 pub use web::streams;
 pub use web::structured_clone;
 pub use web::url as url_native;
@@ -164,6 +165,8 @@ pub use web::crypto::sync_helpers as crypto;
 // External crates (`worker`, `cli`, plugin-*) import via `zeroship_runtime::state::...`,
 // `zeroship_runtime::runtime::...`, etc. The implementations now live in
 // `core::` but the old paths keep working.
+pub use core::brand;
+pub use core::callback;
 pub use core::channel;
 pub use core::databases;
 pub use core::dispatch;
@@ -177,6 +180,7 @@ pub use core::plugin;
 pub use core::runtime;
 pub use core::serve;
 pub use core::state;
+pub use core::strings;
 
 // Back-compat re-exports for the webidl/ types (formerly at root).
 pub use webidl::byte_string;

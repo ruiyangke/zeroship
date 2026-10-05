@@ -316,28 +316,23 @@ fn fastcall_cinfo_ident(class_ty: &syn::Ident, method: &syn::Ident) -> syn::Iden
 ///      returns a zero sentinel (V8 ignores the slot when an exception
 ///      is pending).
 ///
-/// Brand check: not emitted in the fast path. V8's CFunction signature
-/// (typed `Local<Object>` receiver) is enforced at JIT time — Turbofan
-/// inserts an inline-cache shape check before dispatch, so only objects
-/// whose hidden class matches the cached one ever reach the fast path.
-/// Cross-class deception (e.g. `Headers.prototype.has.call(blob)`) hits
-/// a shape-mismatch deopt and falls through to the slow callback, which
-/// runs the prototype-walk brand check and throws "Illegal invocation".
+/// Brand check: not emitted in the fast path, which has no scope to run
+/// one. Two things stand in for it, and the shim is sound only while both
+/// hold:
 ///
-/// NOT VERIFIED IN THIS REPOSITORY, and worth knowing before relying on
-/// it. The paragraph above IS the argument - there is no fuller write-up
-/// behind it. This previously ended "See the design doc for the
-/// chain-of-trust analysis"; MEASURED, the phrase "chain-of-trust"
-/// appears in no file under `docs/`, and no doc discusses the fastcall
-/// brand-check reasoning. A reader sent looking for the analysis that
-/// justifies omitting a security check would have found nothing, and
-/// "it is analysed elsewhere" is exactly the sentence that stops them
-/// looking.
-///
-/// The claim rests on V8/Turbofan internals, so confirming it needs
-/// either the engine's C++ source or a live JIT trace: force a
-/// cross-class fastcall to tier up, then observe the deopt actually
-/// reaching the slow callback. No in-repo test does that today.
+///   - The method's FunctionTemplate carries a `v8::Signature` for the
+///     class, so V8 calls the fast path only with a receiver made from the
+///     class's own template; any other receiver goes to the slow callback,
+///     which brand-checks and throws "Illegal invocation".
+///     `tests/v8_fastcall_smoke.rs` (`*_foreign_receiver_throws_not_crash`)
+///     drives that under an optimised call.
+///   - Every instance of the template that script can reach has slot 1 set.
+///     `<Class>::__zs_install` is the only code that installs a wrapper's
+///     state, and it sets slot 1 for a class with fastcall methods; the
+///     constructor callback and every wrapper the runtime builds by hand go
+///     through it, and a hand-built wrapper it refuses is never handed out.
+///     `fastcall_has_on_kernel_built_request_headers` drives the fast path
+///     on a hand-built wrapper.
 pub(super) fn gen_fastcall_callback(
     class_ty: &syn::Ident,
     state_ty: &syn::Ident,
@@ -434,25 +429,22 @@ pub(super) fn gen_fastcall_callback(
 
         /// Fast-path shim for `<#class_ty>::<#method_name>`. Called by
         /// V8 Turbofan when the optimised JIT inlines this method at a
-        /// hot site. The signature matches the CFunctionInfo above
-        /// exactly — V8 enforces the receiver type at JIT time, so
-        /// `recv` is guaranteed to be a `<#class_ty>` instance (any
-        /// shape mismatch deopts to the slow callback).
+        /// hot site. The method's `v8::Signature` limits `recv` to
+        /// instances of the class's own template; any other receiver
+        /// takes the slow callback.
         ///
         /// Receiver recovery uses internal-field-1 aligned pointer
-        /// (set by `gen_box_and_install_finalizer` when any method on
-        /// the class is fastcall). Slot 0 retains the External + GC
+        /// (set by `<Class>::__zs_install`, the only code that installs
+        /// a wrapper's state). Slot 0 retains the External + GC
         /// finalizer for the standard wrapper teardown.
         ///
         /// SAFETY:
-        ///   - Slot 1 holds the `Box<#state_ty>` raw pointer set at
-        ///     construction time. As long as the wrapper is reachable
-        ///     by V8, the Box stays alive (slot 0's finalizer fires
-        ///     only on GC of the wrapper).
-        ///   - The receiver-type check is enforced by V8 at JIT time
-        ///     via the CFunction's typed signature. Cross-class call
-        ///     attempts deopt to the slow path before reaching this
-        ///     shim.
+        ///   - Slot 1 holds the `Box<#state_ty>` raw pointer
+        ///     `__zs_install` stored. As long as the wrapper is
+        ///     reachable by V8, the Box stays alive (slot 0's finalizer
+        ///     fires only on GC of the wrapper).
+        ///   - The signature check sends any receiver not made from the
+        ///     class's template to the slow path before this shim.
         ///   - We take `&Self` only — fastcall is rejected at macro
         ///     time for `&mut self`, so no aliasing risk.
         #[doc(hidden)]

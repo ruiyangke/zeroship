@@ -1,28 +1,24 @@
-//! Per-class isolate-slot marker types.
+//! Per-class isolate-slot marker type.
 //!
-//! Split out from the old monolithic emit assembly.
-//! Emits the two structs that hold the cached install template and
-//! the cached `Foo.prototype` for brand checks.
+//! Emits the struct that holds the cached install template.
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 
 use super::super::shared::class_config::ClassConfig;
 
-/// Emit the two per-class isolate-slot marker structs:
+/// Emit the per-class isolate-slot marker struct:
 ///
 ///   pub struct __InstallSlot_<Class>(::v8::Global<::v8::FunctionTemplate>);
-///   pub struct __BrandSlot_<Class>(::v8::Global<::v8::Object>);
 ///
-/// These have to live at module scope (a `pub struct` can't live
-/// inside an `impl` block) and are named after the class so two
-/// classes never collide on a single TypeId. The structs are
-/// `#[doc(hidden)]` because they're an implementation detail —
-/// consumers query the cached template via `Foo::install(scope)`.
+/// It has to live at module scope (a `pub struct` can't live inside an
+/// `impl` block) and is named after the class so two classes never
+/// collide on a single `TypeId`. The struct is `#[doc(hidden)]` because
+/// it's an implementation detail: consumers query the cached template
+/// via `Foo::install(scope)`.
 pub(super) fn gen_install_slot_types(cfg: &ClassConfig) -> TokenStream2 {
     let class_ty = cfg.class_ty;
     let install_slot_ty = format_ident!("__InstallSlot_{}", class_ty);
-    let brand_slot_ty = format_ident!("__BrandSlot_{}", class_ty);
 
     quote! {
         /// Per-class isolate-slot marker holding the cached
@@ -34,35 +30,5 @@ pub(super) fn gen_install_slot_types(cfg: &ClassConfig) -> TokenStream2 {
         #[doc(hidden)]
         #[allow(non_camel_case_types)]
         pub struct #install_slot_ty(::v8::Global<::v8::FunctionTemplate>);
-
-        /// Per-class isolate-slot marker holding `Foo.prototype` for
-        /// WebIDL §3.7 brand checks. Captured lazily on first brand
-        /// check (after `get_function`) and consulted by every method,
-        /// getter, and setter callback before the unsafe internal-field
-        /// deref.
-        ///
-        /// Without this, the only "brand check" in the prologue is "is
-        /// internal field 0 an External" — which any `#[v8_class]`
-        /// instance with one internal field passes, allowing
-        /// `Headers.prototype.append.call(blob)` to reinterpret the
-        /// Blob's box as a Headers and write Vec<u8> internals into
-        /// arbitrary memory (UB).
-        ///
-        /// Storage: `v8::Eternal<v8::Object>` rather than
-        /// `v8::Global<v8::Object>`. Eternals are isolate-lifetime
-        /// handles whose `get()` returns a `Local` directly without
-        /// allocating a fresh `GlobalHandles` slot. This eliminates the
-        /// per-call `Global::clone()` (= `v8__Global__New`) on the
-        /// brand-check hot path; profile work attributed ~9 % of CPU
-        /// to this allocation across the four `#[v8_class]` brand-
-        /// checked types on the httpGet bench. The cached prototype is
-        /// constant for the lifetime of the isolate (the prototype's
-        /// hidden class is captured at install time and shared by
-        /// every `new Foo()` instance), so isolate-lifetime ownership
-        /// matches the access pattern exactly — there is no point in
-        /// time at which the slot needs to be cleared or replaced.
-        #[doc(hidden)]
-        #[allow(non_camel_case_types)]
-        pub struct #brand_slot_ty(::v8::Eternal<::v8::Object>);
     }
 }

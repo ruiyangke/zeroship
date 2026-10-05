@@ -470,7 +470,7 @@ pub fn install_global<'s>(
     // on every instance's prototype chain naturally.
     {
         let proto_tmpl = tmpl.prototype_template(scope);
-        let getter = v8::FunctionTemplate::new(scope, search_params_getter_callback);
+        let getter = crate::callback::template(scope, search_params_getter_callback);
         let key = v8::String::new(scope, "searchParams").unwrap();
         proto_tmpl.set_accessor_property(
             key.into(),
@@ -488,13 +488,11 @@ pub fn install_global<'s>(
 }
 
 /// Helper for `URL.parse`: allocate a JS object on URL's instance
-/// template, install the boxed URL in internal field 0, and register
-/// the GC finalizer. Returns `None` on any V8 failure (the caller
-/// should pass null back).
+/// template and install the URL through `URL::__zs_install`. Returns
+/// `None` on any V8 failure (the caller should pass null back).
 ///
-/// Mirrors the macro-emitted `gen_box_and_install_finalizer` flow but
-/// is invoked outside a constructor callback, so we manually attach
-/// the prototype.
+/// Runs outside a constructor callback, so it attaches the prototype
+/// itself.
 fn wrap_parsed_url(
     scope: &mut v8::PinScope,
     parsed: ada_url::Url,
@@ -513,31 +511,10 @@ fn wrap_parsed_url(
     let proto_v = class_fn.get(scope, proto_key.into())?;
     inst.set_prototype(scope, proto_v);
 
-    // Install the boxed URL.
-    let boxed = Box::new(URL {
+    URL::__zs_install(scope, inst, URL {
         inner: parsed,
         search_params: None,
-    });
-    let raw_ptr = Box::into_raw(boxed);
-    let raw_addr = raw_ptr as usize;
-    let ext = v8::External::new(scope, raw_ptr as *mut std::ffi::c_void);
-    inst.set_internal_field(0, ext.into());
-
-    // SAFETY: raw_addr was Box::into_raw'd from Box<URL>; the
-    // finalizer drops the Box exactly once when V8 reclaims the
-    // wrapper. Same pattern the macro emits in
-    // gen_box_and_install_finalizer.
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        inst,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut URL));
-        }),
-    );
-    // Dropping the Weak deregisters the finalizer; with_guaranteed_
-    // finalizer fires on GC or isolate teardown regardless, so leak
-    // the WeakData (~32 bytes per instance).
-    std::mem::forget(weak);
+    })?;
 
     Some(v8::Global::new(scope, inst))
 }
@@ -551,17 +528,14 @@ fn search_params_getter_callback(
     mut rv: v8::ReturnValue,
 ) {
     let this_obj = args.this();
-    let url: &mut URL = match this_obj
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-    {
-        Some(e) => unsafe { &mut *(e.value() as *mut URL) },
-        None => {
-            let msg = v8::String::new(scope, "Illegal invocation").unwrap();
-            let exc = v8::Exception::type_error(scope, msg);
-            scope.throw_exception(exc);
-            return;
-        }
+    let url: &mut URL = if let Some(mut ptr) = crate::brand::state::<URL>(scope, this_obj) {
+        // SAFETY: the brand proves the pointer is this wrapper's live Box<URL>.
+        unsafe { ptr.as_mut() }
+    } else {
+        let msg = v8::String::new(scope, "Illegal invocation").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        scope.throw_exception(exc);
+        return;
     };
 
     if let Some(g) = &url.search_params {
@@ -597,14 +571,10 @@ fn search_params_getter_callback(
     // place rather than swapping pointers — that way the macro's
     // weak-finalizer (which captured the original raw_addr) frees the
     // right thing.
-    let old_ext = match sp_obj
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-    {
-        Some(e) => e,
-        None => return, // shouldn't happen — internal field count = 1
+    let Some(old_ptr) = crate::brand::state::<URLSearchParams>(scope, sp_obj) else {
+        return;
     };
-    let old_raw = old_ext.value() as *mut URLSearchParams;
+    let old_raw = old_ptr.as_ptr();
     // SAFETY: old_raw is the Box allocated by the URLSearchParams
     // macro-emitted constructor; we mutate its contents in place. No
     // other &mut to this Box exists.

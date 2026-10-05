@@ -155,7 +155,8 @@ fn build_branch_stream<'s>(
         underlying.set(scope, key.into(), cancel_fn.into());
     }
 
-    let stream = build_value_stream_wrapper_for_internal(scope, budget);
+    let stream = build_value_stream_wrapper_for_internal(scope, budget)
+        .ok_or_else(|| "tee: branch allocation failed".to_string())?;
     set_up_readable_stream_default_controller_from_underlying_source_with_strategy(
         scope,
         stream,
@@ -183,7 +184,7 @@ fn build_pull_fn<'s>(
     let holder = Rc::new(PullHolder { tee_state });
     let raw = Rc::into_raw(holder) as *mut std::ffi::c_void;
     let ext = v8::External::new(scope, raw);
-    let tmpl = v8::FunctionTemplate::builder(pull_callback)
+    let tmpl = crate::callback::template_builder(pull_callback)
         .data(ext.into())
         .build(scope);
     tmpl.get_function(scope).unwrap()
@@ -357,7 +358,7 @@ fn build_cancel_fn<'s>(
     let holder = Rc::new(CancelHolder { tee_state, idx });
     let raw = Rc::into_raw(holder) as *mut std::ffi::c_void;
     let ext = v8::External::new(scope, raw);
-    let tmpl = v8::FunctionTemplate::builder(cancel_callback)
+    let tmpl = crate::callback::template_builder(cancel_callback)
         .data(ext.into())
         .build(scope);
     tmpl.get_function(scope).unwrap()

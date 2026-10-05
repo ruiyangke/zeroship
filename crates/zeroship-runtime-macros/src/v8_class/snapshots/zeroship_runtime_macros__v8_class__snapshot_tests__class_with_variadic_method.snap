@@ -26,140 +26,73 @@ impl Spreader {
 #[doc(hidden)]
 #[allow(non_camel_case_types)]
 pub struct __InstallSlot_Spreader(::v8::Global<::v8::FunctionTemplate>);
-/// Per-class isolate-slot marker holding `Foo.prototype` for
-/// WebIDL §3.7 brand checks. Captured lazily on first brand
-/// check (after `get_function`) and consulted by every method,
-/// getter, and setter callback before the unsafe internal-field
-/// deref.
-///
-/// Without this, the only "brand check" in the prologue is "is
-/// internal field 0 an External" — which any `#[v8_class]`
-/// instance with one internal field passes, allowing
-/// `Headers.prototype.append.call(blob)` to reinterpret the
-/// Blob's box as a Headers and write Vec<u8> internals into
-/// arbitrary memory (UB).
-///
-/// Storage: `v8::Eternal<v8::Object>` rather than
-/// `v8::Global<v8::Object>`. Eternals are isolate-lifetime
-/// handles whose `get()` returns a `Local` directly without
-/// allocating a fresh `GlobalHandles` slot. This eliminates the
-/// per-call `Global::clone()` (= `v8__Global__New`) on the
-/// brand-check hot path; profile work attributed ~9 % of CPU
-/// to this allocation across the four `#[v8_class]` brand-
-/// checked types on the httpGet bench. The cached prototype is
-/// constant for the lifetime of the isolate (the prototype's
-/// hidden class is captured at install time and shared by
-/// every `new Foo()` instance), so isolate-lifetime ownership
-/// matches the access pattern exactly — there is no point in
-/// time at which the slot needs to be cleared or replaced.
-#[doc(hidden)]
-#[allow(non_camel_case_types)]
-pub struct __BrandSlot_Spreader(::v8::Eternal<::v8::Object>);
-/// Brand-check helper: walks the prototype chain of `this`
-/// looking for the cached `Foo.prototype`. Returns true on
-/// match (the receiver IS a Foo, or a subclass via
-/// `#[v8_inherit]`), false otherwise.
-///
-/// Walks at most 1024 prototype links — matching V8's own
-/// internal `Object::PrototypeChainLength` sanity bound. The
-/// cap is NOT a cycle defence: ECMAScript §10.4.7.2 step 8
-/// already requires `Object.setPrototypeOf` to reject any
-/// assignment that would create a cycle, so user JS cannot
-/// construct one. The cap exists purely as a defence-in-depth
-/// belt-and-braces against an underlying V8 bug or future
-/// proxy-driven prototype chain that fakes infinite linear
-/// depth. Real WebIDL inheritance chains are 1-3 hops; pure
-/// prototypal chains rarely exceed 5; reaching the cap is a
-/// pathological case for which "false" is the conservative
-/// answer.
-///
-/// The cost is dwarfed by the V8 callback overhead —
-/// the brand check itself is O(depth) Local pointer
-/// comparisons.
-///
-/// The cached prototype is populated lazily on first call —
-/// NOT in `install` — because eager `get_function(scope)` at
-/// install time would freeze the FunctionTemplate's instance
-/// shape and silently no-op any subsequent
-/// `prototype_template().set_accessor_property(...)` calls.
-/// Several classes (URL.searchParams, etc.) install accessors
-/// on the prototype_template AFTER `Self::install` returns; we
-/// must not break those.
-///
-/// First-call cost (one-time per isolate): one `get_function`
-/// + one `.get(prototype)` + one `Eternal::set`. Steady state:
-/// an isolate-slot read followed by `Eternal::get` (which
-/// materialises the `Local` straight from the isolate's
-/// eternal handles cell — NO `GlobalHandles::Create`/`Release`
-/// per call), plus the chain walk.
-///
-/// Lifetimes are elided here on purpose. An explicit `<'s>`
-/// would tie the `Local<Object>` argument's lifetime to the
-/// `&mut PinScope` lifetime in an invariant way (mutable
-/// references are invariant over their type param), which
-/// then conflicts with `args.this()`'s callsite-derived
-/// lifetime. Elision lets each Local pick its own appropriate
-/// (and shorter) lifetime — the helper body never returns a
-/// `Local` so there's no need to relate them outside the
-/// function.
+/// Brand-check helper: true iff `obj` is a wrapper this runtime
+/// branded as holding this class's state (or a derived class's,
+/// via `#[v8_inherit]`).
 #[doc(hidden)]
 #[allow(non_snake_case, dead_code)]
 fn __brand_check_Spreader(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> bool {
-    let expected_proto: v8::Local<v8::Object> = if let Some(slot) = scope
-        .get_slot::<__BrandSlot_Spreader>()
-    {
-        match slot.0.get(scope) {
-            Some(p) => p,
-            None => return false,
-        }
-    } else {
-        let tmpl_global = match scope.get_slot::<__InstallSlot_Spreader>() {
-            Some(s) => s.0.clone(),
-            None => return false,
-        };
-        let tmpl_local = v8::Local::new(scope, &tmpl_global);
-        let func = match tmpl_local.get_function(scope) {
-            Some(f) => f,
-            None => return false,
-        };
-        let proto_key = match v8::String::new(scope, "prototype") {
-            Some(s) => s,
-            None => return false,
-        };
-        let proto_v = match func.get(scope, proto_key.into()) {
-            Some(v) => v,
-            None => return false,
-        };
-        let proto: v8::Local<v8::Object> = match proto_v.try_into() {
-            Ok(o) => o,
-            Err(_) => return false,
-        };
-        let eternal: v8::Eternal<v8::Object> = v8::Eternal::empty();
-        eternal.set(scope, proto);
-        scope.set_slot(__BrandSlot_Spreader(eternal));
-        proto
-    };
-    let mut current: v8::Local<v8::Value> = match obj.get_prototype(scope) {
-        Some(v) => v,
-        None => return false,
-    };
-    for _ in 0..1024 {
-        if current.is_null_or_undefined() {
-            return false;
-        }
-        let cur_obj: v8::Local<v8::Object> = match current.try_into() {
-            Ok(o) => o,
-            Err(_) => return false,
-        };
-        if cur_obj == expected_proto {
-            return true;
-        }
-        current = match cur_obj.get_prototype(scope) {
-            Some(v) => v,
-            None => return false,
-        };
+    ::zeroship_runtime::macro_runtime::brand::is::<Spreader>(scope, obj)
+}
+impl ::zeroship_runtime::macro_runtime::brand::ClassState for Spreader {
+    type State = Spreader;
+    const FIELD_COUNT: usize = 1usize;
+}
+impl Spreader {
+    /// Brand `obj`, whose internal field 0 holds `state` (a
+    /// `Box` of this class's state), as a wrapper of this class
+    /// and of every class it inherits from. Only
+    /// `__zs_install` and a derived class's `__zs_brand` call
+    /// it.
+    #[doc(hidden)]
+    pub fn __zs_brand(
+        scope: &mut v8::PinScope,
+        obj: v8::Local<v8::Object>,
+        state: v8::Local<v8::External>,
+    ) {
+        ::zeroship_runtime::macro_runtime::brand::mark::<Spreader>(scope, obj, state);
     }
-    false
+    /// Install `state` as the native state of `obj`, a wrapper
+    /// made from this class's template: box it into internal
+    /// field 0 (and slot 1, for a class with fastcall methods),
+    /// brand the wrapper, and drop the box when V8 collects it.
+    ///
+    /// `None`, with nothing installed, when `obj` lacks this
+    /// class's internal fields or already holds a state.
+    #[doc(hidden)]
+    pub fn __zs_install<'__zs>(
+        scope: &mut v8::PinScope<'__zs, '_>,
+        obj: v8::Local<v8::Object>,
+        state: Spreader,
+    ) -> ::core::option::Option<v8::Local<'__zs, v8::External>> {
+        const __FIELD_COUNT: usize = <Spreader as ::zeroship_runtime::macro_runtime::brand::ClassState>::FIELD_COUNT;
+        if obj.internal_field_count() < __FIELD_COUNT {
+            return ::core::option::Option::None;
+        }
+        if obj
+            .get_internal_field(scope, 0)
+            .is_some_and(|__field| v8::Local::<v8::External>::try_from(__field).is_ok())
+        {
+            return ::core::option::Option::None;
+        }
+        let __raw = ::std::boxed::Box::into_raw(::std::boxed::Box::new(state));
+        let __raw_addr = __raw as usize;
+        let __ext = v8::External::new(scope, __raw.cast());
+        obj.set_internal_field(0, __ext.into());
+        if __FIELD_COUNT > 1 {
+            obj.set_aligned_pointer_in_internal_field(1, __raw.cast(), 0);
+        }
+        Self::__zs_brand(scope, obj, __ext);
+        let __weak = v8::Weak::with_guaranteed_finalizer(
+            scope,
+            obj,
+            ::std::boxed::Box::new(move || unsafe {
+                drop(::std::boxed::Box::from_raw(__raw_addr as *mut Spreader));
+            }),
+        );
+        ::std::mem::forget(__weak);
+        ::core::option::Option::Some(__ext)
+    }
 }
 #[allow(non_snake_case, dead_code)]
 impl Spreader {
@@ -211,17 +144,24 @@ impl Spreader {
         if let Some(cached) = scope.get_slot::<__InstallSlot_Spreader>() {
             return v8::Local::new(scope, cached.0.clone());
         }
-        let __ctor_tmpl = v8::FunctionTemplate::new(
+        let __ctor_tmpl = ::zeroship_runtime::macro_runtime::callback::template(
             scope,
             __Spreader_constructor_callback,
         );
         let __class_name = v8::String::new(scope, "Spreader").unwrap();
         __ctor_tmpl.set_class_name(__class_name);
-        __ctor_tmpl.instance_template(scope).set_internal_field_count(1usize);
+        __ctor_tmpl
+            .instance_template(scope)
+            .set_internal_field_count(
+                <Spreader as ::zeroship_runtime::macro_runtime::brand::ClassState>::FIELD_COUNT,
+            );
         let __proto = __ctor_tmpl.prototype_template(scope);
         {
             let __key = v8::String::new(scope, "invoke").unwrap();
-            let __fn_tmpl = v8::FunctionTemplate::new(scope, __Spreader_invoke_callback);
+            let __fn_tmpl = ::zeroship_runtime::macro_runtime::callback::template(
+                scope,
+                __Spreader_invoke_callback,
+            );
             __proto.set(__key.into(), __fn_tmpl.into());
         }
         {
@@ -273,21 +213,12 @@ pub(crate) fn __Spreader_constructor_callback(
     }
     let __this = args.this();
     let __instance: Spreader = <Spreader>::new();
-    let __boxed = Box::new(__instance);
-    let __raw_ptr = Box::into_raw(__boxed);
-    let __raw_addr = __raw_ptr as usize;
-    let __ext = v8::External::new(scope, __raw_ptr as *mut ::std::ffi::c_void);
-    __this.set_internal_field(0, __ext.into());
-    let __weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        __this,
-        Box::new(move || {
-            unsafe {
-                drop(Box::from_raw(__raw_addr as *mut Spreader));
-            }
-        }),
-    );
-    ::std::mem::forget(__weak);
+    if <Spreader>::__zs_install(scope, __this, __instance).is_none() {
+        let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+        let __exc = v8::Exception::type_error(scope, __msg);
+        scope.throw_exception(__exc);
+        return;
+    }
 }
 #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
 pub(crate) fn __Spreader_invoke_callback(

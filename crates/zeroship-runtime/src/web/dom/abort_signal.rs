@@ -238,11 +238,9 @@ pub(crate) fn mint_abort_signal<'s>(
         .expect("AbortSignal instance allocation failed");
 
     let state = AbortSignal::default();
-    let boxed: Box<AbortSignal> = Box::new(state);
-    let raw = Box::into_raw(boxed);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    obj.set_internal_field(0, ext.into());
+    let ext = AbortSignal::__zs_install(scope, obj, state)
+        .expect("a fresh AbortSignal wrapper has the class's fields and no state");
+    let raw = ext.value().cast::<AbortSignal>();
 
     // Wire prototype to AbortSignal.prototype so methods/getters and
     // the inherited EventTarget chain resolve.
@@ -255,37 +253,21 @@ pub(crate) fn mint_abort_signal<'s>(
     // on the wrapper rather than nested inside the Rust state.
     attach_listeners(scope, obj);
 
-    // Finalizer reclaims the Box on GC / isolate teardown.
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut AbortSignal));
-        }),
-    );
-    std::mem::forget(weak);
-
     (obj, raw)
 }
 
-/// Get the boxed `AbortSignal` from a V8 wrapper. Returns `None` if
-/// the object isn't an AbortSignal (no internal field, or the field
-/// isn't an External).
+/// Get the boxed `AbortSignal` from a V8 wrapper. Returns `None` unless
+/// the object is a wrapper this runtime branded as an `AbortSignal`.
 pub(crate) fn signal_from_obj<'a>(
     scope: &mut v8::PinScope,
     obj: v8::Local<v8::Object>,
 ) -> Option<&'a AbortSignal> {
-    let ext = obj
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())?;
-    let ptr = ext.value() as *mut AbortSignal;
-    if ptr.is_null() {
-        return None;
-    }
-    // SAFETY: The boxed state's lifetime is tied to the wrapper via
-    // a guaranteed finalizer (mint_abort_signal). The single-threaded
-    // isolate invariant means concurrent access is impossible.
-    Some(unsafe { &*ptr })
+    let ptr = crate::brand::state::<AbortSignal>(scope, obj)?;
+    // SAFETY: The brand proves the pointer is the wrapper's live box, whose
+    // lifetime is tied to the wrapper via a guaranteed finalizer
+    // (mint_abort_signal). The single-threaded isolate invariant means
+    // concurrent access is impossible.
+    Some(unsafe { ptr.as_ref() })
 }
 
 /// Public view: is `obj` an aborted AbortSignal? Returns false for
@@ -582,7 +564,7 @@ fn build_timeout_callback_function<'s>(
     let raw_addr = raw as usize;
 
     let data_ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    let tmpl = v8::FunctionTemplate::builder(timeout_fired_callback)
+    let tmpl = crate::callback::template_builder(timeout_fired_callback)
         .data(data_ext.into())
         .build(scope);
     let func = tmpl.get_function(scope).unwrap();
@@ -804,8 +786,8 @@ pub fn install_global<'s>(
     let proto: v8::Local<v8::Object> = proto_v.try_into().unwrap();
 
     let onabort_key = v8::String::new(scope, "onabort").unwrap();
-    let getter_tmpl = v8::FunctionTemplate::new(scope, onabort_getter_callback);
-    let setter_tmpl = v8::FunctionTemplate::new(scope, onabort_setter_callback);
+    let getter_tmpl = crate::callback::template(scope, onabort_getter_callback);
+    let setter_tmpl = crate::callback::template(scope, onabort_setter_callback);
     let getter_fn = getter_tmpl.get_function(scope).unwrap();
     let setter_fn = setter_tmpl.get_function(scope).unwrap();
     let mut desc = v8::PropertyDescriptor::new_from_get_set(getter_fn.into(), setter_fn.into());
@@ -815,6 +797,7 @@ pub fn install_global<'s>(
 
     let key = v8::String::new(scope, "AbortSignal").unwrap();
     global.set(scope, key.into(), class_fn.into());
+    crate::intrinsics::capture(scope, crate::intrinsics::Intrinsic::AbortSignal, class_fn);
 }
 
 // ---------------------------------------------------------------------------

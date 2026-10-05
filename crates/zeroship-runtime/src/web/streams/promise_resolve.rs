@@ -53,10 +53,17 @@ pub fn enqueue_microtask<F: FnOnce(&mut v8::PinScope) + 'static>(
     // FunctionTemplate with the holder pinned in External::data. The
     // template is one-shot — we only call get_function once, attach via
     // enqueue_microtask, and never re-use it.
-    let tmpl = v8::FunctionTemplate::builder(microtask_callback)
+    let tmpl = crate::callback::template_builder(microtask_callback)
         .data(ext.into())
         .build(scope);
-    let func = tmpl.get_function(scope).unwrap();
+    let Some(func) = tmpl.get_function(scope) else {
+        // Only with an exception or termination already pending, which
+        // stays pending; the closure never runs, so take its Rc back.
+        // SAFETY: `raw` came from `Rc::into_raw` above and was never
+        // handed to a callback that could reclaim it.
+        drop(unsafe { Rc::from_raw(raw as *const MicrotaskHolder) });
+        return;
+    };
 
     // The real V8 API: Isolate::enqueue_microtask(Local<Function>).
     // PinScope deref's to Isolate's mutable handle.
@@ -111,13 +118,20 @@ type PromiseCallbackHolder = RefCell<Option<PromiseCallback>>;
 /// Either callback may be `None` (the spec equivalent of passing
 /// `undefined` for that handler — V8 propagates the value/rejection
 /// through unchanged).
+///
+/// Chaining fails only with an exception or a termination already
+/// pending (a heap- or CPU-limit kill lands here as one); the reactions
+/// are then never attached and the pending exception is left for the
+/// caller to propagate.
 pub fn upon_promise<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     promise: v8::Local<'s, v8::Promise>,
     on_fulfilled: Option<PromiseCallback>,
     on_rejected: Option<PromiseCallback>,
 ) {
-    let mid = chain_then(scope, promise, on_fulfilled, on_rejected);
+    let Some(mid) = chain_then(scope, promise, on_fulfilled, on_rejected) else {
+        return;
+    };
     // Outer then: forward unhandled rejections to V8's default.
     chain_then(
         scope,
@@ -156,13 +170,29 @@ pub fn set_promise_is_handled_to_true<'s>(
 /// Closures return `v8::Global<v8::Value>` (not Local) because the trait
 /// object can't carry a scope-tied lifetime. The callback materializes
 /// the Global to a Local at the V8 reaction site.
+///
+/// When V8 cannot attach the reactions, which happens only with an
+/// exception or a termination already pending, the result is a promise
+/// that never settles: nothing would run the reactions, and the pending
+/// exception is left for the caller to propagate.
 pub fn react_to_promise_with<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     promise: v8::Local<'s, v8::Promise>,
     on_fulfilled: Option<PromiseValueCallback>,
     on_rejected: Option<PromiseValueCallback>,
 ) -> v8::Local<'s, v8::Promise> {
-    chain_then_with_value(scope, promise, on_fulfilled, on_rejected)
+    match chain_then_with_value(scope, promise, on_fulfilled, on_rejected) {
+        Some(chained) => chained,
+        None => never_settling(scope),
+    }
+}
+
+/// A promise nothing will settle. `PromiseResolver::new` runs no script (the
+/// runtime installs no promise hooks), so it does not fail.
+fn never_settling<'s>(scope: &v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Promise> {
+    v8::PromiseResolver::new(scope)
+        .expect("PromiseResolver::new runs no script")
+        .get_promise(scope)
 }
 
 /// Default rejection handler — re-throws so V8's unhandled-rejection
@@ -186,52 +216,71 @@ fn rethrow_assertion_error_rejection<'s>(
 // ---------------------------------------------------------------------------
 
 /// PerformPromiseThen(p, onF, onR) — fulfillment/rejection that DISCARDS
-/// the callback's return value (uponPromise semantics).
+/// the callback's return value (uponPromise semantics). `None` when V8
+/// cannot build or attach a reaction, which happens only with an
+/// exception or a termination already pending: V8's `Promise::Then` calls
+/// the `PerformPromiseThen` builtin directly (not `Promise.prototype.then`,
+/// so no species lookup runs creator code), and a termination requested
+/// from another thread (the CPU timer) or from a GC (the heap limit) fires
+/// on that entry into the engine.
 fn chain_then<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     promise: v8::Local<'s, v8::Promise>,
     on_fulfilled: Option<PromiseCallback>,
     on_rejected: Option<PromiseCallback>,
-) -> v8::Local<'s, v8::Promise> {
-    let on_f = on_fulfilled.map(|cb| build_oneshot_callback_void(scope, cb));
-    let on_r = on_rejected.map(|cb| build_oneshot_callback_void(scope, cb));
-
-    match (on_f, on_r) {
-        (Some(f), Some(r)) => promise.then2(scope, f, r).unwrap(),
-        (Some(f), None) => promise.then(scope, f).unwrap(),
-        (None, Some(r)) => {
-            // V8's `Promise::then2` requires both; for the
-            // rejection-only case build a no-op fulfillment that
-            // forwards the value.
-            let f_template = v8::FunctionTemplate::new(scope, identity_callback);
-            let f = f_template.get_function(scope).unwrap();
-            promise.then2(scope, f, r).unwrap()
-        }
-        (None, None) => promise,
-    }
+) -> Option<v8::Local<'s, v8::Promise>> {
+    let on_f = match on_fulfilled {
+        Some(cb) => Some(build_oneshot_callback_void(scope, cb)?),
+        None => None,
+    };
+    let on_r = match on_rejected {
+        Some(cb) => Some(build_oneshot_callback_void(scope, cb)?),
+        None => None,
+    };
+    then_with(scope, promise, on_f, on_r)
 }
 
 /// PerformPromiseThen(p, onF, onR) — fulfillment/rejection that USES
 /// the callback's return value (reactToPromiseWith semantics). The
-/// returned Promise resolves with whatever the callback returned.
+/// returned Promise resolves with whatever the callback returned. `None`
+/// as for [`chain_then`].
 fn chain_then_with_value<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     promise: v8::Local<'s, v8::Promise>,
     on_fulfilled: Option<PromiseValueCallback>,
     on_rejected: Option<PromiseValueCallback>,
-) -> v8::Local<'s, v8::Promise> {
-    let on_f = on_fulfilled.map(|cb| build_oneshot_callback_value(scope, cb));
-    let on_r = on_rejected.map(|cb| build_oneshot_callback_value(scope, cb));
+) -> Option<v8::Local<'s, v8::Promise>> {
+    let on_f = match on_fulfilled {
+        Some(cb) => Some(build_oneshot_callback_value(scope, cb)?),
+        None => None,
+    };
+    let on_r = match on_rejected {
+        Some(cb) => Some(build_oneshot_callback_value(scope, cb)?),
+        None => None,
+    };
+    then_with(scope, promise, on_f, on_r)
+}
 
+/// `promise.then(on_f, on_r)` through the V8 API.
+fn then_with<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    promise: v8::Local<'s, v8::Promise>,
+    on_f: Option<v8::Local<'s, v8::Function>>,
+    on_r: Option<v8::Local<'s, v8::Function>>,
+) -> Option<v8::Local<'s, v8::Promise>> {
     match (on_f, on_r) {
-        (Some(f), Some(r)) => promise.then2(scope, f, r).unwrap(),
-        (Some(f), None) => promise.then(scope, f).unwrap(),
+        (Some(f), Some(r)) => promise.then2(scope, f, r),
+        (Some(f), None) => promise.then(scope, f),
         (None, Some(r)) => {
-            let f_template = v8::FunctionTemplate::new(scope, identity_callback);
-            let f = f_template.get_function(scope).unwrap();
-            promise.then2(scope, f, r).unwrap()
+            // V8's `Promise::then2` requires both; for the
+            // rejection-only case build a no-op fulfillment that
+            // forwards the value.
+            let f_template =
+                crate::callback::template(scope, identity_callback);
+            let f = f_template.get_function(scope)?;
+            promise.then2(scope, f, r)
         }
-        (None, None) => promise,
+        (None, None) => Some(promise),
     }
 }
 
@@ -252,18 +301,25 @@ fn identity_callback(
 // ---------------------------------------------------------------------------
 
 /// Build a one-shot V8 Function from a Rust closure that returns nothing
-/// (uponPromise semantics — return value discarded).
+/// (uponPromise semantics: return value discarded). `None` only with an
+/// exception or a termination already pending.
 fn build_oneshot_callback_void<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     cb: PromiseCallback,
-) -> v8::Local<'s, v8::Function> {
+) -> Option<v8::Local<'s, v8::Function>> {
     let holder: Rc<PromiseCallbackHolder> = Rc::new(RefCell::new(Some(cb)));
     let raw = Rc::into_raw(holder) as *mut std::ffi::c_void;
     let ext = v8::External::new(scope, raw);
-    let tmpl = v8::FunctionTemplate::builder(promise_callback_void)
+    let tmpl = crate::callback::template_builder(promise_callback_void)
         .data(ext.into())
         .build(scope);
-    tmpl.get_function(scope).unwrap()
+    let function = tmpl.get_function(scope);
+    if function.is_none() {
+        // SAFETY: `raw` came from `Rc::into_raw` above, and no function
+        // exists that could reclaim it.
+        drop(unsafe { Rc::from_raw(raw as *const PromiseCallbackHolder) });
+    }
+    function
 }
 
 fn promise_callback_void<'s>(
@@ -301,14 +357,20 @@ type PromiseValueCallbackHolder = RefCell<Option<PromiseValueCallback>>;
 fn build_oneshot_callback_value<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     cb: PromiseValueCallback,
-) -> v8::Local<'s, v8::Function> {
+) -> Option<v8::Local<'s, v8::Function>> {
     let holder: Rc<PromiseValueCallbackHolder> = Rc::new(RefCell::new(Some(cb)));
     let raw = Rc::into_raw(holder) as *mut std::ffi::c_void;
     let ext = v8::External::new(scope, raw);
-    let tmpl = v8::FunctionTemplate::builder(promise_callback_value)
+    let tmpl = crate::callback::template_builder(promise_callback_value)
         .data(ext.into())
         .build(scope);
-    tmpl.get_function(scope).unwrap()
+    let function = tmpl.get_function(scope);
+    if function.is_none() {
+        // SAFETY: `raw` came from `Rc::into_raw` above, and no function
+        // exists that could reclaim it.
+        drop(unsafe { Rc::from_raw(raw as *const PromiseValueCallbackHolder) });
+    }
+    function
 }
 
 fn promise_callback_value<'s>(

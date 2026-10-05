@@ -413,26 +413,18 @@ pub fn install_event_constants<'s>(
 // ---------------------------------------------------------------------------
 
 /// Get the `Event` boxed state from a V8 object via internal field 0.
-/// Returns `None` if the object isn't an Event wrapper (no internal
-/// field, or the field isn't an External).
-///
-/// SAFETY: caller must ensure `obj` is a JS Event wrapper; the
-/// External holds a `*mut Event` we cast back. The unsafe re-borrow
-/// is sound because (a) V8 isolates are per-thread and (b) the boxed
-/// state is reachable via the wrapper's GC root.
+/// Returns `None` unless the object is a wrapper this runtime branded as
+/// holding an `Event`: an Event, or an event class whose `#[repr(C)]`
+/// state starts with one (`#[v8_inherit(Event)]` brands both).
 pub(crate) fn event_from_obj<'a>(
     scope: &mut v8::PinScope,
     obj: v8::Local<v8::Object>,
 ) -> Option<&'a Event> {
-    let ext = obj
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())?;
-    let ptr = ext.value() as *mut Event;
-    if ptr.is_null() {
-        return None;
-    }
-    // SAFETY: see function comment.
-    Some(unsafe { &*ptr })
+    let ptr = crate::brand::state::<Event>(scope, obj)?;
+    // SAFETY: the brand proves the pointer is a live box whose state
+    // starts with an `Event`; the box is reachable via the wrapper's GC
+    // root and V8 isolates are per-thread.
+    Some(unsafe { ptr.as_ref() })
 }
 
 /// Mint a fresh "abort" Event for AbortSignal. Bypasses the JS
@@ -453,11 +445,8 @@ pub(crate) fn build_abort_event<'s>(
     ev.is_trusted.set(true);
     ev.time_stamp.set(now_ms());
 
-    let boxed: Box<Event> = Box::new(ev);
-    let raw = Box::into_raw(boxed);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    obj.set_internal_field(0, ext.into());
+    Event::__zs_install(scope, obj, ev)
+        .expect("a fresh instance of the class's own template takes its state");
 
     // Wire prototype to Event.prototype so the methods/getters from
     // the FunctionTemplate are reachable.
@@ -465,16 +454,6 @@ pub(crate) fn build_abort_event<'s>(
     let proto_key = v8::String::new(scope, "prototype").unwrap();
     let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
     obj.set_prototype(scope, proto_v);
-
-    // Finalizer: reclaim the Box on GC or isolate teardown.
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut Event));
-        }),
-    );
-    std::mem::forget(weak);
 
     obj
 }

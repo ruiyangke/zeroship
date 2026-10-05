@@ -60,7 +60,7 @@ fn evaluate<'s>(
             Export::Env => v8::Local::new(scope, &env).into(),
             _ => {
                 let data = v8::Integer::new_from_unsigned(scope, index as u32);
-                let function = v8::Function::builder(export_callback)
+                let function = crate::callback::function_builder(export_callback)
                     .data(data.into())
                     .build(scope)?;
                 function.set_name(name);
@@ -179,7 +179,7 @@ fn run<'s>(
 }
 
 fn throw_error(scope: &mut v8::PinScope, message: &str) {
-    let message = v8::String::new(scope, message).unwrap();
+    let message = crate::strings::message(scope, message);
     let error = v8::Exception::error(scope, message);
     scope.throw_exception(error);
 }

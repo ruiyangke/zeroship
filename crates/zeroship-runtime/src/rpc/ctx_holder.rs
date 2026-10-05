@@ -183,8 +183,7 @@ impl RpcCtx {
 /// slot) on every call to drop the slot borrow before
 /// `v8::Local::new`. Eternals are isolate-lifetime handles whose
 /// `get(scope)` returns the `Local` directly without allocating.
-/// Mirrors the `__BrandSlot_*` Eternal conversion in commit b08786a
-/// and the `ResponseTemplateSlot` Eternal conversion in commit 6fa5422.
+/// Mirrors the `ResponseTemplateSlot` Eternals.
 struct RpcCtxTemplateSlot {
     instance_tmpl: v8::Eternal<v8::ObjectTemplate>,
     prototype: v8::Eternal<v8::Value>,
@@ -195,8 +194,8 @@ fn get_or_init_template_slot<'s>(
 ) -> (v8::Local<'s, v8::ObjectTemplate>, v8::Local<'s, v8::Value>) {
     if let Some(slot) = scope.get_slot::<RpcCtxTemplateSlot>() {
         // Eternal::get materialises the Local without allocating a
-        // fresh GlobalHandles slot — same access pattern as the macro
-        // brand slots (b08786a) and ResponseTemplateSlot (6fa5422).
+        // fresh GlobalHandles slot, the access pattern the Headers and
+        // Response template slots use too.
         // The slot is always populated below before `set_slot`, so
         // `get` returning None would be a runtime invariant violation;
         // fall through to the install path defensively.
@@ -260,20 +259,9 @@ pub fn mint_rpc_ctx<'s>(
         cached_signal: RefCell::new(Some(signal.clone())),
         cached_user: RefCell::new(None),
     };
-    let boxed: Box<RpcCtx> = Box::new(state);
-    let raw = Box::into_raw(boxed);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    obj.set_internal_field(0, ext.into());
-
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut RpcCtx));
-        }),
-    );
-    std::mem::forget(weak);
+    if RpcCtx::__zs_install(scope, obj, state).is_none() {
+        return Err(OpError::error("RpcCtx: the wrapper already holds a state"));
+    }
 
     Ok((obj, signal))
 }

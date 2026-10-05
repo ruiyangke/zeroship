@@ -22,9 +22,10 @@
 //! mode it corrupts whichever box's state aliases the cast, and under Miri it
 //! is an instant abort.
 //!
-//! The macro emits a per-iterator-class brand check (private prototype-walk
-//! helper, mirrors the parent-class brand check in `v8_class/emit/brand.rs`)
-//! and calls it at the top of `next()` before the External recovery. Mismatches
+//! The macro emits a per-iterator-class brand check (it tests the brand the
+//! factory marks each iterator with, as the parent-class brand check in
+//! `v8_class/emit/brand.rs` does for wrappers) and calls it at the top of
+//! `next()` before the External recovery. Mismatches
 //! throw TypeError with the shape
 //! `"<Class>Iterator.prototype.next called on incompatible receiver"`.
 //!

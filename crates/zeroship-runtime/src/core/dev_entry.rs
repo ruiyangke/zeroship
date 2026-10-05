@@ -50,7 +50,7 @@ impl DevEntryLoader {
             .map_err(|_| format!("dev entry loader factory {export:?} must be a function"))?;
         let invalidation = Rc::new(Invalidation::default());
         scope.set_slot(invalidation.clone());
-        let invalidate = v8::Function::new(scope, invalidate_callback)
+        let invalidate = crate::callback::function(scope, invalidate_callback)
             .ok_or("could not create dev invalidation callback")?;
         let function = call(scope, factory, &[invalidate.into()])?;
         let function = v8::Local::<v8::Function>::try_from(function)

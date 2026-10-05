@@ -941,14 +941,9 @@ pub fn websocket_from_obj<'a>(
     scope: &mut v8::PinScope,
     obj: v8::Local<v8::Object>,
 ) -> Option<&'a WebSocketImpl> {
-    let ext = obj
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())?;
-    let ptr = ext.value() as *mut WebSocketImpl;
-    if ptr.is_null() {
-        return None;
-    }
-    Some(unsafe { &*ptr })
+    let ptr = crate::brand::state::<WebSocketImpl>(scope, obj)?;
+    // SAFETY: the brand proves the pointer is a live Box<WebSocketImpl>.
+    Some(unsafe { ptr.as_ref() })
 }
 
 /// Extract `ws_id` from a native WebSocket wrapper, or 0 if not a

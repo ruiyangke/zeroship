@@ -29,6 +29,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::state::OpError;
+use crate::streams::readable_default_controller as controller_ops;
 
 use super::{BodyImpl, BodySource};
 
@@ -161,23 +162,13 @@ pub fn extract_body(
 // Path: ReadableStream
 // ---------------------------------------------------------------------------
 
-/// True iff `obj instanceof globalThis.ReadableStream`. Used for body
-/// extraction's stream-arm dispatch — must NOT collide with FormData /
-/// Headers / Request / Response which also use V8 internal field 0
-/// for native state. Falls back to false if the global is missing.
+/// True iff `obj` is a `ReadableStream` wrapper (by its brand, not by a
+/// prototype chain script can rewire). Used for body extraction's
+/// stream-arm dispatch: must NOT collide with `FormData` / Headers /
+/// Request / Response which also use V8 internal field 0 for native
+/// state.
 fn is_readable_stream_instance(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> bool {
-    let global = scope.get_current_context().global(scope);
-    let key = match v8::String::new(scope, "ReadableStream") {
-        Some(k) => k,
-        None => return false,
-    };
-    let Some(class_v) = global.get(scope, key.into()) else {
-        return false;
-    };
-    let Ok(class_obj) = v8::Local::<v8::Object>::try_from(class_v) else {
-        return false;
-    };
-    obj.instance_of(scope, class_obj).unwrap_or(false)
+    crate::streams::readable::is_readable_stream(scope, obj)
 }
 
 fn extract_from_stream(
@@ -192,9 +183,8 @@ fn extract_from_stream(
         ));
     }
 
-    // Disturbed or locked → TypeError. The stream's `locked` getter is
-    // on the prototype; check via JS to avoid reaching into RSState.
-    if stream_is_locked_or_disturbed(scope, stream_obj)? {
+    // Disturbed or locked: TypeError.
+    if stream_is_locked_or_disturbed(scope, stream_obj) {
         return Err(OpError::type_error(
             "ReadableStream body is locked or disturbed",
         ));
@@ -211,27 +201,23 @@ fn extract_from_stream(
     })
 }
 
-/// Probe `stream.locked === true` OR the streams crate's RSState
+/// Whether the stream is locked OR the streams crate's `RSState`
 /// `disturbed` slot is set. Per Fetch §3.2 step 11.11.2 (extract a
 /// body from a ReadableStream): "If body's stream is disturbed or
-/// locked, then throw a TypeError." The locked getter is observable
-/// from JS; the disturbed flag is private (per WHATWG Streams §4.1).
-/// We inspect both to honour the spec.
+/// locked, then throw a `TypeError`." Both are read natively, so a
+/// `locked` getter script put on ReadableStream.prototype never runs
+/// here.
 fn stream_is_locked_or_disturbed(
     scope: &mut v8::PinScope,
     stream_obj: v8::Local<v8::Object>,
-) -> Result<bool, OpError> {
+) -> bool {
     if let Some(disturbed) =
         crate::streams::readable::with_rs_state(scope, stream_obj, |s| s.disturbed.get())
         && disturbed
     {
-        return Ok(true);
+        return true;
     }
-    let key = v8::String::new(scope, "locked").unwrap();
-    let v = stream_obj
-        .get(scope, key.into())
-        .ok_or_else(|| OpError::type_error("ReadableStream.locked access threw"))?;
-    Ok(v.boolean_value(scope))
+    crate::streams::algorithms::is_readable_stream_locked(scope, stream_obj)
 }
 
 // ---------------------------------------------------------------------------
@@ -675,10 +661,17 @@ fn build_byte_stream_via_constructor(
     let raw_addr = raw as usize;
     let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
 
-    let tmpl = v8::FunctionTemplate::builder(pull_callback)
+    let tmpl = crate::callback::template_builder(pull_callback)
         .data(ext.into())
         .build(scope);
-    let pull_fn = tmpl.get_function(scope).unwrap();
+    let Some(pull_fn) = tmpl.get_function(scope) else {
+        // Only with an exception or termination already pending, which
+        // stays pending; no function exists to reclaim the box.
+        // SAFETY: `raw` came from `Box::into_raw` above and was never
+        // handed to a finalizer.
+        drop(unsafe { Box::from_raw(raw) });
+        return Err(OpError::error("ReadableStream: pull function allocation failed"));
+    };
 
     // Free the Box when the pull function is GC'd. V8 keeps the object
     // graph alive while the stream can still be pulled.
@@ -695,7 +688,7 @@ fn build_byte_stream_via_constructor(
     underlying.set(scope, pull_key.into(), pull_fn.into());
 
     // new ReadableStream(underlying)
-    crate::streams::construct_global(scope, "ReadableStream", &[underlying.into()])
+    crate::intrinsics::construct(scope, crate::intrinsics::Intrinsic::ReadableStream, &[underlying.into()])
 }
 
 fn pull_callback(
@@ -719,44 +712,61 @@ fn pull_callback(
     // mutate the offset here on the isolate thread.
     let state = unsafe { &*raw };
 
+    // The controller is the one this body's own stream passes to its pull
+    // algorithm. It is driven through the native controller algorithms,
+    // never through `enqueue` / `close` looked up on the controller:
+    // every controller shares ReadableStreamDefaultController.prototype,
+    // and script can delete or replace what is on it.
     let controller_v = args.get(0);
     let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) else {
         return;
     };
-
-    let mut state = state.borrow_mut();
-    if state.offset >= state.bytes.len() {
-        let close_key = v8::String::new(scope, "close").unwrap();
-        let close_v = controller.get(scope, close_key.into()).unwrap();
-        let close_fn: v8::Local<v8::Function> = close_v.try_into().unwrap();
-        let _ = close_fn.call(scope, controller.into(), &[]);
+    if !crate::streams::readable_default_controller::is_default_controller(scope, controller) {
         return;
     }
 
-    let end = state
-        .offset
-        .saturating_add(BYTE_STREAM_CHUNK_SIZE)
-        .min(state.bytes.len());
-    let chunk = state.bytes[state.offset..end].to_vec();
-    state.offset = end;
-    let should_close = state.offset >= state.bytes.len();
-    drop(state);
+    // Take the next slice and release the borrow before any call into V8:
+    // enqueueing can settle a pending read, and nothing that runs from there
+    // may find this state borrowed.
+    let (chunk, should_close) = {
+        let Ok(mut state) = state.try_borrow_mut() else {
+            return;
+        };
+        if state.offset >= state.bytes.len() {
+            (None, true)
+        } else {
+            let end = state
+                .offset
+                .saturating_add(BYTE_STREAM_CHUNK_SIZE)
+                .min(state.bytes.len());
+            let chunk = state.bytes[state.offset..end].to_vec();
+            state.offset = end;
+            (Some(chunk), state.offset >= state.bytes.len())
+        }
+    };
 
-    let buf = v8::ArrayBuffer::new_backing_store_from_vec(chunk).make_shared();
-    let ab = v8::ArrayBuffer::with_backing_store(scope, &buf);
-    let len = ab.byte_length();
-    let view = v8::Uint8Array::new(scope, ab, 0, len).unwrap();
+    if let Some(chunk) = chunk {
+        let buf = v8::ArrayBuffer::new_backing_store_from_vec(chunk).make_shared();
+        let ab = v8::ArrayBuffer::with_backing_store(scope, &buf);
+        let len = ab.byte_length();
+        let Some(view) = v8::Uint8Array::new(scope, ab, 0, len) else {
+            return;
+        };
+        if !controller_ops::readable_stream_default_controller_can_close_or_enqueue(scope, controller) {
+            return;
+        }
+        if let Err(exception) =
+            controller_ops::readable_stream_default_controller_enqueue(scope, controller, view.into())
+        {
+            let exception = v8::Local::new(scope, &exception);
+            scope.throw_exception(exception);
+            return;
+        }
+    }
 
-    let enq_key = v8::String::new(scope, "enqueue").unwrap();
-    let enq_v = controller.get(scope, enq_key.into()).unwrap();
-    let enq_fn: v8::Local<v8::Function> = enq_v.try_into().unwrap();
-    let enq_args = [view.into()];
-    let _ = enq_fn.call(scope, controller.into(), &enq_args);
-
-    if should_close {
-        let close_key = v8::String::new(scope, "close").unwrap();
-        let close_v = controller.get(scope, close_key.into()).unwrap();
-        let close_fn: v8::Local<v8::Function> = close_v.try_into().unwrap();
-        let _ = close_fn.call(scope, controller.into(), &[]);
+    if should_close
+        && controller_ops::readable_stream_default_controller_can_close_or_enqueue(scope, controller)
+    {
+        controller_ops::readable_stream_default_controller_close(scope, controller);
     }
 }

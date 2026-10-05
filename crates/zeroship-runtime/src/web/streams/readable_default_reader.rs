@@ -30,6 +30,7 @@ use std::collections::VecDeque;
 
 use zeroship_runtime_macros::v8_class;
 
+use crate::callback::Callback;
 use crate::state::OpError;
 use crate::streams::algorithms;
 use crate::streams::readable::{is_readable_stream, StreamState};
@@ -203,21 +204,10 @@ pub trait ReadRequestNative: 'static {
 // V8 wrapper helpers
 // ---------------------------------------------------------------------------
 
+/// Whether `obj` is a `ReadableStreamDefaultReader` wrapper: one this
+/// runtime branded as holding a `ReadableStreamDefaultReader`.
 pub fn is_default_reader(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> bool {
-    let has_state = obj
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-        .map(|e| !e.value().is_null())
-        .unwrap_or(false);
-    if !has_state {
-        return false;
-    }
-    // BYOB readers also have a non-null state Box; distinguish by the
-    // BYOB-only tag slot.
-    if crate::streams::readable_byob_reader::is_byob_reader(scope, obj) {
-        return false;
-    }
-    true
+    crate::brand::is::<ReadableStreamDefaultReader>(scope, obj)
 }
 
 pub fn with_state<R>(
@@ -225,16 +215,12 @@ pub fn with_state<R>(
     reader: v8::Local<v8::Object>,
     f: impl FnOnce(&ReadableStreamDefaultReader) -> R,
 ) -> Option<R> {
-    let raw_v8_field = reader.get_internal_field(scope, 0)?;
-    let ext = v8::Local::<v8::External>::try_from(raw_v8_field).ok()?;
-    let ptr = ext.value() as *const ReadableStreamDefaultReader;
-    if ptr.is_null() {
-        return None;
-    }
-    // SAFETY: External points at a Box<ReadableStreamDefaultReader>; dropped
-    // only by the V8 weak finalizer (registered by the macro for JS-built
-    // readers, by `acquire_*` for Rust-built readers).
-    let inst = unsafe { &*ptr };
+    let ptr = crate::brand::state::<ReadableStreamDefaultReader>(scope, reader)?;
+    // SAFETY: the brand proves internal field 0 holds the
+    // Box<ReadableStreamDefaultReader> the macro constructor or
+    // `acquire_*` stored there; it is dropped only by the V8 weak
+    // finalizer.
+    let inst = unsafe { ptr.as_ref() };
     Some(f(inst))
 }
 
@@ -264,11 +250,14 @@ pub fn acquire_readable_stream_default_reader<'s>(
     let reader_obj = inst_tmpl
         .new_instance(scope)
         .ok_or_else(|| "alloc reader instance".to_string())?;
-    // Wire prototype so the macro's brand check (prototype-chain walk) and
-    // the patched-in raw method callbacks resolve.
-    let class_fn = tmpl.get_function(scope).unwrap();
-    let proto_key = v8::String::new(scope, "prototype").unwrap();
-    let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
+    // Wire prototype so the patched-in raw method callbacks resolve.
+    let proto_v = tmpl
+        .get_function(scope)
+        .and_then(|class_fn| {
+            let proto_key = v8::String::new(scope, "prototype")?;
+            class_fn.get(scope, proto_key.into())
+        })
+        .ok_or_else(|| "resolve reader prototype".to_string())?;
     reader_obj.set_prototype(scope, proto_v);
 
     set_up_default_reader_internal(scope, reader_obj, stream);
@@ -292,19 +281,7 @@ fn set_up_default_reader_internal(
     // Build state — `pending_stream` is None on this path; `after_install`
     // never runs for a Rust-built reader.
     let state = ReadableStreamDefaultReader::new_for_internal(resolver_g);
-    let boxed = Box::new(state);
-    let raw_ptr = Box::into_raw(boxed);
-    let raw_addr = raw_ptr as usize;
-    let ext = v8::External::new(scope, raw_ptr as *mut std::ffi::c_void);
-    reader.set_internal_field(0, ext.into());
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        reader,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut ReadableStreamDefaultReader));
-        }),
-    );
-    std::mem::forget(weak);
+    crate::brand::wrap(scope, reader, state);
 
     // Run ReadableStreamReaderGenericInitialize.
     readable_stream_reader_generic_initialize(scope, reader, stream, closed_promise);
@@ -774,7 +751,7 @@ pub fn install(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     // `fetch/body/consumers.rs:110`.
     {
         let closed_key = v8::String::new(scope, "closed").unwrap();
-        let getter_tmpl = v8::FunctionTemplate::new(scope, closed_getter_callback);
+        let getter_tmpl = crate::callback::template(scope, closed_getter_callback);
         let getter_fn = getter_tmpl.get_function(scope).unwrap();
         let mut desc = v8::PropertyDescriptor::new_from_get_set(
             getter_fn.into(),
@@ -798,10 +775,10 @@ fn install_proto_method_on_object(
     scope: &mut v8::PinScope,
     proto: v8::Local<v8::Object>,
     name: &str,
-    cb: impl v8::MapFnTo<v8::FunctionCallback>,
+    cb: impl Callback,
 ) {
     let key = v8::String::new(scope, name).unwrap();
-    let tmpl = v8::FunctionTemplate::new(scope, cb);
+    let tmpl = crate::callback::template(scope, cb);
     let func = tmpl.get_function(scope).unwrap();
     proto.set(scope, key.into(), func.into());
 }

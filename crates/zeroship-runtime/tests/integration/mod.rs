@@ -110,6 +110,7 @@ mod auth_plugin;
 mod base64;
 mod blob_native;
 mod call_fetch_handler;
+mod callback_safety;
 mod capability;
 mod close_event;
 mod codec;

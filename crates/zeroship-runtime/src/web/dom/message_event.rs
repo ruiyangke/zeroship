@@ -97,7 +97,7 @@ struct MessageEventInit<'s> {
 }
 
 #[v8_class]
-#[v8_inherit(super::event::Event)]
+#[v8_inherit(super::event::Event, state_field = event)]
 #[v8_to_string_tag = "MessageEvent"]
 impl MessageEventState {
     /// `new MessageEvent(type, eventInitDict?)` per HTML §9.4.2.
@@ -274,11 +274,8 @@ pub(crate) fn build_message_event<'s>(
     *me.data.borrow_mut() = Some(v8::Global::new(scope, data));
     *me.origin.borrow_mut() = origin.to_string();
 
-    let boxed: Box<MessageEventState> = Box::new(me);
-    let raw = Box::into_raw(boxed);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    obj.set_internal_field(0, ext.into());
+    MessageEventState::__zs_install(scope, obj, me)
+        .expect("a fresh instance of the class's own template takes its state");
 
     // Wire prototype to MessageEvent.prototype so inherited Event
     // getters/methods resolve via the FunctionTemplate chain.
@@ -286,15 +283,6 @@ pub(crate) fn build_message_event<'s>(
     let proto_key = v8::String::new(scope, "prototype").unwrap();
     let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
     obj.set_prototype(scope, proto_v);
-
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut MessageEventState));
-        }),
-    );
-    std::mem::forget(weak);
 
     obj
 }

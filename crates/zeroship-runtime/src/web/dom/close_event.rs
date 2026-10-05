@@ -105,7 +105,7 @@ struct CloseEventInit<'s> {
 }
 
 #[v8_class]
-#[v8_inherit(super::event::Event)]
+#[v8_inherit(super::event::Event, state_field = event)]
 #[v8_to_string_tag = "CloseEvent"]
 impl CloseEventState {
     /// `new CloseEvent(type, eventInitDict?)` per WHATWG §3.2.
@@ -193,25 +193,13 @@ pub(crate) fn build_close_event<'s>(
     ce.code.set(code);
     *ce.reason.borrow_mut() = reason.to_string();
 
-    let boxed: Box<CloseEventState> = Box::new(ce);
-    let raw = Box::into_raw(boxed);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    obj.set_internal_field(0, ext.into());
+    CloseEventState::__zs_install(scope, obj, ce)
+        .expect("a fresh instance of the class's own template takes its state");
 
     let class_fn = tmpl.get_function(scope).unwrap();
     let proto_key = v8::String::new(scope, "prototype").unwrap();
     let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
     obj.set_prototype(scope, proto_v);
-
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut CloseEventState));
-        }),
-    );
-    std::mem::forget(weak);
 
     obj
 }

@@ -195,7 +195,6 @@ pub(super) fn gen_register(cfg: &ClassConfig) -> TokenStream2 {
 /// shape before any prototype properties are layered on.
 fn gen_install_function_template_setup(cfg: &ClassConfig) -> TokenStream2 {
     let class_ty = cfg.class_ty;
-    let has_any_fastcall = cfg.has_any_fastcall;
     let inherit_base = cfg.inherit_base.as_ref();
 
     let class_name_str = class_ty.to_string();
@@ -232,13 +231,9 @@ fn gen_install_function_template_setup(cfg: &ClassConfig) -> TokenStream2 {
         },
     };
 
-    // Internal field count: 2 when at least one method on the class
-    // uses fastcall (slot 0 = External, slot 1 = aligned ptr); else 1
-    // (the existing single-slot External shape).
-    let internal_field_count_lit: usize = if has_any_fastcall { 2 } else { 1 };
 
     quote! {
-        let __ctor_tmpl = v8::FunctionTemplate::new(scope, #constructor_callback_ident);
+        let __ctor_tmpl = ::zeroship_runtime::macro_runtime::callback::template(scope, #constructor_callback_ident);
         let __class_name = #class_name_init;
         __ctor_tmpl.set_class_name(__class_name);
 
@@ -262,12 +257,14 @@ fn gen_install_function_template_setup(cfg: &ClassConfig) -> TokenStream2 {
         //            single load instruction with no scope.
         //
         // The two slots hold the same address, so memory cost is
-        // one extra pointer per wrapper instance. Slot 1 is unused
-        // for classes without fastcall, so the field count stays
-        // at 1 in that case.
+        // one extra pointer per wrapper instance. The count is
+        // `ClassState::FIELD_COUNT`: 2 when this class or a class it
+        // inherits from has a fastcall method, else 1.
         __ctor_tmpl
             .instance_template(scope)
-            .set_internal_field_count(#internal_field_count_lit);
+            .set_internal_field_count(
+                <#class_ty as ::zeroship_runtime::macro_runtime::brand::ClassState>::FIELD_COUNT,
+            );
 
         let __proto = __ctor_tmpl.prototype_template(scope);
     }
@@ -380,7 +377,7 @@ fn gen_proto_method_set(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 
                 // brand-checks + bounds-checks the internal field. Subclass
                 // instances still match (signatures walk the template chain).
                 let __sig = v8::Signature::new(scope, __ctor_tmpl);
-                let __fn_tmpl = v8::FunctionTemplate::builder(#cb)
+                let __fn_tmpl = ::zeroship_runtime::macro_runtime::callback::template_builder(#cb)
                     .signature(__sig)
                     .build_fast(scope, &[#cfn.0]);
                 __proto.set(__key.into(), __fn_tmpl.into());
@@ -391,7 +388,7 @@ fn gen_proto_method_set(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 
             #(#cfg_attrs)*
             {
                 let __key = #key_init;
-                let __fn_tmpl = v8::FunctionTemplate::new(scope, #cb);
+                let __fn_tmpl = ::zeroship_runtime::macro_runtime::callback::template(scope, #cb);
                 __proto.set(__key.into(), __fn_tmpl.into());
             }
         }
@@ -425,13 +422,13 @@ fn gen_proto_accessor_set(
             // mandatory on the fastcall GETTER too, else a foreign receiver
             // reaches the brand-check-free fast shim (isolate escape).
             let __getter_sig = v8::Signature::new(scope, __ctor_tmpl);
-            let __getter_tmpl = v8::FunctionTemplate::builder(#cb)
+            let __getter_tmpl = ::zeroship_runtime::macro_runtime::callback::template_builder(#cb)
                 .signature(__getter_sig)
                 .build_fast(scope, &[#cfn.0]);
             let __getter_arg: Option<v8::Local<v8::FunctionTemplate>> = Some(__getter_tmpl);
         },
         (Some(cb), None) => quote! {
-            let __getter_tmpl = v8::FunctionTemplate::new(scope, #cb);
+            let __getter_tmpl = ::zeroship_runtime::macro_runtime::callback::template(scope, #cb);
             let __getter_arg: Option<v8::Local<v8::FunctionTemplate>> = Some(__getter_tmpl);
         },
         (None, _) => quote! {
@@ -440,7 +437,7 @@ fn gen_proto_accessor_set(
     };
     let setter_tokens = match setter_opt {
         Some(cb) => quote! {
-            let __setter_tmpl = v8::FunctionTemplate::new(scope, #cb);
+            let __setter_tmpl = ::zeroship_runtime::macro_runtime::callback::template(scope, #cb);
             let __setter_arg: Option<v8::Local<v8::FunctionTemplate>> = Some(__setter_tmpl);
         },
         None => quote! {
@@ -496,7 +493,7 @@ fn gen_install_static_methods(cfg: &ClassConfig) -> TokenStream2 {
                         #(#cfg_attrs)*
                         {
                             let __key = #key_init;
-                            let __fn_tmpl = v8::FunctionTemplate::new(scope, #cb);
+                            let __fn_tmpl = ::zeroship_runtime::macro_runtime::callback::template(scope, #cb);
                             // Attributes default to NONE — same as
                             // the prototype-method install above.
                             // Browsers expose static methods as
@@ -520,7 +517,7 @@ fn gen_install_static_methods(cfg: &ClassConfig) -> TokenStream2 {
                         #(#cfg_attrs)*
                         {
                             let __key = #key_init;
-                            let __getter_tmpl = v8::FunctionTemplate::new(scope, #cb);
+                            let __getter_tmpl = ::zeroship_runtime::macro_runtime::callback::template(scope, #cb);
                             // FunctionTemplate exposes
                             // `set_accessor_property`; static getters
                             // live on the constructor function as
@@ -642,7 +639,7 @@ fn gen_install_iterable(cfg: &ClassConfig) -> TokenStream2 {
             quote! {
                 {
                     let __async_iter_sym = v8::Symbol::get_async_iterator(scope);
-                    let __alias_tmpl = v8::FunctionTemplate::new(scope, #cb);
+                    let __alias_tmpl = ::zeroship_runtime::macro_runtime::callback::template(scope, #cb);
                     let __name_v = #name_init;
                     __alias_tmpl.set_class_name(__name_v);
                     __proto.set(__async_iter_sym.into(), __alias_tmpl.into());

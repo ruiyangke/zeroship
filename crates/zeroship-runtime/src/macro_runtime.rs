@@ -134,6 +134,34 @@ pub mod node_error {
     pub use crate::node_error::build_node_exception;
 }
 
+// ----- brand::{mark, is} -----
+//
+// Emitted by every `#[v8_class]`: the constructor and `__zs_brand` mark each
+// new wrapper with its state type's brand, and `__brand_check_<Class>` tests
+// for it before any callback casts internal field 0.
+pub mod brand {
+    pub use crate::brand::{is, mark, ClassState};
+}
+
+// ----- callback::{template, template_builder} -----
+//
+// Every `#[v8_class]` / `#[v8_iterable]` callback is registered through these,
+// which run it under the panic boundary that keeps a Rust panic from aborting
+// the process.
+pub mod callback {
+    pub use crate::callback::{template, template_builder};
+}
+
+// ----- strings::{message, new_or_throw, one_byte_or_throw} -----
+//
+// Emitted wherever a `#[v8_class]` / `#[v8_iterable]` callback turns native
+// text into a JS string: return values and iterator entries go through the
+// `_or_throw` forms, which throw `RangeError` for text V8 refuses, and
+// exception messages go through `message`, which cannot fail.
+pub mod strings {
+    pub use crate::strings::{message, new_or_throw, one_byte_or_throw};
+}
+
 // ----- V8ClassInstance trait -----
 //
 // Stable typed brand-check entry point per `#[v8_class]`.
@@ -172,10 +200,10 @@ pub mod __private {
 
 /// WebIDL §3.7 brand check, generic over `#[v8_class]` types.
 ///
-/// Returns `true` iff `value` is an instance of the implementing class
-/// in the current isolate (or a subclass via `#[v8_inherit]`). The
-/// underlying check walks the prototype chain comparing handle identity
-/// against the cached install slot.
+/// Returns `true` iff `value` is a wrapper this runtime branded as holding
+/// the implementing class's state (directly, or through a subclass via
+/// `#[v8_inherit]`): the per-isolate private-symbol brand `crate::brand`
+/// checks, which script can neither forge nor move between wrappers.
 ///
 /// # Usage
 ///
@@ -196,7 +224,7 @@ pub mod __private {
 ///
 /// `V8ClassInstance: __private::Sealed` keeps this macro-only. Third-
 /// party impls would be unsound — they'd have to fabricate a brand
-/// check without owning the install slot.
+/// check without owning the state the brand vouches for.
 ///
 /// # Stability
 ///

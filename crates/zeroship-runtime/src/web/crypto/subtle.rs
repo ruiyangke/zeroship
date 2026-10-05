@@ -351,18 +351,7 @@ pub fn build<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Object> 
     let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
     inst.set_prototype(scope, proto_v);
 
-    let boxed: Box<SubtleCrypto> = Box::new(SubtleCrypto);
-    let raw = Box::into_raw(boxed);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    inst.set_internal_field(0, ext.into());
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        inst,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut SubtleCrypto));
-        }),
-    );
-    std::mem::forget(weak);
+    SubtleCrypto::__zs_install(scope, inst, SubtleCrypto)
+        .expect("a fresh instance of the class's own template takes its state");
     inst
 }

@@ -135,10 +135,9 @@ pub struct UrlNativeSlot {
     /// (M4/M5).
     ///
     /// Storage: `v8::Eternal<v8::Object>` rather than
-    /// `v8::Global<v8::Object>`. Set-once at install time; the
-    /// `#[v8_iterable]` macro-generated `__BrandSlot_*` performs the
-    /// brand check today, but this field is still populated for any
-    /// future native brand-check call sites. Eternals are
+    /// `v8::Global<v8::Object>`. Set-once at install time; the brand
+    /// check itself is `crate::brand`'s, but this field is still
+    /// populated for any future native call sites. Eternals are
     /// isolate-lifetime handles whose `get(scope)` returns a `Local`
     /// without allocating.
     pub search_params_prototype: v8::Eternal<v8::Object>,

@@ -122,7 +122,7 @@ fn install_test_is_alpha(scope: &mut v8::PinScope, global: v8::Local<v8::Object>
         let r = cls::Alpha::is_instance(scope, v);
         rv.set(v8::Boolean::new(scope, r).into());
     }
-    let tmpl = v8::FunctionTemplate::new(scope, callback);
+    let tmpl = zeroship_runtime::callback::template(scope, callback);
     let f = tmpl.get_function(scope).unwrap();
     let key = v8::String::new(scope, "_test_is_alpha").unwrap();
     global.set(scope, key.into(), f.into());
@@ -138,7 +138,7 @@ fn install_test_is_beta(scope: &mut v8::PinScope, global: v8::Local<v8::Object>)
         let r = cls::Beta::is_instance(scope, v);
         rv.set(v8::Boolean::new(scope, r).into());
     }
-    let tmpl = v8::FunctionTemplate::new(scope, callback);
+    let tmpl = zeroship_runtime::callback::template(scope, callback);
     let f = tmpl.get_function(scope).unwrap();
     let key = v8::String::new(scope, "_test_is_beta").unwrap();
     global.set(scope, key.into(), f.into());

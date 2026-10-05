@@ -26,6 +26,7 @@ use std::collections::VecDeque;
 
 use zeroship_runtime_macros::v8_class;
 
+use crate::callback::Callback;
 use crate::state::OpError;
 use crate::streams::algorithms;
 use crate::streams::pull_into::ViewConstructor;
@@ -193,21 +194,11 @@ pub trait ReadIntoRequestNative: 'static {
 // V8 wrapper helpers
 // ---------------------------------------------------------------------------
 
-/// Discriminator for `is_byob_reader` — set as a priv-sym tag at
-/// construction so we can distinguish from default readers (whose
-/// internal field 0 is also non-null).
-const BYOB_READER_TAG_SLOT: &str = "[[byobReader.tag]]";
-
+/// Whether `obj` is a `ReadableStreamBYOBReader` wrapper: one this runtime
+/// branded as holding a `ReadableStreamBYOBReader`, which also tells it
+/// apart from a default reader.
 pub fn is_byob_reader(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> bool {
-    if obj
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-        .map(|e| e.value().is_null())
-        .unwrap_or(true)
-    {
-        return false;
-    }
-    !slots::slot_is_empty(scope, obj, BYOB_READER_TAG_SLOT)
+    crate::brand::is::<ReadableStreamBYOBReader>(scope, obj)
 }
 
 pub fn with_state<R>(
@@ -215,15 +206,11 @@ pub fn with_state<R>(
     reader: v8::Local<v8::Object>,
     f: impl FnOnce(&ReadableStreamBYOBReader) -> R,
 ) -> Option<R> {
-    let raw = reader.get_internal_field(scope, 0)?;
-    let ext = v8::Local::<v8::External>::try_from(raw).ok()?;
-    let ptr = ext.value() as *const ReadableStreamBYOBReader;
-    if ptr.is_null() {
-        return None;
-    }
-    // SAFETY: External points at a Box<ReadableStreamBYOBReader>; dropped
+    let ptr = crate::brand::state::<ReadableStreamBYOBReader>(scope, reader)?;
+    // SAFETY: the brand proves internal field 0 holds the
+    // Box<ReadableStreamBYOBReader> stored at construction; it is dropped
     // only by the V8 weak finalizer.
-    let inst = unsafe { &*ptr };
+    let inst = unsafe { ptr.as_ref() };
     Some(f(inst))
 }
 
@@ -376,17 +363,21 @@ pub fn acquire_readable_stream_byob_reader<'s>(
     let reader_obj = inst_tmpl
         .new_instance(scope)
         .ok_or_else(|| "alloc BYOB reader instance".to_string())?;
-    let class_fn = tmpl.get_function(scope).unwrap();
-    let proto_key = v8::String::new(scope, "prototype").unwrap();
-    let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
+    let proto_v = tmpl
+        .get_function(scope)
+        .and_then(|class_fn| {
+            let proto_key = v8::String::new(scope, "prototype")?;
+            class_fn.get(scope, proto_key.into())
+        })
+        .ok_or_else(|| "resolve BYOB reader prototype".to_string())?;
     reader_obj.set_prototype(scope, proto_v);
 
     set_up_byob_reader_internal(scope, reader_obj, stream);
     Ok(reader_obj)
 }
 
-/// Box install + BYOB tag write + ReaderGenericInitialize for the
-/// Rust-side (`acquire_*`) path.
+/// Box install + `ReaderGenericInitialize` for the Rust-side (`acquire_*`)
+/// path.
 fn set_up_byob_reader_internal(
     scope: &mut v8::PinScope,
     reader: v8::Local<v8::Object>,
@@ -397,36 +388,20 @@ fn set_up_byob_reader_internal(
     let resolver_g = v8::Global::new(scope, resolver);
 
     let state = ReadableStreamBYOBReader::new_for_internal(resolver_g);
-    let boxed = Box::new(state);
-    let raw_ptr = Box::into_raw(boxed);
-    let raw_addr = raw_ptr as usize;
-    let ext = v8::External::new(scope, raw_ptr as *mut std::ffi::c_void);
-    reader.set_internal_field(0, ext.into());
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        reader,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut ReadableStreamBYOBReader));
-        }),
-    );
-    std::mem::forget(weak);
+    crate::brand::wrap(scope, reader, state);
 
     finalize_byob_reader(scope, reader, stream, closed_promise);
 }
 
-/// BYOB tag priv-sym + ReaderGenericInitialize. Shared between the JS
-/// path's `after_install` hook and the Rust `set_up_byob_reader_internal`
-/// path. Runs after the box has been installed in field 0.
+/// `ReaderGenericInitialize`. Shared between the JS path's `after_install`
+/// hook and the Rust `set_up_byob_reader_internal` path. Runs after the
+/// box has been installed in field 0.
 fn finalize_byob_reader<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     reader: v8::Local<v8::Object>,
     stream: v8::Local<v8::Object>,
     closed_promise: v8::Local<'s, v8::Promise>,
 ) {
-    // BYOB reader tag (used by is_byob_reader).
-    let tag = v8::Boolean::new(scope, true);
-    slots::write_slot(scope, reader, BYOB_READER_TAG_SLOT, tag.into());
-
     // ReaderGenericInitialize.
     slots::write_slot(scope, reader, STREAM, stream.into());
     slots::write_slot(scope, stream, READER, reader.into());
@@ -896,7 +871,7 @@ pub fn install(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     // closed getter
     {
         let closed_key = v8::String::new(scope, "closed").unwrap();
-        let getter_tmpl = v8::FunctionTemplate::new(scope, closed_getter_callback);
+        let getter_tmpl = crate::callback::template(scope, closed_getter_callback);
         let getter_fn = getter_tmpl.get_function(scope).unwrap();
         let mut desc = v8::PropertyDescriptor::new_from_get_set(
             getter_fn.into(),
@@ -920,10 +895,10 @@ fn install_proto_method_on_object(
     scope: &mut v8::PinScope,
     proto: v8::Local<v8::Object>,
     name: &str,
-    cb: impl v8::MapFnTo<v8::FunctionCallback>,
+    cb: impl Callback,
 ) {
     let key = v8::String::new(scope, name).unwrap();
-    let tmpl = v8::FunctionTemplate::new(scope, cb);
+    let tmpl = crate::callback::template(scope, cb);
     let func = tmpl.get_function(scope).unwrap();
     proto.set(scope, key.into(), func.into());
 }

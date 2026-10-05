@@ -589,25 +589,20 @@ mod inherit_base {
         }
     }
 
-    #[derive(Default)]
-    pub struct Dog;
+    /// Dog's state holds its Animal state first, so Animal's callbacks
+    /// read a Dog's box as their own.
+    pub struct Dog {
+        animal: Animal,
+    }
 
-    // Dog inherits Animal: `dog.breathe()` must resolve to Animal's
-    // method via the prototype chain. Note: Dog has its OWN internal
-    // field 0 holding `Box<Dog>`, NOT `Box<Animal>` — which means
-    // `Dog::breathe` callbacks would mis-cast if we tried to call them
-    // here. The valid pattern (used by AbortSignal : EventTarget) is
-    // that Animal's methods only access state shared via priv-syms /
-    // global-side state, NOT the internal-field box. For a unit test,
-    // we instead verify (a) `instanceof Animal === true`, (b) the
-    // prototype chain is correctly chained, (c) dog's own methods
-    // continue to work.
+    // Dog inherits Animal: `dog.breathe()` resolves to Animal's method
+    // via the prototype chain and runs on the Animal state inside Dog's.
     #[v8_class]
-    #[v8_inherit(Animal)]
+    #[v8_inherit(Animal, state_field = animal)]
     impl Dog {
         #[v8_constructor]
         fn new() -> Dog {
-            Dog
+            Dog { animal: Animal { breaths: 0 } }
         }
 
         #[v8_method]
@@ -645,12 +640,11 @@ fn v8_inherit_chains_prototype() {
             chainEndsAtObject: objectProto === Object.prototype,
             // Dog's own method works.
             bark: dog.bark(),
-            // Animal's method is reachable via prototype lookup. We
-            // can't actually CALL it (the callback would mis-cast
-            // Box<Dog> as Box<Animal>); we just check the property is
-            // present on the prototype chain.
+            // Animal's method is reachable via prototype lookup and runs
+            // on the Animal state inside Dog's.
             hasBreathe: typeof Animal.prototype.breathe === "function",
             breatheReachable: typeof dog.breathe === "function",
+            breathes: [dog.breathe(), dog.breathe()],
         });
         "#,
         js_string,
@@ -663,6 +657,7 @@ fn v8_inherit_chains_prototype() {
     assert_eq!(parsed["bark"], serde_json::json!("woof"), "bark works: {parsed}");
     assert_eq!(parsed["hasBreathe"], serde_json::json!(true), "Animal.prototype.breathe: {parsed}");
     assert_eq!(parsed["breatheReachable"], serde_json::json!(true), "dog.breathe via proto: {parsed}");
+    assert_eq!(parsed["breathes"], serde_json::json!([1, 2]), "Animal's method runs on the Animal state in a Dog: {parsed}");
 }
 
 // ---------------------------------------------------------------------------

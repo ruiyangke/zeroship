@@ -311,8 +311,8 @@ impl Headers {
 }
 
 /// Read the underlying `Headers` Rust state from a JS `Headers`
-/// wrapper object. Returns `None` if `obj` isn't a Headers wrapper
-/// (no External in internal field 0, or null pointer).
+/// wrapper object. Returns `None` if `obj` isn't a wrapper this
+/// runtime branded as holding a `Headers` (see `crate::brand`).
 ///
 /// The returned reference borrows the Box<Headers> in the wrapper's
 /// internal field 0. The wrapper is single-threaded (per V8 isolate)
@@ -323,14 +323,9 @@ pub fn try_native_headers<'a>(
     scope: &mut v8::PinScope,
     obj: v8::Local<v8::Object>,
 ) -> Option<&'a Headers> {
-    let ext = obj
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())?;
-    let ptr = ext.value() as *const Headers;
-    if ptr.is_null() {
-        return None;
-    }
-    Some(unsafe { &*ptr })
+    let ptr = crate::brand::state::<Headers>(scope, obj)?;
+    // SAFETY: see above; the brand proves the pointer is a live Box<Headers>.
+    Some(unsafe { ptr.as_ref() })
 }
 
 // ---------------------------------------------------------------------------
@@ -731,7 +726,7 @@ impl Headers {
 /// `GlobalHandles` slot) on every call to drop the slot borrow before
 /// `v8::Local::new`. Eternals are isolate-lifetime handles whose
 /// `get(scope)` returns the `Local` directly without allocating.
-/// Mirrors the `__BrandSlot_*` and `ResponseTemplateSlot` Eternals.
+/// Mirrors the `ResponseTemplateSlot` Eternals.
 pub struct HeadersTemplateSlot {
     pub class_tmpl: v8::Eternal<v8::FunctionTemplate>,
     pub prototype: v8::Eternal<v8::Object>,
@@ -757,6 +752,7 @@ pub fn install_global<'s>(
 
     let key = v8::String::new(scope, "Headers").unwrap();
     global.set(scope, key.into(), class_fn.into());
+    crate::intrinsics::capture(scope, crate::intrinsics::Intrinsic::Headers, class_fn);
 
     // Stash the template + prototype for the kernel-side fast-path
     // Request builder. See `HeadersTemplateSlot`. Eternal slots are
@@ -796,8 +792,7 @@ pub fn build_kernel_headers<'s>(
     pairs: &[(String, String)],
 ) -> Option<v8::Local<'s, v8::Object>> {
     // Eternal::get materialises the Local without allocating a fresh
-    // GlobalHandles slot — same access pattern as the macro brand
-    // slots (b08786a) and ResponseTemplateSlot (6fa5422).
+    // GlobalHandles slot, the access pattern ResponseTemplateSlot uses too.
     let (class_tmpl, proto) = {
         let slot = scope.get_slot::<HeadersTemplateSlot>()?;
         (slot.class_tmpl.get(scope)?, slot.prototype.get(scope)?)
@@ -821,7 +816,7 @@ pub fn build_kernel_headers<'s>(
         headers.list_append_unchecked(n.as_bytes().to_vec(), v.as_bytes().to_vec());
     }
 
-    install_headers_state(scope, obj, headers);
+    install_headers_state(scope, obj, headers)?;
     Some(obj)
 }
 
@@ -837,8 +832,7 @@ pub fn build_kernel_headers_owned<'s>(
     pairs: Vec<(String, String)>,
 ) -> Option<v8::Local<'s, v8::Object>> {
     // Eternal::get materialises the Local without allocating a fresh
-    // GlobalHandles slot — same access pattern as the macro brand
-    // slots (b08786a) and ResponseTemplateSlot (6fa5422).
+    // GlobalHandles slot, the access pattern ResponseTemplateSlot uses too.
     let (class_tmpl, proto) = {
         let slot = scope.get_slot::<HeadersTemplateSlot>()?;
         (slot.class_tmpl.get(scope)?, slot.prototype.get(scope)?)
@@ -854,31 +848,18 @@ pub fn build_kernel_headers_owned<'s>(
         headers.list_append_unchecked(n.into_bytes(), v.into_bytes());
     }
 
-    install_headers_state(scope, obj, headers);
+    install_headers_state(scope, obj, headers)?;
     Some(obj)
 }
 
-/// Common tail: box the `Headers` state, install it as internal field 0,
-/// and register the GC finalizer that drops it.
+/// Common tail: install the `Headers` state through the class's own
+/// installer, which also sets the slot the fastcall `has` reads.
 fn install_headers_state(
     scope: &mut v8::PinScope,
     obj: v8::Local<v8::Object>,
     headers: Headers,
-) {
-    let boxed = Box::new(headers);
-    let raw = Box::into_raw(boxed);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    obj.set_internal_field(0, ext.into());
-
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut Headers));
-        }),
-    );
-    std::mem::forget(weak);
+) -> Option<()> {
+    Headers::__zs_install(scope, obj, headers).map(drop)
 }
 
 // ---------------------------------------------------------------------------
@@ -892,20 +873,10 @@ fn install_headers_state(
 /// Used by `Response.error()` to seal its empty headers per Fetch
 /// §6.2.4 step 4: "Set response's headers' guard to immutable."
 pub fn seal_immutable(scope: &mut v8::PinScope, headers_obj: v8::Local<v8::Object>) {
-    let ext_v = match headers_obj.get_internal_field(scope, 0) {
-        Some(v) => v,
-        None => return,
-    };
-    let ext: v8::Local<v8::External> = match ext_v.try_into() {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    let ptr = ext.value() as *mut Headers;
-    if ptr.is_null() {
+    let Some(mut ptr) = crate::brand::state::<Headers>(scope, headers_obj) else {
         return;
-    }
-    // SAFETY: the V8 wrapper owns the Box<Headers> via External; we
-    // hold a transient `&mut` borrow only for the duration of this
-    // call.
-    unsafe { (*ptr).set_guard(HeadersGuard::Immutable) };
+    };
+    // SAFETY: the brand proves the V8 wrapper owns this Box<Headers>; we
+    // hold a transient `&mut` borrow only for the duration of this call.
+    unsafe { ptr.as_mut().set_guard(HeadersGuard::Immutable) };
 }

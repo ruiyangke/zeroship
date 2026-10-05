@@ -2,11 +2,10 @@
 //!
 //! Constructor uses `#[v8_class]` +
 //! `#[v8_constructor(post_init = ...)]`. Per-instance getters
-//! (`readable` / `writable`) and the
-//! cross-module receiver checks still key off the priv-sym brand
-//! (`TS_BRAND`) because callers across `algorithms.rs` /
-//! `transform_controller.rs` hold raw `Local<Object>` and read the brand
-//! without going through the macro-cached prototype.
+//! (`readable` / `writable`) and the cross-module receiver checks in
+//! `algorithms.rs` / `transform_controller.rs`, which hold raw
+//! `Local<Object>`s, test the same `TSStreamState` brand the macro's
+//! callbacks do (see `crate::brand`).
 //!
 //! IDL surface (§5.2):
 //! ```webidl
@@ -36,14 +35,12 @@ use std::rc::Rc;
 
 use zeroship_runtime_macros::v8_class;
 
+use crate::callback::Callback;
+use crate::intrinsics::{self, Intrinsic};
 use crate::state::OpError;
 use crate::streams::budget::{try_alloc_streams, StreamBudgetGuard};
 use crate::streams::readable_default_controller::SizeAlgorithm;
 use crate::streams::slots;
-
-/// Brand priv-sym to distinguish a TransformStream wrapper from other
-/// classes that may share the "External in field 0" shape.
-const TS_BRAND: &str = "[[ts.brand]]";
 
 // ---------------------------------------------------------------------------
 // State
@@ -127,8 +124,8 @@ impl TSStreamState {
     ///   4. Reject `transformer.readableType` / `writableType`
     ///      (RangeError per §5.2.4 step 7+8).
     ///
-    /// `after_install` runs the post-box-install half: brand priv-sym,
-    /// start_resolver, controller setup. Splitting at the V8-wrapper
+    /// `after_install` runs the post-box-install half: `start_resolver`,
+    /// controller setup. Splitting at the V8-wrapper
     /// boundary lets the macro install the Box first; only after that
     /// can `set_up_transform_stream_default_controller_from_transformer`
     /// drive `with_ts_state`-keyed algorithms.
@@ -206,26 +203,16 @@ impl TSStreamState {
         })
     }
 
-    /// Post_init: brand priv-sym, start_resolver alloc, controller setup
-    /// from the transformer dict. Runs AFTER the macro installed the Box
-    /// in field 0, so subsequent `with_ts_state` calls (driven by
+    /// The post-init hook: `start_resolver` alloc, controller setup from the
+    /// transformer dict. Runs AFTER the macro installed and branded the
+    /// Box in field 0, so subsequent `with_ts_state` calls (driven by
     /// `set_up_transform_stream_default_controller_from_transformer` →
     /// `initialize_transform_stream` → `transform_stream_set_backpressure`)
     /// can recover the boxed state.
-    ///
-    /// The TS_BRAND priv-sym MUST be set before any `with_ts_state` call
-    /// since `with_ts_state` brand-checks first (`is_transform_stream`).
-    /// Without the brand, the controller-setup path's backpressure init
-    /// would silently no-op.
     pub(crate) fn after_install(
         scope: &mut v8::PinScope,
         this: v8::Local<v8::Object>,
     ) -> Result<(), OpError> {
-        // Brand for cross-module `is_transform_stream` checks.
-        let tag = slots::private_sym(scope, TS_BRAND);
-        let true_v: v8::Local<v8::Value> = v8::Boolean::new(scope, true).into();
-        this.set_private(scope, tag, true_v);
-
         let setup = with_ts_state(scope, this, |s| s.pending_setup.borrow_mut().take())
             .ok_or_else(|| OpError::error("after_install: with_ts_state returned None"))?
             .ok_or_else(|| OpError::error("after_install: missing pending_setup"))?;
@@ -250,12 +237,13 @@ impl TSStreamState {
 // V8 wrapper helpers
 // ---------------------------------------------------------------------------
 
+/// Whether `obj` is a `TransformStream` wrapper: one this runtime branded as
+/// holding a `TSStreamState`.
 pub fn is_transform_stream(
     scope: &mut v8::PinScope,
     obj: v8::Local<v8::Object>,
 ) -> bool {
-    let tag = slots::private_sym(scope, TS_BRAND);
-    obj.has_private(scope, tag).unwrap_or(false)
+    crate::brand::is::<TSStreamState>(scope, obj)
 }
 
 pub fn with_ts_state<R>(
@@ -263,18 +251,12 @@ pub fn with_ts_state<R>(
     stream: v8::Local<v8::Object>,
     f: impl FnOnce(&TSStreamState) -> R,
 ) -> Option<R> {
-    if !is_transform_stream(scope, stream) {
-        return None;
-    }
-    let raw_v8_field = stream.get_internal_field(scope, 0)?;
-    let ext = v8::Local::<v8::External>::try_from(raw_v8_field).ok()?;
-    let ptr = ext.value() as *const TSStreamState;
-    if ptr.is_null() {
-        return None;
-    }
-    // SAFETY: the External was set during construction to a Box<TSStreamState>.
-    // The Box is dropped only by the V8 weak finalizer.
-    let inst = unsafe { &*ptr };
+    let ptr = crate::brand::state::<TSStreamState>(scope, stream)?;
+    // SAFETY: the brand proves internal field 0 holds the
+    // Box<TSStreamState> stored at construction. The Box is dropped only
+    // by the V8 weak finalizer, which cannot run while `stream` is
+    // reachable.
+    let inst = unsafe { ptr.as_ref() };
     Some(f(inst))
 }
 
@@ -339,7 +321,8 @@ pub(crate) fn create_identity_transform_stream<'s>(
     let [budget, readable_budget, writable_budget] = try_alloc_streams::<3>(scope)?;
     let start_resolver = v8::PromiseResolver::new(scope)
         .ok_or_else(|| OpError::error("identity TransformStream: no start promise"))?;
-    let stream = build_stream_wrapper(scope, budget);
+    let stream = build_stream_wrapper(scope, budget)
+        .ok_or_else(|| OpError::error("identity TransformStream: wrapper allocation failed"))?;
     let no_transformer: v8::Local<v8::Value> = v8::undefined(scope).into();
     crate::streams::transform_controller::set_up_transform_stream_default_controller_from_transformer(
         scope,
@@ -366,42 +349,28 @@ pub(crate) fn create_identity_transform_stream<'s>(
 /// no halves attached. Used by `create_identity_transform_stream`. The
 /// macro's post_init path mints its own wrapper through the constructor
 /// callback; this helper is the parallel manual mint for the Rust-side path.
+/// `None` when V8 cannot allocate the wrapper, which happens only with an
+/// exception or a termination already pending.
 fn build_stream_wrapper<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     budget: StreamBudgetGuard,
-) -> v8::Local<'s, v8::Object> {
+) -> Option<v8::Local<'s, v8::Object>> {
     let tmpl = TSStreamState::install(scope);
     let inst_tmpl = tmpl.instance_template(scope);
-    let stream_obj = inst_tmpl.new_instance(scope).unwrap();
+    let stream_obj = inst_tmpl.new_instance(scope)?;
 
-    let inst = TSStreamState::new_for_internal(budget);
-    let boxed = Box::new(inst);
-    let raw_ptr = Box::into_raw(boxed);
-    let raw_addr = raw_ptr as usize;
-    let ext = v8::External::new(scope, raw_ptr as *mut std::ffi::c_void);
-    stream_obj.set_internal_field(0, ext.into());
+    crate::brand::wrap(scope, stream_obj, TSStreamState::new_for_internal(budget));
 
-    // Brand priv-sym for receiver checks (keeps cross-module
-    // `is_transform_stream` happy without a separate macro brand check).
-    let tag = slots::private_sym(scope, TS_BRAND);
-    let true_v: v8::Local<v8::Value> = v8::Boolean::new(scope, true).into();
-    stream_obj.set_private(scope, tag, true_v);
+    let proto = if let Some(proto) = intrinsics::prototype(scope, Intrinsic::TransformStream) {
+        proto.into()
+    } else {
+        let class_fn = tmpl.get_function(scope)?;
+        let proto_key = v8::String::new(scope, "prototype")?;
+        class_fn.get(scope, proto_key.into())?
+    };
+    stream_obj.set_prototype(scope, proto);
 
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        stream_obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut TSStreamState));
-        }),
-    );
-    std::mem::forget(weak);
-
-    let class_fn = tmpl.get_function(scope).unwrap();
-    let proto_key = v8::String::new(scope, "prototype").unwrap();
-    let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
-    stream_obj.set_prototype(scope, proto_v);
-
-    stream_obj
+    Some(stream_obj)
 }
 
 // ---------------------------------------------------------------------------
@@ -475,7 +444,7 @@ pub fn build_readable_for_ts<'s>(
     ts: v8::Local<v8::Object>,
     start_promise: v8::Local<'s, v8::Promise>,
     half: HalfSetup,
-) -> v8::Local<'s, v8::Object> {
+) -> Option<v8::Local<'s, v8::Object>> {
     let HalfSetup { hwm, size, budget } = half;
     // Build a JS underlyingSource = { start, pull, cancel } where:
     //   start  → returns startPromise
@@ -498,7 +467,7 @@ pub fn build_readable_for_ts<'s>(
     // Build a fresh ReadableStream wrapper — same as the public
     // constructor but skip the `type === "bytes"` check etc. since we're
     // building a default ReadableStream programmatically.
-    let readable = crate::streams::readable::build_value_stream_wrapper_for_internal(scope, budget);
+    let readable = crate::streams::readable::build_value_stream_wrapper_for_internal(scope, budget)?;
     let _ = crate::streams::readable_default_controller::set_up_readable_stream_default_controller_from_underlying_source_with_strategy(
         scope,
         readable,
@@ -506,7 +475,7 @@ pub fn build_readable_for_ts<'s>(
         hwm,
         size,
     );
-    readable
+    Some(readable)
 }
 
 pub fn build_writable_for_ts<'s>(
@@ -514,7 +483,7 @@ pub fn build_writable_for_ts<'s>(
     ts: v8::Local<v8::Object>,
     start_promise: v8::Local<'s, v8::Promise>,
     half: HalfSetup,
-) -> v8::Local<'s, v8::Object> {
+) -> Option<v8::Local<'s, v8::Object>> {
     let HalfSetup { hwm, size, budget } = half;
     let underlying = v8::Object::new(scope);
     let ts_global = v8::Global::new(scope, ts);
@@ -528,7 +497,7 @@ pub fn build_writable_for_ts<'s>(
     let abort_fn = build_ts_writable_abort_fn(scope, ts_global);
     install_function(scope, underlying, "abort", abort_fn);
 
-    let writable = crate::streams::writable::build_value_stream_wrapper_for_internal(scope, budget);
+    let writable = crate::streams::writable::build_value_stream_wrapper_for_internal(scope, budget)?;
     let _ = crate::streams::writable_controller::set_up_writable_stream_default_controller_from_underlying_sink_with_strategy(
         scope,
         writable,
@@ -536,7 +505,7 @@ pub fn build_writable_for_ts<'s>(
         hwm,
         ws_size(size),
     );
-    writable
+    Some(writable)
 }
 
 /// SizeAlgorithm conversion — readable_default_controller's enum is shared
@@ -643,7 +612,7 @@ fn build_method_fn<'s>(
     let holder = Rc::new(MethodHolder { ts: ts_g, method });
     let raw = Rc::into_raw(holder) as *mut std::ffi::c_void;
     let ext = v8::External::new(scope, raw);
-    let tmpl = v8::FunctionTemplate::builder(method_callback)
+    let tmpl = crate::callback::template_builder(method_callback)
         .data(ext.into())
         .build(scope);
     let f = tmpl.get_function(scope).unwrap();
@@ -771,7 +740,7 @@ fn build_oneshot_promise_fn<'s>(
     let holder = Rc::new(p_g);
     let raw = Rc::into_raw(holder) as *mut std::ffi::c_void;
     let ext = v8::External::new(scope, raw);
-    let tmpl = v8::FunctionTemplate::builder(promise_returning_callback)
+    let tmpl = crate::callback::template_builder(promise_returning_callback)
         .data(ext.into())
         .build(scope);
     let f = tmpl.get_function(scope).unwrap();
@@ -822,16 +791,17 @@ pub fn install_native_transform_stream(
 
     let key = v8::String::new(scope, "TransformStream").unwrap();
     global.set(scope, key.into(), class_fn.into());
+    intrinsics::capture(scope, Intrinsic::TransformStream, class_fn);
 }
 
 fn install_proto_getter(
     scope: &mut v8::PinScope,
     proto: v8::Local<v8::Object>,
     name: &str,
-    cb: impl v8::MapFnTo<v8::FunctionCallback>,
+    cb: impl Callback,
 ) {
     let key = v8::String::new(scope, name).unwrap();
-    let getter_tmpl = v8::FunctionTemplate::new(scope, cb);
+    let getter_tmpl = crate::callback::template(scope, cb);
     let getter_fn = getter_tmpl.get_function(scope).unwrap();
     let mut desc = v8::PropertyDescriptor::new_from_get_set(
         getter_fn.into(),

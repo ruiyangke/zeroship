@@ -45,7 +45,7 @@
 //!   classifier, receiver-shape predicates.
 //! - `method` — slow-path FunctionCallback codegen for methods, getters,
 //!   setters, async methods, static methods/getters, and constructors.
-//!   Hosts `gen_box_and_install_finalizer` and the re-entrancy guard.
+//!   Hosts the state installer and the re-entrancy guard.
 //! - `fastcall` — `#[v8_method(fastcall)]` / `#[v8_getter(fastcall)]`
 //!   shim emission and signature validation.
 //! - `helpers` — cross-submodule utilities: `method_callback_ident`,

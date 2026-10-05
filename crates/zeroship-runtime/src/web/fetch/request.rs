@@ -275,14 +275,7 @@ fn read_content_type(
 /// duplicates the External-deref shape inline since it's a
 /// crate-private helper).
 fn state_ptr(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> Option<*mut RequestState> {
-    let ext = obj
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())?;
-    let ptr = ext.value() as *mut RequestState;
-    if ptr.is_null() {
-        return None;
-    }
-    Some(ptr)
+    crate::brand::state::<RequestState>(scope, obj).map(std::ptr::NonNull::as_ptr)
 }
 
 // ---------------------------------------------------------------------------
@@ -694,7 +687,7 @@ impl RequestState {
                 }),
             None => None,
         };
-        let signal_obj = build_request_signal(scope, followed_signal_v);
+        let signal_obj = build_request_signal(scope, followed_signal_v)?;
         *state.signal.borrow_mut() = Some(v8::Global::new(scope, signal_obj));
 
         // The macro's emitted callback boxes `state`, installs the box
@@ -842,7 +835,7 @@ impl RequestState {
         // builder didn't supply one (most server-side requests don't have
         // an upstream cancellation signal — minting on demand is observably
         // identical to constructor-minting).
-        let signal_obj = build_request_signal(scope, None);
+        let signal_obj = crate::dom::abort_signal::mint_abort_signal(scope).0;
         let signal_g = v8::Global::new(scope, signal_obj);
         *self.signal.borrow_mut() = Some(signal_g);
         let stash = self.signal.borrow();
@@ -883,15 +876,10 @@ impl RequestState {
         // The constructor's "transfer body" step (per Fetch §5.4 step 36)
         // would disturb the original — we don't want that for clone(),
         // since the spec's `clone()` algorithm preserves the original's
-        // body usability. So we build a fresh Request instance, copy
-        // scalar fields from `this`, and tee or rebuild the body.
-        //
-        // The constructor is the intrinsic class, never `globalThis.Request`:
-        // creator code can replace that global, and the object it returns
-        // would be cast to a RequestState below.
-        let req_class_fn = Request::install(scope)
-            .get_function(scope)
-            .ok_or_else(|| crate::state::OpError::type_error("Failed to clone Request"))?;
+        // body usability. So we build a fresh Request instance (through
+        // the realm's own Request, never whatever script stored at
+        // `globalThis.Request`), copy scalar fields from `this`, and tee or
+        // rebuild the body.
 
         let body_is_stream = matches!(
             self.body.borrow().source,
@@ -919,16 +907,18 @@ impl RequestState {
         // and the cloned body / headers. We include `duplex: "half"`
         // unconditionally — the constructor's duplex check fires for any
         // ReadableStream body, and we may pass a tee'd stream below.
+        // Own data properties, so no setter script put on
+        // Object.prototype runs.
         let init = v8::Object::new(scope);
         {
             let key = v8::String::new(scope, "method").unwrap();
             let v = v8::String::new(scope, &self.method.borrow()).unwrap();
-            init.set(scope, key.into(), v.into());
+            init.create_data_property(scope, key.into(), v.into());
         }
         {
             let key = v8::String::new(scope, "duplex").unwrap();
             let v = v8::String::new(scope, "half").unwrap();
-            init.set(scope, key.into(), v.into());
+            init.create_data_property(scope, key.into(), v.into());
         }
         // If the V8 Headers wrapper hasn't been materialised yet (lazy
         // kernel path), build one from raw_headers so the clone gets a
@@ -942,11 +932,11 @@ impl RequestState {
         if let Some(h_g) = self.headers.borrow().clone() {
             let h_local = v8::Local::new(scope, h_g);
             let key = v8::String::new(scope, "headers").unwrap();
-            init.set(scope, key.into(), h_local.into());
+            init.create_data_property(scope, key.into(), h_local.into());
         }
         if let Some(rb) = right_branch {
             let key = v8::String::new(scope, "body").unwrap();
-            init.set(scope, key.into(), rb.into());
+            init.create_data_property(scope, key.into(), rb.into());
             if let Some(lb) = left_branch {
                 *self.body.borrow().stream.borrow_mut() = Some(v8::Global::new(scope, lb));
             }
@@ -954,54 +944,34 @@ impl RequestState {
 
         // Pass URL as a string input (NOT `this` — that would trigger the
         // constructor's input-Request copy path which disturbs the input).
-        let url_str = v8::String::new(scope, &self.url.borrow()).unwrap();
+        let url_str = crate::strings::new(scope, &self.url.borrow())?;
         let args2 = [url_str.into(), init.into()];
-        match req_class_fn.new_instance(scope, &args2) {
-            Some(o) => {
-                // Fetch "clone a body" keeps the source and length: a byte
-                // body stays a byte body (rewindable for a 307/308 replay,
-                // sent with its length), and its stream is built lazily from
-                // the shared source like the original's.
-                let (source, length) = {
-                    let body = self.body.borrow();
-                    (body.source.clone(), body.length)
-                };
-                if !body_is_stream && let Some(source) = source {
-                    let raw = if Request::is_instance(scope, o.into()) {
-                        state_ptr(scope, o)
-                    } else {
-                        None
-                    };
-                    let Some(raw) = raw else {
-                        return Err(crate::state::OpError::type_error("Failed to clone Request"));
-                    };
-                    // SAFETY: `o` was built by the intrinsic Request
-                    // constructor and passed its brand check, so its
-                    // internal field holds a live RequestState, and it is a
-                    // new object, never `self`.
-                    let clone_state: &RequestState = unsafe { &*raw };
-                    *clone_state.body.borrow_mut() = crate::fetch_body::BodyImpl {
-                        stream: std::cell::RefCell::new(None),
-                        source: Some(source),
-                        length,
-                    };
-                }
-                Ok(o)
-            }
-            None => {
-                // Inner constructor already set a pending exception on
-                // scope; surfacing our own would mask the cause. The
-                // original hand-roll let the pending exception propagate
-                // (returning early without rv.set). The macro path can't
-                // express that cleanly, so we return Err with a generic
-                // message — V8 picks up the most-recent throw, which
-                // happens to be the original constructor's. WPT
-                // request-clone tests don't distinguish error identity.
-                Err(crate::state::OpError::type_error(
-                    "Failed to clone Request",
-                ))
-            }
+        // A constructor throw (an invalid URL, say) is rethrown as it is.
+        let o = crate::intrinsics::construct(scope, crate::intrinsics::Intrinsic::Request, &args2)?;
+        let o = v8::Local::new(scope, o);
+        // Fetch "clone a body" keeps the source and length: a byte
+        // body stays a byte body (rewindable for a 307/308 replay,
+        // sent with its length), and its stream is built lazily from
+        // the shared source like the original's.
+        let (source, length) = {
+            let body = self.body.borrow();
+            (body.source.clone(), body.length)
+        };
+        if !body_is_stream && let Some(source) = source {
+            let Some(raw) = state_ptr(scope, o) else {
+                return Err(crate::state::OpError::type_error("Failed to clone Request"));
+            };
+            // SAFETY: `state_ptr` found the RequestState brand on `o`, so its
+            // internal field holds a live RequestState; `o` is a new object,
+            // never `self`.
+            let clone_state: &RequestState = unsafe { &*raw };
+            *clone_state.body.borrow_mut() = crate::fetch_body::BodyImpl {
+                stream: std::cell::RefCell::new(None),
+                source: Some(source),
+                length,
+            };
         }
+        Ok(o)
     }
 }
 
@@ -1052,6 +1022,7 @@ pub fn install_global<'s>(scope: &mut v8::PinScope<'s, '_>, global: v8::Local<v8
 
     let key = v8::String::new(scope, "Request").unwrap();
     global.set(scope, key.into(), class_fn.into());
+    crate::intrinsics::capture(scope, crate::intrinsics::Intrinsic::Request, class_fn);
 }
 
 // ---------------------------------------------------------------------------
@@ -1154,24 +1125,7 @@ pub fn build_kernel_request<'s>(
         ..RequestState::default()
     };
 
-    // 6. Box, install in internal field 0, register finalizer. The
-    //    finalizer's drop type is `RequestState` to match the box
-    //    payload type — same shape as the macro's emitted finalizer
-    //    in `gen_box_and_install_finalizer`.
-    let boxed = Box::new(state);
-    let raw = Box::into_raw(boxed);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    this_obj.set_internal_field(0, ext.into());
-
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        this_obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut RequestState));
-        }),
-    );
-    std::mem::forget(weak);
+    Request::__zs_install(scope, this_obj, state)?;
 
     Some(this_obj)
 }
@@ -1187,18 +1141,7 @@ fn is_readable_stream_global_instance(
     scope: &mut v8::PinScope,
     obj: v8::Local<v8::Object>,
 ) -> bool {
-    let global = scope.get_current_context().global(scope);
-    let key = match v8::String::new(scope, "ReadableStream") {
-        Some(k) => k,
-        None => return false,
-    };
-    let Some(class_v) = global.get(scope, key.into()) else {
-        return false;
-    };
-    let Ok(class_obj) = v8::Local::<v8::Object>::try_from(class_v) else {
-        return false;
-    };
-    obj.instance_of(scope, class_obj).unwrap_or(false)
+    crate::streams::readable::is_readable_stream(scope, obj)
 }
 
 /// Read a single property from the init object. Returns `None` for
@@ -1312,15 +1255,6 @@ fn build_request_headers<'s>(
     input_is_request: bool,
     input_v: v8::Local<v8::Value>,
 ) -> Result<v8::Local<'s, v8::Object>, String> {
-    let global = scope.get_current_context().global(scope);
-    let headers_class_key = v8::String::new(scope, "Headers").unwrap();
-    let class_v = global
-        .get(scope, headers_class_key.into())
-        .ok_or_else(|| "Headers class missing".to_string())?;
-    let class_fn: v8::Local<v8::Function> = class_v
-        .try_into()
-        .map_err(|_| "Headers is not a function".to_string())?;
-
     // Determine the init for the new Headers:
     //   - If init.headers is present, use that.
     //   - Else if input is a Request, copy headers from there.
@@ -1350,76 +1284,43 @@ fn build_request_headers<'s>(
         v8::undefined(scope).into()
     };
 
-    let args = [headers_init];
-    let h = class_fn
-        .new_instance(scope, &args)
-        .ok_or_else(|| "Headers constructor failed".to_string())?;
-    Ok(h)
+    let h = crate::intrinsics::construct(scope, crate::intrinsics::Intrinsic::Headers, &[headers_init])
+        .map_err(|_| "Headers constructor failed".to_string())?;
+    Ok(v8::Local::new(scope, h))
 }
 
+/// An empty Headers wrapper, minted natively. If even that fails (an
+/// exception or termination is pending) the getter still owes script an
+/// object, and a plain one is all that is left to give.
 fn empty_headers<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Object> {
-    let global = scope.get_current_context().global(scope);
-    let key = v8::String::new(scope, "Headers").unwrap();
-    let class_v = global.get(scope, key.into()).expect("Headers missing");
-    let class_fn: v8::Local<v8::Function> = class_v.try_into().unwrap();
-    class_fn
-        .new_instance(scope, &[])
-        .expect("new Headers failed")
+    crate::headers::build_kernel_headers(scope, &[]).unwrap_or_else(|| v8::Object::new(scope))
 }
 
+/// The request's own `AbortSignal`, minted natively: `AbortSignal.any` over
+/// `init.signal` when one is given (a `TypeError` when it is not an
+/// `AbortSignal`), a fresh signal otherwise. Neither the `AbortSignal` nor
+/// the `AbortController` global is consulted, so script replacing or
+/// deleting them changes nothing here.
 fn build_request_signal<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     init_signal: Option<v8::Local<v8::Value>>,
-) -> v8::Local<'s, v8::Object> {
-    let global = scope.get_current_context().global(scope);
-    let key = v8::String::new(scope, "AbortSignal").unwrap();
-    let class_v = global.get(scope, key.into()).expect("AbortSignal missing");
-    let class_obj: v8::Local<v8::Object> = class_v.try_into().unwrap();
-
-    // If init.signal is provided, run AbortSignal.any([init.signal])
-    // so the request's signal aborts when init.signal does. If no
-    // init.signal, just `new AbortController().signal`.
+) -> Result<v8::Local<'s, v8::Object>, crate::state::OpError> {
     if let Some(sig_v) = init_signal
         && !sig_v.is_null_or_undefined()
     {
-        // AbortSignal.any([sig_v]) — returns a fresh signal.
-        let any_key = v8::String::new(scope, "any").unwrap();
-        if let Some(any_fn_v) = class_obj.get(scope, any_key.into())
-            && let Ok(any_fn) = v8::Local::<v8::Function>::try_from(any_fn_v)
-        {
-            let arr = v8::Array::new(scope, 1);
-            arr.set_index(scope, 0, sig_v);
-            let args = [arr.into()];
-            if let Some(result) = any_fn.call(scope, class_obj.into(), &args)
-                && let Ok(o) = v8::Local::<v8::Object>::try_from(result)
-            {
-                return o;
-            }
-        }
+        let arr = v8::Array::new(scope, 1);
+        arr.set_index(scope, 0, sig_v);
+        return crate::dom::abort_signal::any_static(scope, arr.into());
     }
-
-    // Default: fresh AbortController().signal.
-    let ac_key = v8::String::new(scope, "AbortController").unwrap();
-    let ac_v = global.get(scope, ac_key.into()).expect("AbortController missing");
-    let ac_fn: v8::Local<v8::Function> = ac_v.try_into().unwrap();
-    let ac = ac_fn
-        .new_instance(scope, &[])
-        .expect("new AbortController failed");
-    let sig_key = v8::String::new(scope, "signal").unwrap();
-    let sig_v = ac.get(scope, sig_key.into()).unwrap();
-    sig_v.try_into().unwrap()
+    Ok(crate::dom::abort_signal::mint_abort_signal(scope).0)
 }
 
+/// Tee a body stream natively, so a `tee` script put on
+/// `ReadableStream.prototype` never runs inside the constructor or
+/// `clone()`.
 fn tee_stream<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     stream: v8::Local<'s, v8::Object>,
 ) -> Option<(v8::Local<'s, v8::Object>, v8::Local<'s, v8::Object>)> {
-    let key = v8::String::new(scope, "tee")?;
-    let fn_v = stream.get(scope, key.into())?;
-    let fn_l: v8::Local<v8::Function> = fn_v.try_into().ok()?;
-    let result = fn_l.call(scope, stream.into(), &[])?;
-    let arr: v8::Local<v8::Array> = result.try_into().ok()?;
-    let a = arr.get_index(scope, 0)?;
-    let b = arr.get_index(scope, 1)?;
-    Some((a.try_into().ok()?, b.try_into().ok()?))
+    crate::streams::readable::tee(scope, stream).ok().map(Into::into)
 }

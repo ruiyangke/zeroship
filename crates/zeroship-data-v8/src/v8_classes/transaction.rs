@@ -146,23 +146,15 @@ pub(crate) fn mint_tx_view<'s>(
         }
     }
 
-    let state = Box::new(TransactionView {
+    if TransactionView::__zs_install(scope, view, TransactionView {
         binding: binding.clone(),
         collection_cache,
         transaction_scope,
-    });
-    let raw = Box::into_raw(state);
-    let raw_addr = raw as usize;
-    let external = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    view.set_internal_field(0, external.into());
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        view,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut TransactionView));
-        }),
-    );
-    std::mem::forget(weak);
+    })
+    .is_none()
+    {
+        return Err(OpError::error("TransactionView: the wrapper already holds a state"));
+    }
 
     Ok(view)
 }
@@ -573,11 +565,11 @@ fn attach_tx_finalizer(
     let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
     let data: v8::Local<v8::Value> = ext.into();
 
-    let on_fulfilled = v8::Function::builder(tx_resolve_handler)
+    let on_fulfilled = zeroship_runtime::callback::function_builder(tx_resolve_handler)
         .data(data)
         .build(scope)
         .expect("build tx resolve handler");
-    let on_rejected = v8::Function::builder(tx_reject_handler)
+    let on_rejected = zeroship_runtime::callback::function_builder(tx_reject_handler)
         .data(data)
         .build(scope)
         .expect("build tx reject handler");

@@ -69,7 +69,9 @@ pub fn btoa_callback(
     }
 
     let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    let out = v8::String::new(scope, &encoded).unwrap();
+    let Some(out) = crate::strings::new_or_throw(scope, &encoded) else {
+        return;
+    };
     rv.set(out.into());
 }
 
@@ -183,11 +185,11 @@ pub fn install_global<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     global: v8::Local<v8::Object>,
 ) {
-    let btoa_fn = v8::Function::new(scope, btoa_callback).unwrap();
+    let btoa_fn = crate::callback::function(scope, btoa_callback).unwrap();
     let btoa_key = v8::String::new(scope, "btoa").unwrap();
     global.set(scope, btoa_key.into(), btoa_fn.into());
 
-    let atob_fn = v8::Function::new(scope, atob_callback).unwrap();
+    let atob_fn = crate::callback::function(scope, atob_callback).unwrap();
     let atob_key = v8::String::new(scope, "atob").unwrap();
     global.set(scope, atob_key.into(), atob_fn.into());
 }

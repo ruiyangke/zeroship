@@ -9,8 +9,7 @@
 //! # Module layout
 //!
 //! - `key_material` — `CryptoKeyState`, `KeyAlgorithm`, `KeyMaterial`,
-//!   `KeyType`, `KeyUsage`, `HashAlgo`, `NamedCurve`, the `BrandedBox`
-//!   wrapper that puts a tag byte at offset 0 for brand checks.
+//!   `KeyType`, `KeyUsage`, `HashAlgo`, `NamedCurve`.
 //! - `crypto_key` — `CryptoKey` `#[v8_class]` with `[SameObject]`
 //!   getter caching for `algorithm` / `usages`, the brand check, and
 //!   the `build` helper that allocates a JS wrapper around a state.

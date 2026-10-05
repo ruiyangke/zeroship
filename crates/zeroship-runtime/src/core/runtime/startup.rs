@@ -34,11 +34,11 @@ impl RuntimeInner {
 
                 let ctx = v8::Object::new(scope);
                 let key = v8::String::new(scope, "waitUntil").unwrap();
-                let function = v8::Function::new(scope, wait_until_noop_callback).unwrap();
+                let function = crate::callback::function(scope, wait_until_noop_callback).unwrap();
                 ctx.set(scope, key.into(), function.into());
                 let key = v8::String::new(scope, "passThroughOnException").unwrap();
                 let function =
-                    v8::Function::new(scope, pass_through_on_exception_noop_callback).unwrap();
+                    crate::callback::function(scope, pass_through_on_exception_noop_callback).unwrap();
                 ctx.set(scope, key.into(), function.into());
                 ctx.set_integrity_level(scope, v8::IntegrityLevel::Frozen);
                 self.state.borrow_mut().ctx_obj = Some(v8::Global::new(scope, ctx));

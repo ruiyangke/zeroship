@@ -129,11 +129,16 @@ pub fn emit_buffer<'s>(
 }
 
 /// Emit a string value (used for digest('hex') / etc.).
+///
+/// # Errors
+///
+/// A `RangeError` ("Invalid string length") when V8 refuses `s` as too
+/// long: an encoded output is longer than the bytes it encodes.
 pub fn emit_string<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     s: &str,
-) -> v8::Local<'s, v8::String> {
-    v8::String::new(scope, s).unwrap_or_else(|| v8::String::empty(scope))
+) -> Result<v8::Local<'s, v8::String>, OpError> {
+    crate::strings::new(scope, s)
 }
 
 /// `emit_output` — emit Buffer or string per Node's "encoding-driven
@@ -153,7 +158,7 @@ pub fn emit_output<'s>(
                 OpError::node("ERR_UNKNOWN_ENCODING", format!("Unknown encoding: {name}"))
             })?;
             let s = encoding::encode(bytes, enc);
-            Ok(emit_string(scope, &s).into())
+            Ok(emit_string(scope, &s)?.into())
         }
     }
 }

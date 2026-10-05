@@ -877,7 +877,7 @@ fn zs_driver_next_command_callback(
                 }
             },
             Err(message) => {
-                let msg = v8::String::new(scope, &message).unwrap();
+                let msg = crate::strings::message(scope, &message);
                 resolver.reject(scope, v8::Exception::error(scope, msg));
             }
         }
@@ -965,8 +965,12 @@ fn zs_env_callback(
             };
             let env_obj = v8::Object::new(scope);
             for (k, v) in vars.iter().chain(secrets.iter()) {
-                let k_v8 = v8::String::new(scope, k).unwrap();
-                let v_v8 = v8::String::new(scope, v).unwrap();
+                let Some(k_v8) = crate::strings::new_or_throw(scope, k) else {
+                    return;
+                };
+                let Some(v_v8) = crate::strings::new_or_throw(scope, v) else {
+                    return;
+                };
                 env_obj.set(scope, k_v8.into(), v_v8.into());
             }
             rv.set(env_obj.into());
@@ -1179,7 +1183,7 @@ fn setup_globals_with_descriptor(
     // console.log/warn/error/info
     {
         let console = v8::Object::new(scope);
-        let log_fn = v8::Function::new(scope, console_log_callback).unwrap();
+        let log_fn = crate::callback::function(scope, console_log_callback).unwrap();
         let log_key = v8::String::new(scope, "log").unwrap();
         console.set(scope, log_key.into(), log_fn.into());
 
@@ -1198,35 +1202,35 @@ fn setup_globals_with_descriptor(
 
     // setTimeout
     {
-        let f = v8::Function::new(scope, set_timeout_callback).unwrap();
+        let f = crate::callback::function(scope, set_timeout_callback).unwrap();
         let key = v8::String::new(scope, "setTimeout").unwrap();
         global.set(scope, key.into(), f.into());
     }
 
     // clearTimeout
     {
-        let f = v8::Function::new(scope, clear_timeout_callback).unwrap();
+        let f = crate::callback::function(scope, clear_timeout_callback).unwrap();
         let key = v8::String::new(scope, "clearTimeout").unwrap();
         global.set(scope, key.into(), f.into());
     }
 
     // setInterval
     {
-        let f = v8::Function::new(scope, set_interval_callback).unwrap();
+        let f = crate::callback::function(scope, set_interval_callback).unwrap();
         let key = v8::String::new(scope, "setInterval").unwrap();
         global.set(scope, key.into(), f.into());
     }
 
     // clearInterval (same implementation as clearTimeout)
     {
-        let f = v8::Function::new(scope, clear_timeout_callback).unwrap();
+        let f = crate::callback::function(scope, clear_timeout_callback).unwrap();
         let key = v8::String::new(scope, "clearInterval").unwrap();
         global.set(scope, key.into(), f.into());
     }
 
     // queueMicrotask
     {
-        let f = v8::Function::new(scope, queue_microtask_callback).unwrap();
+        let f = crate::callback::function(scope, queue_microtask_callback).unwrap();
         let key = v8::String::new(scope, "queueMicrotask").unwrap();
         global.set(scope, key.into(), f.into());
     }
@@ -1234,7 +1238,7 @@ fn setup_globals_with_descriptor(
     // performance.now
     {
         let perf = v8::Object::new(scope);
-        let f = v8::Function::new(scope, performance_now_callback).unwrap();
+        let f = crate::callback::function(scope, performance_now_callback).unwrap();
         let key = v8::String::new(scope, "now").unwrap();
         perf.set(scope, key.into(), f.into());
         let perf_key = v8::String::new(scope, "performance").unwrap();
@@ -1266,7 +1270,7 @@ fn setup_globals_with_descriptor(
     {
         let env = v8::Object::new(scope);
 
-        let get_fn = v8::Function::new(scope, env_get_callback).unwrap();
+        let get_fn = crate::callback::function(scope, env_get_callback).unwrap();
         let get_key = v8::String::new(scope, "get").unwrap();
         env.set(scope, get_key.into(), get_fn.into());
 
@@ -1277,7 +1281,7 @@ fn setup_globals_with_descriptor(
     // __zs_env — returns the frozen env snapshot (same as fetch's 2nd arg).
     // The host workflow bridge reads `env.workflows` through this callback.
     {
-        let f = v8::Function::new(scope, zs_env_callback).unwrap();
+        let f = crate::callback::function(scope, zs_env_callback).unwrap();
         let key = v8::String::new(scope, "__zs_env").unwrap();
         global.set(scope, key.into(), f.into());
     }
@@ -1293,15 +1297,15 @@ fn setup_globals_with_descriptor(
             .clone();
         if state.borrow().js_driver.is_some() {
             let dsn_key = v8::String::new(scope, "__zsDriverDsn").unwrap();
-            let dsn_fn = v8::Function::new(scope, zs_driver_dsn_callback).unwrap();
+            let dsn_fn = crate::callback::function(scope, zs_driver_dsn_callback).unwrap();
             global.set(scope, dsn_key.into(), dsn_fn.into());
 
             let next_key = v8::String::new(scope, "__zsNextCommand").unwrap();
-            let next_fn = v8::Function::new(scope, zs_driver_next_command_callback).unwrap();
+            let next_fn = crate::callback::function(scope, zs_driver_next_command_callback).unwrap();
             global.set(scope, next_key.into(), next_fn.into());
 
             let resolve_key = v8::String::new(scope, "__zsResolve").unwrap();
-            let resolve_fn = v8::Function::new(scope, zs_driver_resolve_callback).unwrap();
+            let resolve_fn = crate::callback::function(scope, zs_driver_resolve_callback).unwrap();
             global.set(scope, resolve_key.into(), resolve_fn.into());
         }
     }
@@ -1506,7 +1510,7 @@ fn setup_globals_with_descriptor(
                 stream.set(scope, is_tty_key.into(), is_tty.into());
 
                 let write_key = v8::String::new(scope, "write").unwrap();
-                let write_fn = v8::Function::new(scope, process_stdio_write_callback).unwrap();
+                let write_fn = crate::callback::function(scope, process_stdio_write_callback).unwrap();
                 stream.set(scope, write_key.into(), write_fn.into());
 
                 let name_key = v8::String::new(scope, name).unwrap();
@@ -1540,7 +1544,7 @@ fn setup_globals_with_descriptor(
         // against a real Node run in `tests/next_tick_ordering.rs`.
         {
             let key = v8::String::new(scope, "nextTick").unwrap();
-            let next_tick = v8::Function::new(scope, process_next_tick_callback).unwrap();
+            let next_tick = crate::callback::function(scope, process_next_tick_callback).unwrap();
             process.set(scope, key.into(), next_tick.into());
         }
 
@@ -1944,8 +1948,9 @@ fn env_get_callback(
 
     match value {
         Some(v) => {
-            let v_v8 = v8::String::new(scope, &v).unwrap();
-            rv.set(v_v8.into());
+            if let Some(v_v8) = crate::strings::new_or_throw(scope, &v) {
+                rv.set(v_v8.into());
+            }
         }
         None => rv.set(v8::null(scope).into()),
     }

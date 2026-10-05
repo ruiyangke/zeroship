@@ -298,13 +298,13 @@ impl NativeRegistrar {
     /// `fn(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, rv: v8::ReturnValue)`
     pub fn add<F>(&mut self, name: &'static str, callback: F)
     where
-        F: v8::MapFnTo<v8::FunctionCallback> + 'static,
+        F: crate::callback::Callback + 'static,
     {
         self.entries.push((
             name,
             Box::new(
                 move |scope: &mut v8::PinScope, ns_obj: v8::Local<v8::Object>| {
-                    let func = v8::Function::new(scope, callback).unwrap();
+                    let func = crate::callback::function(scope, callback).unwrap();
                     let key = v8::String::new(scope, name).unwrap();
                     ns_obj.set(scope, key.into(), func.into());
                 },

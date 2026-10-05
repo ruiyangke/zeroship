@@ -62,7 +62,7 @@ fn evaluate_import(
 ) {
     let specifier = args.data().to_rust_string_lossy(scope);
     let Some(module) = registry_lookup(scope, &specifier) else {
-        let message = v8::String::new(scope, &format!("Cannot find module '{specifier}'")).unwrap();
+        let message = crate::strings::message(scope, &format!("Cannot find module '{specifier}'"));
         let error = v8::Exception::type_error(scope, message);
         scope.throw_exception(error);
         return;
@@ -83,7 +83,7 @@ fn evaluate_import(
         rv.set(namespace);
         return;
     };
-    let Some(on_fulfilled) = v8::Function::builder(evaluated_namespace)
+    let Some(on_fulfilled) = crate::callback::function_builder(evaluated_namespace)
         .data(namespace)
         .build(scope)
     else {
@@ -99,7 +99,7 @@ fn import_registered<'s>(
     resolver: v8::Local<'s, v8::PromiseResolver>,
     specifier: v8::Local<'s, v8::String>,
 ) -> Option<v8::Local<'s, v8::Promise>> {
-    let callback = v8::Function::builder(evaluate_import)
+    let callback = crate::callback::function_builder(evaluate_import)
         .data(specifier.into())
         .build(scope)?;
     let undefined = v8::undefined(scope);
@@ -113,7 +113,7 @@ fn reject_typeerror<'s>(
     resolver: v8::Local<'s, v8::PromiseResolver>,
     message: &str,
 ) -> v8::Local<'s, v8::Promise> {
-    let msg = v8::String::new(scope, message).unwrap();
+    let msg = crate::strings::message(scope, message);
     let exc = v8::Exception::type_error(scope, msg);
     let promise = resolver.get_promise(scope);
     resolver.reject(scope, exc);
@@ -123,6 +123,11 @@ fn reject_typeerror<'s>(
 /// Compile dynamic bundle imports through the static resolver, then defer
 /// evaluation to a promise continuation. V8 compilation exceptions reject the
 /// import without poisoning subsequent module resolution.
+///
+/// V8 calls this hook through an `extern "C"` trampoline that is not a
+/// function callback and has no panic boundary, so nothing here may panic on
+/// what script passes it: a specifier of any length is quoted through
+/// `strings::message`.
 pub(crate) fn host_import_module_dynamically_callback<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     _host_defined_options: v8::Local<'s, v8::Data>,

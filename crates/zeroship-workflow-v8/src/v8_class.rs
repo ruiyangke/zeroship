@@ -759,17 +759,16 @@ pub fn is_excluded_workflow_property(name: &str) -> bool {
     )
 }
 
-fn state_from_object<'a, T>(
+fn state_from_object<'a, T: 'static>(
     scope: &mut v8::PinScope<'_, '_>,
     obj: v8::Local<v8::Object>,
 ) -> Option<&'a T> {
-    let data = obj.get_internal_field(scope, 0)?;
-    let ext = v8::Local::<v8::External>::try_from(data).ok()?;
-    let ptr = ext.value() as *const T;
-    // SAFETY: every mint_* function below stores a Box<T> in internal field
-    // 0 and registers a V8 Weak finalizer. The callback runs while the holder
-    // object is alive, so this borrowed pointer remains valid for the callback.
-    unsafe { ptr.as_ref() }
+    let ptr = zeroship_runtime::brand::state::<T>(scope, obj)?;
+    // SAFETY: the brand proves a mint_* function below stored this Box<T> in
+    // internal field 0 and registered a V8 Weak finalizer. The callback runs
+    // while the holder object is alive, so this borrowed pointer remains
+    // valid for the callback.
+    Some(unsafe { ptr.as_ref() })
 }
 
 fn workflows_named_getter(
@@ -819,26 +818,6 @@ fn set_proto<'s>(
     Some(())
 }
 
-fn install_state<T: 'static>(
-    scope: &mut v8::PinScope<'_, '_>,
-    obj: v8::Local<v8::Object>,
-    state: T,
-) {
-    let boxed = Box::new(state);
-    let raw = Box::into_raw(boxed);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    obj.set_internal_field(0, ext.into());
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut T));
-        }),
-    );
-    std::mem::forget(weak);
-}
-
 pub fn mint_workflows<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     backend: SharedWorkflowBackend,
@@ -850,7 +829,7 @@ pub fn mint_workflows<'s>(
     );
     let obj = inst_tmpl.new_instance(scope)?;
     set_proto(scope, obj, class_tmpl)?;
-    install_state(scope, obj, Workflows { backend });
+    Workflows::__zs_install(scope, obj, Workflows { backend })?;
     Some(obj)
 }
 
@@ -862,14 +841,14 @@ pub fn mint_workflow_handle<'s>(
     let class_tmpl = WorkflowHandle::install(scope);
     let obj = class_tmpl.instance_template(scope).new_instance(scope)?;
     set_proto(scope, obj, class_tmpl)?;
-    install_state(
+    WorkflowHandle::__zs_install(
         scope,
         obj,
         WorkflowHandle {
             backend,
             workflow_name,
         },
-    );
+    )?;
     Some(obj)
 }
 
@@ -881,6 +860,6 @@ pub fn mint_workflow_run<'s>(
     let class_tmpl = WorkflowRun::install(scope);
     let obj = class_tmpl.instance_template(scope).new_instance(scope)?;
     set_proto(scope, obj, class_tmpl)?;
-    install_state(scope, obj, WorkflowRun { backend, run_id });
+    WorkflowRun::__zs_install(scope, obj, WorkflowRun { backend, run_id })?;
     Some(obj)
 }

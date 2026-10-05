@@ -101,7 +101,7 @@ pub fn readable_stream_pipe_to<'s>(
     let reader = match acquire_readable_stream_default_reader(scope, source_obj) {
         Ok(r) => r,
         Err(msg) => {
-            let m = v8::String::new(scope, &msg).unwrap();
+            let m = crate::strings::message(scope, &msg);
             let exc = v8::Exception::type_error(scope, m);
             return algorithms::rejected_with_promise(scope, exc);
         }
@@ -111,7 +111,7 @@ pub fn readable_stream_pipe_to<'s>(
         Err(msg) => {
             // Release the reader we already took before bailing.
             readable_stream_default_reader_release(scope, reader);
-            let m = v8::String::new(scope, &msg).unwrap();
+            let m = crate::strings::message(scope, &msg);
             let exc = v8::Exception::type_error(scope, m);
             return algorithms::rejected_with_promise(scope, exc);
         }
@@ -335,7 +335,7 @@ fn register_abort_listener(
     let holder: Rc<AbortListenerHolder> = Rc::new(RefCell::new(Some(pipe_state.clone())));
     let raw = Rc::into_raw(holder) as *mut std::ffi::c_void;
     let ext = v8::External::new(scope, raw);
-    let tmpl = v8::FunctionTemplate::builder(abort_listener_callback)
+    let tmpl = crate::callback::template_builder(abort_listener_callback)
         .data(ext.into())
         .build(scope);
     let func = tmpl.get_function(scope).unwrap();
@@ -433,10 +433,11 @@ fn run_abort_algorithm(scope: &mut v8::PinScope, pipe_state: &Rc<PipeState>) {
     );
 }
 
-/// `Promise.all`-style waitForAllPromise. Resolves with undefined when
-/// all actions complete; rejects with the first rejection. We don't need
-/// the full Promise.all behaviour (combining values); pipe just wants
-/// "wait for all".
+/// Spec `waitForAllPromise(promises)`: a promise that resolves with
+/// undefined once every action fulfills and rejects with the first
+/// rejection. Built natively from the actions' own reactions, so neither
+/// `globalThis.Promise` nor `Promise.all` (both script's to replace) is
+/// consulted.
 fn wait_for_all_promise<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     promises: Vec<v8::Local<'s, v8::Promise>>,
@@ -444,27 +445,37 @@ fn wait_for_all_promise<'s>(
     if promises.is_empty() {
         return algorithms::resolved_undefined_promise(scope);
     }
-    let global = scope.get_current_context().global(scope);
-    let promise_key = v8::String::new(scope, "Promise").unwrap();
-    let promise_ctor_v = global.get(scope, promise_key.into()).unwrap();
-    let Ok(promise_ctor) = v8::Local::<v8::Object>::try_from(promise_ctor_v) else {
+    let Some(resolver) = v8::PromiseResolver::new(scope) else {
         return algorithms::resolved_undefined_promise(scope);
     };
-    let all_key = v8::String::new(scope, "all").unwrap();
-    let all_v = promise_ctor.get(scope, all_key.into()).unwrap();
-    let Ok(all_fn) = v8::Local::<v8::Function>::try_from(all_v) else {
-        return algorithms::resolved_undefined_promise(scope);
-    };
-    let arr = v8::Array::new(scope, promises.len() as i32);
-    for (i, p) in promises.iter().enumerate() {
-        let v: v8::Local<v8::Value> = (*p).into();
-        arr.set_index(scope, i as u32, v);
+    let combined = resolver.get_promise(scope);
+    let resolver = Rc::new(v8::Global::new(scope, resolver));
+    let remaining = Rc::new(Cell::new(promises.len()));
+    let settled = Rc::new(Cell::new(false));
+    for promise in promises {
+        let (on_fulfilled_resolver, on_rejected_resolver) = (resolver.clone(), resolver.clone());
+        let (on_fulfilled_settled, on_rejected_settled) = (settled.clone(), settled.clone());
+        let remaining = remaining.clone();
+        promise_resolve::upon_promise(
+            scope,
+            promise,
+            Some(Box::new(move |scope, _value| {
+                remaining.set(remaining.get() - 1);
+                if remaining.get() == 0 && !on_fulfilled_settled.replace(true) {
+                    let resolver = v8::Local::new(scope, &*on_fulfilled_resolver);
+                    let undefined = v8::undefined(scope);
+                    resolver.resolve(scope, undefined.into());
+                }
+            })),
+            Some(Box::new(move |scope, reason| {
+                if !on_rejected_settled.replace(true) {
+                    let resolver = v8::Local::new(scope, &*on_rejected_resolver);
+                    resolver.reject(scope, reason);
+                }
+            })),
+        );
     }
-    let result = all_fn.call(scope, promise_ctor.into(), &[arr.into()]);
-    match result.and_then(|v| v8::Local::<v8::Promise>::try_from(v).ok()) {
-        Some(p) => p,
-        None => algorithms::resolved_undefined_promise(scope),
-    }
+    combined
 }
 
 // ---------------------------------------------------------------------------

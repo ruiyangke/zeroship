@@ -414,14 +414,9 @@ fn state_from_wrapper<'a>(
     scope: &mut v8::PinScope,
     obj: v8::Local<v8::Object>,
 ) -> Option<&'a EventSourceState> {
-    let ext = obj
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())?;
-    let ptr = ext.value() as *const EventSourceState;
-    if ptr.is_null() {
-        return None;
-    }
-    Some(unsafe { &*ptr })
+    let ptr = crate::brand::state::<EventSourceState>(scope, obj)?;
+    // SAFETY: the brand proves the pointer is a live Box<EventSourceState>.
+    Some(unsafe { ptr.as_ref() })
 }
 
 // ---------------------------------------------------------------------------
@@ -482,7 +477,7 @@ fn build_initial_connect_fn<'s>(
     let raw = Box::into_raw(boxed);
     let raw_addr = raw as usize;
     let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    let tmpl = v8::FunctionTemplate::builder(initial_connect_callback)
+    let tmpl = crate::callback::template_builder(initial_connect_callback)
         .data(ext.into())
         .build(scope);
     let f = tmpl.get_function(scope).unwrap();
@@ -583,7 +578,10 @@ fn spawn_connect(
         Err(_) => return,
     };
 
-    let url_v8 = v8::String::new(scope, &url_str).unwrap();
+    // A URL too long for V8 to hold as a string cannot be fetched either.
+    let Some(url_v8) = v8::String::new(scope, &url_str) else {
+        return;
+    };
     let und: v8::Local<v8::Value> = v8::undefined(scope).into();
 
     let promise_global: v8::Global<v8::Promise> = {
@@ -1003,7 +1001,11 @@ fn dispatch_event_from_parser(
         event_type_owned
     };
 
-    let data_v8 = v8::String::new(scope, &data).unwrap();
+    // An event whose data V8 refuses as too long cannot be represented as a
+    // string, and is not dispatched.
+    let Some(data_v8) = v8::String::new(scope, &data) else {
+        return;
+    };
     let me = build_typed_message_event(scope, &event_type, data_v8.into(), &last_id_owned);
     crate::dom::event_target::dispatch_event(scope, wrapper, me);
 }
@@ -1037,25 +1039,13 @@ fn build_typed_message_event<'s>(
     *me.data.borrow_mut() = Some(v8::Global::new(scope, data));
     *me.last_event_id.borrow_mut() = last_event_id.to_string();
 
-    let boxed: Box<MessageEventState> = Box::new(me);
-    let raw = Box::into_raw(boxed);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    obj.set_internal_field(0, ext.into());
+    MessageEventState::__zs_install(scope, obj, me)
+        .expect("a fresh instance of the class's own template takes its state");
 
     let class_fn = tmpl.get_function(scope).unwrap();
     let proto_key = v8::String::new(scope, "prototype").unwrap();
     let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
     obj.set_prototype(scope, proto_v);
-
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut MessageEventState));
-        }),
-    );
-    std::mem::forget(weak);
 
     obj
 }
@@ -1071,25 +1061,14 @@ fn dispatch_plain_event(scope: &mut v8::PinScope, wrapper: v8::Local<v8::Object>
     ev.is_trusted.set(true);
     ev.time_stamp.set(now_ms());
 
-    let boxed = Box::new(ev);
-    let raw = Box::into_raw(boxed);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    obj.set_internal_field(0, ext.into());
+    if Event::__zs_install(scope, obj, ev).is_none() {
+        return;
+    }
 
     let class_fn = tmpl.get_function(scope).unwrap();
     let proto_key = v8::String::new(scope, "prototype").unwrap();
     let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
     obj.set_prototype(scope, proto_v);
-
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut Event));
-        }),
-    );
-    std::mem::forget(weak);
 
     crate::dom::event_target::dispatch_event(scope, wrapper, obj);
 }
@@ -1167,7 +1146,7 @@ fn build_reconnect_fn<'s>(
     let raw = Box::into_raw(boxed);
     let raw_addr = raw as usize;
     let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    let tmpl = v8::FunctionTemplate::builder(reconnect_callback)
+    let tmpl = crate::callback::template_builder(reconnect_callback)
         .data(ext.into())
         .build(scope);
     let f = tmpl.get_function(scope).unwrap();
@@ -1233,7 +1212,7 @@ fn make_reaction<'s>(
     let raw = Box::into_raw(boxed);
     let raw_addr = raw as usize;
     let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    let tmpl = v8::FunctionTemplate::builder(reaction_callback)
+    let tmpl = crate::callback::template_builder(reaction_callback)
         .data(ext.into())
         .build(scope);
     let func = tmpl.get_function(scope).unwrap();
@@ -1270,6 +1249,8 @@ fn reaction_callback(
 // Misc helpers
 // ---------------------------------------------------------------------------
 
+/// Set `obj[key] = value`, for a literal `key`. A `value` V8 refuses as too
+/// long (a server-sent `id` can be any length) is left unset.
 fn set_str_prop(
     scope: &mut v8::PinScope,
     obj: v8::Local<v8::Object>,
@@ -1277,7 +1258,9 @@ fn set_str_prop(
     value: &str,
 ) {
     let k = v8::String::new(scope, key).unwrap();
-    let v = v8::String::new(scope, value).unwrap();
+    let Some(v) = v8::String::new(scope, value) else {
+        return;
+    };
     obj.set(scope, k.into(), v.into());
 }
 

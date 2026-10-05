@@ -1,12 +1,11 @@
-//! Constructor callback codegen + Box install/finalize helpers.
+//! Constructor callback codegen.
 //!
 //! Hosts:
 //!
 //! - `gen_constructor_callback` — user-defined `#[v8_constructor]`
 //! - `gen_default_constructor_callback` — `<State as Default>::default()`
 //! - `gen_must_new_prologue` — WebIDL §3.7.1 must-new guard
-//! - `gen_box_and_install_finalizer` — internal-field 0 setup +
-//!   guaranteed-finalizer registration
+//! - `gen_install_state`: hands the instance to `<Class>::__zs_install`
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
@@ -78,7 +77,6 @@ fn gen_must_new_prologue(class_ty: &syn::Ident, opt_out: bool) -> TokenStream2 {
 pub(crate) fn gen_constructor_callback(cfg: &ClassConfig, c: &ClassMethod) -> TokenStream2 {
     let class_ty = cfg.class_ty;
     let state_ty = cfg.state_ty;
-    let has_any_fastcall = cfg.has_any_fastcall;
     let ctor_name = &c.func.sig.ident;
     let callback_ident = format_ident!("__{}_constructor_callback", class_ty);
 
@@ -118,7 +116,7 @@ pub(crate) fn gen_constructor_callback(cfg: &ClassConfig, c: &ClassMethod) -> To
         }
     };
 
-    let store = gen_box_and_install_finalizer(state_ty, has_any_fastcall);
+    let store = gen_install_state(class_ty);
     let must_new = gen_must_new_prologue(class_ty, c.callable_no_new);
 
     // post_init dispatch runs after box install and before the
@@ -163,13 +161,7 @@ pub(crate) fn gen_constructor_callback(cfg: &ClassConfig, c: &ClassMethod) -> To
         }
     };
 
-    quote! {
-        #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
-        pub(crate) fn #callback_ident(
-            scope: &mut v8::PinScope,
-            args: v8::FunctionCallbackArguments,
-            _rv: v8::ReturnValue,
-        ) {
+    let body = quote! {
             #must_new
             let __this = args.this();
 
@@ -178,6 +170,16 @@ pub(crate) fn gen_constructor_callback(cfg: &ClassConfig, c: &ClassMethod) -> To
 
             #store
             #post_init
+        };
+
+    quote! {
+        #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
+        pub(crate) fn #callback_ident(
+            scope: &mut v8::PinScope,
+            args: v8::FunctionCallbackArguments,
+            _rv: v8::ReturnValue,
+        ) {
+            #body
         }
     }
 }
@@ -189,13 +191,20 @@ pub(crate) fn gen_constructor_callback(cfg: &ClassConfig, c: &ClassMethod) -> To
 pub(crate) fn gen_default_constructor_callback(cfg: &ClassConfig) -> TokenStream2 {
     let class_ty = cfg.class_ty;
     let state_ty = cfg.state_ty;
-    let has_any_fastcall = cfg.has_any_fastcall;
     let callback_ident = format_ident!("__{}_constructor_callback", class_ty);
-    let store = gen_box_and_install_finalizer(state_ty, has_any_fastcall);
+    let store = gen_install_state(class_ty);
     // No method-level attrs to read — the Default-derived constructor
     // is always must-new. The opt-out attribute requires a user-written
     // `#[v8_constructor]`, by definition.
     let must_new = gen_must_new_prologue(class_ty, false);
+
+    let body = quote! {
+            #must_new
+            let __this = args.this();
+            let __instance: #state_ty = <#state_ty as ::core::default::Default>::default();
+
+            #store
+        };
 
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
@@ -204,103 +213,23 @@ pub(crate) fn gen_default_constructor_callback(cfg: &ClassConfig) -> TokenStream
             args: v8::FunctionCallbackArguments,
             _rv: v8::ReturnValue,
         ) {
-            #must_new
-            let __this = args.this();
-            let __instance: #state_ty = <#state_ty as ::core::default::Default>::default();
-
-            #store
+            #body
         }
     }
 }
 
-/// Box the instance, store the raw pointer in internal field 0, and
-/// register a guaranteed finalizer on the JS wrapper to reclaim the
-/// Box when V8 GCs the object.
-///
-/// When `has_any_fastcall` is true, the same raw pointer is also stored
-/// in slot 1 via `set_aligned_pointer_in_internal_field` so fastcall
-/// shims can recover `*const Self` without a scope (a single load,
-/// `get_aligned_pointer_from_internal_field(1, 0)`). Slot 0 keeps the
-/// External + finalizer for the standard wrapper teardown; slot 1 is
-/// scope-free and read-only from the fast path.
-///
-/// The pointer is captured as `usize` in the closure so we don't have
-/// to assert `Send` on a `*mut Self`; we cast back inside the closure
-/// where the type is statically known. The Weak handle is forgotten
-/// (via `mem::forget`) because dropping it would deregister the
-/// finalizer — `with_guaranteed_finalizer` ensures the closure runs
-/// on GC or isolate teardown regardless.
-fn gen_box_and_install_finalizer(state_ty: &syn::Ident, has_any_fastcall: bool) -> TokenStream2 {
-    let fastcall_slot1 = if has_any_fastcall {
-        quote! {
-            // tag = 0: must match the tag passed to
-            // get_aligned_pointer_from_internal_field in the fastcall
-            // shim. V8 uses the tag to distinguish embedder pointer
-            // categories — a mismatch returns null.
-            __this.set_aligned_pointer_in_internal_field(
-                1,
-                __raw_ptr as *const ::std::ffi::c_void,
-                0,
-            );
-        }
-    } else {
-        quote! {}
-    };
+/// Hand the new instance to `<Class>::__zs_install`, which boxes it into
+/// the wrapper's internal fields, brands the wrapper and registers the
+/// finalizer. It refuses a receiver that is not a fresh wrapper of the
+/// class (a constructor opted out of must-new, called on another object),
+/// and the callback throws instead of writing that object's fields.
+fn gen_install_state(class_ty: &syn::Ident) -> TokenStream2 {
     quote! {
-        let __boxed = Box::new(__instance);
-        let __raw_ptr = Box::into_raw(__boxed);
-        let __raw_addr = __raw_ptr as usize;
-
-        let __ext = v8::External::new(scope, __raw_ptr as *mut ::std::ffi::c_void);
-        __this.set_internal_field(0, __ext.into());
-
-        // Optional fastcall slot — set only when at least one method
-        // on the class is annotated with `#[v8_method(fastcall)]` /
-        // `#[v8_getter(fastcall)]`. Slot 1 holds the same Box raw
-        // pointer as slot 0's External, but stored as an aligned
-        // pointer so the fast-path shim can recover `*const Self`
-        // without a scope.
-        #fastcall_slot1
-
-        // SAFETY: __raw_addr was Box::into_raw'd from Box<#state_ty>;
-        // the finalizer closure casts back to the same type and drops
-        // the Box exactly once when V8 reclaims the JS wrapper.
-        let __weak = v8::Weak::with_guaranteed_finalizer(
-            scope,
-            __this,
-            Box::new(move || {
-                unsafe {
-                    drop(Box::from_raw(__raw_addr as *mut #state_ty));
-                }
-            }),
-        );
-        // Dropping the Weak removes the finalizer. The "guaranteed"
-        // variant fires on GC or isolate teardown anyway, so we leak
-        // the per-instance WeakData (~32 bytes) to keep the registration.
-        //
-        // Accepted leak — measurement protocol:
-        //   - Each instance allocation costs `Box<dyn FnOnce()>` + a
-        //     `v8::WeakData` shell ≈ 32 bytes (8B closure pointer +
-        //     8B raw_addr + 16B v8::Weak header).
-        //   - Released in bulk on isolate teardown — V8's
-        //     `kForceGC` fires every "guaranteed" finalizer in O(N)
-        //     before tearing the heap down. So the leak is bounded
-        //     by the live-instance count, not by total allocations
-        //     over isolate lifetime.
-        //   - To verify in production: enable
-        //     `RUST_LOG=zeroship_runtime=trace` and watch the
-        //     control-plane's per-app heap metrics; per-instance
-        //     allocations should track 1:1 with `state.spawned_ops`
-        //     drains. The bound on a 1M-instance app is ≈ 30 MB
-        //     resident — comfortably below the worker budget.
-        //
-        // Instrumentation deferred: emitting `tracing::trace!` from
-        // every constructor would force a snapshot regeneration for
-        // every existing v8_class consumer (it's inside `quote!`,
-        // so it's part of the byte-identity contract). The
-        // measurement protocol above relies on existing per-app
-        // heap metrics that the control plane already collects, so
-        // no per-instance trace event is needed.
-        ::std::mem::forget(__weak);
+        if <#class_ty>::__zs_install(scope, __this, __instance).is_none() {
+            let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+            let __exc = v8::Exception::type_error(scope, __msg);
+            scope.throw_exception(__exc);
+            return;
+        }
     }
 }

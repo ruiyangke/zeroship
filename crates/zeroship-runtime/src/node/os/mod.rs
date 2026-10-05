@@ -151,9 +151,9 @@ fn set_fn<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     obj: v8::Local<v8::Object>,
     name: &str,
-    callback: impl v8::MapFnTo<v8::FunctionCallback>,
+    callback: impl crate::callback::Callback,
 ) {
-    let f = v8::Function::new(scope, callback).unwrap();
+    let f = crate::callback::function(scope, callback).unwrap();
     let k = v8::String::new(scope, name).unwrap();
     obj.set(scope, k.into(), f.into());
 }
