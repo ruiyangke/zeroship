@@ -447,12 +447,27 @@ impl std::ops::Deref for HeldRuntime {
 
 /// The cached runtime of an app, marked recently used. `None` when the app
 /// isn't loaded on this thread.
+///
+/// A quarantined runtime is removed instead of returned, and the answer is
+/// `None`, so the dispatch path loads the app afresh. Quarantine is permanent
+/// and a quarantined isolate runs no app code again; the runtime quarantines
+/// itself when its event pump exceeds its CPU share, so a cached entry can
+/// stop serving without any host action. Dispatching to it would answer every
+/// request with that refusal until something else evicted the entry.
 #[must_use]
 pub fn get_runtime(app_id: &AppId) -> Option<HeldRuntime> {
     CACHE.with(|c| {
         let mut cache = c.borrow_mut();
         let cache = cache.as_mut()?;
         let entry = cache.isolates.get_mut(app_id)?;
+        if entry.runtime.is_quarantined() {
+            tracing::info!(app_id = app_id.as_str(), "worker: dropping quarantined isolate");
+            cache.isolates.remove(app_id);
+            LOADED_META.with(|m| {
+                m.borrow_mut().remove(app_id);
+            });
+            return None;
+        }
         entry.last_used = std::time::Instant::now();
         Some(HeldRuntime {
             runtime: entry.runtime.clone(),
@@ -796,12 +811,16 @@ pub fn remove_loaded_meta(app_id: &AppId) {
 fn evict_lru(cache: &mut AppCache) -> bool {
     refresh_socket_activity(cache);
 
+    // A quarantined isolate is ranked first whatever its recency: it will
+    // never serve again, so keeping it while evicting one that can would
+    // spend a slot on nothing.
     let Some(oldest_id) = cache
         .isolates
         .iter()
         .filter(|(_, entry)| !entry.runtime.is_isolate_leased())
         .min_by_key(|(_, entry)| {
             (
+                !entry.runtime.is_quarantined(),
                 entry.runtime.active_native_socket_count() > 0,
                 entry.last_used,
             )
@@ -2051,6 +2070,96 @@ mod tests {
         .expect("socket-aware eviction test thread panicked");
     }
 
+    /// Under pressure a quarantined isolate is evicted before a live one, even
+    /// when the live one is the least recently used: the quarantined one will
+    /// never serve again. The live victim here is older by a wide margin, so
+    /// recency alone would pick it and the case fails on a ranking that
+    /// ignores quarantine.
+    #[test]
+    fn evict_lru_takes_a_quarantined_isolate_before_an_older_live_one() {
+        std::thread::spawn(|| {
+            let now = Instant::now();
+            let stopped_id = AppId::mint();
+            let live_id = AppId::mint();
+            let stopped = test_runtime();
+            stopped.quarantine();
+            assert!(stopped.is_quarantined(), "the premise");
+            let live = test_runtime();
+            assert!(!live.is_quarantined(), "the premise");
+            let mut cache = AppCache {
+                isolates: HashMap::new(),
+                max_size: 2,
+            };
+            cache
+                .isolates
+                .insert(stopped_id.clone(), entry(stopped_id.clone(), stopped, now));
+            cache.isolates.insert(
+                live_id.clone(),
+                entry(live_id.clone(), live, now - Duration::from_secs(600)),
+            );
+
+            assert!(evict_lru(&mut cache));
+            assert!(
+                !cache.isolates.contains_key(&stopped_id),
+                "the quarantined isolate is the victim"
+            );
+            assert!(
+                cache.isolates.contains_key(&live_id),
+                "the older live isolate stays cached"
+            );
+        })
+        .join()
+        .expect("quarantine-aware eviction test thread panicked");
+    }
+
+    /// A quarantined isolate is dropped from the cache together with what it
+    /// was loaded against, so nothing describes an isolate the cache does not
+    /// hold. The live control keeps both, so the case is about quarantine.
+    #[test]
+    fn a_quarantined_isolate_leaves_no_loaded_metadata_behind() {
+        std::thread::spawn(|| {
+            init_cache(
+                4,
+                KernelConfig {
+                    workflows: None,
+                    db_service: None,
+                    kv_store: None,
+                    storage_backend: None,
+                    meter: Arc::new(zeroship_metering::Meter::new()),
+                    residency: None,
+                },
+            );
+            let meta = LoadedMeta {
+                deploy_hash: Some("deploy".into()),
+                env_version: 1,
+                net_policy: AppNetPolicy::default(),
+                live_bindings: std::collections::BTreeMap::new(),
+            };
+            let stopped_id = AppId::mint();
+            let live_id = AppId::mint();
+            let stopped = test_runtime();
+            stopped.quarantine();
+            for (app_id, runtime) in [(&stopped_id, stopped), (&live_id, test_runtime())] {
+                CACHE.with(|c| {
+                    c.borrow_mut().as_mut().unwrap().isolates.insert(
+                        app_id.clone(),
+                        entry(app_id.clone(), runtime, Instant::now()),
+                    );
+                });
+                set_loaded_meta(app_id.clone(), meta.clone());
+            }
+
+            assert!(get_runtime(&stopped_id).is_none(), "a quarantined isolate is not handed out");
+            assert_eq!(get_loaded_meta(&stopped_id), None, "nor is what it was loaded against kept");
+            assert!(!all_app_ids().contains(&stopped_id), "it left the cache");
+
+            assert!(get_runtime(&live_id).is_some(), "the live control is handed out");
+            assert_eq!(get_loaded_meta(&live_id), Some(meta), "and keeps its metadata");
+        })
+        .join()
+        .expect("quarantined metadata test thread panicked");
+    }
+
     #[test]
     fn evict_lru_never_evicts_leased_isolate() {
         std::thread::spawn(|| {
@@ -2138,5 +2247,238 @@ mod tests {
         })
         .join()
         .expect("socket close eviction test thread panicked");
+    }
+
+    /// An isolate that exceeds its pump CPU share answers the request it holds
+    /// with the CPU termination error, and the next request to the app runs on
+    /// a fresh isolate the worker loads, never on the stopped one.
+    ///
+    /// The cached isolate is built here, not through `load_app`, only because
+    /// its budget window has to be short enough for a case to reach; it is the
+    /// app's entry in this thread's cache like any loaded one, and the
+    /// unlimited shape (no CPU limit, no wall timeout) is the plan on which a
+    /// stranded request would wait forever.
+    #[compio::test]
+    async fn an_isolate_stopped_for_its_pump_share_is_replaced_by_the_next_request() {
+        use crate::control_fixture::{route, ControlPlane};
+        use crate::identity_fixture::gateway_authorization;
+        use crate::worker_fixture::{dispatch_frame, Worker};
+        use ntex::http::StatusCode;
+        use ntex::web::{self, test};
+        use sha2::{Digest, Sha256};
+        use zeroship_core::service_identity::endpoints;
+        use zeroship_core::types::AppVersionInfo;
+
+        let source: &[u8] = br#"
+            export default {
+                fetch(request) {
+                    if (new URL(request.url).pathname === "/spin") {
+                        return new Promise(() => {
+                            const spin = () => {
+                                const end = Date.now() + 20;
+                                while (Date.now() < end) {}
+                                setTimeout(spin, 1);
+                            };
+                            setTimeout(spin, 1);
+                        });
+                    }
+                    return new Response("served");
+                }
+            }
+        "#;
+        let worker = Worker::new();
+        let app_id = worker.app_id.clone();
+
+        let stopping = Runtime::builder()
+            .modules(test_modules(source))
+            .app_id(app_id.clone())
+            .pump_cpu_budget(Duration::from_millis(200), 0.5)
+            .build();
+        stopping.exit_isolate();
+        stopping
+            .initialize(&EnvSnapshot::empty())
+            .await
+            .expect("the stopping isolate initializes");
+        stopping.start_pump();
+        let stopped_isolate = stopping.clone().into_inner_probe_for_test();
+        CACHE.with(|c| {
+            c.borrow_mut().as_mut().expect("the worker installed its cache").isolates.insert(
+                app_id.clone(),
+                entry(app_id.clone(), stopping, Instant::now()),
+            );
+        });
+
+        // The deployment Control serves when the worker loads the app again.
+        let hash = hex::encode(Sha256::digest(source));
+        worker
+            .config
+            .blob_store
+            .put_blob(&hash, source)
+            .await
+            .expect("store the deployment blob");
+        let manifest: zeroship_bundle::Manifest = serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "worker": { "entry": "index.js", "modules": { "index.js": hash } },
+        }))
+        .expect("deployment manifest");
+        let version = serde_json::to_string(&AppVersionInfo {
+            deploy_hash: Some("pump-share-deploy".into()),
+            plan_id: "unlimited".into(),
+            runtime: AppRuntimeLimits::default(),
+            env_version: 1,
+            manifest: Some(manifest),
+            net_policy: AppNetPolicy::default(),
+            live_bindings: std::collections::BTreeMap::new(),
+        })
+        .expect("a version feed entry serializes");
+        let version_route = route(endpoints::CONTROL_APP, &app_id);
+        let env_route = route(endpoints::CONTROL_APP_ENV, &app_id);
+        let control = ControlPlane::serving(
+            2,
+            vec![
+                (version_route.clone(), version),
+                (env_route.clone(), r#"{"vars":{},"secrets":{},"expose":[]}"#.to_owned()),
+            ],
+        );
+        let config = Arc::new(crate::WorkerConfig {
+            service_auth: worker.config.service_auth.clone(),
+            control_url: control.base_url.clone(),
+            control_key: worker.config.control_key.clone(),
+            kv_store: None,
+            storage_backend: None,
+            max_isolates: worker.config.max_isolates,
+            poll_interval_secs: worker.config.poll_interval_secs,
+            shutdown_timeout_secs: worker.config.shutdown_timeout_secs,
+            blob_store: worker.config.blob_store.clone(),
+        });
+        let envs = worker.envs.clone();
+        let logs = worker.logs.clone();
+        let service = test::init_service(web::App::new().configure(move |app| {
+            app.state(config).state(envs).state(logs);
+            crate::handler::configure(app);
+        }))
+        .await;
+        let dispatch = |path: &str| {
+            test::TestRequest::post()
+                .uri(&format!("/dispatch/{}", app_id.as_str()))
+                .header("authorization", gateway_authorization())
+                .set_payload(dispatch_frame("GET", &format!("http://app.test{path}"), b""))
+                .to_request()
+        };
+
+        let before = test::call_service(&service, dispatch("/")).await;
+        assert_eq!(before.status(), StatusCode::OK, "the cached isolate serves before the stop");
+        assert_eq!(String::from_utf8_lossy(&test::read_body(before).await), "served");
+
+        let stopped = compio::time::timeout(
+            Duration::from_secs(10),
+            test::call_service(&service, dispatch("/spin")),
+        )
+        .await
+        .expect("the request holding the pump is answered, not stranded");
+        assert_eq!(stopped.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            String::from_utf8_lossy(&test::read_body(stopped).await),
+            r#"{"message":"CPU time limit exceeded","name":"Error"}"#,
+        );
+
+        let after = test::call_service(&service, dispatch("/")).await;
+        assert_eq!(after.status(), StatusCode::OK, "the next request runs on a fresh isolate");
+        assert_eq!(String::from_utf8_lossy(&test::read_body(after).await), "served");
+        assert_eq!(
+            control.served(),
+            vec![version_route, env_route],
+            "the worker loaded the app again rather than dispatching to the stopped isolate"
+        );
+        compio::time::timeout(Duration::from_secs(5), async {
+            while stopped_isolate.strong_count() != 0 {
+                compio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the worker released the stopped isolate");
+    }
+
+    /// A response body the stop cuts off reaches the gateway as a body that
+    /// failed, never as one that ended: the chunks streamed before the stop,
+    /// then an error, which ntex turns into a connection dropped before the
+    /// final chunk. A clean end would present the prefix as the whole body.
+    #[compio::test]
+    async fn a_body_the_stop_cuts_off_ends_in_an_error_not_a_clean_end() {
+        use crate::identity_fixture::gateway_authorization;
+        use crate::worker_fixture::{dispatch_frame, Worker};
+        use ntex::http::body::MessageBody;
+        use ntex::http::StatusCode;
+        use ntex::web::{self, test};
+
+        let source: &[u8] = br"
+            const encoder = new TextEncoder();
+            export default {
+                fetch() {
+                    let chunk = 0;
+                    return new Response(new ReadableStream({
+                        async pull(controller) {
+                            await new Promise((resolve) => setTimeout(resolve, 1));
+                            const end = Date.now() + 20;
+                            while (Date.now() < end) {}
+                            controller.enqueue(encoder.encode(`chunk ${chunk++}\n`));
+                        },
+                    }));
+                }
+            }
+        ";
+        let worker = Worker::new();
+        let app_id = worker.app_id.clone();
+        let stopping = Runtime::builder()
+            .modules(test_modules(source))
+            .app_id(app_id.clone())
+            .pump_cpu_budget(Duration::from_millis(200), 0.5)
+            .build();
+        stopping.exit_isolate();
+        stopping
+            .initialize(&EnvSnapshot::empty())
+            .await
+            .expect("the stopping isolate initializes");
+        stopping.start_pump();
+        CACHE.with(|c| {
+            c.borrow_mut().as_mut().expect("the worker installed its cache").isolates.insert(
+                app_id.clone(),
+                entry(app_id.clone(), stopping, Instant::now()),
+            );
+        });
+
+        let service = test::init_service(web::App::new().configure(worker.configure())).await;
+        let request = test::TestRequest::post()
+            .uri(&format!("/dispatch/{}", app_id.as_str()))
+            .header("authorization", gateway_authorization())
+            .set_payload(dispatch_frame("GET", "http://app.test/", b""))
+            .to_request();
+        let mut response = test::call_service(&service, request).await;
+        assert_eq!(response.status(), StatusCode::OK, "the head went out before the stop");
+        let mut body = response.take_body();
+        let items = compio::time::timeout(Duration::from_secs(10), async {
+            let mut items = Vec::new();
+            while let Some(item) = std::future::poll_fn(|cx| body.poll_next_chunk(cx)).await {
+                items.push(item.map(|bytes| bytes.to_vec()).map_err(|error| error.to_string()));
+            }
+            items
+        })
+        .await
+        .expect("the body ends once the isolate is stopped");
+
+        let (last, streamed) = items.split_last().expect("the body carried something");
+        assert!(
+            !streamed.is_empty() && streamed.iter().all(Result::is_ok),
+            "chunks streamed before the stop: {items:?}"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(streamed[0].as_ref().unwrap()),
+            "chunk 0\n"
+        );
+        assert_eq!(
+            last.as_ref().map(|bytes| String::from_utf8_lossy(bytes).into_owned()).map_err(String::as_str),
+            Err("CPU time limit exceeded"),
+            "the body ends in the failure that cut it, not cleanly"
+        );
     }
 }

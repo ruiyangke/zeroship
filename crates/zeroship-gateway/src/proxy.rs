@@ -371,33 +371,7 @@ async fn forward_to_worker_path(
 
     if parsed.is_chunked {
         let (tx, rx) = ntex::channel::mpsc::channel();
-
-        compio::runtime::spawn(async move {
-            let mut leftover = parsed.trailing;
-
-            loop {
-                while let ChunkDecode::Complete(data, consumed) = decode_next_chunk(&leftover) {
-                    if data.is_empty() {
-                        return;
-                    }
-                    let item: Result<ntex::util::Bytes, std::io::Error> =
-                        Ok(ntex::util::Bytes::from(data));
-                    if tx.send(item).is_err() {
-                        return;
-                    }
-                    leftover = leftover[consumed..].to_vec();
-                }
-
-                let read_buf = vec![0u8; 4096];
-                let BufResult(r, returned) = stream.read(read_buf).await;
-                match r {
-                    Ok(0) => return,
-                    Ok(n) => leftover.extend_from_slice(&returned[..n]),
-                    Err(_) => return,
-                }
-            }
-        }).detach();
-
+        compio::runtime::spawn(relay_chunked(stream, parsed.trailing, tx)).detach();
         Ok(builder.streaming(rx))
     } else {
         let response_body = compio::time::timeout(
@@ -410,6 +384,49 @@ async fn forward_to_worker_path(
 
         CONN_POOL.with(|p| p.borrow_mut().put(key, stream));
         Ok(builder.body(response_body))
+    }
+}
+
+/// Relay a chunked upstream body into `tx`, starting from the bytes already
+/// read past its headers, until its terminating zero-length chunk.
+///
+/// An upstream that closes or fails before that chunk sent an incomplete
+/// body: a worker ends a response that way when the code producing it failed
+/// part-way. The relay ends the downstream body with an error in that case,
+/// never with a clean end, which would tell the client a cut-off body was
+/// whole.
+async fn relay_chunked(
+    mut stream: Stream,
+    mut leftover: Vec<u8>,
+    tx: ntex::channel::mpsc::Sender<Result<ntex::util::Bytes, std::io::Error>>,
+) {
+    loop {
+        while let ChunkDecode::Complete(data, consumed) = decode_next_chunk(&leftover) {
+            if data.is_empty() {
+                return;
+            }
+            if tx.send(Ok(ntex::util::Bytes::from(data))).is_err() {
+                return;
+            }
+            leftover = leftover[consumed..].to_vec();
+        }
+
+        let read_buf = vec![0u8; 4096];
+        let BufResult(r, returned) = stream.read(read_buf).await;
+        let cut = match r {
+            Ok(0) => std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "upstream response ended before its final chunk",
+            ),
+            Ok(n) => {
+                leftover.extend_from_slice(&returned[..n]);
+                continue;
+            }
+            Err(error) => error,
+        };
+        // Both ways the upstream can stop short end the body the same way.
+        let _ = tx.send(Err(cut));
+        return;
     }
 }
 
@@ -831,34 +848,7 @@ pub async fn forward_http(
 
     if parsed.is_chunked {
         let (tx, rx) = ntex::channel::mpsc::channel();
-
-        compio::runtime::spawn(async move {
-            let mut leftover = parsed.trailing;
-
-            loop {
-                while let ChunkDecode::Complete(data, consumed) = decode_next_chunk(&leftover) {
-                    if data.is_empty() {
-                        return;
-                    }
-                    let item: Result<ntex::util::Bytes, std::io::Error> =
-                        Ok(ntex::util::Bytes::from(data));
-                    if tx.send(item).is_err() {
-                        return;
-                    }
-                    leftover = leftover[consumed..].to_vec();
-                }
-
-                let read_buf = vec![0u8; 4096];
-                let BufResult(r, returned) = stream.read(read_buf).await;
-                match r {
-                    Ok(0) => return,
-                    Ok(n) => leftover.extend_from_slice(&returned[..n]),
-                    Err(_) => return,
-                }
-            }
-        })
-        .detach();
-
+        compio::runtime::spawn(relay_chunked(stream, parsed.trailing, tx)).detach();
         Ok(builder.streaming(rx))
     } else {
         let response_body = compio::time::timeout(
@@ -1335,5 +1325,116 @@ mod pooled_retry_tests {
             1,
             "exactly one worker should have actually received the request"
         );
+    }
+}
+
+#[cfg(test)]
+mod chunked_relay_tests {
+    //! What the gateway forwards when a worker's chunked body is cut short.
+    //!
+    //! A worker whose response producer fails part-way drops the connection
+    //! without the terminating zero-length chunk. A live `compio` listener
+    //! plays that worker here, and the assertion is on the body the gateway
+    //! hands its own client: the chunk that arrived, then an error - never a
+    //! clean end, which would present the prefix as the whole body.
+
+    use super::*;
+    use ntex::http::body::{Body, MessageBody, ResponseBody};
+
+    const HEAD: &[u8] = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+
+    /// A worker that reads one whole request, answers with `body` after a
+    /// chunked head, and closes.
+    async fn worker_answering(body: &'static [u8]) -> String {
+        let listener = compio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the worker");
+        let url = format!("http://{}", listener.local_addr().expect("its address"));
+        compio::runtime::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            // Read the whole request first, so closing afterwards is a FIN
+            // and never a reset that could discard the answer.
+            let mut request = Vec::new();
+            loop {
+                let BufResult(read, buf) =
+                    compio::io::AsyncRead::read(&mut stream, vec![0u8; 4096]).await;
+                match read {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => request.extend_from_slice(&buf[..n]),
+                }
+                let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
+                    continue;
+                };
+                let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                let length = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if request.len() >= end + 4 + length {
+                    break;
+                }
+            }
+            let mut answer = HEAD.to_vec();
+            answer.extend_from_slice(body);
+            let _ = compio::io::AsyncWriteExt::write_all(&mut stream, answer).await;
+        })
+        .detach();
+        url
+    }
+
+    /// Every item of the body the gateway serves, until its end.
+    async fn relayed(worker_url: &str) -> Vec<Result<Vec<u8>, String>> {
+        let mut response = forward_to_worker_path(
+            worker_url,
+            "/dispatch/test",
+            &AppId::mint(),
+            "plan_test",
+            &Uuid::new_v4(),
+            b"{}",
+            None,
+            None,
+        )
+        .await
+        .expect("the worker answered its head");
+        let mut body: ResponseBody<Body> = response.take_body();
+        compio::time::timeout(Duration::from_secs(10), async {
+            let mut items = Vec::new();
+            while let Some(item) = std::future::poll_fn(|cx| body.poll_next_chunk(cx)).await {
+                items.push(item.map(|bytes| bytes.to_vec()).map_err(|error| error.to_string()));
+            }
+            items
+        })
+        .await
+        .expect("the relayed body ends")
+    }
+
+    /// Two cuts: the connection closing straight after a chunk, and what the
+    /// worker's HTTP server actually sends when a body fails - its own error
+    /// response head where the next chunk would go, then the close.
+    #[compio::test]
+    async fn a_chunked_body_cut_short_reaches_the_client_as_an_error() {
+        for cut in [
+            &b"5\r\nhello\r\n"[..],
+            b"5\r\nhello\r\nHTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+        ] {
+            let items = relayed(&worker_answering(cut).await).await;
+            assert_eq!(items.len(), 2, "the chunk, then the end of the body: {items:?}");
+            assert_eq!(items[0], Ok(b"hello".to_vec()));
+            assert!(
+                items[1].is_err(),
+                "a body that lost its final chunk must end in an error, not cleanly: {items:?}"
+            );
+        }
+    }
+
+    /// The rejection control: the same body WITH its final chunk ends
+    /// cleanly, so the case above is about the missing chunk alone.
+    #[compio::test]
+    async fn a_complete_chunked_body_ends_cleanly() {
+        let items = relayed(&worker_answering(b"5\r\nhello\r\n0\r\n\r\n").await).await;
+        assert_eq!(items, vec![Ok(b"hello".to_vec())]);
     }
 }

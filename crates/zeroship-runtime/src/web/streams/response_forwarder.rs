@@ -610,6 +610,61 @@ fn error_forwarder(fwd: &ResponseForwarder, state: &SharedState, stream_id: u32,
     if let Some(request) = request { request.release(state); }
 }
 
+/// End every body this isolate is still forwarding, as a failure carrying
+/// `msg`. Called when the isolate is quarantined: no JavaScript runs in it
+/// again, so no read loop would ever deliver another chunk or close its body,
+/// and a consumer left waiting on one would wait forever. Runs no JavaScript
+/// itself; the readers are released, not cancelled.
+///
+/// A plain body is aborted, so its consumer can tell the cut from a clean end.
+/// An RPC stream carries its own end-of-stream protocol, and a client reads a
+/// body that stops without its terminal frame as a stream that finished, so
+/// it is given the terminal error frame first and then closed - the same end
+/// `cancel_reader` gives a cancelled one.
+pub(crate) fn fail_all(state: &SharedState, msg: &'static str) {
+    let forwarders: Vec<(u32, ResponseForwarder)> = state
+        .borrow()
+        .response_forwarders
+        .iter()
+        .map(|(&stream_id, fwd)| (stream_id, fwd.clone()))
+        .collect();
+    for (stream_id, fwd) in forwarders {
+        let (closed, rpc_framing, request_id) = {
+            let inner = fwd.borrow();
+            let request_id = inner.request.as_ref().map_or(0, |request| request.request_id);
+            (inner.closed, inner.rpc_framing, request_id)
+        };
+        if closed {
+            continue;
+        }
+        if !rpc_framing {
+            error_forwarder(&fwd, state, stream_id, msg);
+            continue;
+        }
+        let failure = crate::rpc::dispatch::response::host_error(
+            msg,
+            crate::rpc::ZsErrorCode::Internal,
+        );
+        let delivered = match crate::rpc::dispatch::stream::terminal_error(failure, request_id) {
+            Ok(frame) => {
+                let mut inner = fwd.borrow_mut();
+                if let Some(writer) = &inner.direct_writer {
+                    matches!(writer.push(frame), StreamPushResult::Ok)
+                } else {
+                    inner.buffer.push_back(frame);
+                    true
+                }
+            }
+            Err(_) => false,
+        };
+        if delivered {
+            close_forwarder(&fwd, state, stream_id);
+        } else {
+            error_forwarder(&fwd, state, stream_id, msg);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Kernel API — used by `runtime::build_fetch_outcome`
 // ---------------------------------------------------------------------------

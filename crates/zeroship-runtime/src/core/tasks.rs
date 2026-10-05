@@ -77,6 +77,11 @@ impl RuntimeTasks {
         self.0.active.get() == 0
     }
 
+    /// True once [`Self::cancel`] has closed the group. Nothing reopens it.
+    pub(crate) fn is_closed(&self) -> bool {
+        self.0.closed.get()
+    }
+
     pub(crate) async fn join(&self) {
         if self.0.active.get() != 0 {
             let (sender, receiver) = oneshot::channel();

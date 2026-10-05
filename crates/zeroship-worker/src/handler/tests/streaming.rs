@@ -126,3 +126,78 @@ async fn a_streamed_body_holds_its_app_until_the_stream_ends() {
         "with the stream gone nothing holds the app"
     );
 }
+
+/// A streamed body, built by the worker's own `stream_response`, whose
+/// producer pushed one chunk and then either failed or closed.
+fn ended_body(failed: bool) -> web::HttpResponse {
+    let (writer, reader) = stream_buffer_with_cap(1024);
+    assert!(matches!(writer.push(b"hello".to_vec()), StreamPushResult::Ok));
+    if failed {
+        writer.abort("producer failed");
+    } else {
+        writer.close();
+    }
+    let app_id = AppId::mint();
+    stream_response(200, &[], reader, app_id.clone(), crate::cache::hold(&app_id))
+}
+
+/// The bytes a client reads off the wire for that body, from the worker's
+/// HTTP server: a real listener, a raw request, everything until the server
+/// closes the connection.
+async fn wire_bytes(path: &str) -> String {
+    let server = test::server(|| async {
+        web::App::new()
+            .route("/failed", web::get().to(|| async { ended_body(true) }))
+            .route("/closed", web::get().to(|| async { ended_body(false) }))
+    })
+    .await;
+    let mut client = compio::net::TcpStream::connect(server.addr())
+        .await
+        .expect("connect to the worker");
+    let request = format!("GET {path} HTTP/1.1\r\nhost: worker\r\nconnection: close\r\n\r\n");
+    let compio::buf::BufResult(written, _) =
+        compio::io::AsyncWriteExt::write_all(&mut client, request.into_bytes()).await;
+    written.expect("send the request");
+    compio::time::timeout(Duration::from_secs(10), async {
+        let mut received = Vec::new();
+        loop {
+            let compio::buf::BufResult(read, buf) =
+                compio::io::AsyncRead::read(&mut client, vec![0u8; 4096]).await;
+            match read {
+                Ok(0) | Err(_) => return String::from_utf8_lossy(&received).into_owned(),
+                Ok(n) => received.extend_from_slice(&buf[..n]),
+            }
+        }
+    })
+    .await
+    .expect("the worker closes the connection")
+}
+
+/// A body whose producer failed leaves the worker without its terminating
+/// chunk: the client reads the chunk that streamed, then bytes that are no
+/// chunk at all, then the close - a chunked read that fails, not a body that
+/// ended. (ntex writes its own error response head where the next chunk would
+/// go; whatever it writes there, no client can read it as the body's end.)
+#[ntex::test]
+async fn a_failed_stream_leaves_the_worker_without_its_terminating_chunk() {
+    let response = wire_bytes("/failed").await;
+    let (head, body) = response.split_once("\r\n\r\n").expect("the head went out");
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    let rest = body
+        .strip_prefix("5\r\nhello\r\n")
+        .unwrap_or_else(|| panic!("the chunk that streamed went out first: {body:?}"));
+    let next_size = rest.split("\r\n").next().unwrap_or_default();
+    assert!(
+        rest.is_empty() || usize::from_str_radix(next_size.trim(), 16).is_err(),
+        "nothing after the chunk reads as another chunk, terminating or not: {rest:?}"
+    );
+}
+
+/// The rejection control: the same body closed normally carries its
+/// terminating chunk, so the case above is about the failure alone.
+#[ntex::test]
+async fn a_closed_stream_leaves_the_worker_with_its_terminating_chunk() {
+    let response = wire_bytes("/closed").await;
+    let (_, body) = response.split_once("\r\n\r\n").expect("the head went out");
+    assert_eq!(body, "5\r\nhello\r\n0\r\n\r\n");
+}

@@ -654,6 +654,15 @@ fn stream_response(
                         let _ = tx.send(Ok(Bytes::from(chunk)));
                     }
                 }
+                // A producer that failed wrote a prefix, not a body. Ending
+                // the response normally would tell the client the prefix was
+                // the whole of it, so the failure goes into the body instead.
+                // ntex then never writes the final chunk: it writes its own
+                // error response head where the next chunk would go and
+                // closes the connection, so a client's chunked read fails.
+                if let Some(error) = reader.error() {
+                    let _ = tx.send(Err(std::io::Error::other(error)));
+                }
                 flush_delta!(); // final delta
                 return; // tx drops → stream ends → HTTP response completes
             }

@@ -299,6 +299,23 @@ const MAX_READY_TIMERS_PER_PASS: usize = 64;
 /// isolate genuinely has nothing else to do but run more zero-delay timers.
 const READY_TIMER_PASS_TICK: Duration = Duration::from_micros(50);
 
+/// The window over which an isolate's pump-side JavaScript is measured against
+/// wall time. See [`RuntimeInner::record_pump_cpu`].
+const BUDGET_WINDOW: Duration = Duration::from_secs(10);
+
+/// The largest share of [`BUDGET_WINDOW`] the pump may spend running app
+/// JavaScript before the isolate is stopped. See
+/// [`RuntimeInner::record_pump_cpu`].
+const MAX_CPU_FRACTION: f64 = 0.80;
+
+/// What [`RuntimeInner::record_pump_cpu`] measured over a window that closed
+/// above the allowed share: the share taken and the wall time it was taken over.
+#[derive(Clone, Copy)]
+struct PumpShareExceeded {
+    fraction: f64,
+    wall: Duration,
+}
+
 // ---------------------------------------------------------------------------
 // Runtime — the public handle
 // ---------------------------------------------------------------------------
@@ -635,34 +652,17 @@ impl Runtime {
     /// Native task teardown retains the isolate until its futures are destroyed.
     /// Hosts may call this synchronously when a workflow loses its authority.
     pub fn quarantine(&self) {
-        let tasks = self.state().borrow().tasks.clone();
-        if !tasks.cancel() {
-            return;
-        }
-        let queued = {
-            let mut inner = self.inner.borrow_mut();
-            inner.fail_startup("runtime has been quarantined".into());
-            inner.advance_startup();
-            for request in inner.pending_requests.values() {
-                request.cancel.cancel();
-            }
-            inner.cleanup_cancelled_requests();
-            let mut state = inner.state.borrow_mut();
-            state.spawned_timers.clear();
-            state.ready_timers.clear();
-            std::mem::take(&mut state.spawned_ops)
-        };
-        drop(queued);
-        self.close_native_sockets_for_eviction();
-        if !tasks.is_idle() {
-            let keep_alive = self.clone();
-            // The supervisor is outside the cancelled group. It preserves V8
-            // until pump and socket futures have dropped their native handles.
-            compio::runtime::spawn(async move {
-                tasks.join().await;
-                drop(keep_alive);
-            }).detach();
-        }
+        RuntimeInner::quarantine(&self.inner, "runtime has been quarantined");
+    }
+
+    /// True once this runtime is quarantined, by its host through
+    /// [`Self::quarantine`] or by the runtime itself when its event pump
+    /// exceeded its CPU share. A quarantined runtime never runs app code
+    /// again, so a host that caches runtimes replaces it rather than
+    /// dispatching to it.
+    #[must_use]
+    pub fn is_quarantined(&self) -> bool {
+        self.state().borrow().tasks.is_closed()
     }
 
     /// Join native task teardown after permanently quarantining the isolate.
@@ -758,6 +758,9 @@ pub struct RuntimeBuilder {
     runtime_descriptor: Option<String>,
     validate_rpc_output: bool,
     dev_entry_loader: Option<String>,
+    /// Override for the pump CPU share budget. `None` keeps `BUDGET_WINDOW`
+    /// and `MAX_CPU_FRACTION`.
+    pump_cpu_budget: Option<(Duration, f64)>,
 }
 
 impl RuntimeBuilder {
@@ -898,6 +901,36 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Replace the pump CPU share budget: the window over which the event
+    /// pump's app JavaScript is measured against wall time, and the largest
+    /// share of that window it may take before the isolate is stopped.
+    ///
+    /// Not a creator-app capability and not reachable from JS: it is a
+    /// trusted-Rust construction knob, like `egress_resolver`. Hosts leave it
+    /// unset and get `BUDGET_WINDOW` and `MAX_CPU_FRACTION`. It exists so a
+    /// test can reach the stop without holding a core for the whole
+    /// production window, so it can only tighten the guard, never loosen or
+    /// disable it.
+    ///
+    /// # Panics
+    ///
+    /// Unless `window` is non-zero and at most `BUDGET_WINDOW`, and
+    /// `max_fraction` is above zero and at most `MAX_CPU_FRACTION`. A NaN
+    /// fraction is refused.
+    #[must_use]
+    pub fn pump_cpu_budget(mut self, window: Duration, max_fraction: f64) -> Self {
+        assert!(
+            Duration::ZERO < window && window <= BUDGET_WINDOW,
+            "pump CPU budget window must be non-zero and at most {BUDGET_WINDOW:?}, got {window:?}"
+        );
+        assert!(
+            0.0 < max_fraction && max_fraction <= MAX_CPU_FRACTION,
+            "pump CPU budget share must be above zero and at most {MAX_CPU_FRACTION}, got {max_fraction}"
+        );
+        self.pump_cpu_budget = Some((window, max_fraction));
+        self
+    }
+
     /// Build the runtime. Panics on V8 init failure (same as the underlying
     /// `v8::Isolate::new` call — not newly fallible here).
     pub fn build(self) -> Runtime {
@@ -924,6 +957,10 @@ impl RuntimeBuilder {
         );
         inner.state.borrow_mut().validate_rpc_output = self.validate_rpc_output;
         inner.dev_entry_factory = self.dev_entry_loader;
+        if let Some((window, max_fraction)) = self.pump_cpu_budget {
+            inner.pump_budget_window = window;
+            inner.pump_max_cpu_fraction = max_fraction;
+        }
         Runtime {
             inner: Rc::new(RefCell::new(inner)),
             limits,
@@ -1060,8 +1097,10 @@ pub(crate) struct RuntimeInner {
     /// callback has to leave a note.
     terminated_note: Arc<std::sync::atomic::AtomicBool>,
 
-    /// Which limit set `terminated_note`. Only the CPU timer writes `true`
-    /// here, so an unset value with the note set means the heap callback.
+    /// Which limit set `terminated_note`. Only a CPU budget writes `true`
+    /// here - the CPU timer, the startup and dev-entry CPU accounting, and the
+    /// pump share stop - so an unset value with the note set means the heap
+    /// callback.
     cpu_note: Arc<std::sync::atomic::AtomicBool>,
 
     /// Host interruption is permanent; limit recovery cannot resume app code.
@@ -1091,6 +1130,12 @@ pub(crate) struct RuntimeInner {
     pump_cpu_accumulated: Duration,
     /// Wall-clock start of the current budget window.
     pump_wall_start: Instant,
+    /// Length of the budget window: `BUDGET_WINDOW` unless the builder
+    /// replaced it.
+    pump_budget_window: Duration,
+    /// Largest share of the window the pump may spend in app JavaScript:
+    /// `MAX_CPU_FRACTION` unless the builder replaced it.
+    pump_max_cpu_fraction: f64,
 
     /// Sub-microsecond remainder of pump CPU not yet handed to the meter.
     ///
@@ -1383,6 +1428,8 @@ impl RuntimeInner {
 
             pump_cpu_accumulated: Duration::ZERO,
             pump_wall_start: Instant::now(),
+            pump_budget_window: BUDGET_WINDOW,
+            pump_max_cpu_fraction: MAX_CPU_FRACTION,
             pump_cpu_unmetered: Duration::ZERO,
             app_id,
             // `Isolate::new()` enters the isolate, so we boot with depth 1.
@@ -1426,6 +1473,50 @@ impl RuntimeInner {
     pub fn notify_pump(&self) {
         if let Some(tx) = &self.pump_notify_tx {
             let _ = tx.clone().try_send(());
+        }
+    }
+
+    /// Permanently stop app dispatch and cancel this isolate's native work.
+    /// `reason` is what later dispatch and any request still waiting on
+    /// startup are refused with, and what every response body still being
+    /// forwarded is failed with. Requests still pending on the pump are
+    /// cancelled; a caller that owes them a more specific answer settles them
+    /// first.
+    ///
+    /// Takes the shared cell rather than `&mut self` because the supervisor it
+    /// may spawn has to keep the isolate alive until native teardown finishes.
+    fn quarantine(this: &Rc<RefCell<Self>>, reason: &'static str) {
+        let tasks = this.borrow().state.borrow().tasks.clone();
+        if !tasks.cancel() {
+            return;
+        }
+        let (queued, state) = {
+            let mut inner = this.borrow_mut();
+            inner.fail_startup(reason.into());
+            inner.advance_startup();
+            for request in inner.pending_requests.values() {
+                request.cancel.cancel();
+            }
+            inner.cleanup_cancelled_requests();
+            let state = inner.state.clone();
+            let mut s = state.borrow_mut();
+            s.spawned_timers.clear();
+            s.ready_timers.clear();
+            let queued = std::mem::take(&mut s.spawned_ops);
+            drop(s);
+            (queued, state)
+        };
+        drop(queued);
+        crate::streams::response_forwarder::fail_all(&state, reason);
+        crate::node::net::state::destroy_all_sockets(&state);
+        if !tasks.is_idle() {
+            let keep_alive = this.clone();
+            // The supervisor is outside the cancelled group. It preserves V8
+            // until pump and socket futures have dropped their native handles.
+            compio::runtime::spawn(async move {
+                tasks.join().await;
+                drop(keep_alive);
+            }).detach();
         }
     }
 
@@ -1834,22 +1925,25 @@ impl RuntimeInner {
                     //    keyed by app and this Runtime is one app's isolate,
                     //    so the attribution billing needs is already exact.
                     // 2. ENFORCEMENT — if those continuations (timer
-                    //    callbacks, microtask chains) consume >80% of WALL
-                    //    time over a 10 s window, terminate the isolate. The
-                    //    per-request CPU timer doesn't catch pump-side work.
+                    //    callbacks, microtask chains) take more than the
+                    //    budget's share of WALL time over its window, stop the
+                    //    isolate. The per-request CPU timer doesn't catch
+                    //    pump-side work.
                     //
                     // Different clocks on purpose: money is charged on CPU,
                     // share-of-the-machine is policed on wall.
                     rt.bill_pump_cpu(
                         crate::core::init::thread_cpu_time().saturating_sub(cpu_start),
                     );
-                    if rt.record_pump_cpu(v8_start.elapsed()) {
-                        // Isolate is terminated — all pending requests
-                        // will get "CPU limit exceeded" on the next
-                        // check_v8_terminated call. Break out of the pump
-                        // loop; the Runtime will be dropped by cache
-                        // eviction or process shutdown.
-                        break;
+                    if let Some(exceeded) = rt.record_pump_cpu(v8_start.elapsed()) {
+                        // This pump is the only thing that drives the
+                        // isolate's pending requests, timers and native work,
+                        // so ending it without the stop would strand every one
+                        // of them. The stop answers them and quarantines the
+                        // isolate, which also cancels this task.
+                        drop(rt);
+                        Self::stop_for_pump_share(&runtime, exceeded);
+                        return;
                     }
                 }
 
@@ -3530,46 +3624,83 @@ impl RuntimeInner {
         }
     }
 
-    /// Record `elapsed` CPU time consumed by the pump for this Runtime.
-    /// Returns `true` if the cumulative budget is exceeded (the caller
-    /// should terminate the isolate).
+    /// Record `elapsed` wall time the pump spent running this isolate's
+    /// JavaScript. Returns what was measured when the window closes over more
+    /// than the allowed share; the caller then stops the isolate through
+    /// [`Self::stop_for_pump_share`].
     ///
     /// ENFORCEMENT ONLY. Billing is [`Self::bill_pump_cpu`], which the pump
     /// calls separately around every V8 window — including the PHASE 1 window
     /// this budget does not see. Keep the two apart: this one is a safety
     /// mechanism whose inputs and thresholds must not drift to suit billing.
     ///
-    /// Budget: an app may consume at most 80% of real wall time over any
-    /// 10-second window. A `setInterval(() => { while(...) {} }, 100)`
-    /// loop that burns 99 ms of every 100 ms would cross this in ~10 s.
-    /// The per-request CPU timer catches synchronous dispatch overruns,
-    /// but it doesn't see pump-side work (timer callbacks, microtask
-    /// checkpoints) — this budget does.
-    pub fn record_pump_cpu(&mut self, elapsed: Duration) -> bool {
-        const BUDGET_WINDOW: Duration = Duration::from_secs(10);
-        const MAX_CPU_FRACTION: f64 = 0.80;
-
+    /// Budget: pump-side JavaScript may take at most `pump_max_cpu_fraction`
+    /// (`MAX_CPU_FRACTION`) of real wall time over a window of
+    /// `pump_budget_window` (`BUDGET_WINDOW`). A `setInterval` whose callback
+    /// busy-waits for most of its period crosses it within one window. The
+    /// per-request CPU timer catches synchronous dispatch overruns, but it
+    /// doesn't see pump-side work (timer callbacks, microtask checkpoints);
+    /// this budget does.
+    fn record_pump_cpu(&mut self, elapsed: Duration) -> Option<PumpShareExceeded> {
         self.pump_cpu_accumulated += elapsed;
         let wall = self.pump_wall_start.elapsed();
 
-        if wall < BUDGET_WINDOW {
-            return false;
+        if wall < self.pump_budget_window {
+            return None;
         }
 
         let fraction = self.pump_cpu_accumulated.as_secs_f64() / wall.as_secs_f64();
-        if fraction > MAX_CPU_FRACTION {
-            tracing::warn!(
-                cpu_fraction = fraction,
-                wall_secs = wall.as_secs_f64(),
-                "runtime pump CPU budget exceeded; terminating isolate"
-            );
-            return true;
+        if fraction > self.pump_max_cpu_fraction {
+            return Some(PumpShareExceeded { fraction, wall });
         }
 
         // Reset window for the next period.
         self.pump_cpu_accumulated = Duration::ZERO;
         self.pump_wall_start = Instant::now();
-        false
+        None
+    }
+
+    /// Stop this isolate for exceeding its pump CPU share, the way a CPU
+    /// overrun stops a request.
+    ///
+    /// The share is policed per isolate rather than per request, so the stop
+    /// is too. Every request still pending on the isolate is answered with the
+    /// termination error the CPU limit produces, and the isolate is
+    /// quarantined: its pump and native work are cancelled, later dispatch is
+    /// refused with the same cause, and [`Runtime::is_quarantined`] tells a
+    /// caching host to replace it.
+    ///
+    /// No creator JavaScript runs here. The pending requests are answered
+    /// directly, before quarantine's cancellation sweep would enter V8 to
+    /// abort their signals.
+    fn stop_for_pump_share(this: &Rc<RefCell<Self>>, exceeded: PumpShareExceeded) {
+        let (cause, failed, app_id) = {
+            let mut rt = this.borrow_mut();
+            // Leave the note the CPU timer leaves, so the detection every
+            // limit goes through records this cause rather than whichever
+            // limit last fired on this isolate.
+            rt.cpu_note.store(true, std::sync::atomic::Ordering::Relaxed);
+            rt.enter_isolate();
+            rt.check_v8_terminated();
+            rt.exit_isolate();
+            let cause = rt.termination_message();
+            let pending: Vec<(u64, PendingRequest)> = rt.pending_requests.drain().collect();
+            let failed = pending.len();
+            for (id, request) in pending {
+                rt.drain_request_logs(id);
+                rt.drop_timers_owned_by(id);
+                send_pending_error(request, cause);
+            }
+            (cause, failed, rt.app_id.clone())
+        };
+        Self::quarantine(this, cause);
+        tracing::warn!(
+            app_id = app_id.as_ref().map(AppId::as_str),
+            cpu_fraction = exceeded.fraction,
+            wall_secs = exceeded.wall.as_secs_f64(),
+            failed_requests = failed,
+            "runtime pump CPU share exceeded; isolate quarantined and its pending requests failed"
+        );
     }
 
     /// Bill one pump V8 window's CPU to this app's `cpu_us` meter.
@@ -4578,4 +4709,55 @@ mod rpc_path_anchor_tests {
     // raw request-target and deliberately does no unescaping — and whether the
     // resolved id names a procedure at all, which is the dispatcher's job
     // downstream.
+}
+
+#[cfg(test)]
+mod pump_cpu_budget_tests {
+    use std::time::Duration;
+
+    use super::{RuntimeBuilder, BUDGET_WINDOW, MAX_CPU_FRACTION};
+
+    fn refused(window: Duration, max_fraction: f64) -> bool {
+        std::panic::catch_unwind(|| {
+            let _ = RuntimeBuilder::default().pump_cpu_budget(window, max_fraction);
+        })
+        .is_err()
+    }
+
+    /// The knob exists for tests to reach the stop sooner, so it may only
+    /// tighten the guard. Every value that would loosen or disable it, or stop
+    /// an isolate on its first batch of pump work, is refused.
+    #[test]
+    fn the_budget_override_refuses_anything_that_loosens_or_disables_the_guard() {
+        let refusals = [
+            (Duration::ZERO, 0.5),
+            (BUDGET_WINDOW + Duration::from_nanos(1), 0.5),
+            (Duration::MAX, 0.5),
+            (Duration::from_millis(200), 0.0),
+            (Duration::from_millis(200), -0.5),
+            (Duration::from_millis(200), MAX_CPU_FRACTION + 0.01),
+            (Duration::from_millis(200), 1.0),
+            (Duration::from_millis(200), f64::INFINITY),
+            (Duration::from_millis(200), f64::NAN),
+        ];
+        for (window, max_fraction) in refusals {
+            assert!(
+                refused(window, max_fraction),
+                "pump_cpu_budget({window:?}, {max_fraction}) must be refused"
+            );
+        }
+
+        // The rejection control: values that only tighten the guard, up to
+        // and including the production budget itself, are accepted.
+        for (window, max_fraction) in [
+            (Duration::from_millis(200), 0.5),
+            (Duration::from_nanos(1), f64::MIN_POSITIVE),
+            (BUDGET_WINDOW, MAX_CPU_FRACTION),
+        ] {
+            assert!(
+                !refused(window, max_fraction),
+                "pump_cpu_budget({window:?}, {max_fraction}) must be accepted"
+            );
+        }
+    }
 }

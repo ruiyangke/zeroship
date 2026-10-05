@@ -8,6 +8,17 @@ use super::procedure::{
     FailureStage, Invocation, InvocationError, InvokeFailure, attempt, property,
 };
 
+/// A failure the host authored, with a fixed message the client may read at
+/// any status: the envelope carries `code` and its default retryability, and
+/// the HTTP status is the code's own.
+pub(crate) fn host_error(message: &'static str, code: crate::rpc::ZsErrorCode) -> DispatchResult {
+    DispatchResult::HttpResponse(ResponseInfo::Complete {
+        status: code.http_status(),
+        headers: vec![("content-type".into(), "application/json".into())],
+        body: crate::dispatch::build_host_error_body(message, code).into_bytes(),
+    })
+}
+
 pub(crate) fn error_value(message: String, status: u16, code: &str) -> DispatchResult {
     DispatchResult::ErrorValue {
         message,

@@ -72,20 +72,73 @@ The CPU budget above is charged in CPU time. A second limit polices the work
 your app runs outside any single request: the timer callbacks and promise
 continuations the isolate's event pump executes, which is where a streaming
 loop's per-chunk step runs once a read or write has resolved. That pump work is
-measured against wall time over a rolling window, and the check applies on
-**every** plan, including `unlimited`. It is the one runtime cap `unlimited`
-does not remove.
+measured against wall time, and the check applies on **every** plan, including
+`unlimited`. It is the one runtime cap `unlimited` does not remove.
 
 The runtime adds up the JavaScript time your app spends in that pump work and
-compares it against the wall time of the window:
+compares it against the wall time of a window:
 
 | | value |
 | --- | --- |
 | window | 10 s |
 | largest share of the window spent running pump work | 80% |
 
-An isolate whose pump-side JavaScript exceeds that share over the window is
-stopped, and its event pump drives none of its pending work after that.
+Windows are fixed, not rolling. The first one starts when the isolate is
+created. Each time the pump finishes a batch of your callbacks, it checks
+whether the current window has lasted at least 10 s. If it has, the share is
+taken over the whole time since the window began: above 80%, the isolate is
+stopped; otherwise that window ends and the next one starts. Time in which no
+pump work runs still counts toward the window, so a window can last longer than
+10 s and idle time lowers its share.
+
+Not every callback is counted. Callbacks of zero-delay timers
+(`setTimeout(fn, 0)`) can run outside the measured part of the pump, and those
+are not counted toward the share.
+
+An isolate whose pump-side JavaScript exceeds the share is stopped. The share
+is measured per isolate, not per request, so the stop ends everything that
+isolate was doing:
+
+- Every request still waiting on it fails at once, including a request that
+  was only waiting on something else and did none of the work:
+
+  ```
+  500  {"message":"CPU time limit exceeded","name":"Error"}
+  ```
+
+  The answer comes when the stop happens, on every plan. On `unlimited`, which
+  has no wall timeout, nothing else would ever answer those requests.
+- A response that is already streaming its body is cut off. The connection
+  closes before the body's end, so a client reading the body sees the read
+  fail rather than a body that ended normally.
+- A streaming RPC procedure's stream ends in an error after the items it sent
+  before the stop: called through `@zeroship/rpc`, the iteration throws an
+  `RpcError` with code `INTERNAL` and message `CPU time limit exceeded`.
+- None of your code runs in that isolate again. Its timers and pending
+  operations are cancelled.
+
+The next request to your deployed app is served by a fresh isolate, which runs
+your module's top-level code again, so state held in module scope does not
+survive the stop.
+
+If the share is exceeded while your module is still starting, during a
+top-level `await`, the app fails to load, and the request that started the load
+answers
+
+```
+503  {"error":"failed to load app: failed to load bundle: failed to initialize app runtime: module init failed: CPU time limit exceeded"}
+```
+
+Every later request starts a fresh load, and fails the same way for as long as
+startup exceeds the share.
+
+The standalone dev server (`zeroship serve`) keeps one isolate per worker
+thread and does not replace a stopped one, whether it stopped while starting or
+afterwards. Until it is restarted, every later request to your app answers
+
+```
+500  {"message":"module init failed: CPU time limit exceeded","name":"Error"}
+```
 
 A long CPU-bound loop over a stream is the shape that reaches this limit: each
 per-chunk step is a promise continuation, so a fast storage path leaves little

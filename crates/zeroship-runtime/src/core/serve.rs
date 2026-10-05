@@ -871,6 +871,12 @@ async fn stream_chunked_body_with_idle(
             return false;
         }
     }
+    // A producer that failed wrote a prefix, not a body. The terminator would
+    // tell the client the prefix was the whole of it, so the connection is
+    // dropped without one and the client sees a body cut short.
+    if reader.error().is_some() {
+        return false;
+    }
     // `&'static [u8]` implements `IoBuf`, so the trailer ships without a
     // `.to_vec()` allocation.
     let BufResult(r, _) = stream.write_all(b"0\r\n\r\n" as &'static [u8]).await;
@@ -2414,6 +2420,54 @@ mod stream_idle_tests {
         writer.close();
         let outcome = block_on(wait_for_data_or_idle(&reader, Duration::from_secs(30)));
         assert_eq!(outcome, StreamWait::Ready);
+    }
+
+    /// What a client reads off the wire for a body whose producer ended it:
+    /// the real chunk writer runs against a live socket pair, one chunk is
+    /// pushed, and the writer either fails or closes.
+    fn wire_bytes(end: impl FnOnce(&crate::channel::StreamWriter)) -> (Vec<u8>, bool) {
+        block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let client = compio::runtime::spawn(async move {
+                let mut client = TcpStream::connect(address).await.unwrap();
+                let mut received = Vec::new();
+                loop {
+                    let BufResult(read, buf) =
+                        compio::io::AsyncRead::read(&mut client, vec![0u8; 4096]).await;
+                    match read {
+                        Ok(0) | Err(_) => return received,
+                        Ok(n) => received.extend_from_slice(&buf[..n]),
+                    }
+                }
+            });
+            let (mut server, _) = listener.accept().await.unwrap();
+            let (writer, reader) = stream_buffer();
+            assert_eq!(writer.push(b"hello".to_vec()), crate::channel::StreamPushResult::Ok);
+            end(&writer);
+            let keep_alive = stream_chunked_body_with_idle(&mut server, reader, Duration::from_secs(30)).await;
+            drop(server);
+            (client.await.unwrap(), keep_alive)
+        })
+    }
+
+    /// A body whose producer failed reaches the client cut short: its chunk,
+    /// and no terminating chunk, so the client cannot mistake it for a whole
+    /// body. The connection is not kept alive.
+    #[test]
+    fn a_failed_body_goes_out_without_its_terminating_chunk() {
+        let (received, keep_alive) = wire_bytes(|writer| writer.abort("producer failed"));
+        assert_eq!(String::from_utf8_lossy(&received), "5\r\nhello\r\n");
+        assert!(!keep_alive);
+    }
+
+    /// The rejection control: the same body closed normally carries its
+    /// terminating chunk, so the case above is about the failure alone.
+    #[test]
+    fn a_closed_body_goes_out_with_its_terminating_chunk() {
+        let (received, keep_alive) = wire_bytes(crate::channel::StreamWriter::close);
+        assert_eq!(String::from_utf8_lossy(&received), "5\r\nhello\r\n0\r\n\r\n");
+        assert!(keep_alive);
     }
 }
 

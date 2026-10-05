@@ -42,11 +42,7 @@ impl Cancellation {
             Self::Timeout => ZsErrorCode::Timeout,
             Self::Overflow => ZsErrorCode::ResourceExhausted,
         };
-        DispatchResult::HttpResponse(crate::http::ResponseInfo::Complete {
-            status: code.http_status(),
-            headers: vec![("content-type".into(), "application/json".into())],
-            body: crate::dispatch::build_host_error_body(self.message(), code).into_bytes(),
-        })
+        super::dispatch::response::host_error(self.message(), code)
     }
 }
 
