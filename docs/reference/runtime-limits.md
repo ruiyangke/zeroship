@@ -76,14 +76,13 @@ measured against wall time over a rolling window, and the check applies on
 **every** plan, including `unlimited`. It is the one runtime cap `unlimited`
 does not remove.
 
-The runtime accumulates pump-side JavaScript time and compares it against the
-wall time of the window. The window is `BUDGET_WINDOW` and the largest share
-allowed is `MAX_CPU_FRACTION`, both defined in `RuntimeInner::record_pump_cpu`:
+The runtime adds up the JavaScript time your app spends in that pump work and
+compares it against the wall time of the window:
 
-| constant | value |
+| | value |
 | --- | --- |
-| `BUDGET_WINDOW` | 10 s |
-| `MAX_CPU_FRACTION` | 0.80 |
+| window | 10 s |
+| largest share of the window spent running pump work | 80% |
 
 An isolate whose pump-side JavaScript exceeds that share over the window is
 stopped, and its event pump drives none of its pending work after that.
@@ -91,9 +90,9 @@ stopped, and its event pump drives none of its pending work after that.
 A long CPU-bound loop over a stream is the shape that reaches this limit: each
 per-chunk step is a promise continuation, so a fast storage path leaves little
 waiting between steps and the JavaScript share of the window climbs toward the
-whole of it. Yield in proportion to the work each step does (the
-`examples/storage-gallery` example sleeps for the time its synchronous section
-measured), so waiting on storage is never counted as compute.
+whole of it. Yield in proportion to the work each step does: time the step's
+synchronous section and, every so often, sleep for the time it measured. Time
+spent waiting on storage is then never counted as compute.
 
 ## Wall timeout
 
