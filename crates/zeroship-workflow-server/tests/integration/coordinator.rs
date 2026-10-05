@@ -645,6 +645,46 @@ async fn lock_waits_cannot_extend_authority_and_timeout_sessions_are_reusable() 
     assert_eq!(attempt.unwrap_err(), Error::Conflict);
 }
 
+/// Metadata verification is a startup step, so a database that accepts
+/// connections, answers startup and then stalls the verification query fails
+/// within `Options::startup_timeout`, not within the shorter command budget
+/// that bounds queue transactions.
+///
+/// The stall is deterministic: `verify` reads `workflow_manager.schema_version`
+/// last, and another session holds it under `ACCESS EXCLUSIVE` for the whole
+/// call. A verification query bounded by the queue transaction budget fails
+/// before the startup budget; one bounded by the startup budget cannot.
+#[compio::test]
+async fn verification_is_bounded_by_the_startup_budget_not_the_command_budget() {
+    const STARTUP: Duration = Duration::from_secs(2);
+    const COMMAND: Duration = Duration::from_millis(500);
+    let fixture = Fixture::new().await;
+    let options = Options {
+        connections: 1,
+        acquire_timeout: STARTUP,
+        command_timeout: COMMAND,
+        ..Options::default()
+    };
+    assert_eq!(options.startup_timeout(), STARTUP);
+    assert!(options.command_timeout < options.startup_timeout());
+    let service = fixture.options(options).await;
+    let mut holder = connect(&fixture.admin_url).await;
+    let lock = holder.transaction().await.unwrap();
+    lock.batch_execute("LOCK TABLE workflow_manager.schema_version IN ACCESS EXCLUSIVE MODE")
+        .await
+        .unwrap();
+    let started = Instant::now();
+    assert_eq!(service.verify().await, Err(HostError::Unavailable));
+    let elapsed = started.elapsed();
+    lock.rollback().await.unwrap();
+    assert!(
+        elapsed >= options.startup_timeout(),
+        "verification failed after {elapsed:?}, before the startup budget of {:?}, \
+         so the queue transaction budget stopped it",
+        options.startup_timeout()
+    );
+}
+
 #[compio::test]
 async fn metadata_schema_has_no_customer_authority_and_ids_are_bytewise() {
     let fixture = Fixture::new().await;

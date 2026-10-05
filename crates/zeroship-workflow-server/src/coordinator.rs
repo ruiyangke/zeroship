@@ -75,6 +75,12 @@ pub struct Options {
     /// It bounds each checkout from the coordinator's pool and, as
     /// [`Options::startup_timeout`], each step of opening the database.
     pub acquire_timeout: Duration,
+    /// The budget for one queue transaction, `workflow.database_command_timeout_ms`.
+    /// It bounds the manager's claim, heartbeat, settlement and scheduling
+    /// work. The coordinator's own pool serves [`Coordinator::verify`] alone,
+    /// and `connect` calls it as a startup step, so that pool's queries are
+    /// bounded by [`Options::startup_timeout`] instead: a short queue
+    /// transaction budget must not shorten metadata verification.
     pub command_timeout: Duration,
     pub batch_limit: usize,
     pub max_pending_management: usize,
@@ -106,13 +112,14 @@ impl Default for Options {
 }
 impl Options {
     /// The budget for each step of opening the metadata database: the service's
-    /// authentication connection, constructing the coordinator's pool, binding
-    /// its queue, opening the journal and opening the policy ledger.
+    /// authentication connection, constructing the coordinator's pool,
+    /// verifying its metadata, binding its queue, opening the journal and
+    /// opening the policy ledger.
     ///
     /// It is [`Options::acquire_timeout`]. One operator setting bounds startup
     /// and checkouts alike, so a database that accepts connections and never
     /// answers fails startup within the budget the operator chose, not within
-    /// a default of the pool's.
+    /// a default of the pool's or the queue transaction budget.
     #[must_use]
     pub const fn startup_timeout(&self) -> Duration {
         self.acquire_timeout
@@ -181,7 +188,11 @@ impl Coordinator {
             .min_idle(1)
             .acquire_timeout(options.acquire_timeout)
             .warm_up_timeout(options.startup_timeout())
-            .command_timeout(options.command_timeout);
+            // This pool serves verification and readiness alone, both startup
+            // steps, so a query is bounded by the startup budget rather than
+            // by the queue transaction budget that [`Options::command_timeout`]
+            // states.
+            .command_timeout(options.startup_timeout());
         let pool = Pool::connect_with_pool_config(url, config).await?;
         let binding = DbBinding::platform(
             "workflow_manager",
