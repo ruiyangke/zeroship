@@ -39,7 +39,7 @@ use std::rc::Rc;
 use zeroship_runtime_macros::v8_class;
 
 use crate::state::OpError;
-use crate::streams::budget::{try_alloc_stream, StreamBudgetGuard};
+use crate::streams::budget::{try_alloc_streams, StreamBudgetGuard};
 use crate::streams::readable_default_controller::SizeAlgorithm;
 use crate::streams::slots;
 
@@ -51,17 +51,29 @@ const TS_BRAND: &str = "[[ts.brand]]";
 // State
 // ---------------------------------------------------------------------------
 
+/// What `InitializeTransformStream` needs to build one half: its queuing
+/// strategy and the budget unit charged for it.
+pub struct HalfSetup {
+    pub hwm: f64,
+    pub size: SizeAlgorithm,
+    pub budget: StreamBudgetGuard,
+}
+
+/// Both halves of a `TransformStream`. Their budget units are charged together
+/// with the stream's own, so a construction the budget cannot cover is
+/// refused before any of the three streams exists.
+pub struct TransformHalves {
+    pub readable: HalfSetup,
+    pub writable: HalfSetup,
+}
+
 /// Setup args stashed by the constructor body so `after_install` can
 /// finish wiring once the box is reachable via internal field 0. None
 /// for streams built via `from_native_transformer` (the Rust-side helper
 /// runs its own controller setup directly).
-#[allow(missing_debug_implementations)]
 struct PendingTransformSetup {
     transformer: v8::Global<v8::Value>,
-    writable_hwm: f64,
-    writable_size: SizeAlgorithm,
-    readable_hwm: f64,
-    readable_size: SizeAlgorithm,
+    halves: TransformHalves,
 }
 
 /// `Box<TSStreamState>` lives in the wrapper's V8 internal field 0.
@@ -85,7 +97,7 @@ pub struct TSStreamState {
     /// (`take()`) by `after_install`. None on the `from_native_transformer`
     /// path which wires the controller directly without the post_init hook.
     pending_setup: RefCell<Option<PendingTransformSetup>>,
-    /// Budget guard.
+    /// This stream's charge to its isolate's budget.
     _budget: StreamBudgetGuard,
 }
 
@@ -111,7 +123,7 @@ impl TSStreamState {
     /// spec §5.2.4.
     ///
     /// Body covers the pre-box-install half:
-    ///   1. Allocate budget.
+    ///   1. Charge the budget for the stream and both halves at once.
     ///   2. Parse writableStrategy (default HWM = 1.0).
     ///   3. Parse readableStrategy (default HWM = 0.0).
     ///   4. Reject `transformer.readableType` / `writableType`
@@ -129,8 +141,8 @@ impl TSStreamState {
         writable_strategy: v8::Local<v8::Value>,
         readable_strategy: v8::Local<v8::Value>,
     ) -> Result<Self, OpError> {
-        // Budget guard first — limits per-isolate stream count.
-        let budget = try_alloc_stream().map_err(OpError::range_error)?;
+        // Budget first: the stream and its two halves, all or none.
+        let [budget, readable_budget, writable_budget] = try_alloc_streams::<3>(scope)?;
 
         // Spec §5.2.4 ordering: strategies converted before transformer
         // dictionary lookup (writableStrategy default HWM = 1, readable
@@ -179,10 +191,18 @@ impl TSStreamState {
             bp_change_resolver: RefCell::new(None),
             pending_setup: RefCell::new(Some(PendingTransformSetup {
                 transformer: transformer_g,
-                writable_hwm,
-                writable_size,
-                readable_hwm,
-                readable_size,
+                halves: TransformHalves {
+                    readable: HalfSetup {
+                        hwm: readable_hwm,
+                        size: readable_size,
+                        budget: readable_budget,
+                    },
+                    writable: HalfSetup {
+                        hwm: writable_hwm,
+                        size: writable_size,
+                        budget: writable_budget,
+                    },
+                },
             })),
             _budget: budget,
         })
@@ -223,10 +243,7 @@ impl TSStreamState {
             this,
             transformer,
             start_resolver,
-            setup.writable_hwm,
-            setup.writable_size,
-            setup.readable_hwm,
-            setup.readable_size,
+            setup.halves,
         )
     }
 }
@@ -315,14 +332,18 @@ pub fn ts_controller_slot<'s>(
 /// JS-bridged transformer (one whose transform/flush/cancel indirectly
 /// touch a JS-visible TransformStream). This is the internal entrypoint
 /// for compression and similar Rust-side codecs.
+///
+/// Fails with the budget's `RangeError` when the isolate cannot hold the
+/// stream and both its halves.
 #[doc(hidden)]
 pub fn from_native_transformer<'s, T: NativeTransformer + 'static>(
     scope: &mut v8::PinScope<'s, '_>,
     transformer: T,
     writable_hwm: f64,
     readable_hwm: f64,
-) -> v8::Local<'s, v8::Object> {
-    let stream = build_stream_wrapper(scope);
+) -> Result<v8::Local<'s, v8::Object>, OpError> {
+    let [budget, readable_budget, writable_budget] = try_alloc_streams::<3>(scope)?;
+    let stream = build_stream_wrapper(scope, budget);
 
     // Set up the TS controller from the native transformer. The
     // transform/flush/cancel algorithms get wired as Native variants on
@@ -331,10 +352,20 @@ pub fn from_native_transformer<'s, T: NativeTransformer + 'static>(
         scope,
         stream,
         transformer,
-        writable_hwm,
-        readable_hwm,
+        TransformHalves {
+            readable: HalfSetup {
+                hwm: readable_hwm,
+                size: SizeAlgorithm::DefaultCount,
+                budget: readable_budget,
+            },
+            writable: HalfSetup {
+                hwm: writable_hwm,
+                size: SizeAlgorithm::DefaultCount,
+                budget: writable_budget,
+            },
+        },
     );
-    stream
+    Ok(stream)
 }
 
 /// Construct the bare `TransformStream` JS wrapper — no controller wired,
@@ -343,12 +374,12 @@ pub fn from_native_transformer<'s, T: NativeTransformer + 'static>(
 /// this helper is the parallel manual mint for the Rust-side path.
 fn build_stream_wrapper<'s>(
     scope: &mut v8::PinScope<'s, '_>,
+    budget: StreamBudgetGuard,
 ) -> v8::Local<'s, v8::Object> {
     let tmpl = TSStreamState::install(scope);
     let inst_tmpl = tmpl.instance_template(scope);
     let stream_obj = inst_tmpl.new_instance(scope).unwrap();
 
-    let budget = try_alloc_stream().expect("from_native_transformer: budget exceeded");
     let inst = TSStreamState::new_for_internal(budget);
     let boxed = Box::new(inst);
     let raw_ptr = Box::into_raw(boxed);
@@ -449,9 +480,9 @@ pub fn build_readable_for_ts<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     ts: v8::Local<v8::Object>,
     start_promise: v8::Local<'s, v8::Promise>,
-    hwm: f64,
-    size: SizeAlgorithm,
+    half: HalfSetup,
 ) -> v8::Local<'s, v8::Object> {
+    let HalfSetup { hwm, size, budget } = half;
     // Build a JS underlyingSource = { start, pull, cancel } where:
     //   start  → returns startPromise
     //   pull   → calls source pull algorithm
@@ -473,7 +504,7 @@ pub fn build_readable_for_ts<'s>(
     // Build a fresh ReadableStream wrapper — same as the public
     // constructor but skip the `type === "bytes"` check etc. since we're
     // building a default ReadableStream programmatically.
-    let readable = crate::streams::readable::build_value_stream_wrapper_for_internal(scope);
+    let readable = crate::streams::readable::build_value_stream_wrapper_for_internal(scope, budget);
     let _ = crate::streams::readable_default_controller::set_up_readable_stream_default_controller_from_underlying_source_with_strategy(
         scope,
         readable,
@@ -488,9 +519,9 @@ pub fn build_writable_for_ts<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     ts: v8::Local<v8::Object>,
     start_promise: v8::Local<'s, v8::Promise>,
-    hwm: f64,
-    size: SizeAlgorithm,
+    half: HalfSetup,
 ) -> v8::Local<'s, v8::Object> {
+    let HalfSetup { hwm, size, budget } = half;
     let underlying = v8::Object::new(scope);
     let ts_global = v8::Global::new(scope, ts);
 
@@ -503,7 +534,7 @@ pub fn build_writable_for_ts<'s>(
     let abort_fn = build_ts_writable_abort_fn(scope, ts_global);
     install_function(scope, underlying, "abort", abort_fn);
 
-    let writable = crate::streams::writable::build_value_stream_wrapper_for_internal(scope);
+    let writable = crate::streams::writable::build_value_stream_wrapper_for_internal(scope, budget);
     let _ = crate::streams::writable_controller::set_up_writable_stream_default_controller_from_underlying_sink_with_strategy(
         scope,
         writable,

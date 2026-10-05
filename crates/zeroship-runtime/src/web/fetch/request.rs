@@ -939,7 +939,7 @@ impl RequestState {
                 | crate::fetch_body::BodySource::Blob(rc, _)
                 | crate::fetch_body::BodySource::UrlSearchParams(rc)
                 | crate::fetch_body::BodySource::FormData(rc, _) => {
-                    let new_stream = crate::fetch_body::extract::build_byte_stream(scope, rc);
+                    let new_stream = crate::fetch_body::extract::build_byte_stream(scope, rc)?;
                     let stream_local = v8::Local::new(scope, new_stream);
                     let key = v8::String::new(scope, "body").unwrap();
                     init.set(scope, key.into(), stream_local.into());

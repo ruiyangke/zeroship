@@ -18,6 +18,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::streams::algorithms;
+use crate::streams::budget::StreamBudgetGuard;
 use crate::streams::promise_resolve;
 use crate::streams::readable::{build_value_stream_wrapper_for_internal, with_rs_state};
 use crate::streams::readable_default_controller::{
@@ -70,11 +71,16 @@ pub struct TeeState {
 /// `clone_for_branch2` is currently always false (the public `tee()`
 /// passes false; the structuredClone path is reserved for future
 /// callers — see design note in §X.1).
+///
+/// `branch_budgets` are the two branches' charges, taken by the caller
+/// before this locks `source`.
 pub fn readable_stream_default_tee<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     source: v8::Local<v8::Object>,
+    branch_budgets: [StreamBudgetGuard; 2],
     _clone_for_branch2: bool,
 ) -> Result<[v8::Local<'s, v8::Object>; 2], String> {
+    let [budget1, budget2] = branch_budgets;
     // Acquire a default reader on the source. The source becomes locked
     // for the lifetime of both branches.
     let reader = acquire_readable_stream_default_reader(scope, source)
@@ -102,10 +108,10 @@ pub fn readable_stream_default_tee<'s>(
     // Build branch 1 — independent ReadableStream. underlyingSource:
     //   - pull: shared pullAlgorithm via `tee_pull_callback`.
     //   - cancel: branch-1 cancelAlgorithm.
-    let branch1 = build_branch_stream(scope, &tee_state, BranchIdx::One)?;
+    let branch1 = build_branch_stream(scope, &tee_state, BranchIdx::One, budget1)?;
     *tee_state.branch1.borrow_mut() = Some(v8::Global::new(scope, branch1));
 
-    let branch2 = build_branch_stream(scope, &tee_state, BranchIdx::Two)?;
+    let branch2 = build_branch_stream(scope, &tee_state, BranchIdx::Two, budget2)?;
     *tee_state.branch2.borrow_mut() = Some(v8::Global::new(scope, branch2));
 
     // Watch the reader's closedPromise. On rejection, error both branches.
@@ -128,6 +134,7 @@ fn build_branch_stream<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     tee_state: &Rc<TeeState>,
     idx: BranchIdx,
+    budget: StreamBudgetGuard,
 ) -> Result<v8::Local<'s, v8::Object>, String> {
     // Build a JS underlyingSource = { pull, cancel } whose closures
     // capture the shared TeeState. Default-count strategy, HWM=0.
@@ -148,7 +155,7 @@ fn build_branch_stream<'s>(
         underlying.set(scope, key.into(), cancel_fn.into());
     }
 
-    let stream = build_value_stream_wrapper_for_internal(scope);
+    let stream = build_value_stream_wrapper_for_internal(scope, budget);
     set_up_readable_stream_default_controller_from_underlying_source_with_strategy(
         scope,
         stream,

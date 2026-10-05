@@ -181,7 +181,7 @@ pub(crate) fn collect_parts_public(
 pub(crate) fn build_blob_stream_public<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     bytes: &[u8],
-) -> v8::Local<'s, v8::Value> {
+) -> Result<v8::Local<'s, v8::Value>, OpError> {
     build_blob_stream(scope, bytes)
 }
 
@@ -693,7 +693,10 @@ impl Blob {
     /// many small chunks. We emit one chunk for v1 (matches polyfill);
     /// chunk-splitting can be added later without breaking semantics.
     #[v8_method]
-    fn stream<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
+    fn stream<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
         build_blob_stream(scope, self.as_bytes())
     }
 }
@@ -715,7 +718,7 @@ impl Blob {
 fn build_blob_stream<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     bytes: &[u8],
-) -> v8::Local<'s, v8::Value> {
+) -> Result<v8::Local<'s, v8::Value>, OpError> {
     // Step 1: copy bytes into a fresh Uint8Array (the stream consumer
     // can transfer the buffer; we don't want them to scribble on the
     // shared Blob backing).
@@ -766,14 +769,8 @@ fn build_blob_stream<'s>(
     let start_key = v8::String::new(scope, "start").unwrap();
     us.set(scope, start_key.into(), start_fn.into());
 
-    let global = scope.get_current_context().global(scope);
-    let rs_key = v8::String::new(scope, "ReadableStream").unwrap();
-    let rs_class_v = global.get(scope, rs_key.into()).unwrap();
-    let rs_class: v8::Local<v8::Function> = rs_class_v.try_into().unwrap();
-    let stream = rs_class
-        .new_instance(scope, &[us.into()])
-        .expect("Blob.stream(): ReadableStream constructor threw");
-    stream.into()
+    let stream = crate::streams::construct_global(scope, "ReadableStream", &[us.into()])?;
+    Ok(v8::Local::new(scope, stream).into())
 }
 
 /// Callback for the underlying-source `start(controller)` of

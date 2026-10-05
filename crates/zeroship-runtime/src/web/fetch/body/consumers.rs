@@ -250,7 +250,13 @@ fn body_getter<T: Body + BodyMarker + 'static>(
             // a fast-path consumer (set_body_used_marker), we still
             // build a stream so observation of `.body` returns a
             // ReadableStream — but mark it disturbed/closed.
-            let stream_global = crate::fetch_body::extract::build_byte_stream(scope, rc);
+            let stream_global = match crate::fetch_body::extract::build_byte_stream(scope, rc) {
+                Ok(stream) => stream,
+                Err(e) => {
+                    crate::streams::readable::throw_op_error(scope, &e);
+                    return;
+                }
+            };
             // Store back into the BodyImpl's RefCell.
             let local = v8::Local::new(scope, stream_global.clone());
 

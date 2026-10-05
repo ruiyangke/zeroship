@@ -633,12 +633,14 @@ fn is_url_search_params(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) ->
 /// The bytes Rc is cheaply cloned so the stream's start callback can
 /// own a fresh reference; the parent BodyImpl still holds the original
 /// Rc for clone()/redirect.
+///
+/// Fails with what the constructor threw, the stream budget's `RangeError`
+/// when the isolate is at its live stream cap.
 pub fn build_byte_stream(
     scope: &mut v8::PinScope,
     bytes: Rc<Vec<u8>>,
-) -> v8::Global<v8::Object> {
-    let stream_obj = build_byte_stream_via_constructor(scope, &bytes);
-    v8::Global::new(scope, stream_obj)
+) -> Result<v8::Global<v8::Object>, OpError> {
+    build_byte_stream_via_constructor(scope, &bytes)
 }
 
 /// Chunk size used when materializing byte-backed bodies as a
@@ -656,19 +658,10 @@ struct ByteStreamPullState {
 /// Construct a fresh ReadableStream wrapping the given bytes. Uses the
 /// JS-visible constructor with a `pull(controller)` callback so the
 /// buffered body is exposed incrementally rather than as a single chunk.
-fn build_byte_stream_via_constructor<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
+fn build_byte_stream_via_constructor(
+    scope: &mut v8::PinScope,
     bytes: &Rc<Vec<u8>>,
-) -> v8::Local<'s, v8::Object> {
-    let global = scope.get_current_context().global(scope);
-    let key = v8::String::new(scope, "ReadableStream").unwrap();
-    let class_v = global
-        .get(scope, key.into())
-        .expect("globalThis.ReadableStream missing");
-    let class_fn: v8::Local<v8::Function> = class_v
-        .try_into()
-        .expect("globalThis.ReadableStream is not a function");
-
+) -> Result<v8::Global<v8::Object>, OpError> {
     // Build the underlyingSource object: { pull(c) { enqueue next chunk; close on EOF; } }
     // The bytes + current offset live in a Rust state block captured by
     // the pull callback.
@@ -702,10 +695,7 @@ fn build_byte_stream_via_constructor<'s>(
     underlying.set(scope, pull_key.into(), pull_fn.into());
 
     // new ReadableStream(underlying)
-    let args = [underlying.into()];
-    class_fn
-        .new_instance(scope, &args)
-        .expect("new ReadableStream failed")
+    crate::streams::construct_global(scope, "ReadableStream", &[underlying.into()])
 }
 
 fn pull_callback(

@@ -35,6 +35,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 
+use crate::state::OpError;
 use crate::streams::budget::{try_alloc_stream, StreamBudgetGuard};
 use crate::streams::writable_controller as ctlr;
 
@@ -84,7 +85,7 @@ pub struct WSStreamState {
     /// completion.
     pub write_requests: RefCell<VecDeque<v8::Global<v8::Promise>>>,
     pub write_request_resolvers: RefCell<VecDeque<v8::Global<v8::PromiseResolver>>>,
-    /// Budget guard.
+    /// This stream's charge to its isolate's budget.
     _budget: StreamBudgetGuard,
 }
 
@@ -169,36 +170,44 @@ pub fn with_ws_state<R>(
 /// Build a JS WritableStream from a Rust sink.
 ///
 /// Mirror of `ReadableStream::from_native_source`. Per design §VIII.2.
+///
+/// Fails with the budget's `RangeError` when the isolate is at its live
+/// stream cap.
 #[doc(hidden)]
 pub fn from_native_sink<'s, S: NativeSink + 'static>(
     scope: &mut v8::PinScope<'s, '_>,
     sink: S,
     hwm: f64,
-) -> v8::Local<'s, v8::Object> {
-    let stream = build_stream_wrapper(scope);
+) -> Result<v8::Local<'s, v8::Object>, OpError> {
+    let budget = try_alloc_stream(scope)?;
+    let stream = build_stream_wrapper(scope, budget);
     ctlr::set_up_writable_stream_default_controller_native(scope, stream, sink, hwm);
-    stream
+    Ok(stream)
 }
 
 /// Public wrapper around `build_stream_wrapper` for internal use by
 /// `transform.rs` (TransformStream's writable half is a programmatically-
-/// constructed WritableStream).
+/// constructed WritableStream). `budget` was charged when the
+/// TransformStream was admitted.
 #[doc(hidden)]
 pub fn build_value_stream_wrapper_for_internal<'s>(
     scope: &mut v8::PinScope<'s, '_>,
+    budget: StreamBudgetGuard,
 ) -> v8::Local<'s, v8::Object> {
-    build_stream_wrapper(scope)
+    build_stream_wrapper(scope, budget)
 }
 
 /// Construct the bare `WritableStream` JS wrapper — no controller wired.
+/// `budget` is the stream's already-charged unit, which the wrapper's Box
+/// holds.
 fn build_stream_wrapper<'s>(
     scope: &mut v8::PinScope<'s, '_>,
+    budget: StreamBudgetGuard,
 ) -> v8::Local<'s, v8::Object> {
     let tmpl = stream_class_template(scope);
     let inst_tmpl = tmpl.instance_template(scope);
     let stream_obj = inst_tmpl.new_instance(scope).unwrap();
 
-    let budget = try_alloc_stream().expect("from_native_sink: budget exceeded");
     let inst = WSStreamState::new(budget);
     let boxed = Box::new(inst);
     let raw_ptr = Box::into_raw(boxed);
@@ -353,12 +362,10 @@ fn constructor_callback(
     }
 
     // Allocate budget + Box<WSStreamState>.
-    let budget = match try_alloc_stream() {
+    let budget = match try_alloc_stream(scope) {
         Ok(g) => g,
-        Err(m) => {
-            let msg = v8::String::new(scope, m).unwrap();
-            let exc = v8::Exception::range_error(scope, msg);
-            scope.throw_exception(exc);
+        Err(e) => {
+            crate::streams::readable::throw_op_error(scope, &e);
             return;
         }
     };

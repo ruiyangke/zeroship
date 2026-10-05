@@ -163,6 +163,7 @@ mod rpc_superjson;
 mod schema_init;
 mod startup;
 mod serve_health_and_env;
+mod stream_budget;
 mod streams_native;
 mod streams;
 mod structured_clone;

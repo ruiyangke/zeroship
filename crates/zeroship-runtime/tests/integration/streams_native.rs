@@ -227,15 +227,79 @@ fn set_promise_is_handled_does_not_resurface_rejection() {
 }
 
 // ---------------------------------------------------------------------------
-// budget.rs — concurrent stream cap
+// budget.rs - each isolate's live stream cap
 // ---------------------------------------------------------------------------
 
+struct IdleSource;
+
+impl zeroship_runtime::streams::NativeSource for IdleSource {
+    fn pull(
+        &mut self,
+        _controller: &mut zeroship_runtime::streams::NativeReadableController,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), v8::Global<v8::Value>>>>> {
+        Box::pin(std::future::pending())
+    }
+}
+
+struct IdleSink;
+
+impl zeroship_runtime::streams::NativeSink for IdleSink {
+    fn write(
+        &mut self,
+        _chunk: v8::Global<v8::Value>,
+        _controller: &mut zeroship_runtime::streams::NativeWritableController,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), v8::Global<v8::Value>>>>> {
+        Box::pin(std::future::pending())
+    }
+}
+
+struct IdleTransformer;
+
+impl zeroship_runtime::streams::NativeTransformer for IdleTransformer {
+    fn transform(
+        &mut self,
+        _chunk: v8::Global<v8::Value>,
+        _controller: &mut zeroship_runtime::streams::NativeTransformController,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), v8::Global<v8::Value>>>>> {
+        Box::pin(std::future::pending())
+    }
+}
+
+/// The Rust-side constructors charge the same per-isolate budget as the JS
+/// classes and refuse past the cap with its `RangeError`, charging nothing.
 #[test]
-fn budget_allocates_under_cap() {
-    use zeroship_runtime::streams::budget::{live_count, try_alloc_stream};
-    let baseline = live_count();
-    let _g = try_alloc_stream().unwrap();
-    assert_eq!(live_count(), baseline + 1);
-    drop(_g);
-    assert_eq!(live_count(), baseline);
+fn native_constructors_past_the_cap_return_range_error() {
+    use zeroship_runtime::state::OpErrorKind;
+    use zeroship_runtime::streams::budget::{try_alloc_stream, StreamBudget, MAX_LIVE_STREAMS};
+    use zeroship_runtime::streams::{from_native_sink, from_native_source, from_native_transformer};
+
+    run_in_v8(|scope| {
+        let budget = StreamBudget::of(scope);
+        let held: Vec<_> = (0..MAX_LIVE_STREAMS)
+            .map(|_| try_alloc_stream(scope).expect("under the cap"))
+            .collect();
+        assert_eq!(budget.live(), MAX_LIVE_STREAMS);
+
+        let refusals = [
+            ("from_native_source", from_native_source(scope, IdleSource, 1.0).err()),
+            ("from_native_sink", from_native_sink(scope, IdleSink, 1.0).err()),
+            (
+                "from_native_transformer",
+                from_native_transformer(scope, IdleTransformer, 1.0, 0.0).err(),
+            ),
+        ];
+        for (constructor, refusal) in refusals {
+            let refusal = refusal.unwrap_or_else(|| panic!("{constructor} built a stream past the cap"));
+            assert!(
+                matches!(refusal.kind, OpErrorKind::RangeError),
+                "{constructor} must refuse with RangeError, got {refusal:?}",
+            );
+        }
+        assert_eq!(budget.live(), MAX_LIVE_STREAMS, "a refusal charged the budget");
+
+        drop(held);
+        assert_eq!(budget.live(), 0);
+        from_native_source(scope, IdleSource, 1.0).expect("one stream fits an empty budget");
+        assert_eq!(budget.live(), 1);
+    });
 }

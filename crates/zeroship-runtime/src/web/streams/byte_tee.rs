@@ -31,6 +31,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::streams::algorithms;
+use crate::streams::budget::StreamBudgetGuard;
 use crate::streams::promise_resolve;
 use crate::streams::pull_into::copy_data_block_bytes;
 use crate::streams::readable::{build_value_stream_wrapper_for_internal, with_rs_state, StreamState};
@@ -83,11 +84,16 @@ pub struct ByteTeeState {
 // ---------------------------------------------------------------------------
 
 /// `ReadableByteStreamTee(stream)` — spec §3.5.3.
+///
+/// `branch_budgets` are the two branches' charges, taken by the caller
+/// before this locks `source`.
 pub fn readable_byte_stream_tee<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     source: v8::Local<v8::Object>,
+    branch_budgets: [StreamBudgetGuard; 2],
     _clone_for_branch2: bool,
 ) -> Result<[v8::Local<'s, v8::Object>; 2], String> {
+    let [budget1, budget2] = branch_budgets;
     // Initial reader: default (will swap to BYOB on demand).
     let reader = acquire_readable_stream_default_reader(scope, source)
         .map_err(|e| format!("byte-tee: {e}"))?;
@@ -112,10 +118,10 @@ pub fn readable_byte_stream_tee<'s>(
         cancel_promise: v8::Global::new(scope, cancel_promise),
     });
 
-    let branch1 = build_branch_byte_stream(scope, &tee_state, BranchIdx::One)?;
+    let branch1 = build_branch_byte_stream(scope, &tee_state, BranchIdx::One, budget1)?;
     *tee_state.branch1.borrow_mut() = Some(v8::Global::new(scope, branch1));
 
-    let branch2 = build_branch_byte_stream(scope, &tee_state, BranchIdx::Two)?;
+    let branch2 = build_branch_byte_stream(scope, &tee_state, BranchIdx::Two, budget2)?;
     *tee_state.branch2.borrow_mut() = Some(v8::Global::new(scope, branch2));
 
     forward_reader_error(scope, &tee_state);
@@ -133,6 +139,7 @@ fn build_branch_byte_stream<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     tee_state: &Rc<ByteTeeState>,
     idx: BranchIdx,
+    budget: StreamBudgetGuard,
 ) -> Result<v8::Local<'s, v8::Object>, String> {
     let underlying = v8::Object::new(scope);
     {
@@ -151,7 +158,7 @@ fn build_branch_byte_stream<'s>(
         underlying.set(scope, key.into(), cancel_fn.into());
     }
 
-    let stream = build_value_stream_wrapper_for_internal(scope);
+    let stream = build_value_stream_wrapper_for_internal(scope, budget);
     set_up_readable_byte_stream_controller_from_underlying_source(
         scope,
         stream,

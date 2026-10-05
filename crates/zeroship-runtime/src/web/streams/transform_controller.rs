@@ -40,9 +40,9 @@ use std::cell::RefCell;
 
 use crate::streams::algorithms;
 use crate::streams::promise_resolve;
-use crate::streams::readable_default_controller::{AlgorithmFn, SizeAlgorithm};
+use crate::streams::readable_default_controller::AlgorithmFn;
 use crate::streams::slots;
-use crate::streams::transform::NativeTransformer;
+use crate::streams::transform::{NativeTransformer, TransformHalves};
 
 const TS_CTRL_BRAND: &str = "[[ts.ctrl.brand]]";
 
@@ -1076,19 +1076,12 @@ fn set_up_transform_stream_default_controller<'s>(
 /// - flush missing → no-op (returns resolved Promise).
 /// - cancel missing → no-op.
 /// - start missing → returns undefined.
-// Each parameter is a distinct input of the WHATWG spec's
-// SetUpTransformStreamDefaultControllerFromTransformer algorithm; grouping
-// them into a struct would be an API redesign, not a lint fix.
-#[allow(clippy::too_many_arguments)]
 pub fn set_up_transform_stream_default_controller_from_transformer<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     stream: v8::Local<v8::Object>,
     transformer: v8::Local<v8::Value>,
     start_resolver: v8::Local<v8::PromiseResolver>,
-    writable_hwm: f64,
-    writable_size: SizeAlgorithm,
-    readable_hwm: f64,
-    readable_size: SizeAlgorithm,
+    halves: TransformHalves,
 ) -> Result<(), crate::state::OpError> {
     use crate::state::OpError;
     // Identity-transform sentinel: when the user did not supply
@@ -1171,15 +1164,7 @@ pub fn set_up_transform_stream_default_controller_from_transformer<'s>(
     let start_resolver_g = v8::Global::new(scope, start_resolver);
 
     // Build halves first so start() sees a fully wired controller.
-    algorithms::initialize_transform_stream(
-        scope,
-        stream,
-        start_promise,
-        writable_hwm,
-        writable_size,
-        readable_hwm,
-        readable_size,
-    );
+    algorithms::initialize_transform_stream(scope, stream, start_promise, halves);
 
     let controller = set_up_transform_stream_default_controller(
         scope,
@@ -1279,8 +1264,7 @@ pub fn set_up_transform_stream_default_controller_native<T: NativeTransformer + 
     scope: &mut v8::PinScope,
     stream: v8::Local<v8::Object>,
     _transformer: T,
-    writable_hwm: f64,
-    readable_hwm: f64,
+    halves: TransformHalves,
 ) {
     let controller = set_up_transform_stream_default_controller(
         scope,
@@ -1292,15 +1276,7 @@ pub fn set_up_transform_stream_default_controller_native<T: NativeTransformer + 
     let _ = controller;
     // Synthesize a resolved start promise.
     let start_promise = algorithms::resolved_undefined_promise(scope);
-    algorithms::initialize_transform_stream(
-        scope,
-        stream,
-        start_promise,
-        writable_hwm,
-        SizeAlgorithm::DefaultCount,
-        readable_hwm,
-        SizeAlgorithm::DefaultCount,
-    );
+    algorithms::initialize_transform_stream(scope, stream, start_promise, halves);
 }
 
 // ---------------------------------------------------------------------------

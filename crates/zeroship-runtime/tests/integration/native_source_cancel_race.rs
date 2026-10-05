@@ -93,8 +93,13 @@ fn make_stream_callback(
     _args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let stream = from_native_source(scope, SuspendingSource, 1.0);
-    rv.set(stream.into());
+    match from_native_source(scope, SuspendingSource, 1.0) {
+        Ok(stream) => rv.set(stream.into()),
+        Err(e) => {
+            let exception = e.to_exception(scope);
+            scope.throw_exception(exception);
+        }
+    }
 }
 
 fn counts_callback(
@@ -315,7 +320,8 @@ where
 #[test]
 fn direct_closure_pull_then_cancel_panics_with_borrow_mut_error() {
     run_in_v8(|scope| {
-        let stream = from_native_source(scope, RaceSource, 1.0);
+        let stream = from_native_source(scope, RaceSource, 1.0)
+            .expect("a fresh isolate has budget for one stream");
 
         let controller_v = read_slot(scope, stream, CONTROLLER);
         let controller = v8::Local::<v8::Object>::try_from(controller_v)

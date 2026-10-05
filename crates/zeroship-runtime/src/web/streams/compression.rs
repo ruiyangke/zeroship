@@ -275,10 +275,10 @@ fn codec_flush_callback(
 
 /// Build the underlyingTransformer object `{ transform, flush }` and
 /// construct the JS-visible TransformStream from it.
-fn construct_transform_stream<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
+fn construct_transform_stream(
+    scope: &mut v8::PinScope,
     state: Rc<RefCell<CodecState>>,
-) -> Option<v8::Local<'s, v8::Object>> {
+) -> Result<v8::Global<v8::Object>, OpError> {
     let transformer = v8::Object::new(scope);
 
     let transform_fn = build_payload_function(scope, state.clone(), codec_transform_callback);
@@ -289,11 +289,7 @@ fn construct_transform_stream<'s>(
     let key = v8::String::new(scope, "flush").unwrap();
     transformer.set(scope, key.into(), flush_fn.into());
 
-    let global = scope.get_current_context().global(scope);
-    let key = v8::String::new(scope, "TransformStream").unwrap();
-    let class_v = global.get(scope, key.into())?;
-    let class_fn = v8::Local::<v8::Function>::try_from(class_v).ok()?;
-    class_fn.new_instance(scope, &[transformer.into()])
+    crate::streams::construct_global(scope, "TransformStream", &[transformer.into()])
 }
 
 // ---------------------------------------------------------------------------
@@ -324,12 +320,8 @@ impl CompressionStream {
             codec,
             flushed: false,
         }));
-        let ts = construct_transform_stream(scope, state).ok_or_else(|| {
-            OpError::error("CompressionStream: failed to construct underlying TransformStream")
-        })?;
-        Ok(CompressionStream {
-            inner: v8::Global::new(scope, ts),
-        })
+        let inner = construct_transform_stream(scope, state)?;
+        Ok(Self { inner })
     }
 
     #[v8_getter]
@@ -373,12 +365,8 @@ impl DecompressionStream {
             codec,
             flushed: false,
         }));
-        let ts = construct_transform_stream(scope, state).ok_or_else(|| {
-            OpError::error("DecompressionStream: failed to construct underlying TransformStream")
-        })?;
-        Ok(DecompressionStream {
-            inner: v8::Global::new(scope, ts),
-        })
+        let inner = construct_transform_stream(scope, state)?;
+        Ok(Self { inner })
     }
 
     #[v8_getter]

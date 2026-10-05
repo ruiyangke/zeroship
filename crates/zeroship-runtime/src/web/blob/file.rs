@@ -332,7 +332,10 @@ impl File {
 
     /// `stream() -> ReadableStream` — delegates to inner Blob bytes.
     #[v8_method]
-    fn stream<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
+    fn stream<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+    ) -> Result<v8::Local<'s, v8::Value>, crate::state::OpError> {
         crate::blob_native::build_blob_stream_public(scope, self.blob.as_bytes())
     }
 }

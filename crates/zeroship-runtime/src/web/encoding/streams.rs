@@ -100,13 +100,10 @@ impl TextEncoderStream {
         // causes the spec's defaultFlushAlgorithm (a no-op) to apply.
 
         // 2. Call new TransformStream(transformer).
-        let ts = construct_transform_stream(scope, transformer.into()).ok_or_else(|| {
-            OpError::error("TextEncoderStream: failed to construct underlying TransformStream")
-        })?;
+        let inner =
+            crate::streams::construct_global(scope, "TransformStream", &[transformer.into()])?;
 
-        Ok(TextEncoderStream {
-            inner: v8::Global::new(scope, ts),
-        })
+        Ok(Self { inner })
     }
 
     /// `readonly attribute ReadableStream readable` (GenericTransformStream §6.1).
@@ -317,14 +314,10 @@ impl TextDecoderStream {
         transformer.set(scope, key.into(), flush_fn.into());
 
         // 5. Construct the underlying TransformStream.
-        let ts = construct_transform_stream(scope, transformer.into()).ok_or_else(|| {
-            OpError::error("TextDecoderStream: failed to construct underlying TransformStream")
-        })?;
+        let inner =
+            crate::streams::construct_global(scope, "TransformStream", &[transformer.into()])?;
 
-        Ok(TextDecoderStream {
-            state,
-            inner: v8::Global::new(scope, ts),
-        })
+        Ok(Self { state, inner })
     }
 
     #[v8_getter]
@@ -561,26 +554,6 @@ fn recover_payload<'a, P: 'static>(
         return None;
     }
     Some(unsafe { &*raw })
-}
-
-/// Look up `globalThis.TransformStream` and call `new
-/// TransformStream(transformer)`. Returns the resulting object, or
-/// `None` if the constructor threw or the global is missing.
-///
-/// Pulling from globalThis (rather than calling
-/// `streams::transform::install_native_transform_stream` directly)
-/// matches the way Blob.stream() builds ReadableStreams — the JS-
-/// visible class is the source of truth, and any future replacement
-/// (e.g. spec-mandated transferable variants) flows through one place.
-fn construct_transform_stream<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    transformer: v8::Local<'s, v8::Value>,
-) -> Option<v8::Local<'s, v8::Object>> {
-    let global = scope.get_current_context().global(scope);
-    let key = v8::String::new(scope, "TransformStream").unwrap();
-    let class_v = global.get(scope, key.into())?;
-    let class_fn = v8::Local::<v8::Function>::try_from(class_v).ok()?;
-    class_fn.new_instance(scope, &[transformer])
 }
 
 /// Dispatch a chunk via `controller.enqueue(chunk)`. Mirrors the

@@ -37,7 +37,7 @@ use std::pin::Pin;
 use zeroship_runtime_macros::WebIdlDict;
 
 use crate::state::OpError;
-use crate::streams::budget::{try_alloc_stream, StreamBudgetGuard};
+use crate::streams::budget::{try_alloc_stream, try_alloc_streams, StreamBudgetGuard};
 use crate::streams::readable_default_controller as ctlr;
 use crate::streams::slots::{self, READER};
 
@@ -61,8 +61,8 @@ pub enum StreamState {
 pub struct RSState {
     pub state: Cell<StreamState>,
     pub disturbed: Cell<bool>,
-    /// Budget guard. Decrements live count on Drop (i.e. when the
-    /// V8 weak finalizer reclaims the Box).
+    /// This stream's charge to its isolate's budget, released when the V8
+    /// weak finalizer (or isolate disposal) reclaims the Box.
     _budget: StreamBudgetGuard,
 }
 
@@ -129,40 +129,47 @@ pub fn with_rs_state<R>(
 /// Otherwise this becomes a backdoor that bypasses the spec's lock
 /// checks. Pull requests adding such a bridged Source MUST update this
 /// invariant.
+///
+/// Fails with the budget's `RangeError` when the isolate is at its live
+/// stream cap.
 #[doc(hidden)]
 pub fn from_native_source<'s, S: NativeSource + 'static>(
     scope: &mut v8::PinScope<'s, '_>,
     source: S,
     hwm: f64,
-) -> v8::Local<'s, v8::Object> {
-    let stream = build_stream_wrapper(scope);
+) -> Result<v8::Local<'s, v8::Object>, OpError> {
+    let budget = try_alloc_stream(scope)?;
+    let stream = build_stream_wrapper(scope, budget);
     ctlr::set_up_readable_stream_default_controller_native(scope, stream, source, hwm);
-    stream
+    Ok(stream)
 }
 
 /// Public wrapper around `build_stream_wrapper` for internal use by
 /// `transform.rs` (TransformStream's readable half is a programmatically-
-/// constructed ReadableStream that doesn't go through `new ReadableStream`).
-/// Equivalent to invoking the constructor with `undefined` source +
-/// strategy then skipping the type-check / strategy-parse — InitializeTransform
-/// Stream's caller already parsed the strategy.
+/// constructed ReadableStream that doesn't go through `new ReadableStream`)
+/// and by the tee branches. Equivalent to invoking the constructor with
+/// `undefined` source + strategy then skipping the type-check / strategy-parse:
+/// the caller already parsed the strategy, and charged `budget` before
+/// taking any step it would have to undo.
 #[doc(hidden)]
 pub fn build_value_stream_wrapper_for_internal<'s>(
     scope: &mut v8::PinScope<'s, '_>,
+    budget: StreamBudgetGuard,
 ) -> v8::Local<'s, v8::Object> {
-    build_stream_wrapper(scope)
+    build_stream_wrapper(scope, budget)
 }
 
 /// Construct the bare `ReadableStream` JS wrapper — no controller wired.
-/// Used by `from_native_source` and by the user-visible constructor.
+/// Used by `from_native_source` and the internal builders. `budget` is the
+/// stream's already-charged unit, which the wrapper's Box holds.
 fn build_stream_wrapper<'s>(
     scope: &mut v8::PinScope<'s, '_>,
+    budget: StreamBudgetGuard,
 ) -> v8::Local<'s, v8::Object> {
     let tmpl = stream_class_template(scope);
     let inst_tmpl = tmpl.instance_template(scope);
     let stream_obj = inst_tmpl.new_instance(scope).unwrap();
 
-    let budget = try_alloc_stream().expect("from_native_source: budget exceeded");
     let inst = RSState::new(budget);
     let boxed = Box::new(inst);
     let raw_ptr = Box::into_raw(boxed);
@@ -398,12 +405,10 @@ fn constructor_callback(
         let hwm = hwm0;
 
         // Allocate budget + Box<RSState>.
-        let budget = match try_alloc_stream() {
+        let budget = match try_alloc_stream(scope) {
             Ok(g) => g,
-            Err(m) => {
-                let msg = v8::String::new(scope, m).unwrap();
-                let exc = v8::Exception::range_error(scope, msg);
-                scope.throw_exception(exc);
+            Err(e) => {
+                throw_op_error(scope, &e);
                 return;
             }
         };
@@ -436,12 +441,10 @@ fn constructor_callback(
     }
 
     // Allocate budget + Box<RSState>.
-    let budget = match try_alloc_stream() {
+    let budget = match try_alloc_stream(scope) {
         Ok(g) => g,
-        Err(m) => {
-            let msg = v8::String::new(scope, m).unwrap();
-            let exc = v8::Exception::range_error(scope, msg);
-            scope.throw_exception(exc);
+        Err(e) => {
+            throw_op_error(scope, &e);
             return;
         }
     };
@@ -839,15 +842,24 @@ fn tee_method_callback<'s>(
         scope.throw_exception(exc);
         return;
     }
+    // Charge both branches before either tee locks the source, so a tee the
+    // budget cannot cover is refused with the source still unlocked.
+    let branch_budgets = match try_alloc_streams::<2>(scope) {
+        Ok(budgets) => budgets,
+        Err(e) => {
+            throw_op_error(scope, &e);
+            return;
+        }
+    };
     // Dispatch to byte-tee or default-tee based on the controller class.
     let controller_v = slots::read_slot(scope, this, slots::CONTROLLER);
     let is_byte = v8::Local::<v8::Object>::try_from(controller_v)
         .map(|c| crate::streams::readable_byte_controller::is_byte_controller(scope, c))
         .unwrap_or(false);
     let res = if is_byte {
-        crate::streams::byte_tee::readable_byte_stream_tee(scope, this, false)
+        crate::streams::byte_tee::readable_byte_stream_tee(scope, this, branch_budgets, false)
     } else {
-        crate::streams::tee::readable_stream_default_tee(scope, this, false)
+        crate::streams::tee::readable_stream_default_tee(scope, this, branch_budgets, false)
     };
     match res {
         Ok([b1, b2]) => {

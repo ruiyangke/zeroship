@@ -969,9 +969,10 @@ pub fn readable_stream_pipe_to<'s>(
 pub fn readable_stream_tee<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     stream: v8::Local<v8::Object>,
+    branch_budgets: [crate::streams::budget::StreamBudgetGuard; 2],
     clone_for_branch2: bool,
 ) -> Result<[v8::Local<'s, v8::Object>; 2], String> {
-    crate::streams::tee::readable_stream_default_tee(scope, stream, clone_for_branch2)
+    crate::streams::tee::readable_stream_default_tee(scope, stream, branch_budgets, clone_for_branch2)
 }
 
 // ===========================================================================
@@ -1137,31 +1138,19 @@ pub fn initialize_transform_stream<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     stream: v8::Local<v8::Object>,
     start_promise: v8::Local<'s, v8::Promise>,
-    writable_hwm: f64,
-    writable_size: crate::streams::readable_default_controller::SizeAlgorithm,
-    readable_hwm: f64,
-    readable_size: crate::streams::readable_default_controller::SizeAlgorithm,
+    halves: crate::streams::transform::TransformHalves,
 ) {
+    let crate::streams::transform::TransformHalves { readable, writable } = halves;
 
     // Build the readable (read side of the TS) — pull = waits on
     // backpressureChangePromise; cancel = TransformStreamSourceCancel.
-    let readable = crate::streams::transform::build_readable_for_ts(
-        scope,
-        stream,
-        start_promise,
-        readable_hwm,
-        readable_size,
-    );
+    let readable =
+        crate::streams::transform::build_readable_for_ts(scope, stream, start_promise, readable);
 
     // Build the writable (write side of the TS) — write = perform_transform;
     // close = perform flush + close readable; abort = error TS.
-    let writable = crate::streams::transform::build_writable_for_ts(
-        scope,
-        stream,
-        start_promise,
-        writable_hwm,
-        writable_size,
-    );
+    let writable =
+        crate::streams::transform::build_writable_for_ts(scope, stream, start_promise, writable);
 
     // Stash both halves in priv-syms on the TS wrapper.
     crate::streams::slots::write_slot(scope, stream, slots::READABLE, readable.into());
