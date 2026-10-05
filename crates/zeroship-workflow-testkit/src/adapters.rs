@@ -4,7 +4,7 @@
 //! The adapters name `zeroship_workflow` types - the registration, the host
 //! bindings, the hold and registration traits, the journal store - so they
 //! cannot be compiled here: this crate never depends on `zeroship-workflow`,
-//! whose own unit tests use it. [`workflow_fixtures!`] holds them once and
+//! whose own unit tests use it. [`crate::workflow_fixtures!`] holds them once and
 //! expands them where they are invoked, against whichever `zeroship_workflow`
 //! that crate sees: `zeroship-workflow` expands them for its own unit tests,
 //! where `zeroship_workflow` names the crate under test, and the dev-only
