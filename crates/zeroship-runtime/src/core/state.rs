@@ -3,7 +3,7 @@
 //! `RuntimeState` holds all V8 callback state, behind an `Rc<RefCell<>>` so
 //! callbacks can borrow it without crossing thread boundaries.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
@@ -617,6 +617,13 @@ pub struct RuntimeState {
     /// creation. Prevents cross-app timing side-channels.
     pub perf_epoch: std::time::Instant,
 
+    /// Test-only controlled clock for RPC/stream deadline checks, paired with
+    /// the per-request deadline to measure on it. Production leaves this
+    /// `None`, so `deadline_now` reads the system clock and RPC deadlines come
+    /// from the wall timeout. See
+    /// `RuntimeBuilder::rpc_deadline_clock_for_test`.
+    pub rpc_deadline_clock: Option<(Rc<Cell<Instant>>, Duration)>,
+
     /// Clone of the pump's notification channel. Stored here so detached
     /// compio tasks (streaming fetch bodies, in particular) can wake the
     /// pump after pushing new entries into `spawned_ops` without needing a
@@ -637,6 +644,30 @@ impl RuntimeState {
         if let Some(tx) = &self.pump_notify_tx {
             let _ = tx.clone().try_send(());
         }
+    }
+
+    /// Install the test-only controlled deadline clock. See
+    /// `RuntimeBuilder::rpc_deadline_clock_for_test`.
+    pub fn set_rpc_deadline_clock(&mut self, clock: Rc<Cell<Instant>>, timeout: Duration) {
+        self.rpc_deadline_clock = Some((clock, timeout));
+    }
+
+    /// The instant RPC/stream deadline checks compare request deadlines
+    /// against: the controlled test clock when installed, otherwise the
+    /// system clock.
+    pub fn deadline_now(&self) -> Instant {
+        self.rpc_deadline_clock
+            .as_ref()
+            .map_or_else(Instant::now, |(clock, _)| clock.get())
+    }
+
+    /// The RPC/stream deadline the controlled test clock assigns to a
+    /// request, if one is installed. `None` on the system clock, where the
+    /// caller derives the deadline from the wall timeout instead.
+    pub fn rpc_deadline_override(&self) -> Option<Instant> {
+        self.rpc_deadline_clock
+            .as_ref()
+            .and_then(|(clock, timeout)| clock.get().checked_add(*timeout))
     }
 
     /// Capture the host identity and project an explicit AppId into the environment.
@@ -715,6 +746,7 @@ impl RuntimeState {
             isolate_lease_count: 0,
 
             perf_epoch: std::time::Instant::now(),
+            rpc_deadline_clock: None,
             pump_notify_tx: None,
         }
     }

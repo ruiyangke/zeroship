@@ -1,20 +1,38 @@
 //! Native RPC cancellation follows handler and iterator continuations.
 
-use std::time::Duration;
+use std::cell::Cell;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use zeroship_runtime::channel::{CancelFlag, StreamReader};
 use zeroship_runtime::runtime::Runtime;
 use zeroship_runtime::{EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, SettledFetch};
 
-fn runtime(source: String, deadline: Option<Duration>) -> Runtime {
+/// A caller-owned clock the tests advance to expire an RPC deadline on
+/// command instead of racing wall time.
+type TestClock = Rc<Cell<Instant>>;
+
+/// A deadline far longer than any test can run, so wall time can never reach
+/// it: only advancing the controlled clock expires it.
+const UNREACHABLE_DEADLINE: Duration = Duration::from_hours(1);
+
+/// One second past `UNREACHABLE_DEADLINE`, so advancing the controlled clock by
+/// this much puts every installed deadline in the past.
+const ADVANCE_PAST_DEADLINE: Duration = Duration::from_secs(3601);
+
+fn runtime_on_clock(source: String, deadline: Option<Duration>, clock: TestClock) -> Runtime {
     let mut builder = Runtime::builder().modules(vec![ModuleEntry {
         specifier: "index.js".into(),
         source,
     }]);
     if let Some(deadline) = deadline {
-        builder = builder.wall_timeout(deadline);
+        builder = builder.rpc_deadline_clock_for_test(clock, deadline);
     }
     builder.build()
+}
+
+fn runtime(source: String, deadline: Option<Duration>) -> Runtime {
+    runtime_on_clock(source, deadline, Rc::new(Cell::new(Instant::now())))
 }
 
 fn request(runtime: &Runtime, name: &str, cancel: CancelFlag) -> FetchOutcome {
@@ -169,9 +187,16 @@ async fn cancellation_aborts_stream_context_and_returns_the_retained_iterator() 
             CancelSource::Deadline,
             CancelSource::Reader,
         ] {
-            let deadline =
-                matches!(source, CancelSource::Deadline).then_some(Duration::from_millis(100));
-            let runtime = runtime(stalled_stream(promised), deadline);
+            let clock: TestClock = Rc::new(Cell::new(Instant::now()));
+            let runtime = if matches!(source, CancelSource::Deadline) {
+                runtime_on_clock(
+                    stalled_stream(promised),
+                    Some(UNREACHABLE_DEADLINE),
+                    clock.clone(),
+                )
+            } else {
+                runtime(stalled_stream(promised), None)
+            };
             runtime.start_pump();
             let cancel = CancelFlag::new();
             let SettledFetch::Stream { body_reader, .. } =
@@ -196,7 +221,10 @@ async fn cancellation_aborts_stream_context_and_returns_the_retained_iterator() 
             match source {
                 CancelSource::Flag => cancel.cancel(),
                 CancelSource::Reader => drop(reader.take()),
-                CancelSource::Deadline => {}
+                CancelSource::Deadline => {
+                    clock.set(clock.get() + ADVANCE_PAST_DEADLINE);
+                    runtime.notify_pump();
+                }
             }
             if let Some(reader) = reader.take() {
                 let body = read_body(reader).await;
@@ -244,7 +272,8 @@ async fn cancellation_aborts_stream_context_and_returns_the_retained_iterator() 
 
 #[compio::test]
 async fn pending_rpc_deadline_aborts_its_signal_without_waiting_for_native_io() {
-    let runtime = runtime(
+    let clock: TestClock = Rc::new(Cell::new(Instant::now()));
+    let runtime = runtime_on_clock(
         r#"
         import {getRequestContext} from 'zeroship';
         const state = {aborted:false, same:false};
@@ -261,11 +290,14 @@ async fn pending_rpc_deadline_aborts_its_signal_without_waiting_for_native_io() 
         }};
     "#
         .into(),
-        Some(Duration::from_millis(30)),
+        Some(UNREACHABLE_DEADLINE),
+        clock.clone(),
     );
     runtime.start_pump();
     let outcome = request(&runtime, "pending", CancelFlag::new());
     assert!(matches!(outcome, FetchOutcome::Pending { .. }));
+    clock.set(clock.get() + ADVANCE_PAST_DEADLINE);
+    runtime.notify_pump();
     let SettledFetch::Response { status, body, .. } = settle(outcome).await else {
         panic!("expected timeout envelope");
     };
@@ -511,16 +543,21 @@ async fn a_paused_stream_expires_while_the_consumer_is_idle() {
         }}}};
     "#
     );
-    let runtime = runtime(source, Some(Duration::from_millis(30)));
+    let clock: TestClock = Rc::new(Cell::new(Instant::now()));
+    let runtime = runtime_on_clock(source, Some(UNREACHABLE_DEADLINE), clock.clone());
     runtime.start_pump();
     let SettledFetch::Stream { body_reader, .. } =
         settle(request(&runtime, "stream", CancelFlag::new())).await
     else {
         panic!("expected stream");
     };
-    compio::time::sleep(Duration::from_millis(100)).await;
+    let paused = wait_for(&runtime, |state| state["pulls"] == 1).await;
+    assert_eq!(paused["returned"], 0);
+    clock.set(clock.get() + ADVANCE_PAST_DEADLINE);
+    runtime.notify_pump();
+    let state = wait_for(&runtime, |state| state["returned"] == 1).await;
     assert_eq!(
-        inspect(&runtime).await,
+        state,
         serde_json::json!({"pulls":1,"returned":1,"reason":"TimeoutError"})
     );
     let body = read_body(body_reader).await;

@@ -761,6 +761,9 @@ pub struct RuntimeBuilder {
     /// Override for the pump CPU share budget. `None` keeps `BUDGET_WINDOW`
     /// and `MAX_CPU_FRACTION`.
     pump_cpu_budget: Option<(Duration, f64)>,
+    /// Test-only controlled clock for RPC/stream deadline checks. See
+    /// [`RuntimeBuilder::rpc_deadline_clock_for_test`].
+    rpc_deadline_clock: Option<(Rc<Cell<Instant>>, Duration)>,
 }
 
 impl RuntimeBuilder {
@@ -931,6 +934,25 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Test-only: bound each RPC procedure and retained RPC stream body by
+    /// `timeout` measured on a caller-owned clock instead of `wall_timeout`.
+    ///
+    /// A test advances the cell and wakes the pump to fire the deadline at a
+    /// chosen point rather than racing wall time, and `wall_timeout` stays
+    /// unset so the deadline it drives is the RPC deadline alone and not the
+    /// synchronous entry-loading wall check. Production hosts never call this,
+    /// so RPC deadlines still come from `wall_timeout` and `deadline_now`
+    /// still reads the system clock.
+    #[doc(hidden)]
+    pub fn rpc_deadline_clock_for_test(
+        mut self,
+        clock: Rc<Cell<Instant>>,
+        timeout: Duration,
+    ) -> Self {
+        self.rpc_deadline_clock = Some((clock, timeout));
+        self
+    }
+
     /// Build the runtime. Panics on V8 init failure (same as the underlying
     /// `v8::Isolate::new` call — not newly fallible here).
     pub fn build(self) -> Runtime {
@@ -960,6 +982,9 @@ impl RuntimeBuilder {
         if let Some((window, max_fraction)) = self.pump_cpu_budget {
             inner.pump_budget_window = window;
             inner.pump_max_cpu_fraction = max_fraction;
+        }
+        if let Some((clock, timeout)) = self.rpc_deadline_clock {
+            inner.state.borrow_mut().set_rpc_deadline_clock(clock, timeout);
         }
         Runtime {
             inner: Rc::new(RefCell::new(inner)),
@@ -1639,6 +1664,10 @@ impl RuntimeInner {
             // nothing would ever wake it (`setTimeout` does not `notify_pump`).
             let mut ready_timers_pending = false;
             let request_deadline;
+            // Deadline comparisons use the controlled test clock when one is
+            // installed, so a fake deadline parks for its remaining fake
+            // duration instead of spinning once real time passes it.
+            let deadline_now;
 
             // Upgrade the Weak back-reference for this iteration's synchronous
             // V8 work. If it returns `None`, the `Runtime` handle has been
@@ -1667,7 +1696,8 @@ impl RuntimeInner {
                     let cancellation_cpu_start = crate::core::init::thread_cpu_time();
                     rt.cleanup_cancelled_requests();
                     rt.bill_pump_cpu(crate::core::init::thread_cpu_time().saturating_sub(cancellation_cpu_start));
-                    crate::streams::response_forwarder::queue_cancellations(&rt.state, Instant::now());
+                    let scan_now = rt.state.borrow().deadline_now();
+                    crate::streams::response_forwarder::queue_cancellations(&rt.state, scan_now);
                     request_deadline = rt.startup_deadline().into_iter()
                         .chain(rt.dev_entry_deadline())
                         .chain(rt.waiting_startup_requests.iter().filter_map(|request| {
@@ -1737,13 +1767,17 @@ impl RuntimeInner {
                     );
                     ready_timers_pending = !rt.state().borrow().ready_timers.is_empty();
                 }
+                // Read the deadline clock once here, after PHASE 1, so the
+                // parked duration is measured from the same phase the
+                // previous `Instant::now()` calls ran in.
+                deadline_now = runtime.borrow().state.borrow().deadline_now();
                 // `runtime` (strong Rc) dropped here — not held across the
                 // event await below.
             }
 
             let wake_deadline = match (ready_timers_pending, request_deadline) {
-                (true, Some(deadline)) => Some(deadline.min(Instant::now() + READY_TIMER_PASS_TICK)),
-                (true, None) => Some(Instant::now() + READY_TIMER_PASS_TICK),
+                (true, Some(deadline)) => Some(deadline.min(deadline_now + READY_TIMER_PASS_TICK)),
+                (true, None) => Some(deadline_now + READY_TIMER_PASS_TICK),
                 (false, deadline) => deadline,
             };
             let cancel_runtime = runtime.clone();
@@ -1788,7 +1822,7 @@ impl RuntimeInner {
                 // on a real deadline yields both: one reactor turn per pass, and
                 // any op/timer that completes in the meantime is picked up here
                 // and taken through PHASE 2 on its normal path.
-                let mut tick = compio::time::sleep(deadline.saturating_duration_since(Instant::now())).boxed_local().fuse();
+                let mut tick = compio::time::sleep(deadline.saturating_duration_since(deadline_now)).boxed_local().fuse();
                 let has_ops = !work.pending_ops.is_empty();
                 let has_timers = !work.pending_timers.is_empty();
 
@@ -2428,8 +2462,12 @@ impl RuntimeInner {
                             let request = crate::rpc::lifetime::RequestLifetime {
                                 request_id, cancel: ctx.cancel.clone(),
                                 deadline: self
-                                    .wall_timeout
-                                    .and_then(|timeout| request_started.checked_add(timeout)),
+                                    .state
+                                    .borrow()
+                                    .rpc_deadline_override()
+                                    .or_else(|| self
+                                        .wall_timeout
+                                        .and_then(|timeout| request_started.checked_add(timeout))),
                                 signal, _abort_guard: abort_guard,
                             };
                             (ctx_obj, Some(request))
@@ -3783,7 +3821,7 @@ impl RuntimeInner {
 
     fn cleanup_cancelled_requests(&mut self) {
         use crate::rpc::lifetime::Cancellation;
-        let now = Instant::now();
+        let now = self.state.borrow().deadline_now();
         let cancelled: Vec<_> = self.pending_requests.iter().filter_map(|(&id, request)| {
             request.rpc_lifetime.as_ref().and_then(|request| request.cancellation(now))
                 .or_else(|| request.cancel.is_cancelled().then_some(Cancellation::Cancelled))
@@ -3859,7 +3897,7 @@ fn collect_settled_promises(
         .iter()
         .filter_map(|(&id, req)| {
             if req.cancel.is_cancelled() || req.rpc_lifetime.as_ref()
-                .is_some_and(|request| request.cancellation(Instant::now()).is_some())
+                .is_some_and(|request| request.cancellation(state.borrow().deadline_now()).is_some())
             { return None; }
             let p = v8::Local::new(scope, &req.promise);
             if p.state() != v8::PromiseState::Pending {
