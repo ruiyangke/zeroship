@@ -167,8 +167,10 @@ zeroship-metering = { workspace = true }
 # contract Wave A pinned in `crates/zeroship-core/src/superjson.rs`.
 indexmap = { workspace = true }
 
-# UUIDv7 keys for the rpc::abort registry — `(app_id, request_id)` keys
-# the in-flight AbortController map walked by `entered_for_eviction`.
+# UUIDv4 values for the synthesized host entry specifier in `core::init`.
+# A fresh value per runtime keeps it clear of creator module names, and a
+# collision with an app module is detected and rejected rather than made
+# impossible.
 uuid = { workspace = true }
 
 [[bin]]

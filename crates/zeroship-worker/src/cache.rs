@@ -561,9 +561,8 @@ async fn build_runtime(
         // read by `RuntimeInner::bill_pump_cpu` for async/pump CPU and by
         // `node:net` for socket egress/ingress - keyed by `app_id.as_str()`,
         // the same rendering `env.{db,kv,storage}` read off `APP_ID` above. It
-        // also sets `RuntimeInner::app_id`, which gates the eviction-time
-        // `AbortController` fan-out: without it an evicted isolate's in-flight
-        // controllers never fire, and nothing errors.
+        // also sets `RuntimeInner::app_id`, the app identity consumed by the
+        // native namespaces and request state.
         .app_id(app_id.clone());
     if let Some(meter) = meter {
         builder = builder.meter(meter);
@@ -846,9 +845,7 @@ fn evict_lru(cache: &mut AppCache) -> bool {
                     "worker: closing native sockets before isolate eviction"
                 );
             }
-            entry.runtime.with_scope(|scope| {
-                zeroship_runtime::rpc::entered_for_eviction(scope, &oldest_id);
-            });
+            entry.runtime.entered_for_eviction();
         }
 
         cache.isolates.remove(&oldest_id);
@@ -2480,5 +2477,149 @@ mod tests {
             Err("CPU time limit exceeded"),
             "the body ends in the failure that cut it, not cleanly"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-runtime abort registry: LRU eviction aborts only the evicted
+    // runtime's in-flight RPC signals, never a same-app neighbour's.
+    // -----------------------------------------------------------------------
+
+    const SAME_APP_RPC_SOURCE: &str = r#"
+        import { currentSignal } from "zeroship";
+        globalThis.__zsAbortFired = false;
+        export async function pending() {
+            currentSignal().addEventListener("abort", () => {
+                globalThis.__zsAbortFired = true;
+            });
+            await new Promise(r => setTimeout(r, 60_000));
+        }
+        export function readFlag() { return { fired: globalThis.__zsAbortFired }; }
+    "#;
+
+    /// Build a runtime bound to `app_id` whose RPC exports are
+    /// `user_source` plus a synthetic `default.rpc` over `procs_block`.
+    fn rpc_runtime(app_id: &AppId, user_source: &str, procs_block: &str) -> Runtime {
+        let modules = vec![ModuleEntry {
+            specifier: "index.js".into(),
+            source: format!("{user_source}\nexport default {{ rpc: {procs_block} }};"),
+        }];
+        let runtime = Runtime::builder()
+            .modules(modules)
+            .app_id(app_id.clone())
+            .build();
+        runtime.exit_isolate();
+        runtime
+    }
+
+    /// Kick off an RPC against `runtime` and return the outcome without
+    /// driving the pump; the caller leaves async procedures pending.
+    fn start_rpc(runtime: &Runtime, id: &str, input_json: &str) -> zeroship_runtime::FetchOutcome {
+        let env = EnvSnapshot::empty();
+        let ctx = zeroship_runtime::RequestCtx::new(zeroship_runtime::CancelFlag::new());
+        let url = format!("http://localhost/__zeroship/v1/{}", id);
+        let body = format!(r#"{{"json":{}}}"#, input_json);
+        runtime.call_fetch_handler(
+            "POST",
+            &url,
+            &[("content-type".into(), "application/json".into())],
+            &body,
+            &env,
+            ctx,
+        )
+    }
+
+    /// Dispatch the synthetic `readFlag` procedure and return `(status, body)`.
+    async fn read_flag(runtime: &Runtime) -> (u16, String) {
+        match start_rpc(runtime, "readFlag", "[]") {
+            zeroship_runtime::FetchOutcome::Response { status, body, .. } => {
+                (status, String::from_utf8_lossy(&body).into_owned())
+            }
+            zeroship_runtime::FetchOutcome::Pending { rx, cancel: _ } => {
+                let settled = compio::time::timeout(Duration::from_secs(2), rx.recv())
+                    .await
+                    .expect("readFlag timed out")
+                    .expect("readFlag dispatch error");
+                match settled {
+                    zeroship_runtime::SettledFetch::Response { status, body, .. } => {
+                        (status, String::from_utf8_lossy(&body).into_owned())
+                    }
+                    other => panic!("unexpected settle: {:?}", std::any::type_name_of_val(&other)),
+                }
+            }
+            other => panic!("unexpected outcome: {:?}", std::any::type_name_of_val(&other)),
+        }
+    }
+
+    #[test]
+    fn evict_lru_aborts_only_the_evicted_runtimes_signals() {
+        std::thread::spawn(|| {
+            compio::runtime::Runtime::new().unwrap().block_on(async {
+                let app_id = AppId::mint();
+                let now = Instant::now();
+
+                // The older runtime is a previous isolate for this app id
+                // that a reload replaced; it is still on this thread with an
+                // in-flight RPC. The newer runtime is the current cache entry.
+                let older = rpc_runtime(&app_id, SAME_APP_RPC_SOURCE, "{ pending, readFlag }");
+                let newer = rpc_runtime(&app_id, SAME_APP_RPC_SOURCE, "{ pending, readFlag }");
+
+                older.enter_isolate();
+                older.start_pump();
+                let _pending_older = start_rpc(&older, "pending", "[]");
+                older.exit_isolate();
+                assert_eq!(older.abort_registry_len(), 1, "older in-flight signal");
+
+                newer.enter_isolate();
+                newer.start_pump();
+                let _pending_newer = start_rpc(&newer, "pending", "[]");
+                newer.exit_isolate();
+                assert_eq!(newer.abort_registry_len(), 1, "newer in-flight signal");
+
+                let mut cache = AppCache {
+                    isolates: HashMap::new(),
+                    max_size: 1,
+                };
+                cache
+                    .isolates
+                    .insert(app_id.clone(), entry(app_id.clone(), newer.clone(), now));
+
+                assert!(evict_lru(&mut cache));
+
+                // The evicted entry's own signal fired and was removed.
+                assert_eq!(
+                    newer.abort_registry_len(),
+                    0,
+                    "evicted runtime's own signal must fire and clear"
+                );
+                newer.enter_isolate();
+                let (status, body) = read_flag(&newer).await;
+                newer.exit_isolate();
+                assert_eq!(status, 200, "newer readFlag failed: {body}");
+                assert!(
+                    body.contains(r#""fired":true"#),
+                    "evicted runtime's listener did not fire: {body}"
+                );
+
+                // The neighbouring runtime of the same app id is untouched.
+                assert_eq!(
+                    older.abort_registry_len(),
+                    1,
+                    "neighbouring runtime's signal must survive the eviction"
+                );
+                older.enter_isolate();
+                let (status, body) = read_flag(&older).await;
+                older.exit_isolate();
+                assert_eq!(status, 200, "older readFlag failed: {body}");
+                assert!(
+                    body.contains(r#""fired":false"#),
+                    "eviction of the newer runtime aborted the older signal: {body}"
+                );
+
+                older.entered_for_eviction();
+                assert_eq!(older.abort_registry_len(), 0, "older registry cleared");
+            });
+        })
+        .join()
+        .expect("per-runtime eviction abort test thread panicked");
     }
 }

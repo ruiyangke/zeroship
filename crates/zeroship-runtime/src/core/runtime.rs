@@ -334,9 +334,9 @@ pub struct Runtime {
     limits: RuntimeLimits,
     modules: Rc<Vec<ModuleEntry>>,
     /// Multi-tenant identity. Set by the worker via `RuntimeBuilder::app_id`
-    /// so per-isolate registries (RPC abort, future telemetry) can key
-    /// entries by the same Uuid the cache uses. `None` for single-tenant
-    /// callers (the bench server, the dev `serve` CLI, most tests).
+    /// so metering, request state and the native app-identity slot are bound
+    /// to the app. `None` for single-tenant callers (the bench server, the
+    /// dev `serve` CLI, most tests).
     app_id: Option<AppId>,
 }
 
@@ -444,8 +444,6 @@ impl Runtime {
     }
 
     /// Multi-tenant identity, if the builder was supplied one.
-    /// Used by `crate::rpc::abort` to key the in-flight controller
-    /// registry by `(app_id, request_id)`.
     pub fn app_id(&self) -> Option<&AppId> {
         self.app_id.as_ref()
     }
@@ -501,6 +499,24 @@ impl Runtime {
             inner.exit_isolate();
         }
         r
+    }
+
+    /// Abort every in-flight RPC registered on this runtime, inside this
+    /// runtime's own isolate scope.
+    ///
+    /// The worker's LRU eviction calls this immediately before dropping the
+    /// cache entry. Because the registry is owned by the runtime, signals
+    /// minted in another runtime on the same thread are never reached.
+    pub fn entered_for_eviction(&self) {
+        let registry = self.inner.borrow().abort_registry.clone();
+        self.with_scope(|scope| registry.entered_for_eviction(scope, self.app_id.as_ref()));
+    }
+
+    /// Number of in-flight RPC signals registered on this runtime.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn abort_registry_len(&self) -> usize {
+        self.inner.borrow().abort_registry.len()
     }
 
     /// Wake the pump task immediately. Callers use this after flipping a
@@ -1099,6 +1115,10 @@ pub(crate) struct RuntimeInner {
     pending_requests: HashMap<u64, PendingRequest>,
     subscriptions: crate::rpc::subscription::Subscriptions,
     next_direct_request_id: u64,
+    /// In-flight RPC signals owned by this runtime, keyed by its own request
+    /// id. Walked only by [`Runtime::entered_for_eviction`]; no other
+    /// runtime's signals are reachable from here.
+    abort_registry: crate::rpc::abort::AbortRegistry,
 
     /// Notification channel to wake the pump task when new work is added.
     /// dispatch_start sends a signal here after spawning timers/ops so the
@@ -1174,10 +1194,8 @@ pub(crate) struct RuntimeInner {
     /// nothing is ever read back out of this one, it only holds the change.
     pump_cpu_unmetered: Duration,
 
-    /// Multi-tenant identity. When `Some`, the RPC fast-path registers
-    /// every in-flight `AbortController` with `crate::rpc::abort` keyed
-    /// by `(app_id, request_id)` so the worker's eviction sweep can
-    /// fire them. `None` for single-tenant callers.
+    /// The app this isolate serves, when the host named one: the identity a
+    /// pump-share stop reports in its log line.
     app_id: Option<AppId>,
 
     /// Net depth of `enter_isolate`/`exit_isolate` pairs. Tracks whether
@@ -1439,6 +1457,7 @@ impl RuntimeInner {
             pending_requests: HashMap::new(),
             subscriptions: crate::rpc::subscription::Subscriptions::default(),
             next_direct_request_id: 1,
+            abort_registry: crate::rpc::abort::AbortRegistry::new(),
             pump_notify_tx: None,
             cpu_limit,
             wall_timeout,
@@ -2383,9 +2402,7 @@ impl RuntimeInner {
                         Ok(result) => result,
                         Err(error) => break 'dispatch Ok(DispatchResult::Error(error.to_string())),
                     };
-                    let abort_guard = self.app_id.as_ref().map(|app_id| {
-                        crate::rpc::abort::register_in_flight(app_id, request_id, signal.clone())
-                    });
+                    let abort_guard = Some(self.abort_registry.register(request_id, signal.clone()));
                     let lifetime = crate::rpc::lifetime::RequestLifetime {
                         request_id,
                         cancel: CancelFlag::new(),
@@ -2456,9 +2473,8 @@ impl RuntimeInner {
                     );
                     let (rpc_ctx_object, mut local_rpc_lifetime) = match mint_result {
                         Ok((ctx_obj, signal)) => {
-                            let abort_guard = self.app_id.as_ref().map(|app_id| {
-                                crate::rpc::abort::register_in_flight(app_id, request_id, signal.clone())
-                            });
+                            let abort_guard =
+                                Some(self.abort_registry.register(request_id, signal.clone()));
                             let request = crate::rpc::lifetime::RequestLifetime {
                                 request_id, cancel: ctx.cancel.clone(),
                                 deadline: self

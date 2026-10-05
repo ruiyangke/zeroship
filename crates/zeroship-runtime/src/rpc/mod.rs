@@ -14,10 +14,9 @@
 //!     `headers` / `signal` / `user` / `idempotencyKey`.
 //!   - `dispatch.rs`: ALS slot install/restore that lets the holder survive
 //!     `await` boundaries and backs the native `zeroship` module exports.
-//!   - `abort.rs`: per-isolate `AbortRegistry` +
-//!     `entered_for_eviction(app_id)` — fires every in-flight
-//!     procedure's `ctx.signal` when the worker's LRU cache evicts the
-//!     isolate.
+//!   - `abort.rs`: per-runtime `AbortRegistry`; the runtime's
+//!     `entered_for_eviction` fires every in-flight procedure's
+//!     `ctx.signal` when the worker's LRU cache evicts the isolate.
 
 pub mod abort;
 pub mod capability;
@@ -28,7 +27,6 @@ pub(crate) mod lifetime;
 pub mod superjson;
 pub(crate) mod subscription;
 
-pub use abort::{entered_for_eviction, register_in_flight, AbortGuard};
 pub use capability::{
     build_capability_violation, current_kind, dispatch_generation, with_kind, ProcedureKind,
 };

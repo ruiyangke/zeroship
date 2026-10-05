@@ -461,7 +461,6 @@ async fn slow_stream_consumer_bounds_pulls_and_disconnect_returns_in_context() {
 
 #[compio::test]
 async fn response_stream_retains_the_native_rpc_signal_after_headers() {
-    use zeroship_runtime::rpc::abort;
     for promised in [false, true] {
         let app_id = zeroship_core::app_id::AppId::mint();
         let source = format!(r#"
@@ -497,13 +496,13 @@ async fn response_stream_retains_the_native_rpc_signal_after_headers() {
             }
             _ => panic!("expected stream"),
         };
-        assert_eq!(abort::entries_for_app(&app_id), 1);
-        runtime.with_scope(|scope| abort::entered_for_eviction(scope, &app_id));
+        assert_eq!(runtime.abort_registry_len(), 1);
+        runtime.entered_for_eviction();
         let (status, body) = dispatch_async(&runtime, "inspect", "{}").await;
         assert_eq!(status, 200);
         assert_eq!(unwrap_json_envelope(&body), "true");
         drop(reader);
-        assert_eq!(abort::entries_for_app(&app_id), 0);
+        assert_eq!(runtime.abort_registry_len(), 0);
     }
 }
 
