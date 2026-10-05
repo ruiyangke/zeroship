@@ -46,8 +46,6 @@
 //! SSRF / extension / subprotocol / Sec-WebSocket-Accept guards are most
 //! of the work.
 
-#![cfg(feature = "runtime_native_websocket")]
-
 use std::io;
 use std::time::Duration;
 

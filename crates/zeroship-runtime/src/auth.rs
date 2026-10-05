@@ -102,11 +102,8 @@ fn current_user(scope: &mut v8::PinScope, state: &SharedState) -> Option<String>
     {
         return Some(u.clone());
     }
-    #[cfg(feature = "runtime_native_websocket")]
-    {
-        if let Some(u) = s.executing_ws_user.as_ref() {
-            return Some(u.clone());
-        }
+    if let Some(u) = s.executing_ws_user.as_ref() {
+        return Some(u.clone());
     }
     None
 }

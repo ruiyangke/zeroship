@@ -1,10 +1,8 @@
 // Subscription dispatch over WebSocket.
 //
-// Migration to native WebSocket plumbing (post cutover landing 2):
-// these tests now reach into `state.native_websockets[ws_id].events`
-// (the per-WS event queue) instead of the polyfill's `state.websockets`
-// HashMap. The semantic shape is the same — outgoing frames the
-// server-side WS sends arrive in the CLIENT-side native_websockets'
+// These tests reach into `state.native_websockets[ws_id].events` (the
+// per-WS event queue). The semantic shape is the same - outgoing frames
+// the server-side WS sends arrive in the CLIENT-side native_websockets'
 // `events` queue (via `pair::deliver_to_peer`), and we drive the
 // server-side `_onMessage` / `_onClose` by pushing `WsEvent::*` onto
 // its events queue and letting the pump dispatch.
@@ -23,8 +21,6 @@
 // `/__zeroship/v1/<id>`, intercept the server-side WebSocket of the pair,
 // inject a `hello` event on the server side, drain outgoing events
 // from the client side as the generator progresses.
-
-#![cfg(feature = "runtime_native_websocket")]
 
 use std::time::Duration;
 

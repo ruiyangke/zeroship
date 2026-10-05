@@ -3,12 +3,11 @@
 //! `RuntimeState` holds all V8 callback state, behind an `Rc<RefCell<>>` so
 //! callbacks can borrow it without crossing thread boundaries.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::task::Waker;
 use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
@@ -309,94 +308,6 @@ pub const MAX_PENDING_TIMERS: usize = 10_000;
 /// operator a clean error instead of an OOM or a control-plane outage.
 pub const MAX_PENDING_FETCHES: usize = 64;
 
-// ---------------------------------------------------------------------------
-// WebSocket state
-// ---------------------------------------------------------------------------
-
-/// A message on a WebSocket channel.
-#[derive(Debug, Clone)]
-pub enum WsMessage {
-    /// UTF-8 text frame.
-    Text(String),
-    /// Binary frame.
-    Binary(Vec<u8>),
-    /// Close frame with code + reason.
-    Close(u16, String),
-}
-
-/// Cached V8 handles for fast WebSocket dispatch (avoids 3 property lookups per message).
-pub struct WsCachedHandles {
-    /// The JS WebSocket object itself.
-    pub ws_obj: v8::Global<v8::Object>,
-    /// Cached `ws._onMessage` function.
-    pub on_message: v8::Global<v8::Function>,
-    /// Cached `ws._onClose` function.
-    pub on_close: v8::Global<v8::Function>,
-}
-
-impl std::fmt::Debug for WsCachedHandles {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WsCachedHandles").finish()
-    }
-}
-
-/// Per-WebSocket state tracked in RuntimeState.
-#[derive(Debug)]
-pub struct WebSocketState {
-    /// The other end of a WebSocketPair (None for standalone WebSockets).
-    pub peer_id: Option<u32>,
-    /// Whether `accept()` has been called (server-side).
-    pub accepted: bool,
-    /// Whether the WebSocket has been closed.
-    pub closed: bool,
-    /// Messages arriving TO this WebSocket (from peer or TCP).
-    pub incoming: VecDeque<WsMessage>,
-    /// Messages FROM this WebSocket (to peer or TCP).
-    pub outgoing: VecDeque<WsMessage>,
-    /// Close code (set when close is initiated).
-    pub close_code: Option<u16>,
-    /// Close reason (set when close is initiated).
-    pub close_reason: Option<String>,
-    /// Notification flag: set to true when outgoing messages are queued.
-    pub outgoing_ready: Rc<Cell<bool>>,
-    /// Waker for the bidirectional pump (woken when outgoing_ready is set).
-    pub pump_waker: Rc<RefCell<Option<Waker>>>,
-    /// Cached V8 handles — resolved once at accept, used for every message.
-    pub cached_handles: Option<WsCachedHandles>,
-}
-
-impl Default for WebSocketState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl WebSocketState {
-    /// Create a new WebSocket state in the CONNECTING state.
-    pub fn new() -> Self {
-        Self {
-            peer_id: None,
-            accepted: false,
-            closed: false,
-            incoming: VecDeque::new(),
-            outgoing: VecDeque::new(),
-            close_code: None,
-            close_reason: None,
-            outgoing_ready: Rc::new(Cell::new(false)),
-            pump_waker: Rc::new(RefCell::new(None)),
-            cached_handles: None,
-        }
-    }
-
-    /// Signal that outgoing data is available — wake the pump if sleeping.
-    pub fn notify_outgoing(&self) {
-        self.outgoing_ready.set(true);
-        if let Some(waker) = self.pump_waker.borrow_mut().take() {
-            waker.wake();
-        }
-    }
-}
-
 /// Parse the EnvSnapshot wire JSON `{ vars, secrets, expose }` into typed
 /// maps + the expose list. Defensive — missing or malformed fields
 /// degrade to empty values. Non-string entries inside `vars` / `secrets`
@@ -544,7 +455,6 @@ pub struct RuntimeState {
     /// `env.auth.getUser()` inside a WS handler returns THIS connection's
     /// user — never null, never a stale leftover from a prior request on
     /// the pooled isolate. Dropped in `free_native_ws_state`.
-    #[cfg(feature = "runtime_native_websocket")]
     pub ws_user: HashMap<u32, String>,
 
     /// The connection user the WS-event pump has bound for the current WS
@@ -554,7 +464,6 @@ pub struct RuntimeState {
     /// `executing_request_id`-keyed user resolves. This is the WS analogue
     /// of the `executing_request_id` → `per_request_user` lookup the normal
     /// fetch / op / timer turns use.
-    #[cfg(feature = "runtime_native_websocket")]
     pub executing_ws_user: Option<String>,
 
     /// For each in-flight request, the list of promises registered via
@@ -648,17 +557,9 @@ pub struct RuntimeState {
     /// allocations, no map transitions.
     pub ctx_obj: Option<v8::Global<v8::Object>>,
 
-    /// WebSocket instances, keyed by ws_id.
-    pub websockets: HashMap<u32, WebSocketState>,
-    /// Monotonically increasing WebSocket ID counter (incremented by 2 for pairs).
-    pub next_ws_id: u32,
-
     /// Native WebSocket per-id state (events queue, send queue, cancel flag).
-    /// Disjoint from `websockets`/`next_ws_id` (which are polyfill-side).
-    #[cfg(feature = "runtime_native_websocket")]
     pub native_websockets: HashMap<u32, std::rc::Rc<std::cell::RefCell<crate::websocket_native::network::NativeWsState>>>,
     /// Monotonically increasing native WebSocket id counter.
-    #[cfg(feature = "runtime_native_websocket")]
     pub next_native_ws_id: u32,
     /// Cached JS wrapper Global per native ws_id. Captured by the
     /// constructor so the dispatch arm can resolve the wrapper from
@@ -666,7 +567,6 @@ pub struct RuntimeState {
     /// when the WebSocket transitions to CLOSED + the per-WS state
     /// is freed; the wrapper Global keeps the underlying
     /// `WebSocketImpl` alive until the JS GC collects the JS object.
-    #[cfg(feature = "runtime_native_websocket")]
     pub native_ws_wrappers: HashMap<u32, v8::Global<v8::Object>>,
 
     /// Raw TCP policy for `node:net`. Default is `Denied`, which also
@@ -780,9 +680,7 @@ impl RuntimeState {
 
             per_request_logs: HashMap::new(),
             per_request_user: HashMap::new(),
-            #[cfg(feature = "runtime_native_websocket")]
             ws_user: HashMap::new(),
-            #[cfg(feature = "runtime_native_websocket")]
             executing_ws_user: None,
             wait_until_by_request: HashMap::new(),
             request_by_id: HashMap::new(),
@@ -800,14 +698,8 @@ impl RuntimeState {
             ctx_obj: None,
 
 
-            websockets: HashMap::new(),
-            next_ws_id: 1,
-
-            #[cfg(feature = "runtime_native_websocket")]
             native_websockets: HashMap::new(),
-            #[cfg(feature = "runtime_native_websocket")]
             next_native_ws_id: 1,
-            #[cfg(feature = "runtime_native_websocket")]
             native_ws_wrappers: HashMap::new(),
 
             net_policy: crate::transport::net_policy::NetPolicy::Denied,
@@ -1168,13 +1060,10 @@ pub enum OpResult {
     /// extras are coalesced (drain returns all queued events in one
     /// shot, leaving subsequent OpResult::WebSocketEvent occurrences
     /// to be no-ops). See `websocket_native::network::drain_events`.
-    #[cfg(feature = "runtime_native_websocket")]
     WebSocketEvent { ws_id: u32 },
     /// A retained native subscription call or iterator is ready to advance.
-    #[cfg(feature = "runtime_native_websocket")]
     SubscriptionAdvance { ws_id: u32 },
     /// A native subscription handshake or keepalive deadline elapsed.
-    #[cfg(feature = "runtime_native_websocket")]
     SubscriptionTimer(crate::rpc::subscription::Timer),
     /// A native `node:net.Socket` event is ready for EventEmitter
     /// dispatch on the V8 thread. Payload is queued under

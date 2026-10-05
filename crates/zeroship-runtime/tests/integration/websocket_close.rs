@@ -8,7 +8,6 @@
 //!     throws InvalidAccessError DOMException.
 //!   - Reason length: ≤ 123 UTF-8 bytes; longer throws SyntaxError.
 
-#![cfg(feature = "runtime_native_websocket")]
 #![allow(unsafe_code)]
 
 use zeroship_runtime::dom;

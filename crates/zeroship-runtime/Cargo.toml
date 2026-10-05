@@ -128,17 +128,10 @@ ada-url = { workspace = true }
 
 # Async
 futures = { workspace = true }
-# `pin_project!` backs the polyfill WebSocket pump's combined read/outgoing
-# future, keeping its read half structurally pinned.
-pin-project-lite = { workspace = true }
 
 # compio event loop
 compio = { workspace = true, features = ["time", "macros", "bytes"] }
 
-# Native WebSocket framer (RFC 6455 — in-tree decoder/encoder + raw
-# compio TCP/TLS. compio-ws remains feature-gated with native WebSocket;
-# TLS itself is shared by wss:// and `node:tls`.
-compio-ws = { workspace = true, optional = true }
 compio-tls = { workspace = true, optional = true }
 # Native trust roots for wss:// and node:tls. Direct dep — used in
 # `transport::tls::build_tls_connector`.
@@ -192,30 +185,12 @@ required-features = ["bench-bins"]
 # Opt-in bench/echo binaries — kept out of the default library build so a
 # plain `cargo build -p zeroship-runtime` doesn't compile them.
 bench-bins = []
-# Cutover landing 2: the native WebSocket impl is on by default.
-# The polyfill's `WebSocket` and `WebSocketPair` JS classes still install
-# but only wire to the native plumbing via `__nativeWebSocket` detection
-# in `embed/websocket.js`. Tests that reach into the polyfill's per-WS
-# state (state.websockets HashMap) and were not yet migrated to native
-# can opt out via `--no-default-features`.
-default = ["runtime_tls", "runtime_native_websocket"]
+default = ["runtime_tls"]
 runtime_tls = ["dep:compio-tls", "dep:rustls-native-certs"]
-# Per docs/archive/websocket-native.md D-25 (cutover cadence):
-#  Landing 1: native behind feature flag, polyfill default — current.
-#  Landing 2: flip default to native; polyfill remains as fallback.
-#  Landing 3: delete polyfill.
-# When OFF: the JS polyfill at `embed/websocket.js` provides
-# `globalThis.WebSocket`; native classes are NOT installed.
-# When ON: native classes install BEFORE the polyfill runs, and the
-# polyfill detects this and skips its WebSocket assignment.
-runtime_native_websocket = ["runtime_tls", "dep:compio-ws"]
 # Strict-throws path for `binaryType` setter on unknown values. v2 D-7
 # default is silent-no-op (matches undici, workerd, the WPT test); the
 # strict path is preserved behind this feature only for WPT-update tracking.
 runtime_websocket_strict_enum = []
-# Emergency rollback to the polyfill once cutover landing 3 has shipped
-# (delete polyfill); reserved.
-runtime_legacy_websocket = []
 
 [dev-dependencies]
 # Compile-fail snapshot tests for proc-macro diagnostics. Locks in
@@ -223,6 +198,8 @@ runtime_legacy_websocket = []
 # (MAC-02, design `docs/archive/macro-constructor-post-init.md` §6.2).
 trybuild = "1.0"
 rcgen = { workspace = true }
+# The WebSocket end-to-end suite runs a tungstenite server as the peer.
+compio-ws = { workspace = true }
 # The live-driver suites take a database of their own on the servers every test
 # process of the worktree shares (`zeroship-testkit`), or start a server a case
 # holds and drops (`testcontainers`) where the server's configuration is the

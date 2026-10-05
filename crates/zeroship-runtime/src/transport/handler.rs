@@ -18,7 +18,6 @@ use crate::state::SharedState;
 // runs the same ~8 property accesses per response.
 static K_STATUS: v8::OneByteConst = v8::String::create_external_onebyte_const(b"status");
 static K_HEADERS: v8::OneByteConst = v8::String::create_external_onebyte_const(b"headers");
-static K_ID: v8::OneByteConst = v8::String::create_external_onebyte_const(b"_id");
 static K_DONE: v8::OneByteConst = v8::String::create_external_onebyte_const(b"done");
 static K_VALUE: v8::OneByteConst = v8::String::create_external_onebyte_const(b"value");
 static K_NEXT: v8::OneByteConst = v8::String::create_external_onebyte_const(b"next");
@@ -92,12 +91,11 @@ pub enum SettledResult {
 
 /// Inspect a V8 Response object and extract status, headers, body / stream info.
 ///
-/// The JS polyfill is gone, so every Response that reaches this
-/// inspector is either a native `#[v8_class]` Response (Box<ResponseState>
-/// in internal field 0 — see `crate::fetch_response`) or a duck-typed
-/// `{ status, ... }` plain object the user returned from a handler. The
-/// native case is the hot path; the duck-type case falls through to the
-/// "wrap as plain text" branch below.
+/// Every Response that reaches this inspector is either a native
+/// `#[v8_class]` Response (Box<ResponseState> in internal field 0 - see
+/// `crate::fetch_response`) or a duck-typed `{ status, ... }` plain object
+/// the user returned from a handler. The native case is the hot path; the
+/// duck-type case falls through to the "wrap as plain text" branch below.
 pub fn inspect_response(scope: &mut v8::PinScope, response_val: v8::Local<v8::Value>) -> Result<ResponseInfo, String> {
     let obj = match response_val.to_object(scope) {
         Some(o) => o,
@@ -124,37 +122,14 @@ pub fn inspect_response(scope: &mut v8::PinScope, response_val: v8::Local<v8::Va
 
     // WebSocket upgrade: status 101 with a `webSocket` property. The
     // gateway path stashes the client WebSocket Global on the Response;
-    // we ferry the `ws_id` through to the kernel.
-    //
-    // Two layouts were supported during the WebSocket cutover:
-    //   - polyfill: `webSocket` is a plain JS object with an `_id`
-    //     expando set by `__wsCreatePair` / `__wsLinkPair`. Read via
-    //     `ws_obj.get("_id")`.
-    //   - native (feature `runtime_native_websocket` ON): `webSocket`
-    //     is a native `#[v8_class]` WebSocket whose `ws_id` lives in
-    //     the boxed state (internal field 0). Read via
-    //     `websocket_native::ws_id_of`.
-    //
-    // We try the native path first, then fall back to the polyfill
-    // expando. This preserves the fallback for the old polyfill-backed
-    // `_id` field.
+    // we ferry the `ws_id` through to the kernel. `webSocket` is a native
+    // `#[v8_class]` WebSocket whose `ws_id` lives in the boxed state
+    // (internal field 0), read via `websocket_native::ws_id_of`.
     if status == 101
         && let Some(ws_g) = crate::fetch_response::try_native_response_websocket(scope, obj)
     {
         let ws_obj = v8::Local::new(scope, ws_g);
-
-        // Native path first: read ws_id from the boxed state.
-        let mut ws_id = crate::websocket_native::ws_id_of(scope, ws_obj);
-
-        // Fallback: polyfill `_id` expando.
-        if ws_id == 0 {
-            let id_key = key(scope, &K_ID);
-            ws_id = ws_obj
-                .get(scope, id_key.into())
-                .and_then(|v| v.uint32_value(scope))
-                .unwrap_or(0);
-        }
-
+        let ws_id = crate::websocket_native::ws_id_of(scope, ws_obj);
         return Ok(ResponseInfo::WebSocket { ws_id, headers });
     }
 

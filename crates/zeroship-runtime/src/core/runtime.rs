@@ -1035,7 +1035,6 @@ pub(crate) struct RuntimeInner {
     plugins: Vec<Arc<dyn NativePlugin>>,
 
     pending_requests: HashMap<u64, PendingRequest>,
-    #[cfg(feature = "runtime_native_websocket")]
     subscriptions: crate::rpc::subscription::Subscriptions,
     next_direct_request_id: u64,
 
@@ -1368,7 +1367,6 @@ impl RuntimeInner {
             state,
             plugins,
             pending_requests: HashMap::new(),
-            #[cfg(feature = "runtime_native_websocket")]
             subscriptions: crate::rpc::subscription::Subscriptions::default(),
             next_direct_request_id: 1,
             pump_notify_tx: None,
@@ -2206,7 +2204,6 @@ impl RuntimeInner {
         } else {
             ZsV1Path::Other
         };
-        #[cfg(feature = "runtime_native_websocket")]
         let subscription_id_str: Option<&str> = if application.rpc.is_some()
             && is_ws_upgrade
             && method.eq_ignore_ascii_case("GET")
@@ -2235,13 +2232,11 @@ impl RuntimeInner {
         let mut pending_rpc_call = None;
         // A pending call or response body takes ownership of cancellation.
         let mut pending_rpc_lifetime: Option<crate::rpc::lifetime::RequestLifetime> = None;
-        #[cfg(feature = "runtime_native_websocket")]
         let mut subscriptions = std::mem::take(&mut self.subscriptions);
         let dispatch_result: Result<DispatchResult, v8::Global<v8::Promise>> =
             enter_v8!(self, |scope| {
                 crate::core::invocation::with_context(scope, &invocation_context, |scope| 'dispatch: {
 
-                #[cfg(feature = "runtime_native_websocket")]
                 if let Some(rpc_id) = subscription_id_str {
                     let registry = application.rpc.as_ref().unwrap().clone();
                     let user_json = self.state.borrow().per_request_user.get(&request_id).cloned();
@@ -2450,10 +2445,7 @@ impl RuntimeInner {
                 }
                 })
             });
-        #[cfg(feature = "runtime_native_websocket")]
-        {
-            self.subscriptions = subscriptions;
-        }
+        self.subscriptions = subscriptions;
         self.disarm_cpu_timer();
 
         if self.check_v8_terminated() {
@@ -3084,7 +3076,6 @@ impl RuntimeInner {
                 self.drain_new_tasks_into(work);
             }
             OpResult::Cancelled => {}
-            #[cfg(feature = "runtime_native_websocket")]
             OpResult::WebSocketEvent { ws_id } => {
                 let invocation_context =
                     crate::core::invocation::InvocationContext::connection(
@@ -3136,7 +3127,6 @@ impl RuntimeInner {
                     },
                 );
             }
-            #[cfg(feature = "runtime_native_websocket")]
             OpResult::SubscriptionAdvance { ws_id } => {
                 let invocation_context =
                     crate::core::invocation::InvocationContext::connection(
@@ -3149,7 +3139,6 @@ impl RuntimeInner {
                     |subscriptions, scope, state| subscriptions.advance(scope, state, ws_id),
                 );
             }
-            #[cfg(feature = "runtime_native_websocket")]
             OpResult::SubscriptionTimer(timer) => {
                 let ws_id = timer.ws_id();
                 let invocation_context =
@@ -3171,10 +3160,7 @@ impl RuntimeInner {
                         let mut s = state.borrow_mut();
                         s.executing_request_id = None;
                         s.executing_request_cancel = None;
-                        #[cfg(feature = "runtime_native_websocket")]
-                        {
-                            s.executing_ws_user = None;
-                        }
+                        s.executing_ws_user = None;
                     },
                     |scope, state| {
                         crate::node::net::dispatch::dispatch_pending_socket_events(
@@ -3211,10 +3197,7 @@ impl RuntimeInner {
 
         // Clear any per-turn WS identity so it never bleeds into a subsequent
         // non-WS turn on this isolate.
-        #[cfg(feature = "runtime_native_websocket")]
-        {
-            self.state.borrow_mut().executing_ws_user = None;
-        }
+        self.state.borrow_mut().executing_ws_user = None;
 
         if self.check_v8_terminated() {
             self.clear_executing_request();
@@ -3231,7 +3214,6 @@ impl RuntimeInner {
         self.drain_new_tasks_into(work);
     }
 
-    #[cfg(feature = "runtime_native_websocket")]
     fn dispatch_subscription_turn<Dispatch>(
         &mut self,
         work: &mut AsyncWork,
@@ -3644,77 +3626,28 @@ impl RuntimeInner {
     }
 
     /// Enter V8 to deliver a WebSocket message to the server-side WebSocket.
-    /// With the native impl on, pushes a `WsEvent::MessageText` onto the
-    /// per-WS event queue and the V8 dispatch arm fires a MessageEvent
-    /// through `dom::event_target::dispatch_event`.
+    /// Pushes a `WsEvent::MessageText` onto the per-WS event queue; the V8
+    /// dispatch arm fires a MessageEvent through
+    /// `dom::event_target::dispatch_event`.
     pub fn enter_v8_for_ws_message(&mut self, ws_id: u32, data: &str) {
-        #[cfg(feature = "runtime_native_websocket")]
-        {
-            use crate::websocket_native::network as nw;
-            let state = self.state.clone();
-            nw::push_event_pub(&state, ws_id, nw::WsEvent::MessageText(data.to_string()));
-        }
-        #[cfg(not(feature = "runtime_native_websocket"))]
-        {
-            // Polyfill path: cached `_onMessage` direct call.
-            let cached = {
-                let s = self.state.borrow();
-                s.websockets.get(&ws_id).and_then(|ws| {
-                    ws.cached_handles.as_ref().map(|h| (h.ws_obj.clone(), h.on_message.clone()))
-                })
-            };
-            enter_v8!(self, |scope| {
-                if let Some((ws_obj_global, on_message_global)) = cached {
-                    let ws_val: v8::Local<v8::Value> = v8::Local::new(scope, &ws_obj_global).into();
-                    let func = v8::Local::new(scope, &on_message_global);
-                    let data_val: v8::Local<v8::Value> = v8::String::new(scope, data).unwrap().into();
-                    func.call(scope, ws_val, &[data_val]);
-                } else {
-                    let data_val: v8::Local<v8::Value> = v8::String::new(scope, data).unwrap().into();
-                    call_ws_method(scope, ws_id, "_onMessage", &[data_val]);
-                }
-            });
-        }
+        use crate::websocket_native::network as nw;
+        let state = self.state.clone();
+        nw::push_event_pub(&state, ws_id, nw::WsEvent::MessageText(data.to_string()));
     }
 
     /// Enter V8 to deliver a WebSocket close to the server-side WebSocket.
     pub fn enter_v8_for_ws_close(&mut self, ws_id: u32, code: u16, reason: &str) {
-        #[cfg(feature = "runtime_native_websocket")]
-        {
-            use crate::websocket_native::network as nw;
-            let state = self.state.clone();
-            nw::push_event_pub(
-                &state,
-                ws_id,
-                nw::WsEvent::Close {
-                    code,
-                    reason: reason.to_string(),
-                    was_clean: code == 1000,
-                },
-            );
-        }
-        #[cfg(not(feature = "runtime_native_websocket"))]
-        {
-            let cached = {
-                let s = self.state.borrow();
-                s.websockets.get(&ws_id).and_then(|ws| {
-                    ws.cached_handles.as_ref().map(|h| (h.ws_obj.clone(), h.on_close.clone()))
-                })
-            };
-            enter_v8!(self, |scope| {
-                if let Some((ws_obj_global, on_close_global)) = cached {
-                    let ws_val: v8::Local<v8::Value> = v8::Local::new(scope, &ws_obj_global).into();
-                    let func = v8::Local::new(scope, &on_close_global);
-                    let code_val: v8::Local<v8::Value> = v8::Integer::new(scope, code as i32).into();
-                    let reason_val: v8::Local<v8::Value> = v8::String::new(scope, reason).unwrap().into();
-                    func.call(scope, ws_val, &[code_val, reason_val]);
-                } else {
-                    let code_val: v8::Local<v8::Value> = v8::Integer::new(scope, code as i32).into();
-                    let reason_val: v8::Local<v8::Value> = v8::String::new(scope, reason).unwrap().into();
-                    call_ws_method(scope, ws_id, "_onClose", &[code_val, reason_val]);
-                }
-            });
-        }
+        use crate::websocket_native::network as nw;
+        let state = self.state.clone();
+        nw::push_event_pub(
+            &state,
+            ws_id,
+            nw::WsEvent::Close {
+                code,
+                reason: reason.to_string(),
+                was_clean: code == 1000,
+            },
+        );
     }
 
     fn cleanup_cancelled_requests(&mut self) {
@@ -3847,35 +3780,6 @@ fn collect_settled_promises(
 // ---------------------------------------------------------------------------
 // Free function: call onRequest handler and inspect result
 // ---------------------------------------------------------------------------
-
-/// Look up a WebSocket in the global `__wsRegistry` by ID and call a method on it.
-#[cfg(not(feature = "runtime_native_websocket"))]
-fn call_ws_method(
-    scope: &mut v8::PinScope,
-    ws_id: u32,
-    method: &str,
-    args: &[v8::Local<v8::Value>],
-) {
-    let global = scope.get_current_context().global(scope);
-
-    // Access __wsRegistry
-    let registry_key = v8::String::new(scope, "__wsRegistry").unwrap();
-    let Some(registry_val) = global.get(scope, registry_key.into()) else { return };
-    let Some(registry_obj) = registry_val.to_object(scope) else { return };
-
-    // Look up the WebSocket by its string ID (JS object keys are strings)
-    let id_key = v8::String::new(scope, &ws_id.to_string()).unwrap();
-    let Some(ws_val) = registry_obj.get(scope, id_key.into()) else { return };
-    if ws_val.is_undefined() || ws_val.is_null() { return; }
-    let Some(ws_obj) = ws_val.to_object(scope) else { return };
-
-    // Call the method
-    let method_key = v8::String::new(scope, method).unwrap();
-    let Some(method_val) = ws_obj.get(scope, method_key.into()) else { return };
-    let Ok(func) = v8::Local::<v8::Function>::try_from(method_val) else { return };
-
-    func.call(scope, ws_val, args);
-}
 
 /// Call the onRequest handler and inspect the result. Separated out to avoid
 /// No-op V8 callback for `ctx.passThroughOnException`. Takes no arguments

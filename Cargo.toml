@@ -61,8 +61,6 @@ compio-tls = { version = "0.9", default-features = false, features = ["rustls"] 
 compio-ws = { version = "0.3", default-features = false, features = ["rustls", "rustls-native-certs"] }
 futures = "0.3"
 async-trait = "0.1"
-# Pin projection for a manually-written `Future` (`pin_project!`).
-pin-project-lite = "0.2.17"
 
 # HTTP
 ntex = { version = "3", features = ["compio"] }

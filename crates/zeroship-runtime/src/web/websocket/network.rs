@@ -79,8 +79,6 @@
 //! - `closing handshake started`: WHATWG §4.5.
 //! - `connection closed`: WHATWG §4.6.
 
-#![cfg(feature = "runtime_native_websocket")]
-
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;

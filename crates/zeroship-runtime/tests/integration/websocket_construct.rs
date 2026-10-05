@@ -2,8 +2,7 @@
 //! protocol validation, and the WebSocketInit dict.
 //!
 //! These tests exercise the native `globalThis.WebSocket` class
-//! installed by `crate::websocket_native::install_global` when the
-//! `runtime_native_websocket` Cargo feature is on.
+//! installed by `crate::websocket_native::install_global`.
 //!
 //! The tests construct sockets but never reach OPEN — the connect
 //! task is stubbed in step 2; step 4 wires the handshake. Sends throw
@@ -15,7 +14,6 @@
 //! duplicates), and constructor invariants (readyState=CONNECTING,
 //! url= serialised, etc.).
 
-#![cfg(feature = "runtime_native_websocket")]
 #![allow(unsafe_code)]
 
 use zeroship_runtime::dom;

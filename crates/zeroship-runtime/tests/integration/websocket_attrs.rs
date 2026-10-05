@@ -7,7 +7,6 @@
 //!   - EventHandler IDL: non-callable assignment coerces to null per
 //!     HTML §8.1.5.1 step 4 — must NOT throw.
 
-#![cfg(feature = "runtime_native_websocket")]
 #![allow(unsafe_code)]
 
 use zeroship_runtime::dom;
@@ -44,8 +43,7 @@ fn js_string(val: v8::Local<v8::Value>, scope: &mut v8::PinScope) -> String {
 
 #[test]
 fn binary_type_default_is_blob() {
-    // Spec default is "blob" (NOT "arraybuffer" — the polyfill
-    // defaulted wrong).
+    // Spec default is "blob", not "arraybuffer".
     let s = run_in_v8(
         r#"
         const ws = new WebSocket("wss://example.com");
@@ -86,7 +84,7 @@ fn binary_type_set_arraybuffer_round_trip() {
 fn binary_type_set_unknown_value_silent_no_op() {
     // WPT `binaryType-wrong-value.any.js`: setter on an unknown value
     // is a silent no-op (current value retained); it must not throw.
-    // Matches undici, workerd, and the existing polyfill.
+    // Matches undici and workerd.
     let s = run_in_v8(
         r#"
         const ws = new WebSocket("wss://example.com");

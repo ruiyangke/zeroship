@@ -25,8 +25,6 @@
 //! context, so `getUser()` returns USER_B (the stale leftover) — the
 //! identity-bleed bug. Post-fix: it returns USER_A.
 
-#![cfg(feature = "runtime_native_websocket")]
-
 use crate::support;
 use support::*;
 

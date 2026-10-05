@@ -11,8 +11,6 @@
 //! events are dispatched in one V8 turn (no microtask checkpoint
 //! between them — the queue settles, then one checkpoint outside).
 
-#![cfg(feature = "runtime_native_websocket")]
-
 use crate::state::SharedState;
 
 use super::network::{self, WsEvent};

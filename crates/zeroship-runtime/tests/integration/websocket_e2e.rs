@@ -14,8 +14,6 @@
 //!   - binary roundtrip (binaryType="arraybuffer" + Uint8Array)
 //!   - graceful close (code=1000)
 
-#![cfg(feature = "runtime_native_websocket")]
-
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};

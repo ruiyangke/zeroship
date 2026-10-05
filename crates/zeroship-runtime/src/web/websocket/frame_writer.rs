@@ -33,8 +33,6 @@
 //! Permessage-deflate is off because we offer no extensions, so
 //! RSV1/RSV2/RSV3 are always zero.
 
-#![cfg(feature = "runtime_native_websocket")]
-
 use aws_lc_rs::rand;
 
 // Opcodes per RFC 6455 §5.2:

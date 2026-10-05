@@ -199,7 +199,7 @@ pub use convert::{DictOrBool, WebIdlConvertible, read_record, read_sequence};
 pub use url_native::helpers::USVString;
 pub use init::{init_v8, init_v8_single_threaded, v8_platform_flavor, RequestResult, HttpResult};
 pub use modules::ModuleEntry;
-pub use state::{SharedState, RuntimeState, OpResult, SpawnedTimer, WebSocketState, WsMessage};
+pub use state::{SharedState, RuntimeState, OpResult, SpawnedTimer};
 pub use storage::AppStorage;
 pub use runtime::{
     heap_limit_callback_hits, heap_used_and_limit, AsyncEvent, AsyncWork, Runtime, RuntimeBuilder, RuntimeLease,

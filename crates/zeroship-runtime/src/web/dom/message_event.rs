@@ -2,10 +2,8 @@
 //! (https://html.spec.whatwg.org/#messageevent), referenced from the
 //! WHATWG WebSockets spec §3.2 (https://websockets.spec.whatwg.org/).
 //!
-//! Replaces the polyfill at `embed/websocket.js:27-33` which built a
-//! plain `Event` and patched on the MessageEvent fields as expandos.
-//! That breaks `instanceof MessageEvent` and prevents `e.data` from
-//! being readback-stable when `data` is an object.
+//! A native class, so `instanceof MessageEvent` holds and `e.data` is
+//! readback-stable when `data` is an object.
 //!
 //! ## Storage layout
 //!
@@ -258,7 +256,6 @@ impl MessageEventState {
 ///
 /// Sets `is_trusted = true` (platform-emitted), `bubbles = false`,
 /// `cancelable = false` per HTML §9.4.2 + WebSockets §3.2.
-#[cfg(feature = "runtime_native_websocket")]
 pub(crate) fn build_message_event<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     data: v8::Local<v8::Value>,

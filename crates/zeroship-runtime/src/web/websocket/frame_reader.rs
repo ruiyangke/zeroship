@@ -21,8 +21,6 @@
 //! buffers fragments and emits the assembled message when FIN=1
 //! arrives. Control frames are interleavable per spec §5.5.
 
-#![cfg(feature = "runtime_native_websocket")]
-
 use std::io;
 
 use compio::io::{AsyncRead, AsyncReadExt};

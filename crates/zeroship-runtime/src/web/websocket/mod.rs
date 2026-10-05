@@ -16,21 +16,15 @@
 pub mod algorithms;
 pub mod constants;
 
-#[cfg(feature = "runtime_native_websocket")]
 pub mod frame_reader;
-#[cfg(feature = "runtime_native_websocket")]
 pub mod frame_writer;
-#[cfg(feature = "runtime_native_websocket")]
 pub mod handshake;
-#[cfg(feature = "runtime_native_websocket")]
 pub mod network;
-#[cfg(feature = "runtime_native_websocket")]
 pub mod pair;
 
 #[cfg(test)]
 mod tests;
 
-#[cfg(feature = "runtime_native_websocket")]
 pub mod dispatch;
 
 use std::cell::{Cell, RefCell};
@@ -42,7 +36,7 @@ use zeroship_runtime_macros::v8_class;
 use crate::state::OpError;
 
 // ---------------------------------------------------------------------------
-// Public types — ReadyState, BinaryType, WsFrame, WsMessage
+// Public types - ReadyState, BinaryType, WsFrame
 // ---------------------------------------------------------------------------
 
 /// Spec `[[readyState]]` — WHATWG §3.1.
@@ -100,10 +94,9 @@ pub enum WsFrame {
 // Cached V8 handles
 // ---------------------------------------------------------------------------
 
-/// Cached V8 handles — resolved once on first event dispatch, reused
-/// for every subsequent dispatch. Mirrors the polyfill's per-WS cache
-/// in `state::WsCachedHandles` but keyed against the native class
-/// wrapper instead of `__wsRegistry[ws_id]`.
+/// Cached V8 handles - resolved once on first event dispatch and
+/// reused for every subsequent dispatch, keyed against the class
+/// wrapper.
 #[derive(Default)]
 pub struct WsCachedHandles {
     /// The WebSocket wrapper Global — used as the `this` arg in
@@ -226,8 +219,7 @@ pub struct WebSocketImpl {
     /// keepalive timer.
     pub ping_interval_ms: Cell<u32>,
 
-    /// Send-pump notification flag + waker (mirrors the polyfill's
-    /// `outgoing_ready` / `pump_waker` plumbing).
+    /// Send-pump notification flag + waker.
     pub send_ready: Rc<Cell<bool>>,
     pub send_waker: Rc<RefCell<Option<std::task::Waker>>>,
 }
@@ -292,7 +284,7 @@ impl WebSocketImpl {
         // alone — without it, MessageEvents/CloseEvents can't be
         // dispatched after the user has discarded their direct
         // reference but listeners are still attached.
-        let _wrapper = wrapper; // consumed below under the cfg gate
+        let _wrapper = wrapper;
         // STEP per IDL: `url` is required. A no-args call must
         // TypeError per WebIDL. (Server-side mode via `WebSocketPair`
         // uses the hidden `mint_paired_websocket` helper which bypasses
@@ -383,7 +375,6 @@ impl WebSocketImpl {
         // hand-rolled IDL-surface tests) skip the connect spawn and
         // leave the socket in CONNECTING — exactly the spec-defined
         // observable from JS until `open` fires.
-        #[cfg(feature = "runtime_native_websocket")]
         if let Some(state_handle) = scope.get_slot::<crate::state::SharedState>() {
             let state = state_handle.clone();
 
@@ -429,12 +420,6 @@ impl WebSocketImpl {
             network::spawn_connect_task(state, ws_id, url_record, opts);
         } else {
             let _ = protocols;
-            let _ = _wrapper;
-        }
-
-        #[cfg(not(feature = "runtime_native_websocket"))]
-        {
-            let _ = protocols; // unused without the network task
             let _ = _wrapper;
         }
 
@@ -734,7 +719,6 @@ impl WebSocketImpl {
                 // propagated so closeEvent.reason carries the user's
                 // intent.
                 self.ready_state.set(Closing);
-                #[cfg(feature = "runtime_native_websocket")]
                 if let Some(state_handle) = scope.get_slot::<crate::state::SharedState>() {
                     let state = state_handle.clone();
                     let reason = reason_opt.clone().unwrap_or_default();
@@ -776,12 +760,11 @@ impl WebSocketImpl {
         self.accepted.set(true);
         if self.ready_state.get() == ReadyState::Connecting {
             self.ready_state.set(ReadyState::Open);
-            #[cfg(feature = "runtime_native_websocket")]
             if let Some(state_handle) = scope.get_slot::<crate::state::SharedState>() {
                 let state = state_handle.clone();
                 let ws_id = self.ws_id.get();
                 // Push an Open event so dispatch fires `open` on the
-                // wrapper — matches the polyfill's transition shape.
+                // wrapper.
                 if let Some(ws) = network::lookup_native_ws_state(&state, ws_id) {
                     ws.borrow_mut().events.push_back(network::WsEvent::Open {
                         protocol: String::new(),
@@ -844,40 +827,29 @@ impl WebSocketImpl {
     }
 
     /// Drain `WebSocketImpl::send_queue` into the per-WS network
-    /// state's `send_queue` and wake the network task. No-op when the
-    /// native feature is off (the polyfill drains via `__wsSend`) or
-    /// when there is no `SharedState` in the isolate slot (test
-    /// isolates that don't run a compio runtime).
-    #[cfg_attr(
-        not(feature = "runtime_native_websocket"),
-        expect(
-            unused_variables,
-            reason = "the send pump consults scope only when the native WebSocket feature is on; the polyfill path drains via __wsSend"
-        )
-    )]
+    /// state's `send_queue` and wake the network task. No-op when
+    /// there is no `SharedState` in the isolate slot (test isolates
+    /// that don't run a compio runtime).
     pub(crate) fn flush_to_network(&self, scope: &mut v8::PinScope) {
-        #[cfg(feature = "runtime_native_websocket")]
-        {
-            let Some(state_handle) = scope.get_slot::<crate::state::SharedState>() else {
-                return;
-            };
-            let state = state_handle.clone();
+        let Some(state_handle) = scope.get_slot::<crate::state::SharedState>() else {
+            return;
+        };
+        let state = state_handle.clone();
 
-            // Pair-coupled: route to peer instead of the framer.
-            if let Some(peer_id) = self.peer_id.get() {
-                let frames: Vec<WsFrame> = self.send_queue.borrow_mut().drain(..).collect();
-                if frames.is_empty() {
-                    return;
-                }
-                pair::deliver_to_peer(&state, self.ws_id.get(), peer_id, frames);
+        // Pair-coupled: route to peer instead of the framer.
+        if let Some(peer_id) = self.peer_id.get() {
+            let frames: Vec<WsFrame> = self.send_queue.borrow_mut().drain(..).collect();
+            if frames.is_empty() {
                 return;
             }
-
-            // Client (network-backed): hand frames to the per-WS
-            // network::flush_v8_send_queue, which routes them onto the
-            // writer task's mpsc channel.
-            network::flush_v8_send_queue(&state, self.ws_id.get(), self);
+            pair::deliver_to_peer(&state, self.ws_id.get(), peer_id, frames);
+            return;
         }
+
+        // Client (network-backed): hand frames to the per-WS
+        // network::flush_v8_send_queue, which routes them onto the
+        // writer task's mpsc channel.
+        network::flush_v8_send_queue(&state, self.ws_id.get(), self);
     }
 }
 
@@ -935,9 +907,8 @@ pub fn install_websocket_constants<'s>(
 }
 
 // ---------------------------------------------------------------------------
-// Global install — wire up `globalThis.WebSocket` (NEW native class).
-// Called by init.rs ONLY when the native feature flag is on (cutover
-// landing 2 flips the default).
+// Global install - wire up `globalThis.WebSocket` (native class).
+// Called by init.rs when the runtime globals are installed.
 // ---------------------------------------------------------------------------
 
 /// Install `globalThis.WebSocket` as the native class. Matches the

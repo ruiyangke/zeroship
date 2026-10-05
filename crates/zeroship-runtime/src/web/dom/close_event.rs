@@ -1,9 +1,6 @@
 //! Native `CloseEvent` per WHATWG WebSockets §3.2
 //! (https://websockets.spec.whatwg.org/#closeevent).
 //!
-//! Replaces the polyfill at `embed/websocket.js:35-41` which built a
-//! plain `Event` and patched on the CloseEvent fields as expandos.
-//!
 //! ## Storage layout
 //!
 //! `#[repr(C)]` with `Event` as the FIRST field is load-bearing — same
@@ -176,7 +173,6 @@ impl CloseEventState {
 /// come from the receive loop's frame parse or a connection-failed
 /// dispatch. Sets `is_trusted = true`, `bubbles = false`, `cancelable = false`
 /// per WHATWG §3.2.
-#[cfg(feature = "runtime_native_websocket")]
 pub(crate) fn build_close_event<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     code: u16,

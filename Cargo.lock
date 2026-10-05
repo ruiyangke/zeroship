@@ -8628,7 +8628,6 @@ dependencies = [
  "itoa",
  "libc",
  "mimalloc",
- "pin-project-lite",
  "rcgen",
  "rustls",
  "rustls-native-certs",

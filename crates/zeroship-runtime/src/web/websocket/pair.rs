@@ -7,8 +7,6 @@
 //! helper here moves it straight onto the peer's `events` queue and
 //! notifies the pump.
 
-#![cfg(feature = "runtime_native_websocket")]
-
 use crate::state::SharedState;
 
 use super::WsFrame;
@@ -197,8 +195,7 @@ pub fn mint_pair(scope: &mut v8::PinScope, state: &SharedState) -> (u32, u32) {
 }
 
 // ---------------------------------------------------------------------------
-// Native WebSocketPair constructor — installed on globalThis when the
-// `runtime_native_websocket` feature is on.
+// Native WebSocketPair constructor - installed on globalThis by init.rs.
 // ---------------------------------------------------------------------------
 
 use super::WebSocketImpl;
@@ -307,7 +304,7 @@ fn build_paired_wrapper<'s>(
 }
 
 /// Install `globalThis.WebSocketPair` to point at the native callback.
-/// Called from `init.rs` AFTER the polyfill so the native shadow wins.
+/// Called from `init.rs` when the runtime globals are installed.
 pub fn install_global<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     global: v8::Local<v8::Object>,

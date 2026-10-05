@@ -151,9 +151,7 @@ fn message_event_data_undefined_is_null() {
 #[test]
 fn message_event_instanceof_event() {
     // Per HTML §9.4.2: `MessageEvent : Event` — instanceof Event MUST
-    // be true. The polyfill's expando-based "plain Event with .data"
-    // failed this for `instanceof MessageEvent`; the native class
-    // passes both checks.
+    // be true. The native class passes both checks.
     let s = run_in_v8(
         r#"
         const e = new MessageEvent("message");

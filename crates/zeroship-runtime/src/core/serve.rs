@@ -15,13 +15,9 @@
 
 #![allow(unsafe_code)]
 
-#[cfg(not(feature = "runtime_native_websocket"))]
-use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-#[cfg(not(feature = "runtime_native_websocket"))]
-use std::task::Waker;
 use std::time::Duration;
 
 use crate::channel::CancelFlag;
@@ -1309,16 +1305,11 @@ async fn write_ws_frame<W: compio::io::AsyncWrite + Unpin>(
 
 /// Handle a WebSocket upgrade: perform handshake, then run the bidirectional pump.
 ///
-/// Native path (`runtime_native_websocket` feature): owns the `TcpStream`
-/// (passed by value because the inner pump splits read/write into two
-/// independent compio tasks sharing an `Rc<TcpStream>` — a single
-/// `&mut TcpStream` borrow can't be split). io_uring multiplexes
-/// concurrent submissions on the same fd, so reads and writes proceed
-/// without blocking each other.
-///
-/// Polyfill path: keeps the prior single-task design. The polyfill's
-/// outbound queue lives on the per-WS state, drained via the
-/// `outgoing_ready` flag — no channel cancellation hazard.
+/// Owns the `TcpStream`: the pump splits read/write into two independent
+/// compio tasks sharing the fd (`&TcpStream`), because a single
+/// `&mut TcpStream` borrow can't be split. io_uring multiplexes concurrent
+/// submissions on the same fd, so reads and writes proceed without blocking
+/// each other.
 async fn handle_websocket_upgrade(
     stream: &mut TcpStream,
     ws_id: u32,
@@ -1346,30 +1337,14 @@ async fn handle_websocket_upgrade(
         return false;
     }
 
-    // The server-side WS is the peer of the client side. The native
+    // The server-side WS is the peer of the client side. The
     // WebSocketPair allocates two consecutive ids (client = N,
     // server = N+1).
-    #[cfg(feature = "runtime_native_websocket")]
     let server_ws_id: u32 = ws_id + 1;
-    #[cfg(not(feature = "runtime_native_websocket"))]
-    let server_ws_id = {
-        let state = runtime.state();
-        let s = state.borrow();
-        s.websockets
-            .get(&ws_id)
-            .and_then(|ws| ws.peer_id)
-            .unwrap_or(0)
-    };
-
-    #[cfg(not(feature = "runtime_native_websocket"))]
-    if server_ws_id == 0 {
-        return false;
-    }
 
     // Open the kernel-outbound channel on the CLIENT-side native WS:
     // anything the JS server-side `socket.send()`s ends up here as
     // a `WsEvent::MessageText` / `WsEvent::MessageBinary` / Close.
-    #[cfg(feature = "runtime_native_websocket")]
     let kernel_rx = {
         use crate::websocket_native::network as nw;
         use futures::channel::mpsc;
@@ -1383,125 +1358,20 @@ async fn handle_websocket_upgrade(
         rx
     };
 
-    // Polyfill-only: notification handles for this WebSocket's outgoing queue.
-    #[cfg(not(feature = "runtime_native_websocket"))]
-    let (outgoing_ready, pump_waker) = {
-        let state = runtime.state();
-        let s = state.borrow();
-        if let Some(ws) = s.websockets.get(&server_ws_id) {
-            (ws.outgoing_ready.clone(), ws.pump_waker.clone())
-        } else {
-            return false;
-        }
-    };
-
-    // Native path: bidirectional pump implemented as two compio tasks
-    // sharing the TCP fd via `Rc<TcpStream>`. Reader runs `read_ws_frame`
-    // in a steady loop and dispatches frames to V8; writer drains
-    // `kernel_rx` and emits frames to TCP. Each task awaits only its
-    // own io_uring submissions — never select-cancel a partially-
-    // completed read, which on io_uring drops the buffer with bytes
-    // already in it (and shifts every subsequent frame's framing).
-    #[cfg(feature = "runtime_native_websocket")]
-    {
-        return native_ws_pump(stream, server_ws_id, kernel_rx, runtime, ws_pending).await;
-    }
-
-    // The polyfill pump feeds leftover bytes into `read_ws_frame` by mutable
-    // borrow; the native pump moves the same value into its reader task. The
-    // shadow keeps the `mut` from being an unused-mut warning on the native
-    // build, where the parameter itself is moved.
-    #[cfg(not(feature = "runtime_native_websocket"))]
-    let mut ws_pending = ws_pending;
-
-    #[cfg(not(feature = "runtime_native_websocket"))]
-    {
-        loop {
-            outgoing_ready.set(false);
-            let mut got_close = false;
-            loop {
-                let msg = {
-                    let state = runtime.state();
-                    let mut s = state.borrow_mut();
-                    match s.websockets.get_mut(&server_ws_id) {
-                        Some(ws) => ws.outgoing.pop_front(),
-                        None => return true,
-                    }
-                };
-                let Some(msg) = msg else { break };
-                match msg {
-                    crate::state::WsMessage::Text(text) => {
-                        if !write_ws_frame(stream, 0x1, text.as_bytes()).await {
-                            return false;
-                        }
-                    }
-                    crate::state::WsMessage::Binary(data) => {
-                        if !write_ws_frame(stream, 0x2, &data).await {
-                            return false;
-                        }
-                    }
-                    crate::state::WsMessage::Close(code, reason) => {
-                        let mut close_payload = Vec::with_capacity(2 + reason.len());
-                        close_payload.extend_from_slice(&code.to_be_bytes());
-                        close_payload.extend_from_slice(reason.as_bytes());
-                        let _ = write_ws_frame(stream, 0x8, &close_payload).await;
-                        got_close = true;
-                    }
-                }
-            }
-
-            if got_close {
-                return true;
-            }
-
-            let event = WsPollBoth::new(
-                read_ws_frame(stream, &mut ws_pending),
-                outgoing_ready.clone(),
-                pump_waker.clone(),
-            )
-            .await;
-
-            match event {
-                WsEvent::Outgoing => {
-                    continue;
-                }
-                WsEvent::Frame(None) => {
-                    return true;
-                }
-                WsEvent::Frame(Some((0x1, payload))) | WsEvent::Frame(Some((0x2, payload))) => {
-                    let text = String::from_utf8(payload).unwrap_or_default();
-                    deliver_ws_message(runtime, server_ws_id, &text);
-                }
-                WsEvent::Frame(Some((0x8, payload))) => {
-                    let (code, reason) = if payload.len() >= 2 {
-                        let code = u16::from_be_bytes([payload[0], payload[1]]);
-                        let reason = String::from_utf8(payload[2..].to_vec()).unwrap_or_default();
-                        (code, reason)
-                    } else {
-                        (1000, String::new())
-                    };
-                    deliver_ws_close(runtime, server_ws_id, code, &reason);
-                    let mut close_payload = Vec::with_capacity(2 + reason.len());
-                    close_payload.extend_from_slice(&code.to_be_bytes());
-                    close_payload.extend_from_slice(reason.as_bytes());
-                    let _ = write_ws_frame(stream, 0x8, &close_payload).await;
-                    return true;
-                }
-                WsEvent::Frame(Some((0x9, payload))) => {
-                    let _ = write_ws_frame(stream, 0xA, &payload).await;
-                }
-                WsEvent::Frame(Some((0xA, _))) => {}
-                WsEvent::Frame(Some(_)) => {}
-            }
-        }
-    }
+    // Bidirectional pump implemented as two compio tasks sharing the TCP
+    // fd via `&TcpStream`. Reader runs `read_ws_frame` in a steady loop and
+    // dispatches frames to V8; writer drains `kernel_rx` and emits frames
+    // to TCP. Each task awaits only its own io_uring submissions - never
+    // select-cancel a partially-completed read, which on io_uring drops the
+    // buffer with bytes already in it (and shifts every subsequent frame's
+    // framing).
+    native_ws_pump(stream, server_ws_id, kernel_rx, runtime, ws_pending).await
 }
 
 /// Write one kernel-side WebSocket event (the JS server's `socket.send()`
 /// or `socket.close()` output) to the wire. Returns false on TCP write
 /// failure; sets `got_close` to true when the event was a Close (the
 /// caller should return true after a clean close handshake).
-#[cfg(feature = "runtime_native_websocket")]
 async fn write_kernel_event<W: compio::io::AsyncWrite + Unpin>(
     stream: &mut W,
     ev: crate::websocket_native::network::WsEvent,
@@ -1550,7 +1420,6 @@ async fn write_kernel_event<W: compio::io::AsyncWrite + Unpin>(
 /// `kernel_rx` (frames the JS server enqueued via `socket.send()`),
 /// plus a small close-echo channel the reader uses to forward peer
 /// Closes for an RFC 6455-clean handshake.
-#[cfg(feature = "runtime_native_websocket")]
 async fn native_ws_pump(
     stream: &mut TcpStream,
     server_ws_id: u32,
@@ -1686,78 +1555,12 @@ async fn native_ws_pump(
     reader_result
 }
 
-#[cfg(not(feature = "runtime_native_websocket"))]
-enum WsEvent {
-    Frame(Option<(u8, Vec<u8>)>),
-    Outgoing,
-}
-
-#[cfg(not(feature = "runtime_native_websocket"))]
-pin_project_lite::pin_project! {
-    /// Combined future: waits for either a TCP frame OR an outgoing notification.
-    /// Avoids the overhead of `Fuse` wrappers + `futures::select!`.
-    ///
-    /// `pin_project!` keeps `read_fut` structurally pinned.
-    struct WsPollBoth<F> {
-        #[pin]
-        read_fut: F,
-        outgoing_ready: Rc<Cell<bool>>,
-        pump_waker: Rc<RefCell<Option<Waker>>>,
-    }
-}
-
-#[cfg(not(feature = "runtime_native_websocket"))]
-impl<F> WsPollBoth<F> {
-    fn new(
-        read_fut: F,
-        outgoing_ready: Rc<Cell<bool>>,
-        pump_waker: Rc<RefCell<Option<Waker>>>,
-    ) -> Self {
-        Self {
-            read_fut,
-            outgoing_ready,
-            pump_waker,
-        }
-    }
-}
-
-#[cfg(not(feature = "runtime_native_websocket"))]
-impl<F: std::future::Future<Output = Option<(u8, Vec<u8>)>>> std::future::Future for WsPollBoth<F> {
-    type Output = WsEvent;
-
-    fn poll(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<WsEvent> {
-        let this = self.project();
-
-        // Check outgoing notification first (cheapest — just a Cell read).
-        if this.outgoing_ready.get() {
-            return std::task::Poll::Ready(WsEvent::Outgoing);
-        }
-
-        // Poll the TCP read.
-        if let std::task::Poll::Ready(frame) = this.read_fut.poll(cx) {
-            return std::task::Poll::Ready(WsEvent::Frame(frame));
-        }
-
-        // Neither ready — store our waker for the outgoing notification.
-        *this.pump_waker.borrow_mut() = Some(cx.waker().clone());
-        // Double-check after storing waker.
-        if this.outgoing_ready.get() {
-            return std::task::Poll::Ready(WsEvent::Outgoing);
-        }
-
-        std::task::Poll::Pending
-    }
-}
-
-/// Enter V8 to call `ws._onMessage(data)` on the server WebSocket.
+/// Enter V8 to deliver a WebSocket message to the server-side socket.
 fn deliver_ws_message(runtime: &Runtime, ws_id: u32, data: &str) {
     runtime.enter_v8_for_ws_message(ws_id, data);
 }
 
-/// Enter V8 to call `ws._onClose(code, reason)` on the server WebSocket.
+/// Enter V8 to deliver a WebSocket close to the server-side socket.
 fn deliver_ws_close(runtime: &Runtime, ws_id: u32, code: u16, reason: &str) {
     runtime.enter_v8_for_ws_close(ws_id, code, reason);
 }
@@ -2674,151 +2477,5 @@ mod worker_count_clamp_tests {
             !r.clamped_for_sqlite,
             "1-to-1 is not a clamp (no surprising log)"
         );
-    }
-}
-
-#[cfg(all(test, not(feature = "runtime_native_websocket")))]
-mod ws_poll_both_tests {
-    //! The polyfill WebSocket pump's combined read/outgoing future. These drive
-    //! `poll` directly to pin down the ordering the pump depends on: an already
-    //! set outgoing flag wins, a ready read surfaces its frame, and a pending
-    //! read registers the pump waker before re-checking the flag. The read
-    //! futures are deliberately `!Unpin`, which is what makes the structural
-    //! pinning load-bearing.
-    use super::*;
-    use std::marker::PhantomPinned;
-    use std::pin::Pin;
-    use std::task::{Context, Poll};
-
-    /// A read future that never resolves, recording how often it is polled.
-    struct PendingRead {
-        polls: Rc<Cell<usize>>,
-        _pin: PhantomPinned,
-    }
-
-    impl std::future::Future for PendingRead {
-        type Output = Option<(u8, Vec<u8>)>;
-
-        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-            self.polls.set(self.polls.get() + 1);
-            Poll::Pending
-        }
-    }
-
-    /// A read future that never resolves but flips `outgoing` while it is being
-    /// polled - the race the pump's post-registration re-check exists for.
-    struct FlipOnPoll {
-        outgoing: Rc<Cell<bool>>,
-        _pin: PhantomPinned,
-    }
-
-    impl std::future::Future for FlipOnPoll {
-        type Output = Option<(u8, Vec<u8>)>;
-
-        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-            self.outgoing.set(true);
-            Poll::Pending
-        }
-    }
-
-    /// A read future that is immediately ready with one frame.
-    struct ReadyRead {
-        frame: Option<(u8, Vec<u8>)>,
-    }
-
-    impl std::future::Future for ReadyRead {
-        type Output = Option<(u8, Vec<u8>)>;
-
-        fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-            Poll::Ready(self.frame.take())
-        }
-    }
-
-    fn waker_slot() -> Rc<RefCell<Option<Waker>>> {
-        Rc::new(RefCell::new(None))
-    }
-
-    #[test]
-    fn an_outgoing_notification_is_taken_before_the_read_is_polled() {
-        let polls = Rc::new(Cell::new(0));
-        let read = PendingRead {
-            polls: polls.clone(),
-            _pin: PhantomPinned,
-        };
-        let mut both = Box::pin(WsPollBoth::new(
-            read,
-            Rc::new(Cell::new(true)),
-            waker_slot(),
-        ));
-        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
-
-        assert!(matches!(
-            both.as_mut().poll(&mut cx),
-            Poll::Ready(WsEvent::Outgoing)
-        ));
-        assert_eq!(
-            polls.get(),
-            0,
-            "an already-set outgoing flag wins before any read poll"
-        );
-    }
-
-    #[test]
-    fn a_ready_read_resolves_to_its_frame() {
-        let read = ReadyRead {
-            frame: Some((0x1, b"hello".to_vec())),
-        };
-        let mut both = Box::pin(WsPollBoth::new(
-            read,
-            Rc::new(Cell::new(false)),
-            waker_slot(),
-        ));
-        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
-
-        match both.as_mut().poll(&mut cx) {
-            Poll::Ready(WsEvent::Frame(frame)) => {
-                assert_eq!(frame, Some((0x1, b"hello".to_vec())))
-            }
-            Poll::Ready(WsEvent::Outgoing) | Poll::Pending => {
-                panic!("a ready read must surface its frame")
-            }
-        }
-    }
-
-    #[test]
-    fn a_pending_read_registers_the_pump_waker() {
-        let read = PendingRead {
-            polls: Rc::new(Cell::new(0)),
-            _pin: PhantomPinned,
-        };
-        let pump_waker = waker_slot();
-        let mut both = Box::pin(WsPollBoth::new(
-            read,
-            Rc::new(Cell::new(false)),
-            pump_waker.clone(),
-        ));
-        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
-
-        assert!(matches!(both.as_mut().poll(&mut cx), Poll::Pending));
-        assert!(
-            pump_waker.borrow().is_some(),
-            "a pending poll stores the task waker for the outgoing notification"
-        );
-    }
-
-    #[test]
-    fn an_outgoing_notification_during_the_read_resolves_as_outgoing() {
-        let outgoing = Rc::new(Cell::new(false));
-        let read = FlipOnPoll {
-            outgoing: outgoing.clone(),
-            _pin: PhantomPinned,
-        };
-        let mut both = Box::pin(WsPollBoth::new(read, outgoing, waker_slot()));
-        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
-
-        assert!(matches!(
-            both.as_mut().poll(&mut cx),
-            Poll::Ready(WsEvent::Outgoing)
-        ));
     }
 }

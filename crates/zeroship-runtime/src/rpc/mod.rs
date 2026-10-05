@@ -26,7 +26,6 @@ pub mod dispatch;
 pub mod error;
 pub(crate) mod lifetime;
 pub mod superjson;
-#[cfg(feature = "runtime_native_websocket")]
 pub(crate) mod subscription;
 
 pub use abort::{entered_for_eviction, register_in_flight, AbortGuard};

@@ -487,17 +487,11 @@ pub(crate) fn prepare_application(
     // fetch global (constructor calls `globalThis.fetch(...)`).
     install_eventsource(scope);
 
-    // Native WebSocket, gated behind the `runtime_native_websocket`
-    // feature flag. The native WebSocket / WebSocketPair classes are
-    // the sole providers — with the feature off, no WebSocket is
-    // installed at all.
-    #[cfg(feature = "runtime_native_websocket")]
+    // Native WebSocket / WebSocketPair classes (the workerd pair
+    // extension is backed by the per-WS event channel).
     {
         let global = scope.get_current_context().global(scope);
         crate::websocket_native::install_global(scope, global);
-        // Native WebSocketPair (workerd extension): the two paired
-        // sockets are native instances backed by the per-WS event
-        // channel.
         crate::websocket_native::pair::install_global(scope, global);
     }
 
