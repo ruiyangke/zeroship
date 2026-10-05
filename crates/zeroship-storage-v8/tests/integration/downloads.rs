@@ -223,10 +223,11 @@ fn s3_downloads_reach_v8_in_bounded_chunks_and_small_objects_end_at_once() {
     assert_eq!(reply["afterEnd"], true);
 }
 
+/// An object's bytes reach JavaScript unchanged whatever text they spell: this
+/// one spells text a runtime could mistake for one of its own internal ids,
+/// and the binding hands it over without reading it.
 #[test]
-fn bytes_shaped_like_a_runtime_marker_reach_javascript_unchanged() {
-    // The runtime reads a `ResolveValue::Bytes` payload of this shape as a
-    // pending native fetch, and a stored object may hold exactly these bytes.
+fn object_bytes_reach_javascript_unchanged_whatever_text_they_spell() {
     let root = tempfile::tempdir().unwrap();
     let store = StorageStore::from_backend(Arc::new(LocalFs::new(root.path())));
     let object = b"__zs_native_fetch#0\n";

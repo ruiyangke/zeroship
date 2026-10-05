@@ -688,3 +688,334 @@ fn redirect_302_get_preserved() {
     assert!(resp.redirected);
     assert!(String::from_utf8_lossy(&resp.body).contains("method=GET"));
 }
+
+// ---------------------------------------------------------------------------
+// V8-driven: what a JS fetch settles to
+// ---------------------------------------------------------------------------
+
+/// JS that reports each way a `fetch` settles: the upstream's Response, the
+/// `TypeError` a network failure produces, and the abort reason when its signal
+/// fires while the fetch is in flight.
+const FETCH_SETTLEMENT_APP: &str = r#"
+export default {
+    async fetch(request) {
+        const url = request.headers.get("x-upstream");
+        const response = await fetch(url);
+        const resolved = {
+            isResponse: response instanceof Response,
+            status: response.status,
+            statusText: response.statusText,
+            probe: response.headers.get("x-probe"),
+            body: await response.text(),
+        };
+        let network;
+        try {
+            await fetch("http://127.0.0.1:1/");
+            network = "resolved";
+        } catch (e) {
+            network = { name: e.name, message: e.message };
+        }
+        const controller = new AbortController();
+        const pending = fetch(url, { signal: controller.signal });
+        const reason = new Error("caller gave up");
+        controller.abort(reason);
+        let aborted;
+        try {
+            await pending;
+            aborted = "resolved";
+        } catch (e) {
+            aborted = { isReason: e === reason, message: e.message };
+        }
+        return Response.json({ resolved, network, aborted });
+    },
+};
+"#;
+
+#[test]
+fn js_fetch_settles_with_the_response_a_network_error_or_the_abort_reason() {
+    use zeroship_runtime::{
+        init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, Runtime, SettledFetch,
+    };
+
+    let server = start_mock_server(|_req| {
+        http_response(201, "Created", &[("x-probe", "upstream")], b"upstream body")
+    });
+    let headers = [("x-upstream".to_owned(), server.url())];
+    let body = run(async move {
+        init_v8();
+        let runtime = Runtime::builder()
+            .modules(vec![ModuleEntry {
+                specifier: "index.js".into(),
+                source: FETCH_SETTLEMENT_APP.into(),
+            }])
+            .build();
+        runtime.start_pump();
+        let outcome = runtime.call_fetch_handler(
+            "GET",
+            "http://localhost/",
+            &headers,
+            "",
+            &EnvSnapshot::empty(),
+            RequestCtx::new(CancelFlag::new()),
+        );
+        let FetchOutcome::Pending { rx, .. } = outcome else {
+            panic!("the handler awaits its fetches, so it must be pending");
+        };
+        let settled = compio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("the handler never settled")
+            .expect("the handler settled with a dispatch error");
+        let SettledFetch::Response { status, body, .. } = settled else {
+            panic!("the handler must settle with a buffered response");
+        };
+        assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+        String::from_utf8(body).unwrap()
+    });
+    let report: serde_json::Value =
+        serde_json::from_str(&body).unwrap_or_else(|e| panic!("report is not JSON ({e}): {body}"));
+    assert_eq!(
+        report["resolved"],
+        serde_json::json!({
+            "isResponse": true,
+            "status": 201,
+            "statusText": "Created",
+            "probe": "upstream",
+            "body": "upstream body",
+        }),
+        "{body}"
+    );
+    assert_eq!(report["network"]["name"], "TypeError", "{body}");
+    assert!(
+        report["network"]["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("Network request failed")),
+        "{body}"
+    );
+    assert_eq!(
+        report["aborted"],
+        serde_json::json!({ "isReason": true, "message": "caller gave up" }),
+        "{body}"
+    );
+    assert_eq!(server.requests().len(), 1, "only the first fetch reaches the upstream");
+}
+
+// ---------------------------------------------------------------------------
+// V8-driven: a finished fetch settles only the promise that started it
+// ---------------------------------------------------------------------------
+
+const VICTIM_TOKEN: &str = "VICTIM-UPSTREAM-TOKEN";
+const VICTIM_BODY: &str = "VICTIM-UPSTREAM-BODY";
+
+/// A loopback upstream that answers one request only once released, so a test
+/// can act while the client's fetch is in flight.
+struct HeldUpstream {
+    url: String,
+    received: futures::channel::oneshot::Receiver<()>,
+    release: std::sync::mpsc::Sender<()>,
+    server: thread::JoinHandle<usize>,
+}
+
+impl HeldUpstream {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let (received_tx, received) = futures::channel::oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel::<()>();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0u8; 1024];
+            while find_double_crlf(&request).is_none() {
+                let n = stream.read(&mut buf).unwrap();
+                assert!(n > 0, "the client closed before sending its request");
+                request.extend_from_slice(&buf[..n]);
+            }
+            received_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            let response =
+                http_response(200, "OK", &[("x-victim-token", VICTIM_TOKEN)], VICTIM_BODY.as_bytes());
+            stream.write_all(&response).unwrap();
+            response.len()
+        });
+        Self { url, received, release, server }
+    }
+}
+
+/// The victim: one outbound fetch, awaited.
+const FETCH_VICTIM_APP: &str = r#"
+export default {
+    async fetch(request) {
+        const upstream = await fetch(request.headers.get("x-upstream"));
+        return new Response(await upstream.text());
+    },
+};
+"#;
+
+/// The attacker: for each low id, hands a byte-returning native method bytes
+/// that spell text a runtime could mistake for one of its own internal ids,
+/// and reports anything other than those bytes coming back.
+const BYTE_PROBE_APP: &str = r#"
+export default {
+    async fetch() {
+        const t = new AsyncTest();
+        const probes = [];
+        for (let id = 1; id <= 8; id++) {
+            const sent = "__zs_native_fetch#" + id + "\n";
+            let received = null;
+            let foreign = null;
+            let error = null;
+            try {
+                const out = await t.echo_bytes(new TextEncoder().encode(sent));
+                if (out instanceof Uint8Array) {
+                    received = new TextDecoder().decode(out);
+                } else {
+                    foreign = { kind: Object.prototype.toString.call(out) };
+                    if (out instanceof Response) {
+                        foreign.token = out.headers.get("x-victim-token");
+                        foreign.body = await out.text();
+                    }
+                }
+            } catch (e) {
+                error = e?.message ?? String(e);
+            }
+            probes.push({ id, sent, received, foreign, error });
+        }
+        return Response.json(probes);
+    },
+};
+"#;
+
+/// Build a runtime and leave its isolate exited, as the worker does, so
+/// several isolates can share this thread.
+fn resident_runtime(
+    source: &str,
+    plugins: Vec<std::sync::Arc<dyn zeroship_runtime::NativePlugin>>,
+) -> zeroship_runtime::Runtime {
+    let runtime = zeroship_runtime::Runtime::builder()
+        .modules(vec![zeroship_runtime::ModuleEntry {
+            specifier: "index.js".into(),
+            source: source.into(),
+        }])
+        .plugins(plugins)
+        .build();
+    runtime.start_pump();
+    runtime.exit_isolate();
+    runtime
+}
+
+/// The host's deadline watchdog interrupts the victim while its fetch is in
+/// flight, so the victim's pump takes the finished fetch and drops it
+/// unsettled, and the victim's isolate is then torn down. Another isolate on
+/// the same thread must not be able to claim that result by resolving bytes
+/// that name it.
+#[test]
+fn a_fetch_its_isolate_never_settled_is_unreachable_from_another_isolate() {
+    use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, RequestCtx, SettledFetch};
+
+    let upstream = HeldUpstream::start();
+    let body = run(async move {
+        init_v8();
+        let victim = resident_runtime(FETCH_VICTIM_APP, Vec::new());
+        let attacker = resident_runtime(
+            BYTE_PROBE_APP,
+            vec![std::sync::Arc::new(super::v8_async_method_smoke::AsyncTestPlugin)],
+        );
+
+        let headers = [("x-upstream".to_owned(), upstream.url.clone())];
+        victim.enter_isolate();
+        let outcome = victim.call_fetch_handler(
+            "GET",
+            "http://localhost/",
+            &headers,
+            "",
+            &EnvSnapshot::empty(),
+            RequestCtx::new(CancelFlag::new()),
+        );
+        victim.exit_isolate();
+        let FetchOutcome::Pending { rx: victim_reply, .. } = outcome else {
+            panic!("the victim's handler must be waiting on its fetch");
+        };
+        compio::time::timeout(Duration::from_secs(10), upstream.received)
+            .await
+            .expect("the victim's fetch never reached the upstream")
+            .expect("the upstream stopped before reading the victim's request");
+
+        victim.interrupt_handle().cancel();
+        upstream.release.send(()).unwrap();
+        let written = upstream.server.join().expect("the upstream panicked");
+        assert!(written > VICTIM_BODY.len(), "the upstream must have answered the victim");
+        compio::time::timeout(Duration::from_secs(10), async {
+            while victim.state().borrow().in_flight_fetches != 0 {
+                compio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the victim's pump never took its finished fetch");
+        compio::time::timeout(Duration::from_secs(10), victim.shutdown())
+            .await
+            .expect("the victim's shutdown never finished");
+        let victim_reply = compio::time::timeout(Duration::from_secs(10), victim_reply.recv())
+            .await
+            .expect("the victim's reply never arrived");
+        let error = match victim_reply {
+            Err(error) => error,
+            Ok(_) => panic!(
+                "the interrupted dispatch resolved the victim's fetch instead of erroring"
+            ),
+        };
+        assert_eq!(
+            error.message, "Request timed out",
+            "the victim's reply must be the interruption error, not a fetch result"
+        );
+        assert_eq!(error.status, 500, "the interruption is an internal dispatch error");
+        drop(victim);
+
+        attacker.enter_isolate();
+        let outcome = attacker.call_fetch_handler(
+            "GET",
+            "http://localhost/",
+            &[],
+            "",
+            &EnvSnapshot::empty(),
+            RequestCtx::new(CancelFlag::new()),
+        );
+        attacker.exit_isolate();
+        let FetchOutcome::Pending { rx, .. } = outcome else {
+            panic!("the attacker awaits its native calls, so it must be pending");
+        };
+        let settled = compio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("the attacker never settled")
+            .expect("the attacker settled with a dispatch error");
+        let SettledFetch::Response { status, body, .. } = settled else {
+            panic!("the attacker must settle with a buffered response");
+        };
+        assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+        String::from_utf8(body).unwrap()
+    });
+
+    let probes: Vec<serde_json::Value> = serde_json::from_str(&body)
+        .unwrap_or_else(|e| panic!("probe report is not a JSON array ({e}): {body}"));
+    assert_eq!(probes.len(), 8, "every probe must report; body: {body}");
+    assert!(
+        !body.contains(VICTIM_TOKEN) && !body.contains(VICTIM_BODY),
+        "CROSS-ISOLATE READ: the victim's upstream response outlived its isolate and \
+         reached another isolate on the same thread; body: {body}"
+    );
+    for probe in &probes {
+        assert_eq!(
+            probe["foreign"],
+            serde_json::Value::Null,
+            "the runtime settled the attacker's call with a value it did not return: {probe}"
+        );
+        assert_eq!(
+            probe["error"],
+            serde_json::Value::Null,
+            "the attacker's bytes were rejected instead of returned: {probe}"
+        );
+        assert_eq!(
+            probe["received"], probe["sent"],
+            "the attacker's bytes did not round-trip verbatim: {probe}"
+        );
+    }
+}

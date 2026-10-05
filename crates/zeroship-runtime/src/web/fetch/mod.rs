@@ -35,8 +35,6 @@ pub mod redirect;
 pub mod request;
 pub mod response;
 
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::pin::Pin;
 
 use crate::channel::CancelFlag;
@@ -51,11 +49,10 @@ use algorithms::{
 };
 
 // ===========================================================================
-// Pending registry
+// Settlement envelope
 // ===========================================================================
 
-/// Outcome of a fetch task — stashed in a thread-local so the pump's
-/// V8 turn can pick it up after the async task resolves.
+/// What a fetch task finished with.
 enum FetchOutcome {
     Resolve(AlgorithmResponse),
     /// `(message, signal_at_callback_time)` — if signal is aborted at
@@ -63,39 +60,18 @@ enum FetchOutcome {
     Reject(String, Option<v8::Global<v8::Object>>),
 }
 
-thread_local! {
-    static PENDING: RefCell<HashMap<u64, FetchOutcome>> = RefCell::new(HashMap::new());
-    static NEXT_ID: RefCell<u64> = const { RefCell::new(1) };
-}
+/// A finished native fetch, carried by value from its task to the pump turn
+/// that settles the promise `fetch()` returned ([`ResolveValue::Fetch`]).
+///
+/// The outcome travels inside the envelope of the one promise it belongs to,
+/// so no other promise, isolate or app on the thread can name it. The field
+/// is private: only `fetch_callback` builds one.
+pub struct FetchSettlement(FetchOutcome);
 
-fn stash(outcome: FetchOutcome) -> u64 {
-    let id = NEXT_ID.with(|n| {
-        let mut m = n.borrow_mut();
-        let v = *m;
-        *m = v.wrapping_add(1);
-        v
-    });
-    PENDING.with(|s| {
-        s.borrow_mut().insert(id, outcome);
-    });
-    id
-}
-
-/// Encode the registry id as the bytes of a `ResolveValue::Bytes`. The
-/// pump recognises this prefix and rebuilds the Response inside V8.
-const MARKER: &str = "__zs_native_fetch#";
-
-fn pack_pending(id: u64) -> ResolveValue {
-    let marker = format!("{MARKER}{id}\n");
-    ResolveValue::Bytes(marker.into_bytes())
-}
-
-/// Inverse — returns the registry id if `bytes` is the marker shape.
-pub fn unpack_pending(bytes: &[u8]) -> Option<u64> {
-    let s = std::str::from_utf8(bytes).ok()?;
-    let s = s.strip_prefix(MARKER)?;
-    let s = s.strip_suffix('\n').unwrap_or(s);
-    s.parse::<u64>().ok()
+impl std::fmt::Debug for FetchSettlement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FetchSettlement").finish_non_exhaustive()
+    }
 }
 
 // ===========================================================================
@@ -457,13 +433,13 @@ fn fetch_callback(
             s.in_flight_fetches = s.in_flight_fetches.saturating_sub(1);
         }
 
-        let id = match result {
-            Ok(alg_resp) => stash(FetchOutcome::Resolve(alg_resp)),
-            Err(err_msg) => stash(FetchOutcome::Reject(err_msg, signal_global.clone())),
+        let outcome = match result {
+            Ok(alg_resp) => FetchOutcome::Resolve(alg_resp),
+            Err(err_msg) => FetchOutcome::Reject(err_msg, signal_global),
         };
         OpResult::JsValue {
             resolver: global_resolver,
-            value: pack_pending(id),
+            value: ResolveValue::Fetch(FetchSettlement(outcome)),
             request_id,
         }
     });
@@ -689,44 +665,38 @@ fn read_headers<'s>(
 }
 
 // ===========================================================================
-// Materialisation — runs from the pump's V8 turn (after the async task
-// resolves with a packed pending id)
+// Settlement - runs in the pump's V8 turn once the fetch task finishes
 // ===========================================================================
 
-/// Build a JS Response from a stashed `AlgorithmResponse`, OR build the
-/// rejection value if the stash holds an error. Called from
-/// `runtime.rs::OpResult::JsValue` on `ResolveValue::Bytes` whose bytes
-/// match the marker shape.
-///
-/// Returns `Ok(value)` to RESOLVE the resolver with that value, or
-/// `Err(value)` to REJECT with that value.
-pub fn materialise_pending<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    id: u64,
-) -> Result<v8::Local<'s, v8::Value>, v8::Local<'s, v8::Value>> {
-    let outcome = PENDING.with(|s| s.borrow_mut().remove(&id));
-    let outcome = match outcome {
-        Some(o) => o,
-        None => {
-            let msg = v8::String::new(scope, "fetch: missing pending result").unwrap();
-            return Err(v8::Exception::error(scope, msg));
-        }
-    };
-    match outcome {
-        FetchOutcome::Resolve(resp) => Ok(build_response_object(scope, resp).into()),
-        FetchOutcome::Reject(msg, signal) => {
-            // Per Fetch §5.1: if signal aborted during fetch, use
-            // signal.reason as the rejection.
-            if let Some(sig_g) = signal {
-                let sig = v8::Local::new(scope, sig_g);
-                if crate::dom::abort_signal::is_aborted(scope, sig)
-                    && let Some(reason) = read_signal_reason(scope, sig)
-                {
-                    return Err(reason);
+impl FetchSettlement {
+    /// Build the JS Response from the fetch's `AlgorithmResponse`, or the
+    /// rejection value if the fetch failed. The pump calls this from its
+    /// `ResolveValue::Fetch` arm, in the scope of the isolate whose `fetch()`
+    /// started the task.
+    ///
+    /// Returns `Ok(value)` to RESOLVE the resolver with that value, or
+    /// `Err(value)` to REJECT with that value.
+    pub(crate) fn settle<'s>(
+        self,
+        scope: &mut v8::PinScope<'s, '_>,
+    ) -> Result<v8::Local<'s, v8::Value>, v8::Local<'s, v8::Value>> {
+        match self.0 {
+            FetchOutcome::Resolve(resp) => Ok(build_response_object(scope, resp).into()),
+            FetchOutcome::Reject(msg, signal) => {
+                // Per Fetch section 5.1: if signal aborted during fetch, use
+                // signal.reason as the rejection.
+                if let Some(sig_g) = signal {
+                    let sig = v8::Local::new(scope, sig_g);
+                    if crate::dom::abort_signal::is_aborted(scope, sig)
+                        && let Some(reason) = read_signal_reason(scope, sig)
+                    {
+                        return Err(reason);
+                    }
                 }
+                let m =
+                    v8::String::new(scope, &format!("Network request failed: {msg}")).unwrap();
+                Err(v8::Exception::type_error(scope, m))
             }
-            let m = v8::String::new(scope, &format!("Network request failed: {msg}")).unwrap();
-            Err(v8::Exception::type_error(scope, m))
         }
     }
 }
@@ -870,29 +840,4 @@ fn response_state_ptr_mut<'s>(
         return None;
     }
     Some(ptr)
-}
-
-// ===========================================================================
-// Tests
-// ===========================================================================
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pack_unpack_round_trip() {
-        let pv = pack_pending(42);
-        match pv {
-            ResolveValue::Bytes(b) => {
-                assert_eq!(unpack_pending(&b), Some(42));
-            }
-            _ => panic!("expected Bytes variant"),
-        }
-    }
-
-    #[test]
-    fn unpack_returns_none_on_unrelated_bytes() {
-        assert_eq!(unpack_pending(b"hello"), None);
-    }
 }

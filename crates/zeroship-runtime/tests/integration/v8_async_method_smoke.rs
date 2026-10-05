@@ -173,7 +173,9 @@ impl AsyncTest {
 // Test plugin — installs `AsyncTest` on globalThis via add_setup
 // ---------------------------------------------------------------------------
 
-struct AsyncTestPlugin;
+/// Also the byte-returning vehicle `fetch_native`'s cross-isolate case probes
+/// through.
+pub(super) struct AsyncTestPlugin;
 
 impl NativePlugin for AsyncTestPlugin {
     fn namespace(&self) -> &str {
@@ -486,6 +488,52 @@ fn echo_bytes_round_trips_buffer() {
             "bytes": [1, 2, 3, 255, 128],
         })
     );
+}
+
+/// The pump hands a `Vec<u8>` result to JS without reading it, so bytes that
+/// spell text a runtime could mistake for one of its own internal ids still
+/// arrive as exactly those bytes. The first payload is an ordinary control.
+#[test]
+fn echo_bytes_delivers_every_payload_verbatim() {
+    let body = run_async_js(
+        r#"
+        async function runTest() {
+            const t = new AsyncTest();
+            const payloads = [
+                "plain bytes",
+                "__zs_native_fetch#1\n",
+                "__zs_native_fetch#1",
+                "__zs_native_fetch#18446744073709551615\n",
+            ];
+            const results = [];
+            for (const sent of payloads) {
+                try {
+                    const out = await t.echo_bytes(new TextEncoder().encode(sent));
+                    results.push({
+                        sent,
+                        kind: Object.prototype.toString.call(out),
+                        received: out instanceof Uint8Array ? new TextDecoder().decode(out) : null,
+                    });
+                } catch (e) {
+                    results.push({ sent, error: e?.message ?? String(e) });
+                }
+            }
+            return results;
+        }
+        "#,
+    );
+    let results = ok_result(&body);
+    let results = results.as_array().unwrap_or_else(|| panic!("expected an array: {body}"));
+    assert_eq!(results.len(), 4, "every payload must report: {body}");
+    for result in results {
+        assert_eq!(
+            result.get("error"),
+            None,
+            "a byte result was rejected instead of delivered: {result}"
+        );
+        assert_eq!(result["kind"], "[object Uint8Array]", "a byte result was not a Uint8Array: {result}");
+        assert_eq!(result["received"], result["sent"], "a byte result did not round-trip: {result}");
+    }
 }
 
 #[test]

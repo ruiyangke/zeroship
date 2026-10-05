@@ -969,9 +969,16 @@ pub enum ResolveValue {
     Undefined,
     /// Resolve with the given V8 value.
     JsGlobal(v8::Global<v8::Value>),
-    /// Resolve with a Uint8Array view over the given bytes (zero-extra-copy:
-    /// the bytes are moved into a fresh ArrayBuffer at dispatch time).
+    /// Resolve with a `Uint8Array` view over the given bytes: the pump
+    /// allocates a fresh `ArrayBuffer` of the same length and copies each byte
+    /// into it. The pump never reads their meaning, so a producer may hand
+    /// back any bytes at all.
     Bytes(Vec<u8>),
+    /// Settle a native `fetch()` promise from its finished task: resolve with
+    /// the Response built in the pump's scope, or reject with the network
+    /// `TypeError` or the signal's abort reason. Only the native fetch builds
+    /// one, and it settles only the promise whose envelope carries it.
+    Fetch(crate::web::fetch::FetchSettlement),
     /// Resolve with a JS string materialised from this UTF-8 buffer.
     String(String),
     /// Resolve with the JS value produced by `JSON.parse(<this>)`.
