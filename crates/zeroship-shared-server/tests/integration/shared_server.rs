@@ -16,6 +16,8 @@ use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Lines, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use zeroship_shared_server::{self as shared, Scope};
@@ -199,6 +201,18 @@ fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_millis() as u64)
+}
+
+/// A token no earlier run of this process used, so each run builds and removes a
+/// tag of its own.
+fn unique_token() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "{}-{}-{}",
+        std::process::id(),
+        now_millis(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 fn write_state(dir: &Path, status: &str, error: &str, failed_at: u64) {
@@ -1159,4 +1173,88 @@ fn the_lifetime_instrument_fails_a_container_that_outlives_its_child() {
         .to_owned();
     shared::remove_by_id(&id);
     wait_removed(&id, REMOVAL_BOUND);
+}
+
+/// Eight threads that want one fresh tag build it once: the cross-process lock
+/// lets one build, and every waiter that found the tag absent re-checks under
+/// the lock and returns the one reference.
+#[test]
+fn one_image_reference_is_built_once_across_threads() {
+    ensure_image();
+    let token = unique_token();
+    // A stage alias carrying the token makes the recipe new each run, so the
+    // tag is absent when the race starts and the lock has a build to serialize.
+    let base = format!("{POSTGRES_IMAGE} AS s{token}");
+    let reference = format!("{}:{}", shared::image::NAME, shared::image::tag(&base));
+    assert!(
+        !shared::image_exists(&reference),
+        "the unique tag must be absent before the race: {reference}"
+    );
+
+    let barrier = Arc::new(Barrier::new(8));
+    let results: Vec<Result<String, String>> = std::thread::scope(|scope| {
+        // Every thread must be spawned before any is joined, or the barrier
+        // never sees all eight and the test deadlocks.
+        let handles: [_; 8] = std::array::from_fn(|_| {
+            let barrier = Arc::clone(&barrier);
+            let base = base.clone();
+            scope.spawn(move || {
+                barrier.wait();
+                shared::image::with_watchdog(&base)
+            })
+        });
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("a builder thread"))
+            .collect()
+    });
+
+    let builds = shared::image::built_images()
+        .into_iter()
+        .filter(|entry| *entry == reference)
+        .count();
+    // Cleanup runs before the count assertion so a failure that panics on the
+    // count still removes the tag the race built.
+    let cleanup = shared::remove_image(&reference);
+    assert_eq!(
+        builds, 1,
+        "exactly one thread must build the reference: {reference} {results:?}"
+    );
+    for result in &results {
+        assert_eq!(
+            result.as_ref().map(String::as_str),
+            Ok(reference.as_str()),
+            "every builder must return the one reference"
+        );
+    }
+    cleanup.expect("remove the throwaway image");
+    assert!(
+        !shared::image_exists(&reference),
+        "the throwaway image must be gone"
+    );
+}
+
+/// A build that fails releases the lock: the next caller reaches the build
+/// again rather than waiting on a lock the failure left held.
+#[test]
+fn a_failed_build_releases_the_build_lock() {
+    let token = unique_token();
+    let name = "zeroship-shared-server-build-failure";
+    let dockerfile =
+        format!("FROM {POSTGRES_IMAGE}\nLABEL zeroship.test.build=\"{token}\"\nRUN exit 1\n");
+
+    let first = shared::image::build(name, &dockerfile, &[])
+        .expect_err("a Dockerfile that fails must fail the build");
+    assert!(first.contains("could not build"), "{first}");
+
+    let second = shared::image::build(name, &dockerfile, &[])
+        .expect_err("the second build must fail, not deadlock on a held lock");
+    assert!(
+        second.contains("could not build"),
+        "the second caller must reach the build, not the lock: {second}"
+    );
+    assert!(
+        !second.contains("image build lock"),
+        "a failed build must release the build lock: {second}"
+    );
 }

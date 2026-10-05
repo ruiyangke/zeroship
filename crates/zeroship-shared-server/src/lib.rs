@@ -416,7 +416,7 @@ pub fn join(
     }
 
     let boot_lock = open_lock(&dir.join("boot.lock"))?;
-    lock_exclusive(&boot_lock, BOOT_LOCK_WAIT)?;
+    lock_exclusive(&boot_lock, BOOT_LOCK_WAIT, "boot lock")?;
 
     match ready(&dir, spec, &session)? {
         Ready::Joined(lease) => return Ok(lease),
@@ -1447,7 +1447,10 @@ fn lock_shared(path: &Path) -> Result<File, String> {
 }
 
 /// Take an exclusive lock on `file`, waiting up to `wait`.
-fn lock_exclusive(file: &File, wait: Duration) -> Result<(), String> {
+///
+/// `purpose` names the lock in the failure, so a caller that waited on an image
+/// build is not told another process is booting the shared server.
+fn lock_exclusive(file: &File, wait: Duration, purpose: &str) -> Result<(), String> {
     let deadline = Instant::now() + wait;
     loop {
         match flock(file, libc::LOCK_EX | libc::LOCK_NB) {
@@ -1455,13 +1458,12 @@ fn lock_exclusive(file: &File, wait: Duration) -> Result<(), String> {
             Err(error) if error.raw_os_error() == Some(libc::EWOULDBLOCK) => {
                 if Instant::now() >= deadline {
                     return Err(format!(
-                        "waited {wait:?} for the boot lock; another process is still booting \
-                         the shared server"
+                        "waited {wait:?} for the {purpose}; another process still holds it"
                     ));
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
-            Err(error) => return Err(format!("boot lock: {error}")),
+            Err(error) => return Err(format!("{purpose}: {error}")),
         }
     }
 }
@@ -1518,6 +1520,21 @@ pub fn image_id(reference: &str) -> Result<String, String> {
         .map_err(|error| format!("inspect image {reference} failed: {error}"))?
         .id
         .ok_or_else(|| format!("the daemon reported no id for image {reference}"))
+}
+
+/// Remove the image `reference` from the daemon.
+///
+/// A test that built a throwaway tag removes it here. The daemon's own "No such
+/// image" is not an error: a build that failed left nothing to remove.
+///
+/// # Errors
+/// When the daemon refuses to remove an image it holds.
+pub fn remove_image(reference: &str) -> Result<(), String> {
+    use testcontainers::bollard::query_parameters::RemoveImageOptions;
+    let docker = docker();
+    block_on(docker.remove_image(reference, Option::<RemoveImageOptions>::None, None))
+        .map(|_| ())
+        .map_err(|error| format!("remove image {reference} failed: {error}"))
 }
 
 /// The multi-threaded runtime every bollard call blocks on.
