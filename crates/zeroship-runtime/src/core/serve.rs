@@ -15,6 +15,7 @@
 
 #![allow(unsafe_code)]
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -418,7 +419,7 @@ const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 async fn handle_connection(
     mut stream: TcpStream,
-    runtime: Runtime,
+    current: Rc<RuntimeSlot>,
     app_env: Rc<EnvSnapshot>,
     dev_auth: Rc<crate::dev_auth::DevAuthSettings>,
 ) {
@@ -603,6 +604,11 @@ async fn handle_connection(
                     Vec::new()
                 };
 
+                // Serve this request on the worker's current isolate. A
+                // pump-share stop quarantines that isolate mid-flight; the
+                // next request this slot hands out is a fresh one built from
+                // the same plan, the way the dev server built the first.
+                let runtime = current.serve();
                 let wrote_ok = handle_request(
                     &mut stream,
                     IncomingRequest {
@@ -871,10 +877,13 @@ async fn stream_chunked_body_with_idle(
             return false;
         }
     }
-    // A producer that failed wrote a prefix, not a body. The terminator would
-    // tell the client the prefix was the whole of it, so the connection is
-    // dropped without one and the client sees a body cut short.
-    if reader.error().is_some() {
+    // A producer that failed or overflowed wrote a prefix, not a body. The
+    // terminator would tell the client the prefix was the whole of it, so the
+    // connection is dropped without one and the client sees a body cut short.
+    // Overflow is checked first: `push` sets it synchronously, while the abort
+    // that sets `error` arrives later from the pump, so the loop can finish on
+    // overflow with no error recorded.
+    if reader.is_overflow() || reader.error().is_some() {
         return false;
     }
     // `&'static [u8]` implements `IoBuf`, so the trailer ships without a
@@ -1606,7 +1615,7 @@ fn accept_error_backoff(consecutive_errors: u32) -> Duration {
 
 async fn accept_loop(
     listener: TcpListener,
-    runtime: Runtime,
+    current: Rc<RuntimeSlot>,
     app_env: Rc<EnvSnapshot>,
     dev_auth: Rc<crate::dev_auth::DevAuthSettings>,
 ) {
@@ -1615,13 +1624,13 @@ async fn accept_loop(
         match listener.accept().await {
             Ok((stream, _addr)) => {
                 consecutive_errors = 0;
-                let rt = runtime.clone();
+                let current = current.clone();
                 let env = app_env.clone();
                 let dev_auth = dev_auth.clone();
                 compio::runtime::spawn(async move {
                     crate::panic_util::guard(
                         "handle_connection",
-                        handle_connection(stream, rt, env, dev_auth),
+                        handle_connection(stream, current, env, dev_auth),
                     )
                     .await;
                 })
@@ -1645,6 +1654,109 @@ async fn accept_loop(
 // ===========================================================================
 // Single-worker entry point
 // ===========================================================================
+
+/// The app and options one worker's isolate is built from, retained so a
+/// quarantined isolate can be replaced on the next request. Every field is a
+/// value `run_single_worker` was handed; [`Self::build`] reproduces the
+/// worker's first isolate, including the dev entry loader and plugin set.
+struct RuntimePlan {
+    app_id: Option<zeroship_core::app_id::AppId>,
+    cpu_limit: Option<Duration>,
+    wall_timeout: Option<Duration>,
+    heap_limit_bytes: Option<usize>,
+    dev_entry_loader: Option<String>,
+    modules: Vec<ModuleEntry>,
+    env_vars: HashMap<String, String>,
+    runtime_descriptor: Option<String>,
+    plugins: Vec<Arc<dyn NativePlugin>>,
+    /// Pump CPU share budget. Production leaves this `None`, keeping the
+    /// runtime's own `BUDGET_WINDOW` and `MAX_CPU_FRACTION`; a test tightens
+    /// it to reach the stop without holding a core for the whole window.
+    pump_cpu_budget: Option<(Duration, f64)>,
+}
+
+impl RuntimePlan {
+    /// Build and start an isolate from this plan. Must run on the compio
+    /// runtime thread: `start_pump` spawns the isolate's event pump there.
+    fn build(&self) -> Runtime {
+        let mut builder = Runtime::builder()
+            .modules(self.modules.clone())
+            .env_vars(self.env_vars.clone())
+            .runtime_descriptor(self.runtime_descriptor.clone())
+            .limits(RuntimeLimits {
+                cpu_limit: self.cpu_limit,
+                wall_timeout: self.wall_timeout,
+                heap_limit_bytes: self.heap_limit_bytes,
+            })
+            .plugins(self.plugins.clone());
+        if let Some(app_id) = self.app_id.clone() {
+            builder = builder.app_id(app_id);
+        }
+        if let Some((window, max_fraction)) = self.pump_cpu_budget {
+            builder = builder.pump_cpu_budget(window, max_fraction);
+        }
+        let runtime = match &self.dev_entry_loader {
+            Some(export) => builder.dev_entry_loader(export.clone()),
+            None => builder,
+        }
+        .build();
+        // Start the async event loop pump (timers, fetch, streams). The
+        // module graph is loaded lazily on the first request.
+        runtime.start_pump();
+        runtime
+    }
+}
+
+/// A worker's current isolate, replaceable when one is quarantined. Every
+/// accepted connection on that worker shares this slot, so the request after
+/// a pump-share stop is served by a fresh isolate built from the same plan.
+struct RuntimeSlot {
+    runtime: RefCell<Option<Runtime>>,
+    plan: RuntimePlan,
+}
+
+impl RuntimeSlot {
+    fn new(plan: RuntimePlan) -> Self {
+        let runtime = plan.build();
+        Self {
+            runtime: RefCell::new(Some(runtime)),
+            plan,
+        }
+    }
+
+    /// The isolate to serve the next request on. A quarantined isolate is
+    /// dropped and replaced by a fresh one from the same plan; an isolate
+    /// still serving is returned as-is.
+    fn serve(&self) -> Runtime {
+        let quarantined = self
+            .runtime
+            .borrow()
+            .as_ref()
+            .is_some_and(Runtime::is_quarantined);
+        if quarantined {
+            // Leave the stopped isolate's isolate stack before dropping it.
+            // `quarantine` keeps it alive through a supervisor task, and V8
+            // drops isolates in reverse creation order: a depth-zero isolate
+            // re-enters itself just before that drop, so it can go after its
+            // replacement was created. The fresh isolate stays entered, the
+            // state the dev server dispatches from.
+            let stopped = self
+                .runtime
+                .borrow_mut()
+                .take()
+                .expect("the slot always holds a runtime");
+            stopped.exit_isolate();
+            drop(stopped);
+            let fresh = self.plan.build();
+            *self.runtime.borrow_mut() = Some(fresh);
+        }
+        self.runtime
+            .borrow()
+            .as_ref()
+            .expect("the slot always holds a runtime")
+            .clone()
+    }
+}
 
 /// Run one worker: bind the listener, build the runtime, and serve until
 /// the process exits.
@@ -1686,6 +1798,19 @@ fn run_single_worker(
     // arm; in `pnpm dev` the Vite plugin set both on this child before exec.
     let dev_auth = Rc::new(crate::dev_auth::DevAuthSettings::from_env());
 
+    let plan = RuntimePlan {
+        app_id,
+        cpu_limit,
+        wall_timeout,
+        heap_limit_bytes,
+        dev_entry_loader,
+        modules,
+        env_vars,
+        runtime_descriptor,
+        plugins,
+        pump_cpu_budget: None,
+    };
+
     compio::runtime::RuntimeBuilder::new()
         .build()
         .unwrap()
@@ -1706,35 +1831,12 @@ fn run_single_worker(
                 tracing::info!(port, addr = %format!("http://0.0.0.0:{port}"), "runtime listening");
             }
 
-            let mut builder = Runtime::builder()
-                .modules(modules)
-                .env_vars(env_vars)
-                .runtime_descriptor(runtime_descriptor)
-                .limits(RuntimeLimits {
-                    cpu_limit,
-                    wall_timeout,
-                    heap_limit_bytes,
-                })
-                .plugins(plugins);
-            if let Some(app_id) = app_id {
-                builder = builder.app_id(app_id);
-            }
-            let runtime = match dev_entry_loader {
-                Some(export) => builder.dev_entry_loader(export),
-                None => builder,
-            }
-            .build();
-
-            // Start the async event loop pump (timers, fetch, streams).
-            // (Warmup removed — `call_fetch_handler` initializes lazily via
-            // `ensure_initialized` on the first request; the kernel no
-            // longer exposes a bare-function dispatch primitive.)
-            runtime.start_pump();
+            let current = Rc::new(RuntimeSlot::new(plan));
 
             // Accept loop
             crate::panic_util::guard(
                 "runtime_accept_loop",
-                accept_loop(listener, runtime, app_env, dev_auth),
+                accept_loop(listener, current, app_env, dev_auth),
             )
             .await;
             Ok(())
@@ -2426,6 +2528,21 @@ mod stream_idle_tests {
     /// the real chunk writer runs against a live socket pair, one chunk is
     /// pushed, and the writer either fails or closes.
     fn wire_bytes(end: impl FnOnce(&crate::channel::StreamWriter)) -> (Vec<u8>, bool) {
+        wire_bytes_with_cap(crate::channel::DEFAULT_STREAM_BUFFER_CAP, |writer| {
+            assert_eq!(
+                writer.push(b"hello".to_vec()),
+                crate::channel::StreamPushResult::Ok
+            );
+            end(writer);
+        })
+    }
+
+    /// The same real-socket pump over a buffer of `cap` bytes, whose contents
+    /// the caller produces. A small cap lets a caller push past it.
+    fn wire_bytes_with_cap(
+        cap: usize,
+        produce: impl FnOnce(&crate::channel::StreamWriter),
+    ) -> (Vec<u8>, bool) {
         block_on(async {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
@@ -2442,10 +2559,10 @@ mod stream_idle_tests {
                 }
             });
             let (mut server, _) = listener.accept().await.unwrap();
-            let (writer, reader) = stream_buffer();
-            assert_eq!(writer.push(b"hello".to_vec()), crate::channel::StreamPushResult::Ok);
-            end(&writer);
-            let keep_alive = stream_chunked_body_with_idle(&mut server, reader, Duration::from_secs(30)).await;
+            let (writer, reader) = crate::channel::stream_buffer_with_cap(cap);
+            produce(&writer);
+            let keep_alive =
+                stream_chunked_body_with_idle(&mut server, reader, Duration::from_secs(30)).await;
             drop(server);
             (client.await.unwrap(), keep_alive)
         })
@@ -2461,6 +2578,33 @@ mod stream_idle_tests {
         assert!(!keep_alive);
     }
 
+    /// A body whose producer overflowed its cap is also cut short, and no
+    /// terminating chunk is written. `push` sets overflow synchronously, while
+    /// the abort that sets `error` lands later from the pump, so an overflowed
+    /// stream can otherwise finish looking exactly like a clean one.
+    #[test]
+    fn an_overflowed_body_goes_out_without_its_terminating_chunk() {
+        let (received, keep_alive) = wire_bytes_with_cap(8, |writer| {
+            assert_eq!(
+                writer.push(b"hello".to_vec()),
+                crate::channel::StreamPushResult::Ok
+            );
+            assert_eq!(
+                writer.push(b"world".to_vec()),
+                crate::channel::StreamPushResult::Full
+            );
+        });
+        let text = String::from_utf8_lossy(&received);
+        assert!(
+            !text.contains("0\r\n\r\n"),
+            "an overflowed body must not be terminated as if it completed: {text:?}"
+        );
+        assert!(
+            !keep_alive,
+            "an overflowed body must not leave the connection reusable"
+        );
+    }
+
     /// The rejection control: the same body closed normally carries its
     /// terminating chunk, so the case above is about the failure alone.
     #[test]
@@ -2468,6 +2612,150 @@ mod stream_idle_tests {
         let (received, keep_alive) = wire_bytes(crate::channel::StreamWriter::close);
         assert_eq!(String::from_utf8_lossy(&received), "5\r\nhello\r\n0\r\n\r\n");
         assert!(keep_alive);
+    }
+}
+
+#[cfg(test)]
+mod dev_isolate_replacement_tests {
+    //! A quarantine in the standalone server is not terminal for the app: the
+    //! next request is served by a fresh isolate, over the same real socket
+    //! path every request takes.
+    use super::*;
+
+    /// The app: `/spin` strands a request on the isolate's pump until the
+    /// pump CPU share stop quarantines it; every other path answers normally.
+    const SPIN_APP: &str = r#"
+        export default {
+            fetch(request) {
+                if (new URL(request.url).pathname === "/spin") {
+                    return new Promise(() => {
+                        const spin = () => {
+                            const end = Date.now() + 20;
+                            while (Date.now() < end) {}
+                            setTimeout(spin, 1);
+                        };
+                        setTimeout(spin, 1);
+                    });
+                }
+                return new Response("served");
+            }
+        }
+    "#;
+
+    /// The worker's plan for the app above, with the pump budget tightened so
+    /// the stop lands inside the production window a test can wait out.
+    fn spin_plan() -> RuntimePlan {
+        RuntimePlan {
+            app_id: None,
+            cpu_limit: None,
+            wall_timeout: None,
+            heap_limit_bytes: None,
+            dev_entry_loader: None,
+            modules: vec![ModuleEntry {
+                specifier: "index.js".into(),
+                source: SPIN_APP.into(),
+            }],
+            env_vars: HashMap::new(),
+            runtime_descriptor: None,
+            plugins: Vec::new(),
+            pump_cpu_budget: Some((Duration::from_millis(200), 0.5)),
+        }
+    }
+
+    fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+        compio::runtime::Runtime::new().unwrap().block_on(fut)
+    }
+
+    async fn read_more(stream: &mut TcpStream, pending: &mut Vec<u8>) {
+        let BufResult(read, buf) = compio::io::AsyncRead::read(stream, vec![0u8; 4096]).await;
+        let n = read.expect("the connection stays open while the server answers");
+        assert!(n > 0, "the server closed before sending a whole response");
+        pending.extend_from_slice(&buf[..n]);
+    }
+
+    /// Read one complete HTTP/1.1 response (headers plus its `Content-Length`
+    /// body) off `stream`, buffering across reads.
+    async fn read_response(stream: &mut TcpStream, pending: &mut Vec<u8>) -> (u16, String) {
+        loop {
+            if let Some(head_end) = pending.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&pending[..head_end]).into_owned();
+                let status: u16 = head
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .and_then(|code| code.parse().ok())
+                    .expect("a status line");
+                let body_len: usize = head
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        if name.eq_ignore_ascii_case("content-length") {
+                            value.trim().parse().ok()
+                        } else {
+                            None
+                        }
+                    })
+                    .expect("the response carries a Content-Length");
+                let total = head_end + 4 + body_len;
+                while pending.len() < total {
+                    read_more(stream, pending).await;
+                }
+                let body = String::from_utf8_lossy(&pending[head_end + 4..total]).into_owned();
+                pending.drain(..total);
+                return (status, body);
+            }
+            read_more(stream, pending).await;
+        }
+    }
+
+    /// A request the isolate's pump answers, then the next request to the same
+    /// server. The stopped request is answered with the CPU stop's error; the
+    /// request after it runs on a fresh isolate and gets the app's normal body.
+    #[test]
+    fn the_request_after_a_pump_share_stop_runs_on_a_fresh_isolate() {
+        init_v8();
+        const SPIN_REQUEST: &str = "GET /spin HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        const ROOT_REQUEST: &str = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+
+        let (stopped, after) = block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let client = compio::runtime::spawn(async move {
+                let mut stream = TcpStream::connect(address).await.unwrap();
+                let mut pending = Vec::new();
+                let BufResult(wrote, _) = stream.write_all(SPIN_REQUEST.as_bytes().to_vec()).await;
+                wrote.expect("the spin request is written");
+                let stopped = read_response(&mut stream, &mut pending).await;
+                let BufResult(wrote, _) = stream.write_all(ROOT_REQUEST.as_bytes().to_vec()).await;
+                wrote.expect("the follow-up request is written");
+                let after = read_response(&mut stream, &mut pending).await;
+                (stopped, after)
+            });
+
+            let (stream, _) = listener.accept().await.unwrap();
+            let slot = Rc::new(RuntimeSlot::new(spin_plan()));
+            let env = Rc::new(EnvSnapshot::empty());
+            let dev_auth = Rc::new(crate::dev_auth::DevAuthSettings::default());
+            handle_connection(stream, slot, env, dev_auth).await;
+            client.await.unwrap()
+        });
+
+        let (stopped_status, stopped_body) = stopped;
+        assert_eq!(
+            stopped_status, 500,
+            "the stopped request is answered, not stranded: {stopped_body}"
+        );
+        assert!(
+            stopped_body.contains("CPU time limit exceeded"),
+            "the stop is the cause: {stopped_body}"
+        );
+
+        let (after_status, after_body) = after;
+        assert_eq!(
+            after_status, 200,
+            "the request after the stop is accepted: {after_body}"
+        );
+        assert_eq!(after_body, "served", "it runs on an isolate that answers");
     }
 }
 

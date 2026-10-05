@@ -132,13 +132,12 @@ answers
 Every later request starts a fresh load, and fails the same way for as long as
 startup exceeds the share.
 
-The standalone dev server (`zeroship serve`) keeps one isolate per worker
-thread and does not replace a stopped one, whether it stopped while starting or
-afterwards. Until it is restarted, every later request to your app answers
-
-```
-500  {"message":"module init failed: CPU time limit exceeded","name":"Error"}
-```
+The standalone dev server (`zeroship serve`) also replaces a stopped isolate.
+Its next request is served by a fresh isolate that runs your module's top-level
+code again, so state held in module scope does not survive the stop. This holds
+whether the isolate stopped while starting or after it was serving. A stop
+during startup is retried the same way: every later request starts a fresh load
+and fails the same way for as long as startup exceeds the share.
 
 A long CPU-bound loop over a stream is the shape that reaches this limit: each
 per-chunk step is a promise continuation, so a fast storage path leaves little
