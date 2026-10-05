@@ -180,43 +180,58 @@ fn url_parse_with_base() {
     assert_eq!(s, "https://example.com/api");
 }
 
-/// URL.parse must parse the input ONCE per call. There is no parse
-/// counter to assert this directly, so this test establishes a
-/// rough wall-time budget and asserts URL.parse is not slower than
-/// `new URL` (the constructor is the single-parse baseline).
+/// `URL.parse` must run the URL parser exactly once per call. The
+/// constructor is the single-parse baseline: `new URL` parses the input
+/// once and wraps the result, and `URL.parse` must do the same. A
+/// `URL.parse` that pre-checked with `URL.canParse` (or otherwise
+/// re-scanned the input) would run the parser twice per call.
+///
+/// Counted, not timed: the parser-run counter is what distinguishes one
+/// pass from two. A parse-vs-constructor wall-clock ratio measures the
+/// machine's load, not the code.
 #[test]
-fn url_parse_is_not_slower_than_constructor() {
-    let s = run_in_v8(
+fn url_parse_runs_the_parser_once_per_call() {
+    const ITERS: u64 = 100_000;
+    let input = "https://user:pass@example.com:8080/api/v1/users?limit=10&offset=5#section";
+    let parse_src = format!(
         r#"
-        const ITERS = 100000;
-        const URL_S = "https://user:pass@example.com:8080/api/v1/users?limit=10&offset=5#section";
-
-        // Warm-up
-        for (let i = 0; i < 1000; i++) URL.parse(URL_S);
-        for (let i = 0; i < 1000; i++) new URL(URL_S);
-
-        const t0 = Date.now();
-        for (let i = 0; i < ITERS; i++) URL.parse(URL_S);
-        const t1 = Date.now();
-        for (let i = 0; i < ITERS; i++) new URL(URL_S);
-        const t2 = Date.now();
-
-        const parse_ms = t1 - t0;
-        const ctor_ms = t2 - t1;
-        // URL.parse should be within 1.5x the constructor's time
-        // (tolerance for V8's JIT decisions and per-call overhead).
-        // Pre-fix it was ~2x; post-fix it's ~1.0x.
-        const ratio = parse_ms / Math.max(ctor_ms, 1);
-        JSON.stringify({ parse_ms, ctor_ms, ratio });
-        "#,
-        js_string,
+        const URL_S = "{input}";
+        for (let i = 0; i < {ITERS}; i++) URL.parse(URL_S);
+        "ok";
+        "#
     );
-    let v: serde_json::Value = serde_json::from_str(&s).expect("json");
-    let ratio = v["ratio"].as_f64().unwrap();
-    assert!(
-        ratio < 1.6,
-        "URL.parse {} ms / constructor {} ms = {:.2}x (expected <1.6x; pre-M6 was ~2x)",
-        v["parse_ms"], v["ctor_ms"], ratio
+    let ctor_src = format!(
+        r#"
+        const URL_S = "{input}";
+        for (let i = 0; i < {ITERS}; i++) new URL(URL_S);
+        "ok";
+        "#
+    );
+
+    let (parse_ok, parse_runs) = run_in_v8(&parse_src, |result, scope| {
+        (
+            js_string(result, scope),
+            url_native::url_parser_run_count(scope),
+        )
+    });
+    let (ctor_ok, ctor_runs) = run_in_v8(&ctor_src, |result, scope| {
+        (
+            js_string(result, scope),
+            url_native::url_parser_run_count(scope),
+        )
+    });
+
+    assert_eq!(parse_ok, "ok");
+    assert_eq!(ctor_ok, "ok");
+    // One parser run per call: not zero (the input was exercised) and
+    // not two (no pre-scan). `URL.parse` must match the constructor.
+    assert_eq!(
+        parse_runs, ITERS,
+        "URL.parse ran the parser {parse_runs} times over {ITERS} calls"
+    );
+    assert_eq!(
+        ctor_runs, ITERS,
+        "new URL ran the parser {ctor_runs} times over {ITERS} calls"
     );
 }
 
@@ -925,17 +940,20 @@ fn url_search_params_cycle_no_leak() {
     assert_eq!(s, "ok");
 }
 
-/// Iteration must stay O(N): an iterator `next()` must not re-parse the
-/// entire query string per step. The `last_seen_search` cache
-/// short-circuits when the parent's search is unchanged.
+/// Iteration must not re-parse the query string on every step: the
+/// `last_seen_search` cache short-circuits when the parent's search is
+/// unchanged, so a full for-of over a bound SP re-parses the parent
+/// once regardless of entry count. Without the cache, each `next()`
+/// re-reads and re-parses the parent, giving N re-parses for N steps.
 ///
-/// The parse count is not directly assertable without instrumentation,
-/// but for-of over a large bound SP must complete in reasonable wall
-/// time — quadratic blow-up at this size would push well past any sane
-/// budget.
+/// Counted, not timed: the number of parent re-parses is what separates
+/// linear from quadratic, and a wall-clock budget measures the machine's
+/// load rather than the code. The counter is per isolate
+/// (`url_native::search_params_reparse_count`); a per-step re-parse
+/// counts once per `next()` call, where this traversal counts one.
 #[test]
 fn search_params_iter_is_linear_not_quadratic() {
-    let s = run_in_v8(
+    let (s, reparses) = run_in_v8(
         r#"
         // Build a URL with 2000 query entries.
         const parts = [];
@@ -943,25 +961,30 @@ fn search_params_iter_is_linear_not_quadratic() {
         const u = new URL("http://example.com/?" + parts.join("&"));
         const sp = u.searchParams;
 
-        // for-of over the live SP. Pre-fix this was N * O(N) =
-        // O(N²) ≈ 4M parse calls. Post-fix should be O(N) total
-        // since the cached search hash matches every step.
-        const t0 = Date.now();
+        // for-of over the live SP. The cache makes the first `next()`
+        // sync (and parse) once; every later step sees an unchanged
+        // parent search and skips.
         let count = 0;
         for (const [k, v] of sp) count++;
-        const t1 = Date.now();
 
-        JSON.stringify({ count, ms: t1 - t0 });
+        JSON.stringify({ count });
         "#,
-        js_string,
+        |result, scope| {
+            (
+                js_string(result, scope),
+                url_native::search_params_reparse_count(scope),
+            )
+        },
     );
     let v: serde_json::Value = serde_json::from_str(&s).expect("json");
     assert_eq!(v["count"], 2000);
-    // Wide budget: linear iteration over this many entries is fast, so
-    // the bound rejects a quadratic regression while leaving slack for
-    // slow CI machines.
-    let ms = v["ms"].as_i64().unwrap();
-    assert!(ms < 1000, "iteration too slow ({ms} ms) — possible O(N²) regression");
+    // Exactly one re-parse for the whole traversal: not zero (the
+    // counter is wired to the work) and not one per step.
+    assert_eq!(
+        reparses, 1,
+        "for-of over 2000 entries re-parsed the parent search {reparses} times; \
+         expected 1 (the cache short-circuits every step after the first)"
+    );
 }
 
 /// Regression: a URLSearchParams whose parent URL has been GC'd should

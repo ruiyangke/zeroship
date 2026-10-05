@@ -92,11 +92,6 @@
 //!     pass or fail depending on which of its neighbours ran first. That is a
 //!     real hazard and it is why they are listed.
 //!
-//!   * Wall-clock budgets now compete with every other module in the target.
-//!     `url_native::search_params_iter_is_linear_not_quadratic` asserts a
-//!     2000-entry `for-of` finishes inside 1000 ms. Read a timing assertion in
-//!     here as measuring a busier machine than it would in its own binary.
-//!
 //!   * One process means one abort. A module that aborts (not panics) takes
 //!     the rest down with it and the run reports no result for any of them.
 //!

@@ -109,6 +109,7 @@ impl URLSearchParams {
         // Strip the leading "?" if present (search() returns it
         // included; the urlencoded parser doesn't expect it).
         let stripped = search.strip_prefix('?').unwrap_or(search);
+        super::note_search_params_reparse(scope);
         self.entries = url_encoded_parse(stripped);
         self.last_seen_search = search.to_string();
     }

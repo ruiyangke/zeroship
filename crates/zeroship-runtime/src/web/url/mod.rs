@@ -31,6 +31,8 @@
 //!
 //! See also the WHATWG URL Living Standard.
 
+use std::cell::Cell;
+
 pub mod helpers;
 pub mod search_params;
 // Flattening this into `mod.rs` (as done for `web::blob` /
@@ -38,6 +40,79 @@ pub mod search_params;
 // call sites outside this crate slice (e.g. `rpc/superjson.rs`).
 #[allow(clippy::module_inception)]
 pub mod url;
+
+/// Per-isolate work counters the `url_native` tests read to assert
+/// structural properties instead of measuring wall time.
+///
+/// A wall-clock budget measures the machine, not the code: a traversal
+/// that is fast on an idle box misses its budget under load. These
+/// count the *work*: how many times the ada-url parser ran, and how
+/// many times a bound `URLSearchParams` re-parsed its parent's search,
+/// so a test can assert the shape (parse once per call; parse once per
+/// traversal, not once per step).
+///
+/// Each is incremented at the single call site that performs the work.
+/// A fresh isolate starts at zero; the counters live in
+/// [`UrlNativeSlot`], so parallel tests in one process do not share
+/// them.
+#[doc(hidden)]
+#[derive(Default)]
+pub struct UrlNativeCounters {
+    url_parser_runs: Cell<u64>,
+    search_params_reparses: Cell<u64>,
+}
+
+impl UrlNativeCounters {
+    fn note_url_parser_run(&self) {
+        self.url_parser_runs.set(self.url_parser_runs.get() + 1);
+    }
+
+    fn note_search_params_reparse(&self) {
+        self.search_params_reparses
+            .set(self.search_params_reparses.get() + 1);
+    }
+}
+
+/// Record one run of the ada-url parser against the current isolate's
+/// counter. A no-op when `install_globals` has not run on the isolate
+/// (there is no slot to count against).
+pub(crate) fn note_url_parser_run(scope: &v8::PinScope) {
+    if let Some(slot) = scope.get_slot::<UrlNativeSlot>() {
+        slot.counters.note_url_parser_run();
+    }
+}
+
+/// Record one re-parse of a bound `URLSearchParams`'s parent search
+/// against the current isolate's counter. A no-op without a slot.
+pub(crate) fn note_search_params_reparse(scope: &v8::PinScope) {
+    if let Some(slot) = scope.get_slot::<UrlNativeSlot>() {
+        slot.counters.note_search_params_reparse();
+    }
+}
+
+/// Number of times the ada-url parser has run in this isolate since
+/// `install_globals`: `new URL`, `URL.parse` and `URL.canParse` each
+/// contribute one run per call. `#[doc(hidden)]` test hook backing
+/// `url_parse_runs_the_parser_once_per_call`.
+#[doc(hidden)]
+#[must_use]
+pub fn url_parser_run_count(scope: &v8::PinScope) -> u64 {
+    scope
+        .get_slot::<UrlNativeSlot>()
+        .map_or(0, |slot| slot.counters.url_parser_runs.get())
+}
+
+/// Number of times a bound `URLSearchParams` has re-parsed its parent
+/// URL's search component in this isolate since `install_globals`.
+/// `#[doc(hidden)]` test hook backing
+/// `search_params_iter_is_linear_not_quadratic`.
+#[doc(hidden)]
+#[must_use]
+pub fn search_params_reparse_count(scope: &v8::PinScope) -> u64 {
+    scope
+        .get_slot::<UrlNativeSlot>()
+        .map_or(0, |slot| slot.counters.search_params_reparses.get())
+}
 
 /// Per-isolate slot storing the URLSearchParams class function and the
 /// URL class function as Globals. URL's `searchParams` getter looks up
@@ -67,6 +142,9 @@ pub struct UrlNativeSlot {
     /// isolate-lifetime handles whose `get(scope)` returns a `Local`
     /// without allocating.
     pub search_params_prototype: v8::Eternal<v8::Object>,
+    /// Work counters for the conformance tests. See
+    /// [`UrlNativeCounters`].
+    counters: UrlNativeCounters,
 }
 
 /// Install `URL` and `URLSearchParams` on `globalThis`. Called from
@@ -95,6 +173,7 @@ pub fn install_globals<'s>(scope: &mut v8::PinScope<'s, '_>, global: v8::Local<v
         url_class_fn: v8::Global::new(scope, url_class_fn),
         search_params_class_fn: v8::Global::new(scope, sp_class_fn),
         search_params_prototype: sp_proto_e,
+        counters: UrlNativeCounters::default(),
     };
     scope.set_slot::<UrlNativeSlot>(slot);
 }

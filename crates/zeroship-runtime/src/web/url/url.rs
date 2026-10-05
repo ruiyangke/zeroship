@@ -55,6 +55,19 @@ impl Default for URL {
     }
 }
 
+/// Run the ada-url parser and record the run against the isolate's
+/// counter. `URL::new` and `URL.parse` both parse through here, so the
+/// count tracks the parser exactly as often as the API runs it; an
+/// implementation that parsed twice would count twice.
+fn parse_tracked(
+    scope: &v8::PinScope<'_, '_>,
+    input: &str,
+    base: Option<&str>,
+) -> Result<ada_url::Url, ()> {
+    super::note_url_parser_run(scope);
+    ada_url::Url::parse(input, base).map_err(|_| ())
+}
+
 // ---------------------------------------------------------------------------
 // URL class — IDL surface per https://url.spec.whatwg.org/#url-class
 // ---------------------------------------------------------------------------
@@ -103,7 +116,7 @@ impl URL {
             )
         };
 
-        match ada_url::Url::parse(&input_s, base_s.as_deref()) {
+        match parse_tracked(scope, &input_s, base_s.as_deref()) {
             Ok(inner) => Ok(URL {
                 inner,
                 search_params: None,
@@ -112,7 +125,7 @@ impl URL {
             // Firefox / Node use a fixed message ("Invalid URL"), and
             // echoing the input risks leaking sensitive data (e.g.
             // tokens embedded in URLs) into logs.
-            Err(_) => Err(OpError::type_error("Invalid URL")),
+            Err(()) => Err(OpError::type_error("Invalid URL")),
         }
     }
 
@@ -141,6 +154,7 @@ impl URL {
                 None => return false,
             }
         };
+        super::note_url_parser_run(scope);
         ada_url::Url::can_parse(&input, base.as_deref())
     }
 
@@ -184,9 +198,8 @@ impl URL {
         // without entering V8 land at all. Routing through `can_parse`
         // first would parse twice on the success path (once here, once
         // inside the macro-emitted constructor).
-        let parsed = match ada_url::Url::parse(&input_s, base_s.as_deref()) {
-            Ok(u) => u,
-            Err(_) => return v8::null(scope).into(),
+        let Ok(parsed) = parse_tracked(scope, &input_s, base_s.as_deref()) else {
+            return v8::null(scope).into();
         };
 
         // Wrap the parsed URL in a fresh JS object using URL's
