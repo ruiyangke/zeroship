@@ -60,7 +60,7 @@ pub(crate) async fn ensure_journal(actor: &MigrationActor) -> Result<(), SqliteA
     // `rolled_back` event, discriminated by `event_kind`. version is NOT unique
     // (rollback <-> re-apply appends multiple rows). TEXT CURRENT_TIMESTAMP replaces
     // PG's TIMESTAMPTZ DEFAULT now; `at`/`by` unify the separate timestamp and
-    // actor columns the two event kinds used to carry. The applied-only
+// actor columns the two event kinds carry. The applied-only
     // columns (kind/phase/outcome) are NULL on a `rolled_back` row; a CHECK
     // documents the per-event_kind shape (mirrors the PG side). There is NO
     // `event_seq` counter table and NO separate rollback-events table any more.

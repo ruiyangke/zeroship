@@ -186,8 +186,8 @@ fn accepted(migration: &MigrationIr, dialect: &zeroship_migrate::DialectId, what
         .unwrap_or_else(|error| panic!("{what} should validate on {dialect:?}: {error}"));
 }
 
-// (a) The shape the `create_widgets` host fixture used to carry until it was
-// bounded: `t.text().required().default("new")`.
+// (a) The shape the `create_widgets` host fixture carries, bounded:
+// `t.text().required().default("new")`.
 #[test]
 fn mysql_refuses_a_bare_literal_default_on_a_text_column() {
     let mut status = column("status", ColType::Text);
@@ -309,8 +309,8 @@ fn mysql_accepts_a_literal_default_on_a_typed_id_text_column() {
     );
 }
 
-// (f) The shape the `create_gadgets` host fixture used to carry until it was
-// bounded: an index over a bare text column declared in the SAME envelope.
+// (f) The shape the `create_gadgets` host fixture carries, bounded: an index over a
+// bare text column declared in the SAME envelope.
 #[test]
 fn mysql_refuses_an_index_over_a_bare_text_column() {
     let migration = ir(vec![

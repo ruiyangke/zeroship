@@ -381,7 +381,7 @@ fn resolve_create_table(
     *columns = resolved_columns;
 
     // The pin names columns; nothing until now has required those columns to exist.
-    // A rule pinning a name neither side creates used to resolve cleanly and hand the
+    // A rule pinning a name neither side creates would otherwise resolve cleanly and hand the
     // database a PRIMARY KEY over a column the table does not have, which it discovers
     // at apply, after the policy sealed and the plan was approved. Ask once, here,
     // where the injected and author-declared columns have just been merged - the

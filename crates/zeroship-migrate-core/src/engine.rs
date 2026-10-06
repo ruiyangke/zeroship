@@ -960,7 +960,7 @@ impl MigrationEngine {
     ///    to run the real vendor backfill mirroring every pre-existing `<from>`
     ///    value into `<to>`, which journals E3 **only after** the backfill
     ///    succeeds (data-integrity ordering); and
-    /// 3. collects every rename's **contract** (DROP TRIGGER C1 + DROP COLUMN
+    /// 3. collects every rename's **contract** (DROP TRIGGER + DROP COLUMN
     ///    `<from>` C2) into [`DeclarativeDeployOutcome::pending_contract`] -
     ///    the DEFERRED set to apply in a SUBSEQUENT deploy, AFTER the app's code
     ///    has switched from `<from>` to `<to>`.
@@ -984,7 +984,7 @@ impl MigrationEngine {
     ///
     /// `approval` must be [`Approval::Approved`] when the plain plan is gated OR
     /// any rename is present (the expand's backfill mutates data). The
-    /// `pending_contract` set is itself gated (`requires_approval`, and C2 is
+    /// `pending_contract` set is itself gated (`requires_approval`, and the drop is
     /// `destructive`), so applying it later also needs approval.
     ///
     /// # Errors
@@ -1269,7 +1269,7 @@ impl MigrationEngine {
     /// # `OnlineRename` dual-execution dispatch
     /// A [`RenameStep::ExpandContract`] runs E1+E2->backfill->E3 atomically under
     /// the held lock - this loop applies E1/E2 and calls `run_online_backfill` for
-    /// the mirror - and surfaces C1/C2 as `pending_contract`
+    /// the mirror - and surfaces the contract as `pending_contract`
     /// (the cross-deploy partition). A [`RenameStep::TableRebuild`] is one
     /// atomic offline `rebuild_one` (approval-gated + net-applied-skipped); it has
     /// NO `pending_contract`.
@@ -1878,7 +1878,7 @@ impl MigrationEngine {
 
             // IR-authored plans restamp the online substeps onto the logical IR
             // plan identity. The durable obligation therefore owns the executable
-            // C1/C2 ids. Re-author the trusted SQL from the immutable intent facts,
+            // contract ids. Re-author the trusted SQL from the immutable intent facts,
             // then restore those recorded ids and their dependency chain.
             let trigger_version = MigrationId::parse(&obligation.pending_version).map_err(|_| {
                 DeclarativeApplyError::Plain(EngineError::PendingContractMalformed {
@@ -2155,10 +2155,10 @@ impl MigrationEngine {
         // deploy applies NOTHING and returns the structured
         // `TABLE_HAS_PENDING_CONTRACT` payload - UNLESS the deploy is the
         // legitimate contract-apply for that obligation: deploy
-        // N+1 applies C1/C2 as `Ddl` steps to complete the rename. We
+        // the next deploy applies the contract as `Ddl` steps to complete the rename. We
         // recognize the contract-apply by RE-AUTHOR-COMPARE: the deploy's `Ddl` steps
         // must carry the obligation's recorded `contract_versions` AND match the
-        // re-authored C1/C2 `up` SQL (not a version-id match alone - a forged plan
+        // re-authored contract `up` SQL (not a version-id match alone - a forged plan
         // carrying the ids with innocuous SQL is NOT recognized and stays gated). Such
         // an obligation is DISCHARGED after the steps apply (a `resolved='applied'` row
         // appended), not refused - applying the REAL contract is exactly
@@ -2179,14 +2179,14 @@ impl MigrationEngine {
             };
         // **Discharge hardening: re-author-compare, not version-id alone.**
         // The `up` SQL each `Ddl` step carries, keyed by version. The contract-apply
-        // recognition below re-authors the obligation's C1/C2 from its stored identity
+        // recognition below re-authors the obligation's contract from its stored identity
         // facts and requires the discharging Ddl steps to SEMANTICALLY MATCH (the
         // re-authored `up` SQL), not merely carry the recorded contract version-ids. A
         // forged plan that carries the obligation's `contract_versions` but innocuous
         // `up` SQL (a `SELECT 1` / a harmless `COMMENT ON`) therefore does NOT
         // discharge: the obligation stays outstanding, the dual-write trigger + `from`
         // column stay live, and the touched-table refusal still fires. Only a deploy
-        // whose Ddl steps actually RUN the real C1 (drop trigger+fn) + C2 (drop column)
+        // whose Ddl steps run the real contract (drop trigger+fn, drop column)
         // un-gates the table. The author's `up` text is byte-stable and independent of
         // `owner_app` (it names table/trigger/column only), so an exact string compare
         // is sound (it mirrors the deterministic contract re-author).
@@ -2197,7 +2197,7 @@ impl MigrationEngine {
                 _ => None,
             })
             .collect();
-        // Re-author an outstanding obligation's contract C1/C2 and decide whether THIS
+        // Re-author an outstanding obligation's contract and decide whether THIS
         // deploy's `Ddl` steps both carry the recorded `contract_versions` AND match
         // the re-authored contract `up` SQL for each. Fail-CLOSED: an empty
         // `contract_versions`, a missing matching Ddl step, an SQL mismatch, or an
@@ -2233,7 +2233,7 @@ impl MigrationEngine {
                 _ => None,
             })
             .collect();
-        // Obligations this deploy DISCHARGES by applying their contract (all C1/C2
+        // Obligations this deploy DISCHARGES by applying their contract (all contract
         // ids present among the Ddl steps). Resolved AFTER the step loop succeeds.
         let mut discharging: Vec<crate::apply::journal::PendingContract> = Vec::new();
         if !outstanding.is_empty() {
@@ -2260,20 +2260,20 @@ impl MigrationEngine {
             for pc in &outstanding {
                 // Recognized as a contract-apply ONLY if the discharging
                 // Ddl steps both carry the recorded `contract_versions` AND match the
-                // re-authored C1/C2 `up` SQL (re-author-compare, not version-id alone).
+                // re-authored contract `up` SQL (re-author-compare, not version-id alone).
                 let is_contract_apply = recognizes_contract_apply(pc);
                 // **Exemption scope (table-wide, by design and bounded).** A
                 // contract-apply deploy exempts the obligation's TABLE for the whole
-                // deploy, so a bundle that carries C1/C2 AND an unrelated touching op
+                // deploy, so a bundle that carries the contract AND an unrelated touching op
                 // on the same table would apply both. This is NOT exploitable: the
                 // exemption keys on the obligation's recorded `contract_versions`,
-                // which are the rename's DETERMINISTIC, server-stamped C1/C2 ids
+                // which are the rename's deterministic, server-stamped contract ids
                 // - a creator cannot forge them, and re-authoring the same
                 // rename's contract IS the only legitimate way to discharge it.
                 // The accepted contract is therefore: a contract-apply
                 // deploy SHOULD carry only the contract steps; co-bundling an
                 // unrelated op on the same table is discouraged but bounded (it
-                // applies under the SAME approval the destructive C2 already forces).
+                // applies under the same approval the destructive drop already forces).
                 if is_contract_apply {
                     discharging.push(pc.clone());
                     continue;
@@ -2302,7 +2302,7 @@ impl MigrationEngine {
             // **Cross-plan `depends_on` BLOCK - fail-closed at APPLY, not
             // only in `status`.** A plan B with `depends_on: [A]` MUST NOT apply
             // while A's online-rename contract is still OUTSTANDING: A is not fully
-            // satisfied (its C1/C2 are not net-applied), so B would run against a
+            // satisfied (its contract is not net-applied), so the next op would run against a
             // half-applied A. This fires even when B touches a DIFFERENT table than
             // A's pending one - the case the touched-table refusal above does NOT
             // cover (the "double-bind": when B *also* touches A's table both
@@ -2668,7 +2668,7 @@ impl MigrationEngine {
                 }
                 PlanStep::OnlineRename(RenameStep::ExpandContract(rename)) => {
                     // Re-expresses `apply_declarative`'s online-rename drive: run
-                    // EXPAND+backfill atomically under the held lock, defer C1/C2 as
+                    // expand+backfill atomically under the held lock, defer the contract as
                     // `pending_contract`.
                     // **Capability (defense in depth).** The plan-wide preflight
                     // already refused a plan whose target cannot expand, and it did
@@ -3087,7 +3087,7 @@ impl MigrationEngine {
 
         // **DISCHARGE the obligations this deploy's contract-apply
         // completed.** All steps applied successfully, so for every obligation whose
-        // C1/C2 this deploy carried (recognized in the read-back above), APPEND a
+        // contract this deploy carried (recognized in the read-back above), APPEND a
         // `resolved='applied'` row (append-only - the `pending` row is never edited),
         // so a later deploy reads the obligation as discharged and no longer refuses
         // the table. This is the routine deploy-N+1 contract-apply path; the
@@ -3979,7 +3979,7 @@ fn enforce_online_scope_if_pending(
 /// templates. The first three statements acquire a table lock through `ALTER
 /// TABLE` and prove both columns still contain identical values. Cleanup and
 /// the destructive column drop then commit with one journal row, so there is
-/// no gap between separate C1 and C2 transactions.
+/// no gap between separate contract transactions.
 fn atomic_pending_resolution_migration(
     vendors: VendorSet,
     project_schema: &str,
@@ -4057,7 +4057,7 @@ fn atomic_pending_resolution_migration(
 /// **The SHARED contract-apply recognizer.** Decide whether a
 /// deploy whose `Ddl` steps carry `ddl_up_by_version` (version -> `up` SQL) is the
 /// LEGITIMATE contract-apply for the outstanding obligation `pc` - i.e. whether
-/// it RE-PRESENTS the obligation's recorded C1/C2 with the SAME re-authored `up`
+/// it RE-PRESENTS the obligation's recorded contract with the same re-authored `up`
 /// SQL (re-author-compare, NOT a version-id match alone). Fail-CLOSED: an empty
 /// `contract_versions`, a missing/ mismatched discharging Ddl step, a length
 /// mismatch, or an author error all return `false` (=> NOT a contract-apply => the
@@ -4265,8 +4265,8 @@ pub struct DeclarativeDeployOutcome {
     /// The combined apply outcome for the plain set + every rename's EXPAND
     /// (E1/E2 + the journaled E3 marker, after the real backfill).
     pub applied: ApplyOutcome,
-    /// The DEFERRED contract migrations (per rename: DROP TRIGGER C1 + DROP
-    /// COLUMN `<from>` C2), to be applied in a SUBSEQUENT deploy via the normal
+    /// The deferred contract migrations (per rename: drop trigger + drop
+    /// COLUMN `<from>`), to be applied in a SUBSEQUENT deploy via the normal
     /// gated [`apply`](MigrationEngine::apply) AFTER app code switches to `<to>`.
     /// Empty when the deploy had no renames. These are gated
     /// (`requires_approval`; C2 is `destructive`).

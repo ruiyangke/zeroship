@@ -208,15 +208,6 @@ pub(crate) fn value_format_renderers(
     vendors.as_slice().iter().map(|vendor| vendor.value_format)
 }
 
-/* `pub(crate) fn stored_ddl(dialect)` USED TO LIVE HERE. Its only caller was
- * SQLite's execution half, which asked this registry which parser handles SQLite
- * from inside the SQLite backend. That half is `zeroship-migrate-sqlite` now and names
- * `crate::stored_ddl::PARSER` directly, leaving this resolver with zero callers.
- *
- * Nothing was lost: the parser is still reached, by everything that has a resolved
- * renderer, through the `SchemaRenderer::stored_ddl()` method this body forwarded to
- * - see `render/declarative.rs`, which calls it on the renderer it already holds.
- */
 
 /// The schema-bound DDL emitter registered by a dialect's vendor crate.
 pub(crate) fn ddl_emitter(

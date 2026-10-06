@@ -4235,7 +4235,7 @@ impl DeclarativeAuthor {
 
         let mut out: Vec<Migration> = Vec::new();
         // The online renames, carried as their full ExpandContractPlan (expand
-        // migs + BackfillSpec + contract migs) - NOT flattened into `out` (C1).
+        // migs + BackfillSpec + contract migs) - NOT flattened into `out`.
         // Flattening would discard the BackfillSpec, so the pre-existing-row
         // mirror never runs and the contract DROP COLUMN <from> destroys data.
         let mut renames: Vec<ExpandContractPlan> = Vec::new();
@@ -4526,8 +4526,8 @@ impl DeclarativeAuthor {
                 // reach the PG expand-contract author below on the SQLite leg.
             }
 
-            // Author the expand-contract rename sequences (E1..E3, C1, C2) and
-            // carry them STRUCTURED - do NOT flatten into `out` (C1: that would
+            // Author the expand-contract rename sequences and
+            // carry them STRUCTURED - do NOT flatten into `out` (that would
             // discard the BackfillSpec, so the real pre-existing-row mirror never
             // runs and the contract DROP destroys data). The caller drives each
             // expand through `run_expand` (which runs the real backfill) and
@@ -4694,7 +4694,7 @@ impl DeclarativeAuthor {
 
             // DROP COLUMN: in live, not in desired -> destructive, gated
             // (skip a rename's `from` column - it is dropped by the rename's gated
-            // contract C2, not a plain drop).
+            // contract drop, not a plain drop).
             for c in &lt.columns {
                 if renamed_from.contains(c.name.as_str()) {
                     continue;
@@ -5585,7 +5585,7 @@ impl DeclarativeAuthor {
             }
         }
 
-        // C2 - the recreate set is EMPTY on the declarative path. The executor
+        // the contract drop - the recreate set is EMPTY on the declarative path. The executor
         // ([`SqliteBackend::rebuild_one`]) is the source of truth for the table's own
         // indexes + triggers: it captures their `sql` TEXT VERBATIM from the live
         // `sqlite_master` before the `DROP TABLE` and replays it after the rename, so
@@ -5665,7 +5665,7 @@ impl DeclarativeAuthor {
     ///   string `expand_contract_ty` (the IR's dialect-neutral column type, already
     ///   mapped to its `data_type` and `ddl_type`-spelled by the caller) and run it
     ///   through [`ExpandContractAuthor::author`] - the SAME author the declarative
-    ///   diff path calls, so the E1..C2 ids + intra-chain `depends_on` are authored
+    ///   diff path calls, so the expand-contract ids + intra-chain `depends_on` are authored
     ///   identically. The returned [`ExpandContractPlan`] is wrapped
     ///   verbatim into [`crate::render::step::RenameStep::ExpandContract`].
     ///
@@ -5712,7 +5712,7 @@ impl DeclarativeAuthor {
             ColumnRenameStrategy::ExpandContract => {
                 // The PG expand-contract author IS the id authority: the
                 // declarative path calls the SAME `ExpandContractAuthor::author` with
-                // the SAME `OnlineIntent` fields, so the authored E1..C2 ids +
+                // the same `OnlineIntent` fields, so the authored expand-contract ids +
                 // intra-chain `depends_on` match by construction.
                 let ec = ExpandContractAuthor::new(
                     self.vendors,
@@ -6201,14 +6201,12 @@ impl DeclarativeAuthor {
     /// and the stand-alone drop - would otherwise each ask the emitter themselves.
     /// The forwarding is here so the direction argument is built once.
     ///
-    /// It USED TO spell the statement, on the grounds that all three dialects agree
-    /// on it and only the identifier quoting differs. The agreement was real and
-    /// MEASURED - MySQL 8.4.11 accepts this statement and reports the new value in
-    /// its catalog - and it was still the wrong reason to write it here: an
+    /// It forwards the statement to the backend emitter. The three shipping
+    /// dialects agree on it and only the identifier quoting differs, but an
     /// agreement among the backends that ship is not a property of the ones that do
-    /// not, and a statement written for a vendor that was never asked comes out
-    /// right until it does not. This is the member of the family a second shipping
-    /// backend actually reaches, which is what makes the point concrete rather than
+    /// not: a statement written for a vendor that was never asked comes out right
+    /// until it does not. This is the member of the family a second shipping backend
+    /// actually reaches, which is what makes the point concrete rather than
     /// precautionary.
     ///
     /// HOW THINLY COVERED THIS IS, MEASURED. Collapsing the set direction into the
@@ -7625,10 +7623,9 @@ columns = [
         }
     }
 
-    /// Core used to call `check_constraint_name(table, column, "enum")` inside
-    /// MySQL's column loop. The crate move precomputes the same ordered vector. Pin
-    /// the properties a set/map shortcut would lose: order, duplicates, and capped
-    /// long-name bytes.
+    /// MySQL's column loop consumes a precomputed ordered vector of constraint
+    /// names. Pin the properties a set/map shortcut would lose: order, duplicates,
+    /// and capped long-name bytes.
     #[test]
     fn enum_check_name_precompute_preserves_order_duplicates_and_capping() {
         let table = "a_table_name_long_enough_to_force_the_constraint_name_capping_path";

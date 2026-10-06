@@ -110,12 +110,12 @@ enum LoweredOp {
         lowered: LoweredCreateTable,
     },
     /// An online `renameColumn` - ONE plan step, dialect-chosen.
-    /// The variant's `Migration`s (PG E1..C2, or the SQLite rebuild journal mig)
+    /// The variant's `Migration`s (the PG expand-contract set, or the SQLite rebuild journal mig)
     /// are restamped with plan-relative, content-independent ids after the full
     /// ordered plan is known. Not guarded per-fragment: the expand-contract author / the differ are
     /// the trusted, descriptor-/intent-driven producers (no untrusted raw SQL),
     /// exactly like the declarative path that produces the same shapes. Boxed: a
-    /// `RenameStep::ExpandContract` is large (the full E1..C2 plan), so boxing it
+    /// `RenameStep::ExpandContract` is large (the full expand-contract plan), so boxing it
     /// keeps the common `Ddl` arm cheap (`clippy::large_enum_variant`).
     Rename(Box<RenameStep>),
     /// An explicit primary-key lifecycle mutation. It remains structured until
@@ -1702,7 +1702,7 @@ impl LoweredArtifact {
     /// the manifest tally records the rename's full id set (the IR-path
     /// rename ids the manifest records are identical to the equivalent
     /// `t.*`-diff-authored rename's) - PG: E1..E3 **and** the deferred contract
-    /// C1/C2 (the whole authored sequence, mirroring the declarative manifest which
+    /// the contract steps (the whole authored sequence, mirroring the declarative manifest which
     /// folds the rename's expand + deferred contract, `engine.rs` manifest doc);
     /// SQLite: the single rebuild journal migration. `Dml`/`Backfill` steps carry no
     /// `Migration` here and do not appear.
@@ -2757,7 +2757,7 @@ impl IrAuthor {
     /// The per-dialect rendered `up`/`down` still applies; only the IDENTITY anchor
     /// is the neutral op list.
     ///
-    /// An [`PlanStep::OnlineRename`] step's sub-migrations (PG E1..C2 or the
+    /// An [`PlanStep::OnlineRename`] step's sub-migrations (the PG expand-contract set or the
     /// SQLite rebuild journal migration) receive the same authoritative checksum
     /// and plan-relative stable identities as every other host-IR step.
     fn assemble_plan(
@@ -5223,7 +5223,7 @@ impl IrAuthor {
                 //
                 // renameColumn `ifExists` is REFUSED fail-closed.
                 // The online-rename plan step is a MULTI-migration shape (PG
-                // expand-contract E1..C2; an SQLite rebuild) authored by the trusted
+                // expand-contract set; an SQLite rebuild) authored by the trusted
                 // expand-contract author / differ, with no single Migration the
                 // executor probe can attribute the ColumnPresence verdict to. More
                 // importantly, `lower_rename` ALREADY MANDATES the live `from` column
@@ -8005,7 +8005,7 @@ impl IrAuthor {
                 // the FK references resolve in the SAME effective schema
                 // the constraint is added in (the resolved qualifier, not the bound
                 // project schema).
-                // **C1** - thread the referential actions into the snapshot so the
+                // Thread the referential actions into the snapshot so the
                 // imperative `addConstraint(fk)` path renders `ON DELETE ...` /
                 // `ON UPDATE ...` (parity with the declarative `ref` path).
                 // Online constraint adoption: the ` NOT VALID` tail asks PostgreSQL

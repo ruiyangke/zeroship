@@ -8,10 +8,9 @@
 //! # Why the machinery itself is HERE now
 //!
 //! The parse-time deny-list, the cross-schema confinement, the classifier and the
-//! operational analyzers used to live in a separate `zero-migrate-guard` crate,
-//! which the engine depended on directly. That crate is gone: everything in it
-//! needed `libpg_query` to parse PostgreSQL, which makes all of it this vendor's
-//! code, and a neutral engine has no business depending on a PostgreSQL parser.
+//! operational analyzers live in this crate. All of it needs `libpg_query` to parse
+//! PostgreSQL, which makes it this vendor's code, and a neutral engine has no
+//! business depending on a PostgreSQL parser.
 //!
 //! [`sql`] holds that machinery ([`SqlGuard`], the deny-walk, the namespace
 //! authority rules); [`denylist`] holds the rule ids it refuses with; and
@@ -23,8 +22,7 @@
 //! cursor check - are `src/backend/{precondition,session,backfill_sql}.rs` in THIS
 //! crate. The engine's remaining entry is `[dev-dependencies]`, for test parses.
 //!
-//! This doc used to say the opposite, and read as a live blocker long after the
-//! relocation closed it. Re-measure rather than trust it:
+//! Re-measure rather than trust this doc:
 //! `git grep -n '^pg_query' -- crates` names every manifest that declares it, and the
 //! section header above each hit says whether it is production or test-only.
 //!

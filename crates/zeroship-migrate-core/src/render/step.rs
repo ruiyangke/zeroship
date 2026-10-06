@@ -1,18 +1,14 @@
 //! Low-level lowered-plan step values.
 //!
-//! Every one of them now lives in `zeroship-migrate-backend` and is re-exported from
+//! Every one of them lives in `zeroship-migrate-backend` and is re-exported from
 //! here, the path each has always been reached by.
 //!
-//! This module used to be the last thing keeping `MigrationBackend` in the engine,
-//! and the obstacle was never `PlanStep` itself. It was one FIELD, four types down:
+//! This module re-exports the backend contract into the engine. The obstacle is not
+//! `PlanStep` itself but one FIELD, four types down:
 //! `PlanStep::OnlineRename` carries a [`RenameStep`], whose `TableRebuild` arm
-//! carries a [`TableRebuild`], whose [`TableRebuildSpec`] had a `sequence_policy`
-//! typed `zeroship_migrate_sqlite::SqliteSequencePolicy` - a VENDOR type, in the shared
-//! plan vocabulary, pointing the dependency the wrong way through the whole chain.
-//! That field carries a neutral
-//! [`SequenceHighWaterPolicy`](zeroship_migrate_backend::table_rebuild::SequenceHighWaterPolicy)
-//! now, `zeroship-migrate-sqlite` converts it at its own boundary, and the chain
-//! travelled.
+//! carries a [`TableRebuild`], whose [`TableRebuildSpec`] carries a neutral
+//! [`SequenceHighWaterPolicy`](zeroship_migrate_backend::table_rebuild::SequenceHighWaterPolicy),
+//! and `zeroship-migrate-sqlite` converts it at its own boundary.
 
 /// A typed scalar bound into a parameterized [`PlanStep::Dml`] statement.
 ///

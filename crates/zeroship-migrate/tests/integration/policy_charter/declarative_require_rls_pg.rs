@@ -4,8 +4,8 @@
 //! that function has one non-test caller: `IrAuthor::lower_guarded_with_op_spans`.
 //! `plan_declarative` never builds a `MigrationIr` - it diffs two snapshots into
 //! `Vec<Migration>` (SQL text) and lints that text - so a table created through the
-//! declarative path used to reach live Postgres with row level security off, however
-//! the obligation was scoped.
+//! declarative path reaches live Postgres with row level security off only when
+//! declared.
 //!
 //! The declarative model carries no RLS intent: `SchemaSnapshot` records RLS only as
 //! `RoleSnapshot.bypass_rls`, nothing per table, so no diff of it can ever author the

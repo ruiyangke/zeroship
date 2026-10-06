@@ -130,7 +130,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A read-only dry run: report what was configured and exit BEFORE the tmp
     // directory is created, before the control DSN is dialled, and before a
     // listener is bound. Each of those is a side effect a config check must not
-    // have, and each of them used to run unconditionally here.
+    // have, and each of them runs only when its configuration is present.
     if check_config {
         let mut report = CheckConfigReport::new();
         report.field("bind", CheckValue::Plain(settings.bind.get().clone()));
@@ -486,8 +486,6 @@ mod tests {
         // What this does NOT catch: a diagnostic naming a variable migrated
         // does read but which is the wrong one for the failure, and any
         // diagnostic outside the two driven below. It drove three until the
-        // PAT signing key was deleted; the loop is unchanged, it has one fewer
-        // subject.
         let readable = env_names_migrated_reads();
         assert!(
             readable.contains("ZEROSHIP_AUTH_PLATFORM_ISSUER"),

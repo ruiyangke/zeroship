@@ -9,19 +9,19 @@
 //! it to validation, to the refusal messages and to the generated TypeScript surface,
 //! and touches no neutral crate and no `match` anywhere.
 //!
-//! # The two that used to live in the neutral IR
+//! # The two PostgreSQL attributes
 //!
-//! `IndexStorageParams` held `fillfactor` and `pages_per_range` as named fields in
-//! `zeroship-migrate-ir` and in the neutral contract crate's `IndexSnapshot` - PostgreSQL
-//! storage parameters living in the crates whose purpose is to name no vendor. Core's
-//! own drift pass then formatted them BY THOSE TWO SPELLINGS. They were the reason this
-//! mechanism exists.
+//! `fillfactor` and `pages_per_range` are PostgreSQL storage parameters, declared
+//! here rather than in `zeroship-migrate-ir` or the neutral contract crate's
+//! `IndexSnapshot`. They are the reason this mechanism exists: the neutral crates
+//! must name no vendor, and core's own drift pass reads them through this
+//! vocabulary.
 //!
-//! That type is now deleted. The `createIndex` declarations below are its whole
-//! replacement: they are what the renderer emits, what live introspection FILTERS
-//! `reloptions` down to, and what drift compares. The filter used to be two hardcoded
-//! field names and is now the vocabulary, so a third index storage parameter is a change
-//! to this file and to nothing else.
+//! The `createIndex` declarations below are the whole replacement: they are what the
+//! renderer emits, what live introspection FILTERS `reloptions` down to, and what
+//! drift compares. The filter is this declared vocabulary rather than two hardcoded
+//! field names, so a third index storage parameter is a change to this file and to
+//! nothing else.
 
 use zeroship_migrate_backend::attribute::{AttrDef, AttrShape, AttributeVocabulary};
 use zeroship_migrate_backend::declare_attributes;

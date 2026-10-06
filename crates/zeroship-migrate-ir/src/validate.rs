@@ -135,9 +135,8 @@ pub const CODE_SEQUENCE_OPTION_INVALID: &str = "SEQUENCE_OPTION_INVALID";
 /// The list above is the CAPABILITY-GATED set, which is not the same set as the
 /// privileged catalog-object family exactly one backend renders. A trigger is a
 /// member here by AUTHORITY: every backend renders one, so an artifact carrying a
-/// trigger still reaches every dialect. Reading one membership off the other is the
-/// mistake this sentence used to invite, back when it named triggers in a list the
-/// gate could not actually see them in.
+/// trigger still reaches every dialect. Reading one membership off the other is a
+/// mistake, because the two lists are distinct.
 pub const CODE_VENDOR_OP_DENIED: &str = "VENDOR_OP_DENIED";
 /// A `raw` op must carry a non-empty audit reason for using the raw SQL escape.
 pub const CODE_RAW_REASON_REQUIRED: &str = "RAW_REASON_REQUIRED";
@@ -1047,8 +1046,8 @@ impl Ctx<'_> {
                 self.validate_feature(ExprDialectFeature::StorageSize)?;
                 self.walk_depth(expr, d)
             }
-            // Every field is asked, not just the ones core used to file under a
-            // vendor: the target answers for the part actually authored.
+// Every field is asked, not just a subset the target happens to declare: the target
+// answers for the part actually authored.
             Expr::Extract { field, from } => {
                 self.validate_feature(ExprDialectFeature::Extract(*field))?;
                 self.walk_depth(from, d)

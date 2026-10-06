@@ -2,7 +2,7 @@
 //! object's KIND rather than its body.
 //!
 //! `materialized: true` together with `replace: true` is already refused upstream, at
-//! `crates/zeroship-migrate-core/src/model/op_support.rs:240-243`. That is a DIFFERENT case and
+//! `crates/zeroship-migrate-core/src/model/op_support.rs`. That is a DIFFERENT case and
 //! checking it is what made this one easy to miss: the gap is a PLAIN replace -
 //! `replace: true` with `materialized` absent or false - aimed at a view the folded
 //! snapshot records as materialized.
@@ -17,7 +17,7 @@
 //! So the point of this arm is TIMING, not data safety: it moves the refusal back to
 //! plan time where it was, without restoring the duplicate-name refusal that was wrong.
 //!
-//! Materialized views are PostgreSQL-only (`op_support.rs:246`), so no other dialect can
+//! Materialized views are PostgreSQL-only (`model::op_support`), so no other dialect can
 //! reach this shape.
 
 

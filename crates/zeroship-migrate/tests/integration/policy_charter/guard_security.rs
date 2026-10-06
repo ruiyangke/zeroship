@@ -257,7 +257,7 @@ fn insert_auth_schema_is_cross_schema() {
 fn drop_other_project_schema_is_denied() {
     // DROP SCHEMA is outside a project migrator's remit entirely (schema
     // lifecycle is the platform's, not the creator's): denied-by-default as an
-    // unrecognized/unsafe construct (was previously surfaced as CrossSchema).
+    // unrecognized/unsafe construct.
     assert_denied("DROP SCHEMA project_other CASCADE");
 }
 
@@ -1834,9 +1834,8 @@ fn pg_get_object_address_own_schema_array_passes() {
 // test's import list and is asserted structurally: `Checksum`, `Migration`,
 // `MigrationFlags`, `MigrationId` and `GuardConfig` come from `zeroship_migrate`, while
 // `classify`, `DdlKind`, `SqlGuard` and `flags_for` come from
-// `zeroship_migrate_postgres`. They used to ALL be reachable from the engine root, which
-// put PostgreSQL's parser on the neutral engine's public API — so a caller could hold
-// a `DdlKind` believing it described any backend's statement.
+// `zeroship_migrate_postgres`. They are reachable through the backend, not the engine
+// root, so `DdlKind` does not sit on the neutral engine's public API.
 // ---------------------------------------------------------------------------
 
 #[test]

@@ -4,7 +4,7 @@
 //! `CREATE TRIGGER` pair that installs it, and the `DROP TRIGGER` / `DROP FUNCTION`
 //! pair that removes it.
 //!
-//! # Where it used to live
+//! # Where it lives
 //!
 //! Split across the two crates that are supposed to hold no vendor. The engine's
 //! `render::expand_contract` spelled `CREATE OR REPLACE FUNCTION ... LANGUAGE plpgsql`,

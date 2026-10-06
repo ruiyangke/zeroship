@@ -540,11 +540,9 @@ fn validate_single_select(sql: &str) -> Result<(), PreconditionError> {
 /// This sits beside [`tree_has_key`], and both are PostgreSQL parse-tree code in a
 /// PostgreSQL crate - the shape gate above already calls `pg_query::parse` directly.
 ///
-/// The doc here used to argue for the arrangement as a compromise, because this file
-/// lived in neutral core and importing a vendor crate to walk a parse tree would have
-/// made core name a vendor. It named relocating the file as the honest fix. That
-/// relocation happened: the file IS `zeroship-migrate-postgres` now, so the helper is
-/// simply local code beside its caller.
+/// The helper is local code beside its caller, in `zeroship-migrate-postgres`. Keeping
+/// it in neutral core would have made core import a vendor crate to walk a parse tree,
+/// which would name a vendor.
 fn first_dml_node(v: &Value) -> Option<&'static str> {
     fn first_matching(v: &Value) -> Option<&'static str> {
         match v {

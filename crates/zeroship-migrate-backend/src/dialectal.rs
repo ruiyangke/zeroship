@@ -39,7 +39,7 @@
 //!   no settings for this dialect*, and the owning vendor resolves it to its own
 //!   default. A miss cannot be a silently wrong answer there because only the
 //!   vendor that owns a leg ever reads it, and the value it falls back to is the
-//!   same `Default` the neutral constructor used to install eagerly.
+//!   same `Default` the neutral constructor would install.
 //!
 //! # What a mis-keyed leg means
 //!

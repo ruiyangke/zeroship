@@ -5,13 +5,12 @@
 //! follows it automatically: `pg_get_constraintdef` deparses the NEW name the
 //! instant the rename commits.
 //!
-//! `render/fold.rs` used to update `snap.columns`, `ConstraintSnapshot::cascade_columns`
-//! and `snap.indexes` in its `Op::RenameColumn` arm while leaving
-//! `ConstraintSnapshot::definition` untouched. The differ compares that field for
-//! every kind except `EXCLUDE` and `CHECK` (`apply::drift::constraint_definition_is_comparable`),
-//! so after `rename a -> b` the fold reported `UNIQUE (a)` / `FOREIGN KEY (a) ...` /
-//! `PRIMARY KEY (a)` against live's `UNIQUE (b)` / `FOREIGN KEY (b) ...` /
-//! `PRIMARY KEY (b)` - real drift on the very next introspection.
+//! `render/fold.rs` updates `snap.columns`, `ConstraintSnapshot::cascade_columns`
+//! and `snap.indexes` in its `Op::RenameColumn` arm and also rewrites
+//! `ConstraintSnapshot::definition`. The differ compares that field for every kind
+//! except `EXCLUDE` and `CHECK` (`apply::drift::constraint_definition_is_comparable`),
+//! so the fold's `UNIQUE (b)` / `FOREIGN KEY (b) ...` / `PRIMARY KEY (b)` must match
+//! live rather than report drift on the very next introspection.
 //!
 //! Only the LEADING PARENTHESIZED GROUP is re-rendered, and only for UNIQUE /
 //! PRIMARY KEY / FOREIGN KEY, whose leading group is a LOCAL COLUMN LIST. A string

@@ -1,24 +1,19 @@
 //! Live PostgreSQL oracle for the CHECK body a column rename leaves in the fold, and
 //! for the two consumers that must not read it.
 //!
-//! ## What this file used to assert, and why that changed
+//! ## What this file asserts
 //!
-//! It used to pin the fold's CHECK body as deliberately STALE. The `Op::RenameColumn`
-//! arm re-rendered `ConstraintSnapshot::definition` for UNIQUE / PRIMARY KEY / FOREIGN
-//! KEY and for nothing else, on the grounds that those three open with a LOCAL COLUMN
-//! LIST - a closed identifier grammar where a string literal cannot appear - while a
-//! CHECK's leading group is an EXPRESSION, where `CHECK ((status <> 'qty'::text))`
-//! survives dropping `qty` (measured on PostgreSQL 18.4). Substituting a name inside
-//! that text would corrupt the literal, so the arm left the body alone.
-//!
-//! The trap is real; the conclusion was not. `rename_quoted_column_in_sql` walks a
-//! fragment as QUOTED RUNS, so a `'…'` literal is copied through whole and can never be
-//! mistaken for a column reference - it was written for `ColumnSnapshot::inline_checks`
-//! and it solves the CHECK body identically. The RENAME CARRIER SWEEP applied it, so
-//! the fold now projects `CHECK (("amount_on_hand" > 0))` where it used to project
-//! `CHECK (("qty_on_hand" > 0))`, and `crates/zeroship-migrate/tests/integration/rename/rename_carrier_sweep_pg.rs` pins the
-//! literal's survival beside the reference's move. This file's first assertion is
-//! INVERTED rather than relaxed: it now demands the follow it used to forbid.
+//! The fold rewrites a renamed column inside a rendered CHECK body. The trap is
+//! real: a CHECK's leading group is an EXPRESSION, so `CHECK ((status <> 'qty'::text))`
+//! could be corrupted by substituting a name. `rename_quoted_column_in_sql` walks a
+//! fragment as QUOTED RUNS, so a `'...'` literal is copied through whole and can never
+//! be mistaken for a column reference - it was written for
+//! `ColumnSnapshot::inline_checks` and it solves the CHECK body identically. The
+//! RENAME CARRIER SWEEP applies it, so the fold projects
+//! `CHECK (("amount_on_hand" > 0))`, and
+//! `crates/zeroship-migrate/tests/integration/rename/rename_carrier_sweep_pg.rs` pins
+//! the literal's survival beside the reference's move. The first assertion here
+//! demands that follow.
 //!
 //! ## What it still asserts, unchanged, and why that is the point
 //!

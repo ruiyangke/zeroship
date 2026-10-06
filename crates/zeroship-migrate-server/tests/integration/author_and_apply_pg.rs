@@ -199,7 +199,7 @@ export function schema() {
 }
 "#;
 
-// ── The live-PG apply path (identical to Stage 1) ────────────────────────────
+    // -- The live-PG apply path --
 
 const PROJECT: &str = "prj_stage2";
 const APP: &str = "app_stage2";
@@ -253,8 +253,8 @@ async fn drop_schemas(session: &CompioPgSession, cfg: &ExecutorConfig) {
 }
 
 /// Resolve the authored envelope's `createTable` ops through the confined
-/// table-shape policy (the platform's create-table policy) before lowering —
-/// the same normalisation Stage 1 uses.
+/// table-shape policy (the platform's create-table policy) before lowering -
+/// the same normalisation the engine uses.
 fn resolved_envelope_json(raw: &str, effective: &EffectivePolicy, default_schema: &str) -> String {
     let ir: MigrationIr = serde_json::from_str(raw).expect("authored IR parses as MigrationIr");
     let resolved =
@@ -316,7 +316,7 @@ async fn authored_v1_envelope_lowers_and_applies_over_native_compio_seam() {
     let postgres = crate::support::fixture::Postgres::start();
     let url = postgres.url();
 
-    // (1) AUTHOR the envelope in zeroship-runtime's V8 (the whole point of Stage 2).
+    // (1) AUTHOR the envelope in zeroship-runtime's V8 (the whole point of the authoring path).
     let authored = author_v1_envelope(SAMPLE_MIGRATION_TS, "create_notes_and_add_tag");
     let tok = token();
     let (cfg, effective) = cfg_for(&tok);

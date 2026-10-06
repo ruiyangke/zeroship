@@ -144,8 +144,7 @@ fn an_inlined_enum_column_gets_exactly_one_membership_check() {
 /// and without the
 /// membership lift, which is why it was recorded rather than blamed on it.
 ///
-/// IT IS NOW FIXED, and the assertion below was REVERSED accordingly - it used to pin
-/// the stale body as current behaviour. `rename_column_in_inline_checks` walks the
+/// The assertion below pins the current behavior: `rename_column_in_inline_checks` walks the
 /// rendered fragment as quoted runs and rewrites only the identifier, which is why the
 /// member literal `'status'` in the neighbouring file's fixture survives it. The
 /// end-to-end proof, including what SQLite does when handed the stale body, is
@@ -222,8 +221,7 @@ fn a_sqlite_rebuild_carries_the_membership_exactly_once() {
             && create.contains("'RESOLVED'"),
         "and that one CHECK carries every member:\n{create}"
     );
-    // And it names the POST-rename column. See the doc comment: this assertion was
-    // reversed when the staleness it used to pin was fixed.
+// And it names the POST-rename column. See the doc comment: the staleness is fixed.
     assert!(
         create.contains(r#""state" TEXT NOT NULL CHECK ("state" IN ("#),
         "the inline CHECK body names the post-rename column:\n{create}"

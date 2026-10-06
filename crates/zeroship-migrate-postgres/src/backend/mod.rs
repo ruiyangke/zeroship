@@ -391,9 +391,8 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
     /// `crates/zeroship-migrate/tests/integration/pg_engine/pg_column_drop_dependency_oracle.rs`, which calls THIS function and
     /// attempts a real drop per shape, asserting the two agree on every one.
     ///
-    /// The oracle used to run its own SQL spelling of the same rule, which made an
-    /// edit here invisible to it. It executes the shipped function now, so changing
-    /// this query is what the oracle reports on.
+/// The oracle executes the shipped function rather than its own SQL spelling of the
+/// same rule, so changing this query is what the oracle reports on.
     ///
     /// Refuse iff a NORMAL dependency exists whose own object does NOT also hold an
     /// AUTO edge on the column, or an AUTO dependency comes from an index whose

@@ -185,9 +185,9 @@ pub async fn ensure_journal<D: SqlSession>(
     .await?;
 
     // 2a-ter. The append-only CROSS-DEPLOY PENDING-CONTRACT obligation log
-    // A `ExpandContract` online rename applies its EXPAND
-    // (E1..E3 + backfill) in deploy N and DEFERS its contract (C1 drop trigger
-    // + C2 drop old column) to a later deploy. The deferred contract
+// An `ExpandContract` online rename applies its expand steps and backfill in one
+// deploy and DEFERS its contract (drop trigger + drop old column) to a later deploy.
+// The deferred contract
     // is a DURABLE OBLIGATION - not a transient return value - so a later deploy
     // (or a restarted process) can READ IT BACK and fail closed on any op that
     // touches the rename's table while the contract is still outstanding.
@@ -219,7 +219,7 @@ pub async fn ensure_journal<D: SqlSession>(
     // `lower_plan.version`) and an author's `depends_on` references, so
     // `status`'s orphan/blocked surfacing keys on THIS, not the deep E2
     // sub-version that no plan-level set ever exposes;
-    // `contract_versions` is the JSON array of C1/C2 ids.
+// `contract_versions` is the JSON array of contract ids.
     conn.batch(&format!(
         "CREATE TABLE IF NOT EXISTS {meta}.__zeroship_schema_pending_contracts (
             event_seq         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

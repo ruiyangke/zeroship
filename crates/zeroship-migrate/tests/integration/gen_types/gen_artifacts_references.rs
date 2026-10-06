@@ -6,8 +6,8 @@
 //!
 //! The `ColType::Ref` brand and a table-level `Fk` both derive the SAME
 //! `<table>_<column>_fkey` name, so an op that carries both declares one
-//! constraint twice. The descriptor producer used to emit exactly that pair, and
-//! the fold rejected the schema it had just produced.
+//! constraint twice. The descriptor producer emits one of them, so the fold accepts
+//! the schema it produced.
 //!
 //! These arms go through the exact entry points the napi addon's `genArtifacts`
 //! calls (`render_artifacts_from_descriptors` / `render_artifacts`).

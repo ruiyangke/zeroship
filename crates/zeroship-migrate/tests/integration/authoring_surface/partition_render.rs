@@ -291,8 +291,8 @@ fn collapse_events_ops() -> Vec<Op> {
     ]
 }
 
-/// Index attributes in the wire form the op now carries, for fixtures that used to build
-/// an `IndexStorageParams` literal.
+/// Index attributes in the wire form the op carries, for fixtures that build
+/// the attribute set rather than an `IndexStorageParams` literal.
 fn index_attrs(pairs: &[(&str, i64)]) -> zeroship_migrate_ir::attribute::CreateIndexAttributes {
     let mut carried = zeroship_migrate_ir::attribute::Attributes::new();
     for (key, value) in pairs {
@@ -1027,7 +1027,7 @@ fn render_with_storage_param_index_pg() {
 
     assert!(
         // CANONICAL KEY ORDER, alphabetical by full key, so `fillfactor` precedes
-        // `pages_per_range`. This used to be the order two struct fields were declared in.
+        // `pages_per_range`.
         // Both spellings are the same statement to PostgreSQL; a canonical one is what
         // keeps rendered DDL reproducible now that the set of parameters is open.
         sql.contains("WITH (fillfactor='70', pages_per_range='32')"),

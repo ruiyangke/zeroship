@@ -393,15 +393,15 @@ pub struct AppliedPlanStatus {
 
 /// One terminal pending-contract event used to reconcile an authored plan.
 ///
-/// Terminal resolutions overlay their matching deferred C1/C2 steps because
+/// Terminal resolutions overlay their matching deferred contract steps because
 /// the resolver journals one atomic migration instead of the individual steps.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedPendingContract {
-    /// Durable E2 obligation key used to derive resolver-owned step ids.
+    /// Durable expand-obligation key used to derive resolver-owned step ids.
     pub pending_version: String,
     /// Stable logical plan identity that owns the online rename.
     pub plan_version: String,
-    /// Deferred C1/C2 journal identities owned by the obligation.
+    /// Deferred contract journal identities owned by the obligation.
     pub contract_versions: Vec<String>,
     /// Terminal action recorded for the obligation.
     pub resolution: journal::Resolution,

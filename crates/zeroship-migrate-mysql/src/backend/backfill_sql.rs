@@ -544,12 +544,11 @@ fn cursor_component_mutated(component: &str) -> ApplyError {
 /// Gate an author-supplied bare identifier, then let the MySQL backend spell it.
 ///
 /// The MySQL twin of `zeroship_migrate_postgres::backend::backfill_sql::quote_ident`, which
-/// has always forwarded to `render::dml`. This one used to end in a bare
-/// ``format!("`{ident}`")`` - byte-identical (the gate above admits no backtick, so
-/// there is nothing to double) but an unrouted spelling, and one that the
-/// backtick-doubling scan in `render::dml::tests` CANNOT see precisely because it
-/// does no doubling. That is the documented limit of a byte-pattern guard, so this
-/// site is fixed by hand rather than by the ratchet.
+/// has always forwarded to `render::dml`. This one forwards to the same shared
+/// spelling. A bare ``format!("`{ident}`")`` would be byte-identical (the gate above
+/// admits no backtick, so there is nothing to double) but an unrouted spelling, and
+/// the backtick-doubling scan in `render::dml::tests` CANNOT see it precisely because
+/// it does no doubling - the documented limit of a byte-pattern guard.
 fn quote_bare(what: &'static str, ident: &str) -> Result<String, ApplyError> {
     let valid = ident
         .as_bytes()

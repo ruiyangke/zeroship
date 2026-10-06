@@ -19,8 +19,8 @@
 //! exactly what the migrations authored.
 //!
 //! THE DIFFER IS UNIFORM; THE SNAPSHOT IS NOT. All three object classes report
-//! an expected object absent from `actual` as missing - roles at drift.rs:1759,
-//! schemas at 1770, extensions at 1781. That rule is sound for the classes whose
+//! an expected object absent from `actual` as missing - roles, schemas and extensions
+//! alike (`apply::drift`). That rule is sound for the classes whose
 //! live query is CLUSTER-WIDE, which roles and extensions both are: absence is
 //! then real evidence. Measured, both behave correctly - a role dropped out of
 //! band is reported, and a cluster carrying `plpgsql` against a fold naming no

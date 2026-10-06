@@ -130,7 +130,7 @@ fn guarded_drop_doc() -> String {
 ///
 /// `history` is the ordered op stream of every migration applied so far. It is
 /// folded into the live schema exactly the way the deploy path does it
-/// (`refresh_historical_live`, engine.rs:390-392), because that fold is what
+/// (`refresh_historical_live` in `zeroship_migrate_core::engine`), because that fold is what
 /// carries an earlier `createView`'s body forward to the `dropView` that undoes it.
 /// Building the live schema from table names alone would leave the body behind and
 /// prove nothing about the production path.

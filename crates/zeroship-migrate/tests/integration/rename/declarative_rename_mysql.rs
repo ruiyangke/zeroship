@@ -387,9 +387,9 @@ async fn a_mysql_declarative_rename_is_refused_at_plan_time_and_nothing_reaches_
     );
 
     // Only now the message. The refusal is the differ's own typed one, raised before
-    // a single statement was rendered - NOT the engine's `ApplyError::Backend("... a
-    // PgExpandContract here is a routing bug")`, which is an internal-invariant
-    // message and was what an operator used to see.
+    // a single statement was rendered - NOT the engine's internal-invariant
+    // `ApplyError::Backend("... a PgExpandContract here is a routing bug")`, which an
+    // operator does not see for this shape.
     assert!(
         refusal.contains("cannot rename column"),
         "the refusal must be the differ's typed plan-time one: {refusal}"

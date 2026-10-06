@@ -728,9 +728,9 @@ async fn create_table_ifnotexists_reruns_idempotent_with_timestamp_and_text_colu
 /// A guarded `createTable ifNotExists` with a `unique:true` field lowers to
 /// MULTIPLE units on `SQLite` too: the CREATE TABLE (which inlines the system-field
 /// indexes) PLUS a SEPARATE `CREATE INDEX` unit for the unique field's index
-/// (`lower_create_table` skips only the SYSTEM-field indexes on `SQLite` —
-/// declarative.rs:4587 — every other non-PK index, including a `unique:true`
-/// field's, is its own guarded `CREATE INDEX` unit; declarative.rs:4583-4604).
+/// (`lower_create_table` skips only the SYSTEM-field indexes on `SQLite` - every other
+/// non-PK index, including a `unique:true` field's, is its own guarded `CREATE INDEX`
+/// unit; `render::declarative`).
 ///
 /// Before the fix the SAME `Table` probe was stamped on EVERY unit, so once
 /// unit 0 created the table, the index unit saw the table PRESENT + base columns

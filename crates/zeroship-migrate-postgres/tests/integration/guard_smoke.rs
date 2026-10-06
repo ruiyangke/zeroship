@@ -37,11 +37,8 @@ fn explicit_confined_charter_fixture_composes() {
 /// Retargeting a config carries the composed policy across unchanged: `for_dialect`
 /// selects WHICH backend vets the SQL, never WHAT the policy grants.
 ///
-/// It used to assert a second thing alongside - that a host-set belt-off mode
-/// survived onto PostgreSQL and was reset to `Enforced` for every other id. Both
-/// halves of that are gone with the mode itself: there is no belt-off posture to
-/// carry, so nothing to reset and nothing a future backend could inherit. The
-/// policy-preservation half is unchanged and is what remains here.
+/// It asserts the policy-preservation half. There is no belt-off posture to carry, so
+/// nothing to reset and nothing a future backend could inherit.
 #[test]
 fn dialect_selection_preserves_the_composed_policy() {
     let cfg = GuardConfig::from_policy(crate::support::no_inject("app1"), POSTGRES, "app1");

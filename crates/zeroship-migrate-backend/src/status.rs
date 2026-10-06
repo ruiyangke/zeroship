@@ -43,7 +43,7 @@ pub struct MigrationStatus {
     /// rollback event's detail.
     pub rolled_back: Vec<RolledBackEntry>,
     /// **Cross-deploy online-rename pending contracts.** Each outstanding
-    /// obligation (EXPAND applied, contract C1/C2 not yet applied), flagged
+    /// obligation (expand applied, contract not yet applied), flagged
     /// `orphaned` when the supplied migration set no longer carries the rename
     /// whose contract is pending. A distinct surfaced state - the operator must
     /// `resolve-pending` (or re-add the rename op for an orphan). Always empty on

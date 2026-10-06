@@ -35,8 +35,8 @@
 //!
 //! `pub use zeroship_migrate_core::*;` re-exports the engine's entire root, so every
 //! `zeroship_migrate::…` path a host already wrote resolves unchanged. The two composition
-//! accessors below are what USED to be at the engine's root and could not stay there:
-//! they read the shipping list, and the engine no longer has one.
+//! accessors below live at this composition root: they read the shipping list, which
+//! the engine does not carry.
 
 pub use zeroship_migrate_core::*;
 

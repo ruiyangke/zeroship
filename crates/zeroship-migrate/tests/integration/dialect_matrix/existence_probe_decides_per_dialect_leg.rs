@@ -41,10 +41,9 @@ fn decide_mysql(probe: &GuardProbe, live: &SchemaSnapshot) -> GuardVerdict {
 }
 
 /// PostgreSQL's own catalog normalization, taken from PostgreSQL's own vendor
-/// literal. The helper used to reach it through the engine's registry, which was
-/// correct while it lived inside the engine and is not available from here — and
-/// would be the wrong shape anyway: a caller that already knows which vendor it
-/// wants asks that vendor, it does not ask which backend handles a dialect.
+/// literal. A caller that already knows which vendor it wants asks that vendor, so
+/// the helper reaches it through the registered vendor rather than the engine's
+/// registry.
 fn normalize_pg_constraint_definition(definition: &str) -> String {
     zeroship_migrate_postgres::VENDOR
         .existence_probe

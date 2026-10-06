@@ -33,9 +33,8 @@ use zeroship_migrate_postgres::PostgresBackend;
 /// The shipped predicate's own answer for one column.
 ///
 /// This CALLS `PostgresBackend::column_type_change_blockers` rather than
-/// re-spelling its SQL. The drop oracle learned that the hard way: it used to carry
-/// a second copy of the query, which made the agreement it reported an agreement
-/// about the copy.
+/// re-spelling its SQL. A second copy of the query would make the agreement it reports
+/// an agreement about the copy.
 async fn shipped_blockers(
     session: &crate::support::PgDevSession,
     schema: &str,

@@ -8,9 +8,8 @@
 //!
 //! # Why this is a module and not two halves in two places
 //!
-//! The inbound half used to live in [`crate::bridge`], which is `napi`-gated. That was
-//! right while the conversion was inbound-only - nothing but the N-API entrypoint
-//! needed it. It stops being right the moment an EXPORT exists, for a reason about
+//! The inbound half lives here, outside the `napi` gate. That is where the
+//! conversion belongs once an EXPORT exists, for a reason about
 //! measurement rather than tidiness: the only oracle that can catch a facet the wire
 //! drops is `engine -> dto -> engine`, and a test that cannot see
 //! [`crate::descriptors::field_dto_to_engine`] would have to re-implement it - at which
@@ -32,12 +31,11 @@
 //! vocabulary and every facet outside it is still dropped there - and it is NOT a
 //! claim that the exported values are CORRECT, only that they are preserved.
 //!
-//! The `VARCHAR(n)` width used to be the standing example of that gap:
-//! `token_to_col_type` mapped every `"string"` to `ColType::Text`, so a width crossed
-//! this wire intact and died one layer down. It no longer does - the producer reads
-//! `max_length` to choose between `ColType::String { length }` and `ColType::Text`,
-//! and `zero-migrate/tests/integration/fold_live/pg_bounded_string_producer_live.rs` is the live
-//! PostgreSQL oracle for the difference that made.
+//! The `VARCHAR(n)` width is an example of that gap: `token_to_col_type` mapped
+//! every `"string"` to `ColType::Text`, but the producer reads `max_length` to
+//! choose between `ColType::String { length }` and `ColType::Text`, so the width
+//! crosses the wire and is preserved. The live PostgreSQL oracle is
+//! `crates/zeroship-migrate/tests/integration/fold_live/pg_bounded_string_producer_live.rs`.
 
 use zeroship_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor, IndexDescriptor};
 

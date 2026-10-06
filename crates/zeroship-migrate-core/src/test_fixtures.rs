@@ -35,10 +35,10 @@ use crate::{effective_policy_from_charter_toml, EffectivePolicy};
 /// # This is the ONE place in core that names a backend crate, and it is a TEST double
 /// in the same sense the composition is not
 ///
-/// It USED TO BE `crate::render::backends::VENDORS` - an alias for the composition,
-/// which lived in this crate. The composition is `zero-migrate`'s now, and this crate
-/// cannot see it: `zero-migrate` depends on `zeroship-migrate-core`, so the edge back
-/// would be a cycle Cargo refuses even as a dev edge in the direction that matters.
+/// It is the test-fixture composition of the shipping vendors. The real composition
+/// is `zero-migrate`'s, and this crate cannot see it: `zero-migrate` depends on
+/// `zeroship-migrate-core`, so the edge back would be a cycle Cargo refuses even as a
+/// dev edge in the direction that matters.
 ///
 /// So core's tests compose their own, from the same three vendor crates, reached
 /// through `[dev-dependencies]`. That is deliberate rather than a workaround, and both

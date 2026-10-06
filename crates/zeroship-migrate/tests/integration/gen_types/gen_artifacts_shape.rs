@@ -68,11 +68,11 @@ fn people_descriptor() -> CollectionDescriptor {
 /// **The v2 descriptor contract, structurally.**
 ///
 /// This was `..._the_v1_shape` until `RuntimeSchemaDescriptorV1` became V2
-/// (`crates/zeroship-migrate-core/src/render/gen_types.rs:126-135`, `:481`). The version
+/// (`crates/zeroship-migrate-core/src/render/gen_types.rs`, `render::gen_types`). The version
 /// number is the smallest part of the change and checking only it would leave the arm
 /// weaker than the one it replaced: V2 also gives EVERY field four read-surface flags
 /// and a `storage` block naming the physical column(s) it occupies
-/// (`gen_types.rs:320-360`). So every field of this collection is walked, not just the
+/// (`render::gen_types`). So every field of this collection is walked, not just the
 /// seven the policy injects, and the storage block's key set is pinned exactly.
 ///
 /// The TWO-COLUMN arm - a masked or encrypted field, where `valueColumn` is the sibling
@@ -146,7 +146,7 @@ fn emitted_runtime_json_parses_and_satisfies_the_v2_shape() {
         // Exhaustive, not a spot check: `rawColumn`, the three `raw*` capability flags
         // and `auxiliary` are all `skip_serializing_if`-absent for a one-column field,
         // and a flag about a column that does not exist is not state
-        // (`gen_types.rs:172-209`).
+        // (`render::gen_types`).
         assert_eq!(
             storage.keys().collect::<Vec<_>>(),
             vec!["valueColumn"],

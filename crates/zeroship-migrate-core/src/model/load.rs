@@ -797,9 +797,7 @@ mod tests {
 
     #[test]
     fn load_refuses_dml_and_create_table_in_one_migration() {
-        // This envelope used to LOAD, and was the vehicle for the ownership
-        // pre-pass's order-independence. F656 retired the vehicle: an op list
-        // mixing DML with DDL is now refused outright, because the phase a
+        // An op list mixing DML with DDL is refused outright, because the phase a
         // migration belongs to is derived from its ops rather than from the
         // function the author happened to name.
         //

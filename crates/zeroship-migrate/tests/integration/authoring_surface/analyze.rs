@@ -299,7 +299,7 @@ fn table_rewrite_does_not_fire_on_constant_default() {
 
 // ---------------------------------------------------------------------------
 // GROUP 1 (review) — inline PRIMARY KEY / UNIQUE on ADD COLUMN, and the
-// ADD CONSTRAINT PRIMARY KEY form. Previously these emitted ZERO advisories.
+// ADD CONSTRAINT PRIMARY KEY form. These emit the expected advisories.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -357,7 +357,7 @@ fn add_column_plain_nullable_int_stays_clean() {
 #[test]
 fn add_constraint_primary_key_fires() {
     // ALTER TABLE … ADD CONSTRAINT pk PRIMARY KEY (id) builds a validating unique
-    // index under ACCESS EXCLUSIVE — previously fell through with zero advisories.
+    // index under ACCESS EXCLUSIVE; it emits the lock advisory.
     let a = first(
         "ALTER TABLE t ADD CONSTRAINT pk PRIMARY KEY (id)",
         rule::CONSTRAINT_NOT_VALIDATED,

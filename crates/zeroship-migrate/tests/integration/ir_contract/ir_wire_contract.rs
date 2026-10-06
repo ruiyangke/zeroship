@@ -797,7 +797,7 @@ fn create_index_where_rejects_raw_sql_string() {
 #[test]
 fn create_index_using_is_a_closed_method_enum() {
     // The index method is a closed union ("btree"|"brin"|"gin"|"gist"|"ivfflat"
-    // |"hnsw", design line 648) — an arbitrary/injection-shaped string must NOT
+    // |"hnsw") - an arbitrary/injection-shaped string must NOT
     // deserialize, and a valid member round-trips.
     use zeroship_migrate::model::ir::IndexMethod;
     let ok = r#"{"op":"createIndex","table":"t","columns":[{"kind":"column","name":"a"}],"using":"gin"}"#;

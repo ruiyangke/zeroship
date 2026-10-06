@@ -616,12 +616,10 @@ pub fn render_schema_export_from_descriptors(
 /// needs. `render_env_db_ts` is its only reader.
 ///
 /// This is a PROJECTION TARGET, not a walker's accumulator:
-/// `FoldedSchema::project_authoring_tables` produces it and the private op-stream
-/// replay that used to produce it is deleted.
+/// `FoldedSchema::project_authoring_tables` produces it.
 /// `AuthoredState::advance` owns the op semantics, so the dialect that selects an
 /// `Op::Dialectal` leg is now necessarily the same one the runtime metadata folded
-/// under: both are reads of one traversal, and the "two artifacts under different
-/// dialects" hole this type's doc used to warn about cannot reopen.
+/// under: both are reads of one traversal, so the cross-dialect hole cannot reopen.
 ///
 /// The neighbouring hole is still OPEN and is not this move's: `render_runtime_descriptor_v2`
 /// takes the runtime-metadata map as given and falls back to `unwrap_or_default()`

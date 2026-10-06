@@ -28,15 +28,12 @@
 //!     set of `DialectId`s, on both sides. See below for why this is not
 //!     redundant with the row-for-row comparison.
 //!
-//! WHY THE CENSUS FLOOR EXISTS. The row used to carry three fields named after
-//! vendors, so "every dialect was compared" held BY TYPE. It is now a slice keyed
-//! by `DialectId`, and every scan over it iterates a DISCOVERED set — which fails
-//! OPEN. Drop a cell from the sidecar and the generator and the table both stop
-//! carrying it, the row-for-row comparison compares two rows that agree about the
-//! two dialects that remain, and the suite reports clean while the artifact has
-//! silently stopped making a claim it used to make. That is not hypothetical: it
-//! was MEASURED here by removing one cell from both sides, and the comparison
-//! above passed. The floor is what the three fields used to do for free.
+//! WHY THE CENSUS FLOOR EXISTS. The row is a slice keyed by `DialectId`, so every
+//! scan over it iterates a DISCOVERED set - which fails OPEN. Drop a cell from the
+//! sidecar and the generator and the table both stop carrying it, the row-for-row
+//! comparison compares two rows that agree about the dialects that remain, and the
+//! suite reports clean while the artifact makes no claim. The floor asserts
+//! non-empty coverage on BOTH sides, because a cell can go missing on either.
 //!
 //! The disposition vocabulary is portable / vendor (both supported cells),
 //! transparentDegradable, and unsupported. `transparentDegradable` is LIVE, not
@@ -46,7 +43,7 @@
 //! partition child into its parent behind a mirror guard rather than creating a
 //! relation. The sidecar's own legend claimed the opposite until it was measured.
 //!
-//! The CORPUS itself now lives in `tests/integration/dialect_corpus/mod.rs`, unchanged, so the
+//! The CORPUS itself lives in `tests/integration/dialect_corpus/mod.rs`, unchanged, so the
 //! live conformance layer (`dialect_conformance_live.rs`) drives the SAME
 //! representative ops this file proves the bijection over. Two corpora could
 //! drift; one cannot. The guarantees below are exactly the ones this file always
@@ -280,15 +277,13 @@ fn op_variant_matches_the_corpus_and_the_generated_table_matches_the_sidecar() {
 
     // 4b. CENSUS FLOOR for the dialect axis.
     //
-    // The row used to carry three NAMED fields, so "every dialect was compared"
-    // was true by TYPE and needed no assertion. It is now a slice keyed by
-    // `DialectId`, and every scan over it — the comparison just above, the
-    // transparent-degradable sweep just below, `unsupported_reason_is_operator_facing`,
-    // and the live conformance suite — iterates a DISCOVERED set. A scan over a
-    // discovered set FAILS OPEN: shrink the discovery and it iterates nothing, finds
-    // nothing, and reports clean. The comparison above would then be `{}` == `{}`
-    // and pass. This floor is what the three fields used to do for free, and it is
-    // asserted on BOTH sides, because a cell can go missing on either.
+// The row is a slice keyed by `DialectId`, and every scan over it - the comparison
+// just above, the transparent-degradable sweep just below,
+// `unsupported_reason_is_operator_facing`, and the live conformance suite - iterates
+// a DISCOVERED set. A scan over a discovered set FAILS OPEN: shrink the discovery and
+// it iterates nothing, finds nothing, and reports clean. The comparison above would
+// then be `{}` == `{}` and pass. This floor asserts non-empty coverage on BOTH sides,
+// because a cell can go missing on either.
     let census: BTreeSet<String> = DIALECT_TABLE
         .iter()
         .flat_map(|row| row.dialects())

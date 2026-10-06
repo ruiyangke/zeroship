@@ -1474,8 +1474,8 @@ pub(crate) async fn rollback_one_transactional<D: SqlSession>(
     // is SQL from the migration file that is about to reach the database. Without
     // it, `down` is a way to run precisely what `up` is refused - an author whose
     // `up` is guard-denied could put the same statement in `down` and have it
-    // execute the moment anything rolls back. The migrator role is line 2 below, not
-    // a substitute.
+// execute the moment anything rolls back. The migrator role is not a substitute for
+// the line-1 guard.
     //
     // Guarding engine-synthesized SQL is not novel: the apply path already runs this
     // guard over `up`, which is equally synthesized on the IR path.

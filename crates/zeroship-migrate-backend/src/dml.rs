@@ -439,25 +439,6 @@ fn scalar_to_bind(s: &IrScalar) -> BindValue {
     }
 }
 
-/* `pub fn placeholder(dialect, n)` USED TO LIVE HERE, and its doc claimed to be
- * "the SINGLE placeholder-emission point the one-shot assembler and the batched-
- * backfill SQLite executor both call". It was not: it had ZERO callers in
- * `crates/` or `packages/`, and had had none for as long as the two
- * places it named have existed. The one-shot assembler emits through
- * `BindCtx::push`, which asks its RESOLVED backend (`self.backend.placeholder(n)`);
- * the SQLite executor uses its own crate's helper, described below.
- *
- * It was `pub`, so the compiler could not report it unused, and it was counted as
- * one of the crate's dialect boundaries on the strength of that doc comment. It was
- * neither a boundary nor reachable - just a `renderer(dialect)` lookup that nothing
- * performed. 0.1.0 was never published and nothing outside this repo consumes the
- * crate, so deleting it costs nothing and stops the miscount recurring.
- *
- * A SQLite-named placeholder helper sat here too and its callers WERE real - both of
- * them inside `zeroship-migrate-sqlite`, one the `DmlRenderer::placeholder` impl and one
- * the batched backfill executor. Two callers in one vendor crate is that crate's
- * shared helper, not the contract's, so it is `crate::dml::placeholder` there now.
- */
 
 /// Render a single inline SQL literal for the **backfill** string path
 /// ([`render_expr_inline_for_backend`]). Numeric/bool literals print verbatim, except that an

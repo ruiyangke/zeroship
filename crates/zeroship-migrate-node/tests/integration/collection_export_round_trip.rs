@@ -1,7 +1,7 @@
 //! **The structured export survives the crossing: `engine -> dto -> engine` is the
 //! identity over a folded corpus.**
 //!
-//! `genArtifacts` now returns the folded schema as TYPED collections beside the two
+//! `genArtifacts` returns the folded schema as TYPED collections beside the two
 //! artifact strings, so a host can render its own files instead of re-parsing
 //! `schema.runtime.json` out of the reply it already got. That export is only worth
 //! anything if it carries what the fold recovered, and the failure mode is silent: a
@@ -33,7 +33,7 @@
 //!   descriptor-to-ops producer speaks its own vocabulary and drops what falls outside
 //!   it. One facet HAS been carried all the way through and is measured below by
 //!   [`a_varchar_width_survives_the_wire_and_the_producer`] - the `VARCHAR(n)` width,
-//!   which used to reach `token_to_col_type` and die there. That case is the whole
+//!   carried all the way to the producer. That case is the whole
 //!   extent of the end-to-end claim; nothing here generalises it.
 //! * NOT anything about `env.db.ts`. That artifact is rendered from the richer
 //!   authoring IR, and no descriptor vocabulary can reconstruct it.
@@ -725,13 +725,10 @@ fn a_literal_field_is_unreachable_from_both_gen_artifacts_sources() {
 
 /// **A `VARCHAR(n)` width survives the wire AND the producer, end to end.**
 ///
-/// This test was renamed from one naming the producer as where a varchar width dies
-/// and it asserted the opposite of its last line: `token_to_col_type` mapped every
-/// `"string"` token to `ColType::Text` without consulting `max_length`, so re-importing
-/// an exported `VARCHAR(64)` produced an unbounded `TEXT`. It was written as a sighted
-/// pin - "fixing the producer is announced by this test turning red" - and that is
-/// exactly how it went: the producer now reads the facet, and this file's failure was
-/// the notice.
+/// This test pins that a `VARCHAR(n)` width survives the wire and the producer:
+/// `token_to_col_type` reads `max_length` to choose `ColType::String { length }`
+/// over `ColType::Text`, so an exported `VARCHAR(64)` re-imports with its bound
+/// rather than as an unbounded `TEXT`.
 ///
 /// So the claim it makes is now the STRONG one its own message asked for, and it holds
 /// three links in a row: the fold recovers the width, the DTO carries it across, and

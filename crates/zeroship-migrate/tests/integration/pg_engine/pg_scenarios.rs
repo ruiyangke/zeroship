@@ -5317,7 +5317,7 @@ async fn a_failed_resolution_tombstone_append_retries_without_repeating_cleanup(
 /// `down` is SQL from the migration file, exactly like `up`. Without a line-1 check
 /// over it, `down` is a way to run precisely what `up` is refused: an author whose
 /// `up` is guard-denied can put the same statement in `down` and have it execute the
-/// moment anything rolls back. The migrator role is line 2, not a substitute.
+/// moment anything rolls back. The migrator role is not a substitute.
 #[compio::test]
 async fn a_guard_denied_down_is_refused_before_it_runs() {
     let url = crate::support::pg_database();
@@ -6089,8 +6089,8 @@ async fn a_guarded_partition_probe_fails_closed_on_a_divergent_child() {
 // BEFORE the expand-contract chain starts, rather than failing at its last step.
 //
 // The chain is five separate journaled migrations - E1 add column, E2 dual-write
-// trigger, E3 backfill, C1 drop trigger, C2 drop the old column. The dependency
-// only stops C2, so without a preflight the first four commit and the operator is
+// trigger, backfill, drop trigger, drop the old column. The dependency
+// only stops the column drop, so without a preflight the first four commit and the operator is
 // left mid-transition: both columns present, the trigger gone, the rename
 // unfinished, and the repair manual.
 //
@@ -6106,7 +6106,7 @@ async fn a_guarded_partition_probe_fails_closed_on_a_divergent_child() {
 //
 // The assertion that matters is the SECOND one. "An error came back" is also true
 // of today's mid-chain failure; only "the new column was never added" separates a
-// preflight refusal from a C2 blow-up.
+// preflight refusal from a column-drop failure.
 #[compio::test]
 async fn a_pg_rename_read_by_a_generated_column_is_refused_before_the_chain_starts() {
     use zeroship_migrate::driver::SqlSession;
@@ -7123,8 +7123,8 @@ async fn a_migration_edited_after_it_applied_aborts_the_next_deploy() {
 /// That is why recognition is a re-author-compare rather than a version-id match.
 /// The contract ids are deterministic and server-stamped, so they are DERIVABLE by
 /// anyone who can read the journal - which makes "carries the right ids" a test an
-/// attacker passes for free. Only re-authoring the real C1 (drop trigger and
-/// function) and C2 (drop column) discharges.
+/// attacker passes for free. Only re-authoring the real drop-trigger step (drop trigger and
+/// function) and drop-column step discharges.
 ///
 /// The failure mode is silent: a forged discharge does not error, it simply un-gates a
 /// table whose rename window is still open, after which an ordinary op can drop or
@@ -7321,7 +7321,7 @@ async fn a_plan_carrying_the_contract_ids_with_other_sql_does_not_discharge() {
     //
     // The obvious control - resolve THIS obligation now and watch the column go -
     // does not work, and the reason is worth recording. The forged steps journalled
-    // the obligation's C1/C2 ids against unrelated SQL, so a later legitimate
+    // the obligation's contract ids against unrelated SQL, so a later legitimate
     // resolution finds those versions already net-applied and idempotent-skips
     // them: the obligation clears while the trigger and source column stay live.
     // That is a fail-open, but it is NOT creator-reachable - a contract id is

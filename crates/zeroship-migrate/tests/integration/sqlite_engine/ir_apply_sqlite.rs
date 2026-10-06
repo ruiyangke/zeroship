@@ -983,7 +983,7 @@ async fn mixed_data_plan_is_refused_before_insert_when_delete_and_backfill_are_u
     );
 }
 
-// L7/M15: `date` is an honest portable column type. The SQLite leg stores it as
+    // `date` is an honest portable column type. The SQLite leg stores it as
 // TEXT affinity and must accept/apply it through the real IR load gate.
 #[compio::test]
 async fn ir_envelope_date_column_lowers_and_applies_on_sqlite() {

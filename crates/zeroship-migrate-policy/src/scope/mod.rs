@@ -328,11 +328,11 @@ impl Scope {
         }
     }
 
-    // -- difference (OVER-approx or reject - NEVER under-approx) [C1 FIX] ------
+    // -- difference (OVER-approx or reject - NEVER under-approx) ------
 
     /// The objects `self` grants that `other` does NOT cover.
     ///
-    /// **[C1 FIX]** The result MUST over-approximate or reject - NEVER
+    /// The result MUST over-approximate or reject - NEVER
     /// under-approximate. `Objects(result)` contains at least every object in
     /// `Objects(self)` but not in `Objects(other)` (an
     /// over-approx can only turn an accept into a reject; an under-approx would let

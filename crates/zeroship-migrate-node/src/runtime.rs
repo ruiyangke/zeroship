@@ -143,13 +143,13 @@ fn with_diagnostics<T>(body: impl FnOnce() -> T) -> T {
 
 /// What an engine future left behind when it panicked instead of returning.
 ///
-/// A panic on the worker thread used to destroy the completion callback along with
-/// the rest of the frame. In the napi wrapper that callback owns the `JsDeferred`,
+/// A panic on the worker thread would otherwise destroy the completion callback along
+/// with the rest of the frame. In the napi wrapper that callback owns the `JsDeferred`,
 /// which has no `Drop` impl and settles a promise only through `resolve` or
-/// `reject` - so dropping it left the JS promise pending forever. The caller's
-/// `finally` never ran, its connection was never closed, and on PostgreSQL the
-/// session-scoped advisory project lock was held until the process died. Carrying
-/// the panic to the callback is what turns that hang into an error the caller can
+/// `reject` - so dropping it would leave the JS promise pending forever. The caller's
+/// `finally` would never run, its connection would never be closed, and on PostgreSQL
+/// the session-scoped advisory project lock would be held until the process died.
+/// Carrying the panic to the callback turns that hang into an error the caller can
 /// see and clean up after.
 #[derive(Debug)]
 pub struct EnginePanic {

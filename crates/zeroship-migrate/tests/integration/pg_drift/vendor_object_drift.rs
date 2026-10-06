@@ -364,9 +364,9 @@ fn an_alias_spelled_argument_type_is_not_drift() {
 #[test]
 fn a_replaced_function_body_is_reported_as_drift() {
     // The signature is IDENTICAL, so the identity comparison - which is all this
-    // differ used to do - sees nothing. `CREATE OR REPLACE FUNCTION` with an
-    // unchanged signature is the ORDINARY way a function is modified, so this was
-    // the common case reporting clean, not an edge case.
+    // differ does - sees nothing. `CREATE OR REPLACE FUNCTION` with an
+    // unchanged signature is the ORDINARY way a function is modified, so this is
+    // the common case, not an edge case.
     let mut expected_vendor = VendorObjectIdentities::default();
     expected_vendor
         .functions

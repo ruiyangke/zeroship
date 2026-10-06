@@ -178,7 +178,7 @@ async fn rollback_drop_column_additive() {
 }
 
 // ---------------------------------------------------------------------------
-// A `down` requiring a TYPE-change reversal returns the clear P3b-deferred typed
+    // A `down` requiring a TYPE-change reversal returns the clear deferred typed
 // error — NOT a silent skip, NOT a broken rebuild. Nothing is rolled back.
 // ---------------------------------------------------------------------------
 #[compio::test]
@@ -186,7 +186,7 @@ async fn rollback_rebuild_needed_returns_p3b_deferred_error() {
     let p = paths("rb_rebuild");
     let be = backend(&p);
     // The `up` is additive; the `down` is a type-change reversal that SQLite cannot
-    // perform without the 12-step rebuild (P3b).
+    // perform without the 12-step rebuild.
     let m = mig(
         "widen",
         "ALTER TABLE t ADD COLUMN amount INTEGER;",

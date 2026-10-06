@@ -4,9 +4,9 @@
 //! [`BaselineOutcome`] and [`BaselineError`] are the `MigrationBackend::baseline_one`
 //! signature, so all three backends speak them. The IMPLEMENTATIONS do not live
 //! here and never could have: PostgreSQL's is its `postgres::baseline_sql`,
-//! SQLite's is its own `journal_sql::baseline`, and MySQL refuses. What this module
-//! used to hold was PostgreSQL's body reaching `postgres::journal_sql` by name,
-//! which made "core's baseline" and "PostgreSQL's baseline" the same code.
+//! SQLite's is its own `journal_sql::baseline`, and MySQL refuses. The vocabulary
+//! here is dialect-neutral, so "core's baseline" and "PostgreSQL's baseline"
+//! are distinct code.
 //!
 //! The vocabulary sits HERE, below every vendor, for the reason every other item in
 //! this crate does: a type a backend's signature names cannot live in the engine
@@ -66,8 +66,7 @@ pub enum BaselineError {
     /// `MigrationBackend::acquire_project_lock`
     /// every other acquire site uses. That seam compensates for a grant the engine
     /// recorded before failing the acquiring statement; inlining the raw advisory
-    /// lock here would take the lock without the compensation, which is what it
-    /// used to do.
+    /// lock here would take the lock without the compensation.
     #[error(transparent)]
     Lock(#[from] crate::executor::ApplyError),
     /// A journal operation failed.

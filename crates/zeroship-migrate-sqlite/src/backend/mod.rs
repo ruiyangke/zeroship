@@ -89,10 +89,10 @@ pub use rebuild_sql::RebuildError;
 //
 // The apply-time SQL builders under this module (`backfill_sql`,
 // `identity_sql`, `primary_key_sql`, `rebuild_sql`) each spell identifiers into
-// SQL they send to a real SQLite database. They used to do it through the raw
-// crate-wide escape primitive, which reached no renderer at all - and because
-// they contained no vendor-identity literal, the one-dialect-literal grep read
-// them as clean: it looks for a FOREIGN literal, and "no literal" passes.
+// SQL they send to a real SQLite database. They do it through the guarded
+// crate-wide escape primitive, which routes to a renderer; a raw escape reaching no
+// renderer would contain no vendor-identity literal, so the one-dialect-literal grep
+// would read it as clean: it looks for a FOREIGN literal, and "no literal" passes.
 //
 // One name, read by all of them, is the shape that makes their vendor greppable
 // without putting a literal in each. It is aliased rather than imported

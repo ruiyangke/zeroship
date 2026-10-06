@@ -2336,7 +2336,7 @@ mod rollback_selection_tests {
             other => panic!("expected PendingContractOutstanding, got {other:?}"),
         }
 
-        // The contract half is covered too: an obligation still owing C1/C2 names
+        // The contract half is covered too: an obligation still owing its contract steps names
         // those versions, and rolling one back strands the same interlock.
         let contract = set[1].version.as_str().to_string();
         let err = super::plan_rollback(

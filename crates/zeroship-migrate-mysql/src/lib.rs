@@ -37,11 +37,9 @@
 //! This CRATE names its dialect exactly ONCE - [`DIALECT`] in this file - and no
 //! module names another vendor at all. Everything else reads `crate::DIALECT`.
 //!
-//! The rule used to be per-MODULE: each renderer held its own
-//! `const DIALECT: DialectId = MYSQL;` and imported that name from
-//! `zeroship-migrate-ir`, the neutral vocabulary crate, which declared the ids for all
-//! the shipping vendors. The ids moved into the vendor crates; this crate exports
-//! its `DIALECT` identity and its modules read that value.
+//! The rule is per-CRATE: this crate exports its `DIALECT` identity and its modules
+//! read that value, rather than each renderer holding its own `const DIALECT`
+//! imported from a neutral vocabulary crate.
 //!
 //! # What the rule does NOT catch
 //!
@@ -108,9 +106,9 @@ const NAME: &str = "mysql";
 ///
 /// `zeroship-migrate-ir` is the neutral vocabulary crate and its own module doc says a
 /// backend "declares its own - `DialectId::new(\"duckdb\")` - without editing this
-/// crate". It used to declare three anyway, and core re-exported them, so every
-/// consumer that wanted to name `MySQL` reached a neutral crate to get it. This is
-/// the declaration that ended that: the `NAME` const above is the workspace's only
+/// crate". This crate declares its own id, so every
+/// consumer that wants to name `MySQL` reads it from here: the `NAME` const above is
+/// the workspace's only
 /// non-test spelling of it, and [`VENDOR`]'s descriptor, this crate's own modules,
 /// the composition's `tests/` binaries and the Node host all read it from here.
 ///
@@ -138,7 +136,7 @@ const _: () = assert!(DialectId::is_well_formed_name(NAME));
 ///
 /// The renderer structs themselves are deliberately private. A caller reaches this
 /// vendor's spelling through a registry or not at all, which is the property the
-/// in-crate `match` used to give for free and which `pub` statics would have thrown
+/// registry composition provides and which `pub` statics would throw
 /// away at exactly the moment the vendor became separately linkable.
 ///
 /// `value_format`, `validation`, `ddl`, `guard` and `advisor` are REQUIRED. Delete any line and this literal stops

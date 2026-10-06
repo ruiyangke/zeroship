@@ -1504,7 +1504,7 @@ fn index_referenced_columns(index: &IndexSnapshot) -> Option<Vec<&str>> {
 /// Kept separate from `constraint_definition_is_retained` (private to
 /// `zeroship_migrate_postgres::backend::drift_sql`, so it is named here rather than linked)
 /// on purpose - it is the PostgreSQL introspector's own rule about what to STORE and
-/// now lives with the reader that applies it. Not
+/// lives with the reader that applies it. Not
 /// comparing a body is not a reason to stop recording it: the guard's fail-closed
 /// refusal reports the live definition so an operator can see what is actually
 /// installed, and collapsing that to `<present>` would remove the only text in the

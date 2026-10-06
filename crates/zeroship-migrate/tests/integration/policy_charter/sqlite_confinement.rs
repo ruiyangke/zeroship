@@ -468,7 +468,7 @@ async fn confine_i_creator_read_of_mig_journal_denied() {
     let attack = "CREATE TABLE stolen AS SELECT * FROM main.\"__zeroship_schema_migrations\";";
     assert_denied_and_journal_clean(&be, attack, DenyKind::Authorizer).await;
     // Positive control: the SAME read-into-table SUCCEEDS on a raw connection (no
-    // authorizer), proving the hardened deny is the M1 confinement rule and not a
+    // authorizer), proving the hardened deny is the confinement rule and not a
     // parse / missing-table / CTAS error.
     assert_attack_succeeds_unhardened(CONTROL_JOURNAL_SETUP, attack);
     // And the journal is still readable by the engine itself (EngineJournal reads
@@ -921,11 +921,8 @@ async fn confine_creator_view_cannot_read_the_mig_journal_through_a_pragma_vtabl
 //       `Reindex if targets_journal` arm, which sits AHEAD of the main/temp allow
 //       (the journal-immutability arm omits `Reindex` entirely).
 //
-//       A no-arg `REINDEX;` is ALLOWED. It used to be refused, and the refusal
-//       was an accident of placement rather than a decision: the journal was a
-//       second attached database, so the no-arg form named an alias that was
-//       neither `main` nor `temp` and fell through to the foreign-alias deny.
-//       With one database it names only `main`'s own indexes, and REINDEX
+//       A no-arg `REINDEX;` is ALLOWED: with one database it names only `main`'s own
+//       indexes, so it cannot name a foreign alias. REINDEX
 //       rebuilds an index B-tree from the table it already indexes - it reads no
 //       row out, writes no row in, and fires no trigger.
 //
@@ -1048,8 +1045,8 @@ async fn create_table_with_policy_injected_indexes_applies_under_creator_up() {
 // ---------------------------------------------------------------------------
 // The denial diagnostic: a refused statement says WHAT was refused.
 //
-// A denied migration used to surface as the bare `Exec("authorization denied")`,
-// which named no action, no database and no mode. The authorizer now records the
+// A denied migration surfaces as a typed refusal that names the action, the database
+// and the mode. The authorizer records the
 // last DENY and the actor appends it. These two tests pin the two halves that
 // matter: the message must NAME the refused action, and it must never claim a
 // denial that did not happen.

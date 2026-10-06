@@ -37,8 +37,8 @@
 //! like the duplicate-name refusal it was supposed to be proving. The mixed
 //! pass/fail pattern across sibling controls is what exposed it.
 //!
-//! THE TRIGGER OP HAS SINCE JOINED THE GATED CLASS. It is no longer reachable
-//! from a confined migration either, so `verdict` now runs AUTHORISED, the same
+//! The trigger op is in the gated class: it is not reachable from a confined
+//! migration, so `verdict` runs AUTHORISED, the same
 //! way `privileged_names_claimed_twice.rs` runs - which is what keeps the
 //! question this file asks about NAMES answerable at all. The assertions that a
 //! refusal must not be a VENDOR_OP_DENIED are unchanged and are now doing the

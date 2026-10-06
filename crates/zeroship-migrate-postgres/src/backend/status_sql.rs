@@ -1,12 +1,9 @@
 //! The PostgreSQL status read: net journal state under a `REPEATABLE READ READ
 //! ONLY` snapshot.
 //!
-//! This body used to live in `zeroship_migrate::ops::status` under the neutral name `status`,
-//! and from there it reached back into this backend's own `journal_sql` repeatedly.
-//! Core's status verb WAS PostgreSQL's status verb - nothing about the signature
-//! (`&D: SqlSession`, a `dialect` argument) could have routed it anywhere else, and
-//! the SQL it drives is PostgreSQL's: `BEGIN ISOLATION LEVEL REPEATABLE READ READ
-//! ONLY` is not a statement MySQL or SQLite accepts.
+//! This body lives in the PostgreSQL backend crate, reached through this backend's
+//! own `journal_sql`. The SQL it drives is PostgreSQL's: `BEGIN ISOLATION LEVEL
+//! REPEATABLE READ READ ONLY` is not a statement MySQL or SQLite accepts.
 //!
 //! Its DIALECT-NEUTRAL peer is
 //! `zeroship_migrate::ops::status::status_via_backend`, which reads the

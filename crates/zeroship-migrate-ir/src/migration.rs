@@ -57,7 +57,7 @@ impl MigrationId {
     ///
     /// This is the deterministic-derivation discipline mandated for every
     /// `PlanStep` sub-version (`step_id = uuidv7_derive(plan.version, step_index)`):
-    /// the `ExpandContractAuthor`'s E1..C2 ids are derived from the rename's stable
+    /// the `ExpandContractAuthor`'s expand-contract ids are derived from the rename's stable
     /// identity (`schema + owner + table + from + to + ty`) plus the step index, so
     /// **re-lowering the identical IR envelope reproduces byte-identical ids** - the
     /// property the cross-deploy obligation key, the idempotent re-run skip, the

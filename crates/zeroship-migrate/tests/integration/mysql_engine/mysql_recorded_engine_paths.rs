@@ -249,11 +249,10 @@ async fn snapshot_schema_reads_canonical_columns_and_ordered_unique_indexes() {
             .map(|index| index.name.as_str())
             .collect::<Vec<_>>(),
         // `PRIMARY` is the canned catalog's OWN value for this row, carried through
-        // instead of replaced. The reader used to substitute `users_pkey` here — a
-        // name no MySQL server holds — to satisfy a primary-key predicate in the
-        // neutral contract crate that recognised only one other vendor's
-        // convention. It sorts first now because it is uppercase, which is the only
-        // reason the two entries below moved.
+// instead of replaced. The reader preserves the catalog's own primary-key name; a
+// synthesized `users_pkey` would satisfy only a neutral contract predicate that
+// recognised one other vendor's convention. It sorts first because it is uppercase,
+// so the expected order starts with PRIMARY.
         vec!["PRIMARY", "idx_nickname_prefix", "uq_users_tenant_email"]
     );
     assert!(users.indexes[0].unique);

@@ -1,10 +1,10 @@
 //! Admission must not depend on the order a draft's rules are written.
 //!
-//! The escalation check used to partition the draft's granted scope by charter rule
-//! scopes and compare values at ONE witness per region. A draft carrying two values
-//! inside a single charter region had only the witness's value compared, and the witness
-//! is derived from the first include pattern - so writing the compliant rule first
-//! admitted a draft that writing the escalating rule first refused.
+//! The escalation check partitions the draft's granted scope by charter rule
+//! scopes and compares values at ONE witness per region. A draft carrying two values
+//! inside a single charter region would have only the witness's value compared, and
+//! the witness is derived from the first include pattern - so writing the compliant
+//! rule first would admit a draft that writing the escalating rule first refuses.
 //!
 //! These use a custom registry because the builtin one has no object-scoped ordered
 //! grant. The charter-side twin of this defect needs no custom registry and is pinned at

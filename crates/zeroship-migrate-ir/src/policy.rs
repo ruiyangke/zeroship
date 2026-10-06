@@ -6,12 +6,10 @@
 /// APIs receive a caller-composed policy explicitly. `#[non_exhaustive]` keeps the
 /// label set evolvable and requires external matches to include a wildcard.
 ///
-/// There was a third label, `Trusted`: the dbmate-like posture with no untrusted
-/// boundary at all, whose documented meaning was that the deny-list, cross-schema and
-/// body walks were SKIPPED entirely. Nothing can skip them now - the root/host-set
-/// guard mode that did has been removed - so the label described a posture no config
-/// could be put into, and it went with the posture rather than staying as a name for
-/// something that does not happen.
+/// There is no `Trusted` label. A dbmate-like posture with no untrusted boundary,
+/// where the deny-list, cross-schema and body walks would be skipped, is not
+/// configurable: the root/host-set guard mode that skipped them does not exist, so
+/// the label would name a posture no config could be put into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TrustProfile {

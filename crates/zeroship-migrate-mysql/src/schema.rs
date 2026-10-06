@@ -663,7 +663,7 @@ fn strip_mysql_int_display_width(input: &str) -> String {
 /// Snapshot-native catalog carriers historically pin only native enums here;
 /// authored character columns take the broader pass in `column_type`. Keeping the
 /// distinction preserves catalog-carrier bytes while the neutral authored marker
-/// replaces the vendor-spelled override that core used to precompute.
+/// replaces the vendor-spelled override.
 fn mysql_pin_native_enum_collation(rendered: &str, case_sensitive: Option<bool>) -> String {
     if !rendered.trim().to_ascii_lowercase().starts_with("enum(") {
         return rendered.to_string();
@@ -744,7 +744,7 @@ fn mysql_native_enum_values(def: &serde_json::Value) -> Option<Vec<String>> {
 
 /// Legacy SDK-token-to-MySQL-spelling table, moved out of the neutral contract.
 ///
-/// Snapshot rendering no longer calls this JSON carrier. It remains vendor-owned
+/// Snapshot rendering does not call this JSON carrier. It remains vendor-owned
 /// while the remaining SDK-definition producers lower to neutral snapshots.
 pub fn mysql_base_column_type_for_def(def: &serde_json::Value) -> String {
     if def.get("encrypted").and_then(serde_json::Value::as_bool) == Some(true) {

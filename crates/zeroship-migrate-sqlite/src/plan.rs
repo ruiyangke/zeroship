@@ -21,10 +21,10 @@ pub enum SqliteSequencePolicy {
 /// The neutral rebuild spec says WHICH transition; this vendor says what that
 /// means for `sqlite_sequence`.
 ///
-/// `TableRebuildSpec::sequence_policy` used to be this very type, which pointed the
-/// dependency the wrong way: the backend CONTRACT, which every vendor sits above,
-/// would have had to name this crate. It carries
-/// [`SequenceHighWaterPolicy`] now, and the translation happens here - at the
+/// `TableRebuildSpec::sequence_policy` is neutral vocabulary rather than this very
+/// vendor type: were it this type, the backend CONTRACT, which every vendor sits
+/// above, would have to name this crate. It carries [`SequenceHighWaterPolicy`], and
+/// the translation happens here - at the
 /// boundary of the backend that owns the behaviour - rather than in a plan
 /// carrier every dialect shares.
 impl From<SequenceHighWaterPolicy> for SqliteSequencePolicy {

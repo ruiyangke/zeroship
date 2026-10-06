@@ -1,18 +1,13 @@
 //! Byte-spellings that MORE THAN ONE shipping vendor agrees on, with exactly one
 //! physical home.
 //!
-//! # The invariant, and how the crate split weakened it
+//! # The invariant
 //!
-//! These two functions used to be `pub(in crate::render::backends)`: physically
-//! unreachable from the engine, so a core caller that wanted to spell `"x"` had to
-//! pick a named door in `render::dml` and put a vendor on the record. That
-//! visibility WAS the detector, and the reason is measured in
-//! `zeroship_migrate::render::backends`'s header - two of the three vendors agree on the
-//! ANSI spelling, so an unrouted emission produces correct bytes and no assertion
-//! about emitted SQL can see the missing routing.
-//!
-//! Across a crate boundary `pub(in ...)` cannot express "these three crates and no
-//! other". The vendor crates must reach these, so they are `pub`. Callers keep the
+//! Two of the three vendors agree on the ANSI spelling, so an unrouted emission
+//! produces correct bytes and no assertion about emitted SQL can see the missing
+//! routing. These two functions are `pub` because across a crate boundary
+//! `pub(in ...)` cannot express "these three crates and no
+//! other", and the vendor crates must reach them. Callers keep the
 //! target explicit by passing the backend renderer that owns the spelling.
 
 /// The ANSI double-quote identifier spelling: double every embedded `"`, wrap the

@@ -993,14 +993,9 @@ async fn view_lifecycle() {
 /// A trigger and function lifecycle, folded offline and checked against the live
 /// catalog at every stage.
 ///
-/// THIS TEST USED TO PASS VACUOUSLY, and said so. `snapshot_schema` built the live
-/// side with `functions`, `policies` and `triggers` hardcoded empty, and
-/// `diff_snapshots` compared none of them, so the scenario proved only that the
-/// APPLY path ran - the oracle could not see either object it created. Its own
-/// note ended: if those maps are ever populated and compared, this test starts
-/// failing on a genuine fold-vs-live difference, and that is the moment to turn it
-/// into the real round-trip scenario it looks like. They now are, through
-/// `SchemaSnapshot::vendor_objects`, and it did not fail - the two sides agree.
+/// `snapshot_schema` populates `functions`, `policies` and `triggers` through
+/// `SchemaSnapshot::vendor_objects`, and `diff_snapshots` compares them, so the
+/// scenario proves the objects round-trip rather than only that the apply path ran.
 ///
 /// So this is now the FALSE-DRIFT CONTROL for that comparison, and the only one
 /// that runs both halves for real. The unit tests in `vendor_object_drift.rs` build

@@ -2,10 +2,10 @@
 //! `code.extension` allowlist entry that decides `CREATE EXTENSION`.
 //!
 //! The knob's value is a set of names, not a boolean, so "holds the capability" and
-//! "may name THIS extension" are different questions. The drop side used to ask only
-//! the first one - it routed to a capability predicate that takes no object and
-//! answers "is the allowlist non-empty" - so a charter allowlisting one name admitted
-//! a drop of every other name in the database.
+//! "may name THIS extension" are different questions, and the drop side asks both:
+//! the name is checked against the same allowlist entry. A capability predicate that
+//! takes no object and answers "is the allowlist non-empty" would admit a drop of
+//! every other name in the database.
 //!
 //! Each arm below changes only the allowlist and the name in the statement. The
 //! create arms are the control: they must keep behaving exactly as they did, and a

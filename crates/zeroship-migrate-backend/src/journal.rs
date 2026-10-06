@@ -186,7 +186,7 @@ impl EventKind {
 
 /// The lifecycle state of a cross-deploy online-rename pending-contract
 /// obligation. An obligation is born `pending` when an `ExpandContract`
-/// EXPAND completes (its C1/C2 contract is deferred to a later deploy); it is
+/// completes (its contract is deferred to a later deploy); it is
 /// discharged by appending a `resolved` row (history is append-only - a discharge
 /// is NEVER a DELETE, exactly like the journal of record). The NET state of an
 /// obligation is the latest event for its `pending_version` key.
@@ -226,7 +226,7 @@ impl PendingState {
 /// the `resolve-pending` CLI).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resolution {
-    /// The deferred contract (C1 drop trigger + C2 drop old column) was applied
+    /// The deferred contract (drop trigger + drop old column) was applied
     /// under [`Approval::Approved`](crate::approval::Approval::Approved) - the rename
     /// completed.
     Applied,
@@ -273,7 +273,7 @@ pub struct PendingContract {
     /// The new (shadow) column being renamed to.
     pub to_col: String,
     /// The Postgres type of the column (carried so an `--abort` can reconstruct
-    /// the drop, and an `--apply` can re-author C1/C2 if needed).
+    /// the drop, and an `--apply` can re-author the contract if needed).
     pub ty: String,
     /// The APPLY-TIME obligation key: the E2 trigger migration version (the
     /// "expand" id the partition keys on), deterministic per rename
@@ -289,7 +289,7 @@ pub struct PendingContract {
     /// blocked surfacing keys on THIS - not the deep E2 `pending_version`
     /// no plan-level set ever exposes.
     pub plan_version: String,
-    /// The C1/C2 contract migration versions (so resolve can journal them and the
+    /// The contract migration versions (so resolve can journal them and the
     /// status/orphan surfacing can name them).
     pub contract_versions: Vec<String>,
 }
@@ -334,7 +334,7 @@ pub struct PendingContractRecord<'a> {
     /// The rename's plan-group version (E1-anchored) - the stable identity the
     /// supplied set / `depends_on` key on for orphan/blocked.
     pub plan_version: &'a str,
-    /// The C1/C2 contract version ids, comma-separated-free (serialized as a JSON
+    /// The contract version ids, comma-separated-free (serialized as a JSON
     /// array on write; carried here as a slice).
     pub contract_versions: &'a [String],
     /// The actor recorded as opening the obligation.

@@ -3,13 +3,9 @@
 //! A replace changes an existing view's body. Its inverse is therefore "put the previous
 //! body back", not "remove the view" - the view predates the migration being undone.
 //!
-//! `crates/zeroship-migrate-core/src/render/lower.rs` used to synthesise the `createView`
-//! statement's `down` as `DROP VIEW IF EXISTS` unconditionally, with `replace` reaching
-//! the `up` prefix and the replace prelude but never the `down`. That was harmless while
-//! the fold refused a replace against a view an applied migration had created: the arm
-//! could only be reached when the create had brought the view into being, and dropping
-//! really was the inverse. Commit a1fe1047 made the across-deploys replace applicable,
-//! which made the arm reachable in the one case it gets wrong - a rollback that reported
+//! The `createView` lowering lives in `zeroship-migrate-backend`. Emitting
+//! `DROP VIEW IF EXISTS` as the `down` is faithful only when the create brought the
+//! view into being: a rollback of a REPLACE against a pre-existing view would report
 //! success while deleting a view the migration never created.
 //!
 //! TWO ARMS, and the pair is the point:
@@ -201,7 +197,7 @@ async fn apply_doc(
 /// meet, and because the measurement behind it was the expensive part. Reaching it means
 /// widening `ViewStatement.down` past one statement: SQLite has no
 /// `CREATE OR REPLACE VIEW` - `view_create_prefix` ignores the flag
-/// (`render/renderer.rs:444-452`) and its replace is carried by a prelude that drops
+/// (`zeroship_migrate_backend::renderer::DmlRenderer::view_create_prefix`) and its replace is carried by a prelude that drops
 /// first - so a faithful restore is DROP + CREATE there and one statement on PostgreSQL.
 #[ignore = "aspirational: a restoring fix would make this pass; today the replace is refused"]
 #[compio::test]
@@ -279,7 +275,7 @@ async fn rolling_back_a_replace_restores_the_previous_body() {
 /// migration never created - and it is strictly worse than restoring, which is why the
 /// aspirational arm stays in the file.
 ///
-/// The refusal is one an operator sees. `apply/executor.rs:2563` returns
+/// The refusal is one an operator sees. `apply::executor` returns
 /// `RollbackError::Irreversible` naming the version, and only a `force` carrying an
 /// explicit `backup_acknowledged` proceeds past it, recording the version under
 /// `skipped_irreversible` rather than passing silently.

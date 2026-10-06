@@ -273,7 +273,7 @@ fn create_time_not_valid_is_refused_in_both_spellings_by_validate() {
     // ("validated createTable NOT VALID FOREIGN KEY reached lower"), which is a fine
     // thing for a validator bypass to say and a terrible thing to show an author.
     //
-    // `Some(false)` used to clear validate and hit exactly that message. It is
+    // `Some(false)` does not clear validate and does not reach that message. It is
     // reachable from the surface: the recorder's `requireOptionalBoolean` passes a
     // literal `false` through unchanged.
     let create = |not_valid: Option<bool>| Op::CreateTable {

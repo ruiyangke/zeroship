@@ -127,16 +127,7 @@ pub struct DryRunReport {
 /// declarative apply path uses to drive a zero-downtime online operation.
 ///
 /// # The engine drives the phases; this answers one of them
-///
-/// This seam used to expose a single method that took the WHOLE authored
-/// expand sequence and drove it: it applied E1/E2 by calling the engine's
-/// orchestrator (`apply_with_lock_backend`) back across the layer boundary,
-/// tripped the engine's fault point, read the journal, and then ran the one thing
-/// only a vendor can run - the paged data mirror. That was mutual recursion across
-/// the seam the crate split exists to create: a vendor crate cannot depend on the
-/// engine, so a vendor that calls the orchestrator can never leave it. Widening
-/// the contract could not fix it, because the callee WAS the orchestrator.
-///
+    ///
 /// The phases are inverted instead. The engine now owns every neutral phase -
 /// the approval and scope gates, splitting the marker off the expand chain,
 /// applying E1/E2 through its own apply path, the fault point, and the journal
@@ -209,7 +200,7 @@ pub struct ExpandContractPlan {
     pub plan_version: Option<MigrationId>,
     /// E1, E2, E3 in order (add column, dual-write trigger, backfill marker).
     pub expand: Vec<Migration>,
-    /// C1, C2 in order (drop trigger/function, drop old column).
+    /// The contract steps in order (drop trigger/function, drop old column).
     pub contract: Vec<Migration>,
     /// The structured backfill spec for E3, handed to
     /// [`OnlineSchemaChange::run_online_backfill`]

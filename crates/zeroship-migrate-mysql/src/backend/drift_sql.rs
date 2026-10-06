@@ -421,11 +421,9 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
             let is_primary = catalog_name.eq_ignore_ascii_case("PRIMARY");
             // The catalog's own name, canonicalised through this backend's stated
             // answer so a differently-cased `primary` from an older server still
-            // lands on one spelling. This used to synthesize `<table>_pkey` - a name
-            // no MySQL server has ever held - because the neutral contract crate's
-            // primary-key predicate recognised that one vendor's convention and
-            // nothing else. The predicate asks the backend now, so the catalog's
-            // answer can be reported as-is.
+// lands on one spelling. The catalog's own name is reported as-is: the predicate
+// asks the backend, rather than a neutral contract crate recognising one vendor's
+// convention and nothing else.
             let name = if is_primary {
                 crate::fold::POLICY.implicit_primary_key_name(&table_name)
             } else {
@@ -888,7 +886,7 @@ mod tests {
         // ordinary expression key.
         //
         // Stated as the literal key rather than as
-        // `catalog_expression_fingerprint("uuid()")`. That call used to compose the
+// `catalog_expression_fingerprint("uuid()")`. That call would compose the
         // UNATTRIBUTED rules - every registered vendor's, because it took no dialect
         // - which this crate cannot build and should not: it holds one renderer.
         // Recomputing the key with MySQL's own rules would compare the function to

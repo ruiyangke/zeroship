@@ -29,7 +29,7 @@
 //! The identity row is a refusal because PostgreSQL will not honour the change:
 //! `identity column type must be smallint, integer, or bigint`. The generated row
 //! is NOT a refusal, because the server DOES honour the change - it refuses only
-//! the `USING` clause this engine used to attach unconditionally (`cannot specify
+//! the `USING` clause the engine would otherwise attach (`cannot specify
 //! USING when altering type of generated column`). Refusing there would deny a
 //! migration the database accepts.
 
@@ -463,7 +463,7 @@ fn sqlite_refuses_the_whole_op_before_either_verdict_applies() {
     }
 }
 
-/// MySQL used to belong in the test above and no longer does, which is the finding
+/// MySQL does not belong in the test above, which is the finding
 /// rather than a relaxation of it.
 ///
 /// It never lacked the CAPABILITY — `MODIFY COLUMN` restates the whole column

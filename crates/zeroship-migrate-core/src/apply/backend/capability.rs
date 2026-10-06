@@ -13,9 +13,8 @@ use crate::render::declarative::DesiredSchema;
 pub use zeroship_migrate_backend::backfill::{BackfillError, BackfillOutcome, BackfillSpec};
 // -- The online capability, whole: the trait, the `OnlineIntent` it is handed and
 // the `OnlineError` it refuses with. Nothing in `run_online_backfill`'s signature
-// reaches the engine any more, and - since the phases were inverted and the engine
-// drives them - neither does its body, so the vendor that implements it no longer
-// has to name the orchestrator.
+// reaches the engine, and the engine drives the phases, so the vendor that
+// implements it does not name the orchestrator.
 // -- The shadow dry-run's neutral half travelled too: `ShadowConfig` in,
 // `DryRunReport`/`MigrationResult` out. The `ShadowDryRun` TRAIT stayed, because
 // `dry_run_declarative` takes a `DeclarativeDeployPlan` and a `DesiredSchema` -

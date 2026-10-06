@@ -2372,9 +2372,9 @@ pub enum RaiseLevel {
     Rollback,
 }
 
-// `RaiseLevel` carries no `as_*_sql`. The four SQL TOKENS it used to hand out
-// belong to the one backend whose `RAISE(<level>, ...)` grammar spells them, and
-// they live there now, beside the renderer that writes them -
+// `RaiseLevel` carries no `as_*_sql`. The four SQL TOKENS belong to the one backend
+// whose `RAISE(<level>, ...)` grammar spells them, and they live there, beside the
+// renderer that writes them -
 // `raise_level_sql` in `zeroship-migrate-sqlite`'s `dml`. A target with a different
 // grammar reads the same level and answers differently: the MySQL renderer
 // discards it entirely and emits `SIGNAL SQLSTATE`, which is why the enum stays

@@ -195,13 +195,8 @@ struct VerifiedSeed {
 
 /// Classify a rejection from [`BearerVerifier`] by the status it reports.
 ///
-/// This used to also match the message `"platform token verification failed"`.
-/// That was a patch on one symptom of a construction bug in `zeroship-authn`:
-/// ntex's `InternalError` discarded the 401 it was built with, so EVERY authn
-/// rejection arrived here as a 500 and the one message someone happened to hit
-/// got special-cased. `zeroship_authn::AuthnRejection` now reports the status
-/// it was constructed with, so the status alone is sufficient and matching on
-/// prose is not.
+/// The status alone is sufficient: `zeroship_authn::AuthnRejection` reports the
+/// status it was constructed with, so matching on prose is not.
 fn map_bearer_error(err: ntex::web::Error) -> AuthError {
     if err.as_response_error().status_code() == StatusCode::UNAUTHORIZED {
         AuthError::Unauthorized

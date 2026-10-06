@@ -452,12 +452,10 @@ pub trait SchemaRenderer: std::fmt::Debug + Sync {
     /// spelled here: the `EXCLUDE USING` frame, the access-method token, the
     /// `WITH <operator>` pairing, the `WHERE` tail and the deferrability clause.
     ///
-    /// It moved for the reason the ALTER COLUMN family and the SQLite trigger family
-    /// moved before it. The engine used to assemble the whole body itself, including the
-    /// access-method names `gist` and `spgist` and the `&&` overlap operator, none of
-    /// which any other shipping vendor can execute. Nothing about that NAMED a vendor,
-    /// so the product-name census read it as clean - which is the hole the grammar
-    /// census now covers.
+    /// It sits here for the reason the ALTER COLUMN family and the SQLite trigger family
+    /// do: the access-method names `gist` and `spgist` and the `&&` overlap operator
+    /// are grammar this backend owns. An engine spelling of them names no vendor, so
+    /// only the grammar census catches it.
     ///
     /// # Why here and not on `DdlEmitter`
     ///

@@ -43,9 +43,9 @@ use zeroship_migrate_ir::dialect::DialectId;
 // DatabaseRequirements}` resolve unchanged.
 pub use zeroship_migrate_backend::requirements::{DatabaseFeature, DatabaseRequirements};
 // The fully-resolved specification for ONE table rebuild, and the neutral
-// high-water policy that finally let it travel. Its `sequence_policy` used to be
-// typed `zeroship_migrate_sqlite::SqliteSequencePolicy` - a type from a crate ABOVE
-// the contract - which stranded this spec, `TableRebuild`, `RenameStep` and
+// high-water policy. Its `sequence_policy` is `SequenceHighWaterPolicy`, neutral
+// vocabulary the contract owns rather than a type from a crate ABOVE it - the
+// vendor type that would have stranded this spec, `TableRebuild`, `RenameStep` and
 // `PlanStep` in the engine for want of one field. Re-exported so
 // `crate::render::plan::TableRebuildSpec` resolves unchanged.
 pub use zeroship_migrate_backend::table_rebuild::{SequenceHighWaterPolicy, TableRebuildSpec};

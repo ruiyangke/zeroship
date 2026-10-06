@@ -1,6 +1,6 @@
 //! Standalone creator migration service.
 //!
-//! Phase 1 exposes the frozen `.ir.json` apply surface. Phase 2 routes creator
+//! The server exposes the frozen `.ir.json` apply surface and routes creator
 //! applies through a server-managed policy ceiling, engine composition, and the
 //! sealed shared-infra apply path.
 

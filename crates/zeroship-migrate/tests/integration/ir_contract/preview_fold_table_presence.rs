@@ -1,10 +1,9 @@
 //! **Table presence means the same thing to the preview, the lower, and the fold.**
 //!
-//! Three places used to answer "which table names does a later op in this stream get
-//! to reference": the fold (correctly), `render::lower`'s working `live_tables`, and
-//! the offline preview's own presence carrier. The latter two knew `createTable` and
-//! nothing else, so every one of them agreed only on streams that never dropped,
-//! renamed or detached anything.
+//! The fold answers "which table names does a later op in this stream get to
+//! reference", and `render::lower`'s working `live_tables` and the offline preview's
+//! own presence carrier agree with it. A carrier that knew `createTable` and nothing
+//! else would agree only on streams that never dropped, renamed or detached anything.
 //!
 //! Two failure directions, both measured on PostgreSQL 18.4 before this file was
 //! written (see `PG ORACLE` notes on each test) — which matters, because a test that

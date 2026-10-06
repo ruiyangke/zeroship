@@ -9,11 +9,10 @@
 //! inside, so a directory may be named nothing like the package it holds and the
 //! build stays green forever.
 //!
-//! The cost of that invisibility was paid, not imagined. Renaming the addon's
-//! directory to `zeroship-migrate-node` while its `package.json` still said
-//! `zero-migrate-node` left the npm workspace glob pointing at a path that no longer
-//! existed: pnpm silently resolved 58 members instead of 59, dropped the addon two
-//! packages declare as `workspace:*`, and reported success. Nothing failed. The
+//! The invisibility is a real hazard: renaming the addon's directory while its
+//! `package.json` name stays put points the npm workspace glob at a path that does
+//! not exist, and pnpm resolves fewer members, drops the addon dependents declare
+//! as `workspace:*`, and reports success. Nothing fails. The
 //! Cargo side of that same rename is guarded here so the equivalent cannot happen
 //! quietly on the Rust side.
 //!

@@ -13,12 +13,11 @@
 //! format `CHECK`s are equivalent by ONE algorithm, and a backend that wrote its own
 //! copy would be a backend whose drift verdict could disagree with the engine's.
 //!
-//! They used to sit in `zeroship_migrate::render::value_format`, where they resolved a
-//! renderer out of the engine's registry from a `DialectId`. That is the same
+//! A registry lookup from a `DialectId` inside this crate would close the same
 //! compressed cycle `crate::dml`'s header describes: the registry sits ABOVE the
 //! vendors and the comparison sits BELOW them, so no crate can hold both, and a
 //! backend crate calling the engine's resolver is a vendor asking a registry to hand
-//! the vendor back to itself. They take the renderers directly now - a backend passes
+//! the vendor back to itself. They take the renderers directly - a backend passes
 //! its own, and the engine, which holds a dialect identity rather than a renderer,
 //! resolves once at its own door.
 //!

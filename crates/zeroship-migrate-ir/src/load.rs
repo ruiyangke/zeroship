@@ -562,7 +562,7 @@ pub fn authoritative_ir_checksum(ir: &MigrationIr) -> Checksum {
 
 /// Return the hint-domain field this engine build cannot fold for `ir`,
 /// or `None` when the hint domain IS fully computable (flags at default + no
-/// deps/supersedes). Used to fail closed on a hint over a not-yet-foldable
+/// deps/supersedes). The hint domain fails closed on a not-yet-foldable
 /// domain (the `IrFlagsOverride`/`MigrationId` merges are not implemented).
 ///
 /// Public so the build-time checksum fold (the JS builder's `typed_checksum` anchor

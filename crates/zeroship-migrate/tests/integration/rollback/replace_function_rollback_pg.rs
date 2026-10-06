@@ -13,8 +13,8 @@
 //! function replace has always applied, and its rollback has always been destructive.
 //!
 //! And it must be measured HERE rather than on SQLite, where the cheaper view harness
-//! lives. `createFunction` is PostgreSQL-only - `dialect-table.ts:47` marks it
-//! `sqlite: "unsupported", mysql: "unsupported"`, and `model/op_support.rs:271` refuses it
+//! lives. `createFunction` is PostgreSQL-only - `packages/zero-migrate/src/generated/dialect-table.ts` marks it
+//! `sqlite: "unsupported", mysql: "unsupported"`, and the SQLite/MySQL backends refuse it
 //! with "function vendor primitives are PostgreSQL-only". A SQLite copy of this test would
 //! fail for a reason that has nothing to do with the defect.
 //!
@@ -189,7 +189,7 @@ async fn live_function_body(
 ///     op_index=0 dialect=postgres]
 ///
 /// Reaching the defect needs `load_ir_document_authorized` with a `VendorAuthority`
-/// (`model/load.rs:70`), which no test in this crate constructs today. That plumbing is the
+/// (`model::load`), which no test in this crate constructs today. That plumbing is the
 /// work, and it is worth doing deliberately rather than inside a probe.
 ///
 /// The refusal is itself the useful result: it narrows #211 from "always reachable" to

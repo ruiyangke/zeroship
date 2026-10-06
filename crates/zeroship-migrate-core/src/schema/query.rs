@@ -214,20 +214,6 @@ mod schema_renderer_tests {
     }
 }
 
-/* THE ENCRYPTED-BLOB SENTINEL IS DELETED, AND ITS DOC WAS FALSE.
- *
- * A `pub const` here carried a SQLite blob prefix, and claimed that "the SQLite
- * session strips the prefix and base64-decodes the remainder". The literal it defined
- * appeared EXACTLY ONCE in the entire repository - in that definition - so no session
- * stripped it,
- * and none ever had. Its only reader in code was one of the two encryption methods the
- * `SchemaRenderer` trait no longer declares, itself dead (see the trait's header), so
- * the constant, its one reader, and the decode step it promised are all gone together.
- *
- * Recorded rather than silently removed because the doc is the interesting part: a
- * comment describing a decode that does not exist reads as a designed seam, and the
- * next person to add encrypted-column support would have built on top of it.
- */
 
 /// Platform-owned collection prefixes mirrored by `zeroship-data-sql`.
 ///
@@ -1151,8 +1137,8 @@ pub fn normalize_fk_action(s: Option<&str>) -> &'static str {
 /// The engine's entry point: it RESOLVES `dialect` and asks that vendor. A backend
 /// that already knows which vendor it is calls
 /// [`zeroship_migrate_backend::constraint_definition::normalize_fk_action_for_vendor`].
-/// `render::declarative` used to carry a byte-identical private duplicate of this;
-/// the move that took the FK body below the vendors deleted it.
+/// `schema::diff` calls this shared implementation; the FK body lives
+/// below the vendors.
 pub fn normalize_fk_action_for_dialect(
     vendors: VendorSet,
     s: Option<&str>,

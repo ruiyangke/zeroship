@@ -650,11 +650,11 @@ scope = { include = ["staging"] }
 
 /// Two globs that RENDER the same but match different sets must not seal the same.
 ///
-/// The seal used to encode `SegGlob::render`, justified by render being injective
-/// over the `(prefix, suffix, has_star)` triple. That holds only while the triple is
-/// canonical - at most one `*`, none inside the literal pieces. `SegGlob::parse`
-/// enforces it, so the strict TOML loader cannot break it, but the public
-/// `SegGlob::infix` can.
+/// The seal encodes canonical segment bytes rather than `SegGlob::render`, because
+/// render is injective over the `(prefix, suffix, has_star)` triple only while the
+/// triple is canonical - at most one `*`, none inside the literal pieces.
+/// `SegGlob::parse` enforces it, so the strict TOML loader cannot break it, but the
+/// public `SegGlob::infix` can.
 #[test]
 fn globs_rendering_alike_but_matching_differently_seal_differently() {
     use zeroship_migrate_policy::scope::glob::SegGlob;

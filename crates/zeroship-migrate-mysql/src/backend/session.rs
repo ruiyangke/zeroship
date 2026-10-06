@@ -948,9 +948,9 @@ pub(crate) async fn apply_two_phase<D: SqlSession>(
             });
         }
 
-        // This vendor's own registration, not a registry lookup keyed by a dialect
-        // literal. It used to be `&zeroship_migrate_ir::dialect::MYSQL` - the one place
-        // in this backend that named the dialect outside its `DIALECT` const.
+// This vendor's own registration, not a registry lookup keyed by a dialect
+// literal. The registration is `&crate::VENDOR`, the vendor's own identity, so this
+// backend names the dialect only through its `DIALECT` const.
         match zeroship_migrate_backend::existence_probe::decide(probe, &live, &crate::VENDOR) {
             zeroship_migrate_backend::existence_probe::GuardVerdict::RunBare => {}
             zeroship_migrate_backend::existence_probe::GuardVerdict::SatisfiedNoop => {

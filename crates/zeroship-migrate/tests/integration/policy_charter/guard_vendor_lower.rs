@@ -768,7 +768,7 @@ fn m2_stage2_superuser_belt_sites_stay_hard_denied() {
     }
 }
 
-// ---- T11: the Platform posture comes from the policy -------------------
+    // ---- the Platform posture comes from the policy ----
 
 /// The Platform posture is carried by the composed `EffectivePolicy` and by nothing
 /// else, and both readers of that policy agree about it.

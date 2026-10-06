@@ -24,9 +24,7 @@
 //!
 //! # Why this is a separate type from SQLite's
 //!
-//! Both dialects used to share one guard type named after the
-//! other vendor, whose own doc had to explain that the name was wrong. Each vendor
-//! now writes its own trusting guard, so a change to one dialect's posture cannot
+//! Each dialect has its own guard type, so a change to one dialect's posture cannot
 //! silently become a change to the other's.
 
 use zeroship_migrate_backend::guard::{GuardConfig, GuardError, GuardOutcome, MigrationGuard};
@@ -106,7 +104,7 @@ impl MigrationGuard for MysqlGuard {
     /// approval needed" about text nobody inspected - this returns
     /// `requires_approval: true`.
     ///
-    /// What is NO LONGER CHECKED, stated plainly: a raw-SQL-authored MySQL migration
+    /// What is NOT CHECKED, stated plainly: a raw-SQL-authored MySQL migration
     /// gets NO destructive classification, NO non-transactional detection and NO
     /// bare-rename or `SET NOT NULL` gate. It is gated on approval instead, so a human
     /// looks at every one. MySQL's real posture is the descriptor path plus

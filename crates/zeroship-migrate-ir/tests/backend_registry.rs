@@ -33,8 +33,8 @@ const fn descriptor(id: &'static str, display_name: &'static str) -> BackendDesc
     }
 }
 
-// Nine distinct, well-formed ids. Nine, not eight: eight would still fit the
-// bitset that used to back the set and would prove nothing.
+// Nine distinct, well-formed ids. Nine, not eight: eight would fit a
+// bitset and would prove nothing.
 static B1: BackendDescriptor = descriptor("postgres", "PostgreSQL");
 static B2: BackendDescriptor = descriptor("sqlite", "SQLite");
 static B3: BackendDescriptor = descriptor("mysql", "MySQL");

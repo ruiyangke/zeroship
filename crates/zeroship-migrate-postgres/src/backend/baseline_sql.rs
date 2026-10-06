@@ -1,14 +1,12 @@
 //! The PostgreSQL adoption baseline: record an existing project DB's schema as a
 //! `completed` journal event WITHOUT running its `up`.
 //!
-//! This body used to live in `zeroship_migrate_backend::baseline`, next to the dialect-neutral
-//! [`BaselineOutcome`]/[`BaselineError`] vocabulary it returns - and from there it
-//! called `apply::backend::postgres::journal_sql` by name. That made core's baseline
-//! verb PostgreSQL's baseline verb: SQLite has its own body in
+//! This body lives in the PostgreSQL backend crate, next to the dialect-neutral
+//! [`BaselineOutcome`]/[`BaselineError`] vocabulary it returns. The vocabulary is
+//! shared; each body is not: SQLite has its own body in
 //! `zeroship_migrate_sqlite::backend::journal_sql` (named in prose, not linked - that
 //! crate is below this one in the graph, so this crate's docs cannot resolve into
-//! it), MySQL refuses, and neither could ever have been reached through the module
-//! that named this one.
+//! it), and MySQL refuses.
 //!
 //! The neutral half stayed where it was. `BaselineOutcome` and `BaselineError` are
 //! the [`MigrationBackend::baseline_one`](zeroship_migrate_backend::backend::MigrationBackend::baseline_one)
@@ -30,9 +28,8 @@ use super::journal_sql;
 /// [`MigrationBackend::baseline_one`](zeroship_migrate_backend::backend::MigrationBackend::baseline_one)
 /// (multi-engine abstraction): it is `pub(crate)`, reached only through
 /// [`PostgresBackend::baseline_one`](super::PostgresBackend), which keeps the
-/// `&Client`/`pg_advisory_lock` confined to the PG backend. There is no longer a
-/// top-level PG-`&Client`-typed `baseline` on the public surface; callers go through
-/// `backend.baseline_one(...)`.
+/// `&Client`/`pg_advisory_lock` confined to the PG backend. Callers reach baseline
+/// through `backend.baseline_one(...)`.
 ///
 /// Idempotent for the same baseline version (a retried deploy is safe); refuses a
 /// *different* baseline once one exists, and refuses entirely if the engine

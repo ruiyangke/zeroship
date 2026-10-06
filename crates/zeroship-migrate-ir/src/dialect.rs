@@ -7,12 +7,9 @@
 //!
 //! # This module declares NO ids
 //!
-//! It used to declare three - `POSTGRES`, `SQLITE`, `MYSQL` - directly above the
-//! sentence promising that a backend declares its own without editing this crate,
-//! and the engine re-exported all three. So the neutral vocabulary crate at the
-//! bottom of the stack named vendors it does not own, and every reference to a
-//! vendor's identity anywhere in the tree resolved through a crate that had no
-//! business knowing it.
+//! Declaring `POSTGRES`, `SQLITE` or `MYSQL` here would name vendors this neutral
+//! vocabulary crate does not own, and every reference to a vendor's identity in the
+//! tree would resolve through a crate that has no business knowing it.
 //!
 //! They live in the vendors now: `zeroship_migrate_postgres::DIALECT`,
 //! `zeroship_migrate_sqlite::DIALECT`, `zeroship_migrate_mysql::DIALECT`, each beside the
@@ -225,9 +222,7 @@ impl FromIterator<DialectId> for DialectSet {
 mod tests {
     use super::*;
 
-    // A well-formedness test over the shipping ids USED TO LIVE HERE. It looped over the three
-    // constants this module declared and asserted the id rule on each. Both halves of
-    // it moved and the proposition is now checked more strongly than a test can:
+// The shipping ids' well-formedness is checked more strongly than a test can:
     //
     // * the three ids live in the vendor crates, so this crate cannot see them; and
     // * each vendor asserts its own with `const _: () = assert!(

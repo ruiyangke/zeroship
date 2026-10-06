@@ -685,7 +685,7 @@ fn render_plan_sql_online_rename_is_labeled_never_fabricated() {
     use zeroship_migrate::{PlanStep, RenameStep};
 
     // Author a REAL PG expand-contract plan via the same author the engine uses, so
-    // the test feeds the genuine E1..C2 + backfill shape (never a synthetic stub).
+    // the test feeds the genuine expand-contract + backfill shape (never a synthetic stub).
     let ec = ExpandContractAuthor::new(
         zeroship_migrate::shipping_vendors(),
         "public",

@@ -710,10 +710,9 @@ async fn read_only_plan_status_never_creates_a_fresh_journal() {
 // A migration's DDL and its journal entry commit together, and an interruption
 // between them is not observable.
 //
-// This is the property the super-journal protocol used to buy across two files,
-// and it is why that protocol pinned BOTH files to DELETE + FULL. With the
-// journal inside the database it describes it is an ordinary single-file
-// transaction, so the assertion is the same and the machinery is gone.
+// The journal inside the database it describes makes this an ordinary single-file
+// transaction: DDL and its journal entry commit together, and an interruption
+// between them is not observable.
 //
 // The interruption is the REAL apply path's own crash boundary,
 // `APPLY_AFTER_UP_BEFORE_COMPLETED`, armed through the executor fault seam. That

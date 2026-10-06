@@ -8,8 +8,8 @@
 //! `app` and the statement addressed `APP`.
 //!
 //! `IrAuthor::effective_schema` is the canonicalization that keeps the two in step, and
-//! the comment renderer used to re-read the target's own schema instead of the
-//! already-canonicalized value handed to it.
+//! the comment renderer reads the already-canonicalized value handed to it rather than
+//! re-reading the target's own schema.
 
 
 use std::collections::BTreeSet;

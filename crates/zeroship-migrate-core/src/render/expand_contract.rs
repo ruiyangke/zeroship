@@ -17,9 +17,9 @@
 //!       WHERE <to> IS NULL                 depends_on [E2]
 //!
 //! CONTRACT (deploy N+1, lands AFTER code stops using <from>; gated on EXPAND)
-//!   C1  DROP TRIGGER + DROP FUNCTION     -- requires_approval, depends_on [E2]
-//!   C2  DROP COLUMN <from>               -- destructive, requires_approval,
-//!                                           depends_on [E1, E3, C1]
+//!   contract  DROP TRIGGER + DROP FUNCTION -- requires_approval, depends_on [dual-write trigger]
+//!   contract  DROP COLUMN <from>           -- destructive, requires_approval,
+//!                                           depends_on [add column, backfill, drop trigger]
 //! ```
 //!
 //! # Why each piece is shaped the way it is
@@ -53,8 +53,8 @@
 //!   depends on E2 so the trigger is live before the backfill runs - otherwise a
 //!   concurrent write between backfill batches could land in `<from>` only and
 //!   be lost.
-//! - **C1/C2 are gated.** Dropping the trigger and the old column is
-//!   `requires_approval` (C2 is also `destructive`). The engine's expand/contract
+//! - **The contract steps are gated.** Dropping the trigger and the old column is
+//!   `requires_approval` (the column drop is also `destructive`). The engine's expand/contract
 //!   gate additionally refuses the contract until the matching
 //!   expand is net-applied in the journal.
 //!
@@ -177,7 +177,7 @@ pub(crate) fn qualified(
 }
 
 /// Sub-step indices for the online-rename sequence - folded into the
-/// rename's stable seed so each of E1..C2 derives a DISTINCT, reproducible id.
+/// rename's stable seed so each expand-contract step derives a distinct, reproducible id.
 /// These are the `step_index` half of `step_id = derive(rename_seed, step_index)`.
 const EC_STEP_E1: u8 = 1;
 const EC_STEP_E2: u8 = 2;
@@ -213,7 +213,7 @@ pub(crate) fn resolve_pending_abort_atomic_version(pending_version: &str) -> Mig
 /// `from`, `to`, `ty`. Length-prefixing each field makes the encoding injective
 /// (so `("a","bc")` and `("ab","c")` never collide). NOTHING per-run is folded
 /// (no time, no random), so re-lowering the identical IR envelope reproduces the
-/// SAME seed -> the SAME E1..C2 ids. A semantically different rename (different
+/// the same seed yields the same expand-contract ids. A semantically different rename (different
 /// `to`/`ty`) produces a different seed -> fresh ids.
 fn rename_id_seed(
     schema: &str,
@@ -380,7 +380,7 @@ impl ExpandContractAuthor {
         Ok(vec![cleanup, drop_destination])
     }
 
-    // A linear sequence builder: validate, then emit E1/E2/E3/C1/C2 in order.
+    // A linear sequence builder: validate, then emit the expand then contract steps in order.
     // Kept as one readable top-to-bottom function (the phased sequence reads best
     // contiguously); the pedantic line-count lint is allowed for exactly that.
     #[allow(clippy::too_many_lines)]
@@ -428,7 +428,7 @@ impl ExpandContractAuthor {
         // Structural rollback BEFORE the backfill runs is allowed:
         // dropping the just-added nullable column is a clean reverse.
         let e1_down = Some(format!("ALTER TABLE {tbl_q} DROP COLUMN {to_q}"));
-        // The rename's STABLE identity seed. Every E1..C2 sub-step id is
+        // The rename's STABLE identity seed. Every expand-contract sub-step id is
         // `MigrationId::derive("ec", seed || step_index)`, so a re-lower of the
         // identical IR envelope (the production path re-lowers on EVERY deploy,
         // `deploy_migrate.rs`) reproduces byte-identical ids. The seed folds the
@@ -543,7 +543,7 @@ impl ExpandContractAuthor {
             EC_STEP_E3,
         );
 
-        // ---- C1: remove the dual-write trigger (gated, depends_on E2) ----
+        // ---- contract: remove the dual-write trigger (gated, depends_on the trigger step) ----
         // Last use of both halves, so this consumes the pair the renderer built.
         let c1 = self.make(
             &format!("contract_drop_dual_write_{table}_{from}_{to}"),
@@ -562,9 +562,9 @@ impl ExpandContractAuthor {
             EC_STEP_C1,
         );
 
-        // ---- C2: DROP COLUMN <from> (destructive, gated) ----
+        // ---- contract: DROP COLUMN <from> (destructive, gated) ----
         //
-        // depends_on [E1, E3, C1]: E1 is the column it reverses; E3 (the backfill)
+        // depends_on [add column, backfill, drop trigger]: the column add is the step it reverses; the backfill
         // MUST be net-applied first - dropping <from> before every pre-existing
         // row's value is mirrored into <to> would lose un-backfilled data; and C1
         // (DROP TRIGGER + DROP FUNCTION) MUST run before C2 - the dual-write
@@ -659,7 +659,7 @@ impl ExpandContractAuthor {
             preconditions: &[],
         });
         // Deterministic sub-version: fold the step index into the rename's
-        // stable seed so E1..C2 each get a distinct, reproducible id.
+        // stable seed so each expand-contract step gets a distinct, reproducible id.
         let mut seed = id_seed.to_vec();
         seed.push(step_index);
         Migration {
@@ -849,9 +849,9 @@ mod tests {
         assert_eq!(e2.depends_on, vec![e1.version.clone()]);
         // E3 depends on E2 (trigger live before backfill).
         assert_eq!(e3.depends_on, vec![e2.version.clone()]);
-        // C1 depends on E2 (the trigger it drops).
+        // the drop-trigger step depends on the trigger step it drops.
         assert_eq!(c1.depends_on, vec![e2.version.clone()]);
-        // C2 depends on E1 (the column add it reverses), E3 (the backfill -
+        // the drop-column step depends on the column add it reverses, the backfill -
         // dropping <from> before the backfill mirrors pre-existing rows loses
         // data), AND C1 (the trigger drop MUST run before the column it reads -
         // a structural guarantee, not incidental UUIDv7 ordering).
@@ -874,7 +874,7 @@ mod tests {
         assert!(c1.flags.requires_approval, "DROP TRIGGER/FUNCTION is gated");
         assert!(c2.flags.requires_approval, "DROP COLUMN is gated");
         assert!(c2.flags.destructive, "DROP COLUMN is destructive");
-        // C1 is not "destructive" in the data-loss sense (no rows lost dropping
+        // the drop-trigger step is not "destructive" in the data-loss sense
         // a trigger), but is gated.
         assert!(!c1.flags.destructive);
     }
@@ -941,7 +941,7 @@ mod tests {
     #[test]
     fn expand_sql_is_byte_stable_across_reauthoring() {
         // Re-authoring the same intent yields identical Expand/Contract SQL AND
-        // identical sub-step ids + checksums: the E1..C2 versions are
+        // identical sub-step ids + checksums: the expand-contract versions are
         // DETERMINISTICALLY derived from the rename's stable seed
         // (schema+owner+table+from+to+ty) plus the step index. The checksum folds
         // `depends_on`, which holds deterministic sibling ids, so the FULL
@@ -997,9 +997,9 @@ mod tests {
 
     #[test]
     fn substep_ids_are_deterministic_and_distinct() {
-        // Every E1..C2 id is derived (not random), so two
+        // Every expand-contract id is derived (not random), so two
         // authorings of the SAME rename produce byte-identical ids; and the five
-        // sub-steps are mutually DISTINCT (the step-index fold keeps E1..C2 apart).
+        // sub-steps are mutually distinct (the step-index fold keeps them apart).
         let p1 = author().author(&rename()).expect("author 1");
         let p2 = author().author(&rename()).expect("author 2");
         // Compare id strings directly across the two authorings.

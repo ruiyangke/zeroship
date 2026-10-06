@@ -76,11 +76,10 @@ scope = "all"
     effective_policy_from_charter_toml(&charter)
 }
 
-// This used to be a SECOND implementation of charter composition, kept here only
-// because the real one lived in the engine and this crate sits below the engine.
-// The real one moved down to `zeroship_migrate_ir::policy_registry`, so this delegates
-// to it: one composition, one grant-only-draft extractor, no drift between what a
-// vendor's tests compose and what production composes.
+// This delegates to the shared charter composition in
+// `zeroship_migrate_ir::policy_registry`: one composition, one grant-only-draft
+// extractor, no drift between what a vendor's tests compose and what production
+// composes.
 pub fn effective_policy_from_charter_toml(charter_toml: &str) -> EffectivePolicy {
     zeroship_migrate_ir::policy_registry::effective_policy_from_charter_toml(charter_toml)
         .expect("test policy composes")

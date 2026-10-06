@@ -47,7 +47,7 @@ pub static POSTGRES_DESCRIPTOR: BackendDescriptor = BackendDescriptor {
         identifier: IdentifierLimit::Bytes(63),
         // The system catalog namespace. `pg_` is reserved for catalog objects and
         // for the `pg_catalog` schema; a user object under it is a collision the
-        // server does not always refuse. Core used to hold this string itself.
+        // server does not always refuse. The PostgreSQL crate holds this string.
         reserved_identifier_prefixes: &["pg_"],
     },
 };

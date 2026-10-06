@@ -1611,7 +1611,7 @@ async fn creator_trigger_and_partial_index_survive_rebuild() {
 }
 
 // ---------------------------------------------------------------------------
-// (C2b) A dependent object that genuinely cannot be replayed (it references a column
+// A dependent object that genuinely cannot be replayed (it references a column
 //       the new shape DROPS) FAILS CLOSED with the typed DependentReplayFailed error
 //       — never silently lost. The original table + dependent are intact. We use an
 //       INDEX over a column the new shape omits: SQLite validates an index's columns

@@ -7,10 +7,10 @@
 //! total, and a `_ =>` arm is where fail-open lives.
 //!
 //! But a backend has knobs the closed set does not model, and today they arrive by being
-//! hand-added to THIS crate. `IndexStorageParams` USED TO hold `pages_per_range`
-//! (BRIN) and `fillfactor` - two PostgreSQL storage parameters, in the crate whose whole
-//! purpose is to name no vendor. They survived every naming census because they are a
-//! FIELD, not a name.
+//! hand-added to THIS crate. PostgreSQL's `pages_per_range` (BRIN) and `fillfactor`
+//! arrived as FIELDS on `IndexStorageParams`, in the crate whose whole purpose is
+//! to name no vendor, and survived every naming census because a FIELD is not a
+//! name.
 //!
 //! So vendor-specific data is already in the IR. This module changes only whether it is
 //! centrally defined and closed, or vendor-owned and extensible.
@@ -466,8 +466,8 @@ op_attributes! {
     ///
     /// This carrier RETIRED `IndexStorageParams`, which held PostgreSQL's `fillfactor`
     /// and `pages_per_range` as named fields in this neutral crate and in the neutral
-    /// contract crate's `IndexSnapshot`. Both are now ordinary declarations in the
-    /// PostgreSQL crate, and core's drift pass no longer spells either name.
+/// contract crate's `IndexSnapshot`. Both are ordinary declarations in the
+/// PostgreSQL crate, and core's drift pass does not spell either name.
     CreateIndexAttributes => "createIndex"
 }
 

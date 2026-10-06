@@ -21,8 +21,8 @@
 //! NAMED PRESETS ([`VendorCapabilities::confined`] / [`operator`]),
 //! but the gate keys on `caps.allow_role`, never on `trust == Confined`. A future
 //! "local dev" or "CI" posture can compose its own flag set without touching the
-//! gate - and would compose it where it is used, which is why the speculative `local`
-//! preset that used to sit beside these two is gone.
+//! gate - and would compose it where it is used. The presets are exactly the two
+//! below.
 //! The profile mapping is [`VendorCapabilities::for_trust`].
 //!
 //! [`operator`]: VendorCapabilities::operator
@@ -218,9 +218,9 @@ impl VendorCapabilities {
     // The presets are exactly the ones a `TrustProfile` maps onto, and the list is not
     // free to grow. Every capability field added to this struct has to be answered by
     // each preset, so a preset nothing composes is an answer that must be kept
-    // plausible forever with nothing to check it against. An in-between dev/CI posture
-    // wired to no profile stood here once and was exactly that: its only reference in
-    // the tree was the unit test that exercised it, and it was deleted.
+// plausible forever with nothing to check it against. An in-between dev/CI posture
+// wired to no profile would be exactly that: no caller would check it, and a unit
+// test would measure only itself.
 
     /// Map a [`TrustProfile`] onto its named preset: Confined =>
     /// [`confined`](Self::confined); Platform => [`operator`](Self::operator).

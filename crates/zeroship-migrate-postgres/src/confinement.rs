@@ -184,7 +184,7 @@ mod tests {
         let cfg = cfg();
         assert!(cfg.confinement.vendor.is_empty());
         // The miss is invisible: `of` answers with the same values the neutral
-        // constructor used to install eagerly.
+        // constructor's default would install.
         assert_eq!(of(&cfg).migrator_role, None);
         assert_eq!(of(&cfg).extension_schemas, vec!["public".to_string()]);
     }

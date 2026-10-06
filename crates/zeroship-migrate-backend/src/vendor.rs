@@ -10,14 +10,9 @@
 //! ([`VendorStatement`]) and the refusal set ([`VendorError`]). It renders nothing
 //! and spells no keyword.
 //!
-//! **This header used to describe a PostgreSQL renderer**, because it once WAS one:
-//! it opened "The VENDOR (`zero-migrate`) Postgres render seam", described
-//! double-quoting identifiers and `pg_query`-parsing the rendered statement, and
-//! said "this module only renders Postgres". None of that has been true since the
-//! renderer moved to `zeroship_migrate_postgres::vendor`, which is where every sentence
-//! of it now applies. What was left behind was a vendor's module doc on a neutral
-//! vocabulary - a description that would have told a fourth backend it was reading
-//! PostgreSQL's code.
+//! **This header describes a dialect-neutral backend contract.** The PostgreSQL
+//! renderer lives in `zeroship_migrate_postgres::vendor`, where double-quoting
+//! identifiers and `pg_query` parsing belong.
 //!
 //! # What is NOT here
 //!

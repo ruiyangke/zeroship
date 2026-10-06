@@ -263,7 +263,7 @@ impl ValidationPolicy for MysqlValidationPolicy {
     /// MySQL BYPASSES the raw-view-body gate. This is a deliberate WIDENING, and it
     /// is written here so nobody has to infer it.
     ///
-    /// # What used to be checked, and is not any more
+    /// # What is not checked
     ///
     /// Until this seam existed, a MySQL raw view body went through the engine's
     /// `pg_query::parse` and the PostgreSQL body scanner, so it had to survive:

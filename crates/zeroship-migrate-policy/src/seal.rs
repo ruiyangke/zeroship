@@ -611,11 +611,11 @@ mod tests {
 
     /// Two globs that render alike but match different sets must encode differently.
     ///
-    /// `write_seg` used to encode `SegGlob::render`, justified by render being
-    /// injective over the `(prefix, suffix, has_star)` triple. That holds only while
-    /// the triple is canonical - at most one `*`, none inside the literal pieces.
-    /// `SegGlob::parse` enforces it, so the strict TOML loader cannot break it, but
-    /// the public `SegGlob::infix` can, and then two different globs sealed the same.
+/// `write_seg` encodes canonical segment bytes rather than `SegGlob::render`,
+/// because render is injective over the `(prefix, suffix, has_star)` triple only
+/// while the triple is canonical - at most one `*`, none inside the literal pieces.
+/// `SegGlob::parse` enforces it, so the strict TOML loader cannot break it, but
+/// the public `SegGlob::infix` can, and then two different globs would seal the same.
     #[test]
     fn seg_encoding_separates_globs_that_render_alike() {
         let a = SegGlob::infix(b"a*".to_vec(), b"b".to_vec());

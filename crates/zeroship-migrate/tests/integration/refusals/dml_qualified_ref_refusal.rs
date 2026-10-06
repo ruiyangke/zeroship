@@ -1,7 +1,7 @@
 //! A DML statement may not reference another table through a qualified column.
 //!
-//! `UPDATE users SET n = 8 WHERE other.ghost > 0` used to clear validate and preview
-//! and be refused by PostgreSQL partway through the deploy:
+//! `UPDATE users SET n = 8 WHERE other.ghost > 0` is refused at validate and preview
+//! rather than by PostgreSQL partway through the deploy:
 //!
 //! ```text
 //! SERVER_REJECTED sqlstate=42P01 missing FROM-clause entry for table "other"

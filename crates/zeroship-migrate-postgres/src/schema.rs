@@ -502,7 +502,7 @@ fn ddl_type(data_type: &str) -> &str {
 }
 
 /// Legacy SDK-token-to-PostgreSQL-spelling table, moved out of the neutral
-/// contract. Snapshot rendering no longer calls this JSON carrier.
+/// contract. Snapshot rendering does not call this JSON carrier.
 pub fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
     match def.get("type").and_then(|t| t.as_str()) {
         Some("string") => "TEXT",

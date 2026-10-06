@@ -161,9 +161,7 @@ pub mod namespace_rule {
 ///
 /// There is no belt-off posture. The static parse-time guard belt - the deny-list,
 /// cross-schema confinement and body walks - runs for every config this type can
-/// build. The engine used to carry a root/host-set mode that skipped it for a
-/// dbmate-like Trusted operator, and removing that mode is what makes the belt
-/// unconditional here.
+/// build.
 #[derive(Debug, Clone)]
 pub struct GuardConfig {
     /// PRIVATE. The target SQL dialect this guard config is for.
@@ -623,11 +621,9 @@ pub enum GuardError {
     /// A raw SQL string reached a guard that cannot vet it, and was refused
     /// fail-closed rather than mis-vetted or waved through.
     ///
-    /// # The message used to describe only one of the three ways this is reached
+    /// # The message names all three ways this is reached
     ///
-    /// It read "raw SQL is not accepted by the PostgreSQL parser guard for backend
-    /// {dialect}", which was TRUE of one producer and FALSE of the other two. All
-    /// three shipping guards raise it, each carrying its OWN id:
+    /// All three shipping guards raise it, each carrying its OWN id:
     ///
     /// * the parser-backed guard, when the config's target is not the dialect its
     ///   parser reads - it cannot vet another grammar, so it declines;
@@ -635,9 +631,7 @@ pub enum GuardError {
     ///   because they have NO raw door at all. Answering `Ok` there would grant an
     ///   unchecked raw path no author of that dialect can even open.
     ///
-    /// So on two of the three the refusal came from the target's own guard, and the
-    /// message told the operator a different backend's parser had turned it away. It
-    /// names the refusing target and nothing else now.
+    /// The message names the refusing target and nothing else.
     ///
     /// The id is PROVENANCE only: no behaviour dispatches on it, and a fourth backend
     /// gets this refusal by declining in its own name.

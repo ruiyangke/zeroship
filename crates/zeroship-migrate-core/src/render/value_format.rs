@@ -1447,9 +1447,9 @@ mod tests {
     /// both are answered earlier - so the value it returns there can never make a
     /// drift verdict flip: a `Literal` and an `Expression` are equally unequal to an
     /// `Absent` expectation. What it CAN do is decide what the operator reads. With
-    /// no dialect the arm used to fall through to `Expression("literal:7")`, leaking
-    /// an internal fingerprint prefix into a report line, while every registered
-    /// dialect answered `Literal("7")` for the same input.
+    /// no dialect the arm routes through `AllRegisteredVendors` and answers
+    /// `Literal("7")`, the same answer every registered dialect gives for the same
+    /// input, rather than leaking an internal fingerprint prefix into a report line.
     ///
     /// The dialect-free answer already existed: [`sql_literal_fingerprint`] takes an
     /// `Option<&DialectId>` and routes a `None` through `AllRegisteredVendors`. The

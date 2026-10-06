@@ -2,13 +2,9 @@
 //!
 //! # What this replaces
 //!
-//! `zeroship_migrate::render::vendor` used to re-export `zeroship_migrate_postgres::render_vendor_op`,
-//! and the engine called it BY NAME at three sites covering sixteen privileged op
-//! kinds — roles, grants, RLS, policies, functions, extensions, schemas, `raw` —
-//! none of which touch `DmlRenderer`. `render/vendor.rs` recorded that honestly as
-//! "the vendor-op surface is not behind the contract", and
-//! `zeroship-migrate-sqlite/src/dml.rs` recorded the mirror image: "PostgreSQL is STILL
-//! in the position SQLite just left, via `render::vendor`".
+//! `zeroship_migrate::render::vendor` dispatches through the backend, so the engine
+//! reaches the sixteen privileged op kinds - roles, grants, RLS, policies, functions,
+//! extensions, schemas, `raw` - the same way it reaches every other renderer.
 //!
 //! It is behind the contract now: `DmlRenderer::render_vendor_op`, answered by each
 //! vendor crate, reached by the engine through `render::backends`.
@@ -56,10 +52,10 @@ fn create_schema() -> Op {
 /// PostgreSQL's REGISTERED renderer still renders the vendor ops, byte for byte.
 ///
 /// The positive control. Reached through `BackendVendor::dml` — the same
-/// `&'static dyn DmlRenderer` the engine's registry hands out — rather than through
-/// `zeroship_migrate_postgres::render_vendor_op`, which is no longer reachable from
-/// outside that crate at all (`mod vendor` is private and the `pub use` is gone, so
-/// this is a privacy error rather than a convention).
+/// `&'static dyn DmlRenderer` the engine's registry hands out, which the engine
+/// reaches through the backend rather than by naming
+/// `zeroship_migrate_postgres::render_vendor_op` - `mod vendor` is private and the `pub
+/// use` is gone, so naming it is a privacy error rather than a convention.
 #[test]
 fn postgres_renders_a_vendor_op_through_the_contract() {
     let stmts = zeroship_migrate_postgres::VENDOR

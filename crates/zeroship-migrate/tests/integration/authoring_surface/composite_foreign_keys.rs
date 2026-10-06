@@ -534,13 +534,11 @@ fn ordered_unique_creation_is_visible_to_a_later_composite_fk_on_every_dialect()
         });
 
         // SQLite has no native ALTER TABLE ADD UNIQUE lifecycle operation. This
-        // block used to assert that SQLite nonetheless CLEARED validate, and then
-        // skipped lower on SQLite alone - the gate accepting work the lowerer
-        // rejects, which is the exact defect `dialect-support.toml` now records by
-        // declaring `addConstraint/unique` `unsupported` there. Validate and lower
-        // agree from here: both refuse. The candidate-key replay this test is about
-        // keeps its executable all-target coverage from the unique-INDEX artifact
-        // above, which IS portable on SQLite.
+// block asserts SQLite's current validate behavior: validate and lower both refuse,
+// which is the defect `dialect-support.toml` records by declaring
+// `addConstraint/unique` `unsupported` there. The candidate-key replay this test is
+// about keeps its executable all-target coverage from the unique-INDEX artifact
+// above, which IS portable on SQLite.
         if dialect == &zeroship_migrate_sqlite::DIALECT {
             let error = validate_ir(
                 zeroship_migrate::shipping_vendors(),
@@ -896,11 +894,9 @@ fn mysql_composite_fk_compares_exact_live_character_storage_per_position() {
     )
     .lower(&add, &live)
     .expect_err("different exact live MySQL collations must be rejected");
-    // The diagnostic names the POSITION and both sides' exact storage. It used to open
-    // "position 2 MySQL character storage differs", naming the vendor in a refusal whose
-    // gate is the selected backend's own reference policy; the refusing target is
-    // already carried structurally (`dialect=mysql` in the error tag), so the product
-    // name in the prose was a second, unmaintained copy of it.
+// The diagnostic names the POSITION and both sides' exact storage. The refusing
+// target is already carried structurally (`dialect=mysql` in the error tag), so the
+// prose names no vendor and keeps no second, unmaintained copy of it.
     let text = error.to_string();
     assert!(
         text.contains("position 2 character storage differs"),

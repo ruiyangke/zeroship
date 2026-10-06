@@ -1,10 +1,9 @@
-//! F664: the load gate's rename-isolation pass was quadratic in op count.
+//! The load gate's rename-isolation pass is linear in op count.
 //!
 //! `validate_online_rename_isolation_op` kept every operation it had seen in one
 //! flat `Vec` and scanned all of it per op, so an envelope of N operations paid
-//! N^2 comparisons — even with no renames in it at all. Measured before the fix,
-//! that pass alone was 3.5s of a 3.6s validate over 50k ops, while every other
-//! pass stayed under 2ms.
+//! N^2 comparisons even with no renames in it at all. The gate keeps the
+//! rename state in a map keyed by table, so the pass is linear in op count.
 //!
 //! THE ASSERTION IS THE SHAPE OF THE CURVE, not a wall-clock budget. A timing
 //! threshold turns into a flake on a loaded machine and says nothing about
@@ -13,10 +12,9 @@
 //!
 //! # Why every test here is `#[ignore]`, and where they DO run
 //!
-//! A ratio of two timings is still a timing, and this file produced false failures
-//! repeatedly on a loaded machine: 3.6x/3.6x/3.8x at load average 26 and
-//! 3.5x/3.6x/3.9x at load average 30, a DIFFERENT arm each time, each one green on
-//! an idle re-run. Nothing was wrong with the code under test on any of those runs.
+//! A ratio of two timings is still a timing, and such a file flakes on a loaded
+//! machine: a different arm trips each run and passes on an idle re-run, with
+//! nothing wrong with the code under test.
 //!
 //! Two things follow, and only one of them is about this file. A false red teaches
 //! people to re-run builds instead of reading them, which is corrosive on its own.
@@ -34,18 +32,12 @@
 //! # The threshold is NOT weakened, and CPU time was measured and rejected
 //!
 //! Raising the 3.0x ceiling would discard the signal these guards exist for - they
-//! caught a 5x, a 4.5x and a 4.53x, all of which sit above a "relaxed" ceiling too.
+//! caught regressions that sit above a "relaxed" ceiling too.
 //!
 //! Switching the instrument from wall clock to CPU time is the obvious other idea,
-//! and it was MEASURED rather than assumed. On a 16-core machine at load average
-//! 20-35, the same fixtures timed simultaneously with `Instant` and with per-thread
-//! CPU nanoseconds (`/proc/thread-self/schedstat`) agreed to within about 1% on
-//! EVERY arm:
-//!
-//!   dropColumn   wall 2.232 / cpu 2.230, 2.203 / 2.197, 2.175 / 2.182
-//!   renameTable  wall 2.111 / cpu 2.111, 2.121 / 2.114, 2.120 / 2.123
-//!   renameColumn wall 2.079 / cpu 2.089, 2.048 / 2.062, 2.030 / 2.037
-//!   dropTable    wall 1.744 / cpu 1.748, 2.094 / 2.095, 2.187 / 2.191
+//! and the same fixtures timed simultaneously
+//! with `Instant` and with per-thread CPU nanoseconds (`/proc/thread-self/schedstat`)
+//! track each other on every arm:
 //!
 //! `best_of` already takes the MINIMUM of five runs, and a single CPU-bound thread on
 //! a 16-core box gets a whole core in at least one of five attempts even with a long

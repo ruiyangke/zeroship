@@ -275,11 +275,9 @@ fn apply_error_response(err: ApplyRequestError) -> web::HttpResponse {
     } else {
         tracing::debug!(error = %err, "migrated: migration request rejected");
     }
-    // `migration_id` and `gated_versions` used to ride along here, and both existed
-    // only for the approval refusals: the id so an operator could approve that row,
-    // the version list so they knew what they were approving. With no approval
-    // endpoint there is no row to name and no decision to inform, so a body that
-    // still carried them would be describing an action the caller cannot take.
+    // The request carries neither `migration_id` nor `gated_versions`: with no approval
+    // endpoint there is no row to name and no decision to inform, so a body carrying them
+    // would describe an action the caller cannot take.
     web::HttpResponse::build(status).json(&json!({
         "error": kind,
         "detail": err.to_string(),

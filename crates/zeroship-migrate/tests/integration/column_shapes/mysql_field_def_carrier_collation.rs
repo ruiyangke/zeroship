@@ -24,10 +24,9 @@
 //!
 //! # And what nothing here proves: nothing reaches this arm today
 //!
-//! Measured, not assumed. `MysqlSchemaRenderer::column_type` was given a tripwire that
-//! panics on entry and the whole Rust suite was run against live PostgreSQL, MySQL and
-//! SQLite (37 sections, 3333 tests): exactly eight tests tripped it, all eight
-//! `#[cfg(test)]` unit tests inside `schema/query.rs` itself. The dialect-generic
+//! `MysqlSchemaRenderer::column_type` has no production caller: the only tests that
+//! reach it are the `#[cfg(test)]` unit tests inside `schema/query.rs` itself. The
+//! dialect-generic
 //! emitter's only production caller is the SQLite 12-step rebuild, which passes a
 //! hardcoded `SQLITE`; the `def_to_column_type_for_dialect` call sites in
 //! `render::declarative` and `schema::diff` all pass a hardcoded `POSTGRES`.

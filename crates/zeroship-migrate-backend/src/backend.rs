@@ -327,8 +327,7 @@ pub trait MigrationBackend {
     ///
     /// Existing Postgres/SQLite behavior reduces to `!m.flags.transactional`
     /// for versioned migrations because both backends report transactional DDL.
-    /// Repeatables are always forced through the transactional apply path,
-    /// matching the pre-P2a invariant.
+    /// Repeatables are always forced through the transactional apply path.
     fn uses_two_phase_path(&self, m: &Migration) -> bool {
         if m.flags.repeatable {
             return false;

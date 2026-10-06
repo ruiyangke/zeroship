@@ -143,9 +143,7 @@ impl DialectSupport {
     /// `backend_feature` declaration yields the REGISTRY's order (shipping order:
     /// `postgres, sqlite, mysql`); a decision-list declaration yields its own
     /// `decisions` order, which IS ascending because `decision_for`
-    /// binary-searches it. Callers must not treat this iterator as sorted: this
-    /// doc previously claimed ascending order for both, and an ordering assertion
-    /// written against that claim failed on a correct tree.
+    /// binary-searches it. Callers must not treat this iterator as sorted.
     pub fn dialects(&self, vendors: VendorSet) -> Box<dyn Iterator<Item = DialectId> + '_> {
         if self.backend_feature.is_some() {
             Box::new(vendors.dialects())
@@ -517,9 +515,9 @@ mod tests {
         // CENSUS FLOOR. Both axes here are DISCOVERED, and a scan over a
         // discovered set fails OPEN: shrink the registry, or shrink one
         // declaration's cells, and the loop below iterates less, finds less, and
-        // reports clean while the artifact has stopped making a claim it used to
-        // make. The three struct fields this shape replaced did that check by
-        // TYPE, for free; these two assertions are what buys it back.
+        // reports clean when the artifact makes no claim. The three struct fields
+        // this shape replaced did that check by TYPE, for free; these two assertions
+        // are what buys it back.
         assert_eq!(
             FEATURE_SUPPORT_REGISTRY.len(),
             14,

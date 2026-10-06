@@ -364,7 +364,7 @@ async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() 
     );
 
     // The journal records the REBUILD migration as Completed — the proof it ran via
-    // `rebuild_one` and NOT `run_online_backfill` (run_online_backfill journals the PG E1..C2
+    // `rebuild_one` and NOT `run_online_backfill` (run_online_backfill journals the PG expand-contract
     // expand sub-steps, a wholly different version set; here the only journaled
     // online-rename version is the single rebuild migration's).
     let applied = be.applied(&exec_cfg()).await.expect("journal");
@@ -377,7 +377,7 @@ async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() 
     // never taken). `version` is a UUIDv7 (MigrationId::generate), NOT the human
     // "expand_*"/"contract_*" name — so a name-prefix check is vacuous. Instead
     // prove it by VERSION-SET DIFFERENCE: the rename added EXACTLY the one rebuild
-    // version to the journal. run_online_backfill would journal the E1..C2 expand sub-steps
+    // version to the journal. run_online_backfill would journal the expand sub-steps
     // as *additional, distinct* versions; their absence is the load-bearing proof.
     let after: std::collections::BTreeSet<String> = applied
         .iter()

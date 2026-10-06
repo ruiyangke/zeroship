@@ -61,11 +61,10 @@ const fn vendor(variant: &'static str, reason: &'static str) -> ExprCoverage {
 
 /// The EXTRACT fields all three shipping backends render today.
 ///
-/// This expectation belongs in a test, not in the IR. It used to be structural —
-/// `ExtractField` vs `PgExtractField` — which made a claim about backends part of
-/// the wire contract and froze it there. Now widening it (MySQL's native
-/// `QUARTER`/`WEEK`/`MICROSECOND` are the obvious candidates) is a visible diff
-/// here plus a live proof, instead of a schema change.
+/// The expectation lives in a test, not in the IR: a structural carrier would make a
+/// claim about backends part of the wire contract and freeze it there. Widening it
+/// (MySQL's native `QUARTER`/`WEEK`/`MICROSECOND` are the obvious candidates) is a
+/// visible diff here plus a live proof.
 const fn is_tri_dialect_extract_field(field: ExtractField) -> bool {
     matches!(
         field,

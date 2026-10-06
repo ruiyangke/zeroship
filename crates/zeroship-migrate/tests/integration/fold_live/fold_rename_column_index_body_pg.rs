@@ -1,9 +1,9 @@
 //! Live PostgreSQL oracle for the two RENDERED-SQL index bodies a column rename has to
 //! follow, and for the differ exemption that still covers their SPELLING.
 //!
-//! ## What this file used to assert, and why that changed
+//! ## What this file asserts
 //!
-//! It used to pin the partial-index `predicate` and the text inside an
+//! It pins the partial-index `predicate` and the text inside an
 //! `IndexElementSnapshot::Expr` key as deliberately STALE. The `Op::RenameColumn` arm
 //! rewrote every STRUCTURED column name an index carries - `IndexSnapshot::columns`,
 //! the `Column` variant of `elements`, the `INCLUDE` payload and the
@@ -36,9 +36,8 @@
 //! `(amount_on_hand > 0)` and every assertion below keeps two distinct strings to
 //! compare.
 //!
-//! The differ used to byte-compare both, so that disagreement reported as drift on
-//! every introspection, forever, and no apply could clear it. It no longer compares
-//! either BODY (`apply::drift::index_expression_bodies_are_comparable`) and compares
+//! The differ exempts both BODIES
+//! (`apply::drift::index_expression_bodies_are_comparable`) and compares
 //! the REFERENCED-COLUMN SET instead, recovered structurally from `pg_depend` on the
 //! live side. This test refuses to take "the differ is quiet" as evidence: it asserts
 //! each side of the disagreement separately and only then asserts what the differ says
@@ -478,9 +477,9 @@ async fn a_rename_moves_both_folded_index_bodies_and_their_spelling_stays_unrepo
          subject; both read `{fold_expr_element}`"
     );
 
-    // The consumer that used to expose the staleness: the differ. It byte-compared a
-    // hand-rolled renderer against PostgreSQL's deparser, so the divergence above read
-    // as drift on every introspection and no apply could clear it.
+    // The consumer that would have exposed the staleness: the differ. It exempts index
+    // expression BODIES, so the divergence above does not read as drift on every
+    // introspection.
     assert!(
         stale_is_clean,
         "the differ exempts index expression BODIES, so two stale folded bodies must report \

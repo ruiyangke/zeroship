@@ -22,11 +22,10 @@
 //!
 //! # The identifier seam, resolved rather than forwarded
 //!
-//! `qid` used to call `dml::quote_ident_checked`, a PostgreSQL-PINNED wrapper that
-//! wrote a closed PostgreSQL target into its own body and resolved a renderer from it.
-//! That is a vendor asking a registry to hand it back to itself. It now asks
-//! `self`. The bytes are identical - `PostgresDmlRenderer::quote_ident` was always
-//! what that lookup resolved to - and the round trip is gone.
+//! `qid` calls `quote_ident_checked_for_backend` with its own renderer rather than
+//! through a PostgreSQL-pinned wrapper that wrote a closed PostgreSQL target into
+//! its own body and resolved a renderer from it - a vendor asking a registry to hand
+//! it back to itself. The bytes are identical, and the round trip is gone.
 //!
 //! This module is the only vendor-op renderer any registered backend ships, so an
 //! artifact carrying one of these ops measures a `DialectScope::Only` reach naming
@@ -198,10 +197,11 @@ fn type_ref_sql<'a>(value: &'a str, slot: &'static str) -> Result<&'a str, Vendo
 ///
 /// `pub(crate)` DELIBERATELY: the one door to this is
 /// `DmlRenderer::render_vendor_op`, which `crate::dml` implements by delegating
-/// here. The engine used to name this function through a re-export at this crate's
-/// root; with that gone and `mod vendor` private, a caller outside this crate cannot
-/// reach it at all. Widening this back to `pub` would hand the engine the ability to
-/// resolve one vendor by name again, which is the coupling the contract removed.
+/// here. The engine reaches it through `DmlRenderer::render_vendor_op`, not by name:
+/// `mod vendor` is private and there is no re-export at this crate's root, so a caller
+/// outside this crate cannot reach it at all. Widening this back to `pub` would hand
+/// the engine the ability to resolve one vendor by name, which is the coupling
+/// the contract removed.
 ///
 /// # Errors
 /// [`VendorError`] on an invalid identifier, an unrenderable predicate, or an
@@ -684,8 +684,6 @@ pub(crate) fn render_vendor_op(
             // A create that BROUGHT THE FUNCTION INTO BEING is undone by dropping it. A
             // REPLACE is not that: it changes the body of a function that predates the
             // migration, so dropping it destroys an object this migration never created.
-            // Rolling one back used to do exactly that and report success - the function
-            // was gone from `pg_proc` with nothing recorded as skipped.
             //
             // The faithful inverse is the PREVIOUS body, and this pure renderer sees only
             // the replacement op. The history fold retains function definitions for a later

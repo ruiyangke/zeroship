@@ -6,12 +6,10 @@
 //!
 //! # Why the question needed measuring rather than reading
 //!
-//! This file previously measured the OPPOSITE and was right to: trigger ops sat in
-//! `vendor_capabilities`'s portable-core arm returning the empty set, and
-//! `validate_vendor_op` returns `Ok` on an empty set before it can consult a backend
-//! refusal or a charter grant. Prose in two places already CLAIMED triggers were in
-//! the privileged family while the gate could not see them. The claim is now true and
-//! the prose is now checkable, which is what this file checks.
+//! The claim is that trigger ops are in the privileged family, and the gate can see
+//! them: prose in two places claims it, and this file checks it. A `vendor_capabilities`
+//! arm returning the empty set would make `validate_vendor_op` return `Ok` before it
+//! can consult a backend refusal or a charter grant.
 //!
 //! # The one axis a trigger does NOT share with the rest of the family
 //!

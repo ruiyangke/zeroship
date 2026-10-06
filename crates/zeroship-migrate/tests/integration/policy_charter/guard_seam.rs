@@ -13,9 +13,9 @@
 //!   `SQLite` feeds it descriptor-generated DDL, which must NOT be rejected.
 //! - The raw-untrusted-SQLite-SQL fail-closed survives on `SqlGuard` itself: a
 //!   SQLite-keyed `SqlGuard` (the PG guard mis-handed a `SQLite` config) still
-//!   refuses with `RawSqlRejected { dialect: SQLITE }` rather than mis-parsing — the defensive
-//!   property the engine no longer relies on (it routes `SQLite` through
-//!   `SqliteGuard`), kept as a backstop for the wrong caller.
+//!   refuses with `RawSqlRejected { dialect: SQLITE }` rather than mis-parsing - a
+//!   defensive property kept as a backstop for the wrong caller (the engine routes
+//!   `SQLite` through `SqliteGuard`).
 //! - `guard_for` selects the right per-engine guard by dialect, with no by-name
 //!   `SQLite` knowledge in the core.
 
@@ -28,7 +28,7 @@ use zeroship_migrate_postgres::guard::SqlGuard;
 /// allowlist = `pgcrypto` + `uuid-ossp` (mirrors the `guard_security` matrix).
 ///
 /// Built through [`guard_for`] rather than by naming `PgGuard`. The engine's crate
-/// root no longer re-exports the three vendor guard TYPES, so a test cannot name one
+/// root does not re-export the vendor guard types, so a test cannot name one
 /// — which is the point: the only way to reach a vendor's line-1 is the registry the
 /// engine itself goes through. `zeroship-migrate-postgres`'s `BackendVendor::guard` is
 /// `PgGuard::from_config(cfg.clone())`, so this is the same guard the deleted
@@ -130,8 +130,8 @@ fn sqlite_descriptor_guard_passes_descriptor_create_table() {
 #[test]
 fn sqlite_keyed_sqlguard_rejects_raw_sql_backstop() {
     // A raw, untrusted SQLite string handed to the PG guard (a SQLite-keyed config)
-    // is refused rather than mis-parsed by libpg_query — the defensive property the
-    // engine no longer relies on (it routes SQLite through SqliteGuard).
+    // is refused rather than mis-parsed by libpg_query - a defensive property kept as a
+    // backstop for the wrong caller (the engine routes SQLite through SqliteGuard).
     let guard = SqlGuard::new(GuardConfig::from_policy(
         crate::support::no_inject("project_acme"),
         zeroship_migrate_sqlite::DIALECT,

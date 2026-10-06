@@ -5,11 +5,8 @@
 //! that mask is the kernel default the `encrypted` facet unambiguously implies.
 //!
 //! A STANDALONE `.mask()` on a PLAINTEXT column (`t.string().mask({ kind: "last4" })`)
-//! used to be DROPPED: the IR `IrColumn` had no `mask` field, and the offline op fold
-//! has no live `zero-migrate:mask` COMMENT sentinel to read (the runtime's recovery source). So
-//! the creator's `MaskedValue<string>` silently downgraded to `string`, AND the op lower
-//! emitted no sentinel — so the RUNTIME (which DOES read the sentinel) never masked the
-//! field either.
+//! persists through the IR and the offline op fold: `IrColumn.mask` carries it, and
+//! the runtime reads the `zero-migrate:mask` COMMENT sentinel.
 //!
 //! BOTH gaps are closed by CARRYING the mask on `IrColumn.mask` (and `Op::AddColumn`):
 //!   1. the producer `descriptors_to_create_ops` carries a standalone mask onto

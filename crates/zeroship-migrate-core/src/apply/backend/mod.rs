@@ -53,9 +53,9 @@
 //! `dyn`, no `async-trait` allocation on the apply hot path.
 
 pub mod capability;
-// PostgreSQL used to sit here, and SQLite and MySQL beside it. All three are
+// The three shipping backends live in their own crates:
 // `zeroship_migrate_postgres::backend`, `zeroship_migrate_sqlite::backend` and
-// `zeroship_migrate_mysql::backend` now, and none is re-exported from here.
+// `zeroship_migrate_mysql::backend`, none re-exported from here.
 
 pub use capability::{
     BackendCapability, BackfillError, BackfillOutcome, BackfillSpec, DryRunError, DryRunReport,

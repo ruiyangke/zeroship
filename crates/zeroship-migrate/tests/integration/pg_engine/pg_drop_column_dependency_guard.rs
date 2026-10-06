@@ -218,10 +218,9 @@ async fn masked_drop_column_checks_the_sibling_unit_and_names_its_blocker() {
 
     // The layout the platform emits AFTER the storage flip: the field's own
     // column holds the mask and carries the sentinel; `__zs_raw__ssn` holds the
-    // real value. The pair is named the other way round from what this fixture
-    // used to hand-write, and the drop's two-unit shape is unchanged by that -
-    // which is the point of restating the fixture rather than leaving it
-    // describing a layout nothing produces.
+    // real value. The fixture names the pair the other way round, and the drop's
+    // two-unit shape is unchanged by that - which is the point of restating the fixture
+    // rather than leaving it describing a layout nothing produces.
     //
     // `sensitive_column` is the one the view blocks, so it is the one the drop
     // must refuse on; `field_column` is the one the drop starts from.

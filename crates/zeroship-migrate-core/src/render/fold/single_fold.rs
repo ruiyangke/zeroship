@@ -910,8 +910,7 @@ impl FoldedSchema {
     }
 
     /// **Projection 3: the authoring tables.** The source model `env.db.ts` is
-    /// rendered from, and LIVE - `render_artifacts` reads this, and
-    /// The separate walker that used to produce it is deleted.
+    /// rendered from, and LIVE - `render_artifacts` reads this.
     #[must_use]
     pub(crate) fn project_authoring_tables(&self) -> BTreeMap<String, AuthoringTable> {
         self.authored

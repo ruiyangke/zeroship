@@ -51,7 +51,7 @@ fn main() {
 fn workspace_source_digest() -> String {
     // `clippy.toml` bans `std::env::var` and points at
     // `zeroship_core::declared_env!`. That macro is real
-    // (`zeroship-core/src/config/declared.rs:634`) but UNREACHABLE from here:
+    // (`crates/zeroship-core/src/config/declared.rs`, the `declared_env!` macro) but UNREACHABLE from here:
     // using it needs `zeroship-core` as a BUILD-dependency, and
     // `cargo tree -p zeroship-core -e normal -i tokio` shows it reaching tokio
     // through `cyper -> hyper` on two paths. A tokio edge is permitted only for

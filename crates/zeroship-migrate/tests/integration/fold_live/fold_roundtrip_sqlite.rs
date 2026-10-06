@@ -192,8 +192,8 @@ fn canonicalize(mut snap: SchemaSnapshot) -> SchemaSnapshot {
 ///
 /// Called after every stage rather than once at the end of the corpus. A create
 /// and a drop of the same object cancel in the folded snapshot, so a single
-/// trailing comparison observes neither: `notes_tag_idx` is created in stage 4
-/// and dropped in stage 5, and folding both at once yields the same snapshot a
+/// trailing comparison observes neither: `notes_tag_idx` is created and dropped
+/// within the folded stream, so folding both at once yields the same snapshot a
 /// fold that ignored `createIndex` and `dropIndex` entirely would yield.
 async fn assert_matches_live(be: &SqliteBackend, ops: &[Op], stage: &str) {
     let live = be

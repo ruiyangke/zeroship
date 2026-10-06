@@ -331,7 +331,7 @@ const DIVERGENCES: &[Divergence] = &[
     // ROWS RETIRE WITH THEIR LEG, not fixed away and not lost.
     //
     // `v_primary_key|{Postgres,Sqlite,Mysql}|authoring_tables` recorded
-    // `line 45: fold "legacy_id," walker "id,"` - the authoring-table walker's missing
+// `fold "legacy_id," vs walker "id,"` - the authoring-table walker's missing
     // `Op::AlterPrimaryKey` arm meant `env.db.ts` kept the primary key the migration
     // replaced. The defect it named is pinned
     // at the artifact level in
@@ -536,7 +536,7 @@ const EQUAL_COMPARISONS: usize = 680;
 /// Every one of the 12 belonged to a leg that has retired, and the `snapshot` leg
 /// contributed none of them at any point. What the number says is that the only
 /// comparison left in this file is one that has never differed; what it does not say is
-/// anything at all about the three artifact projections, whose evidence now lives in
+/// the evidence for the three artifact projections lives in
 /// three artifact-level gates.
 const DIFFERING_COMPARISONS: usize = 0;
 /// Prefixes both sides refuse.
@@ -1101,8 +1101,7 @@ fn a_dropped_check_constraint_does_not_outlive_itself_in_the_field_def_map() {
     let effective = policy(false);
 
     // The bound is really recovered while the constraint is live, or the drop below
-    // proves nothing. Measured through the projection, since the walker that used to
-    // answer this is gone.
+    // proves nothing. Measured through the projection.
     let with_check = single_fold::fold(
         crate::test_fixtures::VENDORS,
         &ops[..2],

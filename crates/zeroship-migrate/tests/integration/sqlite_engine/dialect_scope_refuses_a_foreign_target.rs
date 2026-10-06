@@ -191,9 +191,8 @@ fn a_single_leg_dialect_expression_pins_the_plan_too() {
     );
 }
 
-/// THE REMEDY IS TRUE. The renderer's refusal used to advise
-/// `dialect_scope=PgOnly` — a variant that does not exist, on a facet no author
-/// writes. This drives the REAL load gate and reads what an operator is actually
+/// THE REMEDY IS TRUE. The renderer's refusal advises an escape that exists. This
+/// drives the REAL load gate and reads what an operator is actually
 /// told, then holds that text to the escape that exists.
 ///
 /// Pairing it with `a_single_leg_dialect_expression_pins_the_plan_too` is the point:

@@ -546,7 +546,7 @@ fn of_and_of_ir_never_collide_even_with_equal_length_regions() {
     );
 }
 
-/// Dialect stability (spec line 1267): a portable migration's `of_ir` is
+/// Dialect stability (the byte-stability contract): a portable migration's `of_ir` is
 /// IDENTICAL across the PG and `SQLite` renders, because `of_ir` is dialect-neutral
 /// by construction (no dialect parameter; it hashes the neutral op list + the
 /// derived-then-overridden flags). This pins the single-artifact / single-checksum
@@ -566,7 +566,7 @@ fn checksum_of_ir_is_identical_across_dialect_renders() {
     // A `createIndex { concurrently: true }` is the canonical case where the
     // per-dialect LOWERING diverges: PG keeps `transactional:false` + the
     // CONCURRENTLY; SQLite forces `transactional:true` and drops CONCURRENTLY
-    // (spec line 257). The IR-level flags fed to `of_ir` are the DIALECT-NEUTRAL
+    // (the checksum contract). The IR-level flags fed to `of_ir` are the DIALECT-NEUTRAL
     // derived+overridden flags — the SAME struct for both renders.
     let neutral_flags = MigrationFlags {
         transactional: false, // the neutral derived value (concurrent index)
@@ -638,8 +638,8 @@ fn checksum_of_ir_is_identical_across_dialect_renders() {
 ///    `ir_version` bump needed).
 ///  - an FK that DOES set an action (`onDelete: cascade`) produces a brand-new
 ///    shape with the key present — a different (new) checksum. There is no
-///    persisted checksum for an FK-with-actions to preserve (it was previously
-///    unbuildable), so the new bytes are correct.
+///    persisted checksum for an FK-with-actions to preserve, so the new bytes are
+///    correct.
 #[test]
 fn checksum_of_ir_fk_actions_are_additive_neutral_and_sensitive() {
     use zeroship_migrate::model::ir::{IrConstraint, IrConstraintKind, RefAction};

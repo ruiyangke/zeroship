@@ -22,7 +22,7 @@
 //! preview emits a CLEARLY-LABELED `-- [runtime-resolved] ...` comment line and
 //! **NEVER fabricates SQL**:
 //!
-//! - **online `renameColumn`** - PG expand-contract (E1..C2) carries a windowed
+//! - **online `renameColumn`** - the PG expand-contract set carries a windowed
 //!   runtime BACKFILL (`BackfillSpec`, exact statement stream depends on live row
 //!   count / PK ranges) and a cross-deploy CONTRACT cutover; SQLite needs the live
 //!   12-step rebuild (it does not even lower offline - fails closed with

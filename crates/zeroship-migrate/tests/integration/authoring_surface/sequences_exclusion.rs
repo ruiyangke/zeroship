@@ -850,10 +850,9 @@ fn an_over_long_index_name_is_refused() {
         err.reason
     );
     // The refusal must name the target it ASKED, not a vendor compiled into the
-    // message. This sentence used to read "PostgreSQL truncates identifiers to 63
-    // bytes" on EVERY target, including the two that do not truncate; it is now the
-    // answer `existence_probe.truncated_identifier` gave for this backend, so the
-    // dialect appearing here is the one under test rather than a coincidence.
+// message. The sentence is the answer `existence_probe.truncated_identifier` gives
+// for this backend, so the dialect appearing here is the one under test rather than a
+// coincidence.
     assert!(
         err.reason.contains(zeroship_migrate_postgres::DIALECT.as_str()),
         "the truncation reason must name the target that truncates, got {:?}",

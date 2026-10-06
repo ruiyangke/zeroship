@@ -382,9 +382,9 @@ fn support_declarations_cover_every_op_and_dialect() {
 
 /// A BRIN index's `pages_per_range`, in the wire form the op now carries.
 ///
-/// This fixture used to build `IndexStorageParams { pages_per_range: Some(16), .. }`. The
-/// same value is now an ordinary declared attribute, so the case still exercises "this
-/// index has storage parameters" rather than quietly becoming an empty one.
+/// This fixture builds the index attributes directly: the same value as an ordinary
+/// declared attribute, so the case still exercises "this index has storage parameters"
+/// rather than quietly becoming an empty one.
 fn brin_pages_per_range(value: i64) -> zeroship_migrate_ir::attribute::CreateIndexAttributes {
     let mut carried = zeroship_migrate_ir::attribute::Attributes::new();
     carried.insert(

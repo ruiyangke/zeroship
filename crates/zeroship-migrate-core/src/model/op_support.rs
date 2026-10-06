@@ -11,8 +11,7 @@
 //! foreign `Op` type through free functions taking `&Op`.
 //!
 //! Call sites use `op_support::support(op)` / `op_support::vendor_capabilities(op)`
-//! / `op_support::op_variant(op)` exactly where they previously wrote
-//! `op.support()` etc.
+//! / `op_support::op_variant(op)` rather than `op.support()` etc.
 #![allow(clippy::too_many_lines, clippy::match_same_arms)]
 
 use crate::model::expr::Expr;

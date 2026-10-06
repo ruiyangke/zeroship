@@ -2,15 +2,9 @@
 //!
 //! # What this test is for
 //!
-//! `DmlRenderer::dialect` and `SchemaRenderer::dialect` used to return
-//! a closed enum owned by `zeroship-migrate-ir`. A vendor crate cannot construct a
-//! variant of a closed enum it does not own, so the only body that type-checked
-//! in a fourth backend was
-//! `todo!()`: the crate compiled and then panicked the first time anything asked
-//! it who it was. That is not a registry problem - a stub fourth backend already
-//! registers and is REACHED through the real registry - it is a signature
-//! problem, and it is the one thing that stopped a vendor crate from lowering a
-//! migration.
+//! A vendor crate cannot construct a variant of a closed dialect enum it does not
+//! own, so a `dialect()` signature returning one leaves a fourth backend with no
+//! body that type-checks. Returning a [`DialectId`] removes that.
 //!
 //! Both methods return [`DialectId`] now. This file is the proof: `DuckDb` below
 //! is a complete outsider. It is declared in a test binary, while the contract
@@ -1266,10 +1260,8 @@ fn a_fourth_backend_answers_dialect_with_its_own_id() {
     assert!(!dml.supports(Capability::PrivilegedCatalogObjects));
     assert!(!dml.supports(Capability::MaterializedView));
     // The outsider's PARTITION posture, stated in the same one place it states
-    // everything else about itself. This used to be a required
-    // a native-partitioning predicate on ValidationPolicy - a method the outsider had
-    // to implement but whose answer nothing ever checked. It is a descriptor row
-    // now, which means the outsider's NO is the ordinary consequence of not
+    // everything else about itself. The PARTITION posture is a descriptor row,
+    // so the outsider's NO is the ordinary consequence of not
     // claiming a capability rather than a separate contract to satisfy, and it
     // fails closed if a future author forgets it exists.
     assert!(!dml.supports(Capability::PartitionRelationDdl));

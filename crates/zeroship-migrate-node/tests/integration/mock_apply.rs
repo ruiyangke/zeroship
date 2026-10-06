@@ -10,9 +10,8 @@
 //!    monomorphizes and runs the whole DDL + lock + journal flow generically over
 //!    the host bridge (the convergence point) - a real behavioral assertion, not
 //!    just "no error". The backend wrapper is explicit at the call site because
-//!    `executor::apply` takes a `MigrationBackend`; it used to take the session and
-//!    build the PostgreSQL backend internally, which is the vendor choice that no
-//!    longer lives in the executor;
+//!    `executor::apply` takes a `MigrationBackend`; the backend wrapper is explicit
+//!    at the call site, because the vendor choice does not live in the executor;
 //! 2. the recorded verb sequence contains the expected structural landmarks
 //!    (advisory lock acquire -> confinement SET -> the migration's `up` DDL ->
 //!    journal write-back -> advisory unlock), in order;

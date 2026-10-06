@@ -750,7 +750,7 @@ fn decide(current: Mode, ctx: &AuthContext<'_>) -> Authorization {
         // CREATE TABLE/INDEX/TRIGGER/VIEW behind the fence: only the engine may
         // create journal objects (bootstrap). Creator mode denied - which is also
         // what stops a creator CLAIMING a fenced name before the engine bootstraps
-        // it, the collision the separate file used to make impossible.
+        // it, the collision the combined authorizer prevents.
         AuthAction::CreateTable { .. }
         | AuthAction::CreateIndex { .. }
         | AuthAction::CreateTrigger { .. }

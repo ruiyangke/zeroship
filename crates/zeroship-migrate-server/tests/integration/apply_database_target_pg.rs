@@ -554,8 +554,7 @@ async fn an_apply_that_commits_a_schema_delta_mints_no_binding_role_and_retires_
 /// Every `zs_bind_` role on the cluster, in catalog order.
 ///
 /// The WHOLE set rather than one name: an assertion that only looked for the
-/// role it expected would pass over an apply that minted a second one beside
-/// it, which is exactly what a rotation used to do.
+/// role it expected would pass over an apply that minted a second one beside it.
 async fn binding_roles(cluster: &Client) -> Vec<String> {
     cluster
         .query(

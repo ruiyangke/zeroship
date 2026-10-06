@@ -2,9 +2,10 @@
 //!
 //! PostgreSQL caps identifiers at 63 bytes (NAMEDATALEN) and truncates anything longer
 //! with only a NOTICE. The engine keeps the AUTHORED name while the catalog keeps the
-//! TRUNCATED one. That used to make a guarded drop probe the AUTHORED name against the
-//! INTROSPECTED snapshot, never match the truncated catalog name, decide the work was
-//! already done, skip the statement, and journal it COMPLETED while the object survived.
+//! TRUNCATED one. A guarded drop that probes the AUTHORED name against the
+//! INTROSPECTED snapshot would never match the truncated catalog name, decide the work
+//! was already done, skip the statement, and journal it COMPLETED while the object
+//! survived.
 //!
 //! The hazard is now closed at two seams, and this suite exercises both against a live
 //! server:

@@ -598,8 +598,8 @@ fn raw_view_body_native_quoting_is_not_judged_by_the_postgres_parser() {
                 dialect.as_str()
             )
         });
-        // PostgreSQL still refuses both — it is not that the check was deleted, it
-        // is that the check belongs to whichever backend owns the grammar.
+// PostgreSQL still refuses both: the check is present and belongs to whichever
+// backend owns the grammar.
         let err = validate_ir_scoped(
             zeroship_migrate::shipping_vendors(),
             &ir(raw_view(sql, None)),

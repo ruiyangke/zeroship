@@ -87,7 +87,7 @@ fn drop_doc(guarded: bool) -> String {
 /// Apply one IR doc through the real lower + apply path against live `PostgreSQL`.
 ///
 /// `history` accumulates the applied op stream and is folded into the live schema
-/// the way the deploy path does it (`refresh_historical_live`, engine.rs:390-392).
+/// the way the deploy path does it (`refresh_historical_live` in `zeroship_migrate_core::engine`).
 async fn apply_doc(
     session: &PgDevSession,
     cfg: &ExecutorConfig,

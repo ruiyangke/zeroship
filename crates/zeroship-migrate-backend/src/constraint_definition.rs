@@ -36,9 +36,8 @@
 //!
 //! [`fk_definition`] and [`fk_constraint_snapshot`] do need one vendor fact apiece
 //! (its canonical FK action fold, its FK target spelling, its capability row), so
-//! they take a `&BackendVendor` PARAMETER. They used to resolve one from a
-//! `DialectId` through the engine's registry, which is exactly what a vendor crate
-//! may not do. The engine RESOLVES and hands the vendor down; a vendor hands its OWN
+//! they take a `&BackendVendor` PARAMETER. A vendor crate cannot resolve one from a
+//! `DialectId` through the engine's registry. The engine RESOLVES and hands the vendor down; a vendor hands its OWN
 //! `VENDOR` down and never asks. `zeroship_migrate::render::declarative` keeps the
 //! dialect-taking shims its in-engine callers use, the same split
 //! `existence_probe::decide` draws.

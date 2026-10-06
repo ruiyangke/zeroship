@@ -67,10 +67,10 @@ use zeroship_migrate_ir::dialect::DialectId;
 /// `pub` surfaces whose callers hand in a dialect) and CALLER-FIXED TARGETS (the
 /// functions that name PostgreSQL because they ARE PostgreSQL).
 ///
-/// The distinction is what the crate split turned on, and it is now past tense: a boundary
+/// The distinction is what the crate split turned on: a boundary
 /// resolution survived the move to per-vendor crates by becoming this registry
-/// composition, while a point-of-use lookup could not - it is the engine reaching for
-/// a vendor list it no longer has. Adding one back inside an emitter re-creates the
+/// composition, while a point-of-use lookup cannot - it would be the engine reaching
+/// for a vendor list it does not carry. Adding one back inside an emitter re-creates the
 /// blocker.
 pub fn renderer(vendors: VendorSet, dialect: &DialectId) -> &'static dyn SchemaRenderer {
     crate::render::backends::schema_renderer(vendors, dialect)

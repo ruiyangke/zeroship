@@ -315,9 +315,8 @@ async fn a_retype_a_view_blocks_applies_nothing_at_all() {
 
 /// Case 2: a GENERATED column reads the column.
 ///
-/// `cannot alter type of a column used by a generated column`. `render/lower.rs`
-/// used to carry a comment calling this case "Unreachable through this replay
-/// today"; the fixture below is an ordinary `createTable`, so it is reachable.
+/// `cannot alter type of a column used by a generated column`. The fixture below is
+/// an ordinary `createTable`, so the case is reachable.
 #[compio::test]
 async fn a_retype_a_generated_column_reads_applies_nothing_at_all() {
     let setup = format!(

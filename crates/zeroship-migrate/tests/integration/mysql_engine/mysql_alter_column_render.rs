@@ -1,8 +1,8 @@
 //! MySQL alter-column ops: one is restated, one is refused, two are corrected. The
 //! split is the point of this file.
 //!
-//! Every one of these renderers used to emit PostgreSQL syntax with double-quoted
-//! identifiers on all three dialects, so nothing here executed on MySQL:
+//! Every one of these renderers emits MySQL syntax. PostgreSQL syntax with
+//! double-quoted identifiers would execute on none of them, e.g.:
 //!
 //!     ALTER TABLE "app"."accounts" ALTER COLUMN "nickname" TYPE INT USING "nickname"::INT
 //!     ALTER TABLE "app"."accounts" ALTER COLUMN "nickname" SET NOT NULL
@@ -162,10 +162,9 @@ fn set_column_not_null_op() -> Op {
 
 /// A MySQL retype lowers to a RESTATE step and emits no PostgreSQL syntax.
 ///
-/// This test used to assert the refusal, and the refusal is gone. What it protected
-/// is not: the property that matters here is that MySQL never receives
-/// `ALTER COLUMN … TYPE`, and that is still asserted - more strongly, because it now
-/// also has to hold for a lowering that SUCCEEDS. A refusal makes "emits no
+/// This test asserts the restated column: the property that matters is that MySQL
+/// never receives `ALTER COLUMN ... TYPE`, and that is asserted - more strongly,
+/// because it also has to hold for a lowering that SUCCEEDS. A refusal makes "emits no"
 /// PostgreSQL syntax" vacuously true.
 ///
 /// The definition `MODIFY COLUMN` needs is read from `SHOW CREATE TABLE` at apply;
