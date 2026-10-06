@@ -30,6 +30,9 @@
     "test": "node --import tsx --test test/*.test.ts"
   },
   "license": "MIT",
+  "peerDependencies": {
+    "superjson": "^2.2.6"
+  },
   "peerDependenciesMeta": {
     "superjson": {
       "optional": true
@@ -39,11 +42,9 @@
     "@arethetypeswrong/cli": "^0.18.2",
     "@types/node": "catalog:",
     "publint": "^0.3.21",
+    "superjson": "^2.2.6",
     "tsup": "^8.5.1",
     "tsx": "catalog:",
     "typescript": "catalog:"
-  },
-  "optionalDependencies": {
-    "superjson": "^2.2.6"
   }
 }

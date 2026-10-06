@@ -268,23 +268,31 @@ fn from_bytes_rejects_unknown_tag() {
 
 // ---- npm-side deserialize compatibility (shells out to node) ----
 
-/// The directory the npm `superjson` this test cross-checks against is
-/// installed into.
+/// The repository checkout this crate is tested inside.
+fn workspace_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf()
+}
+
+/// Where the workspace install provisions the npm `superjson` the wire fixtures
+/// are the contract for.
 ///
-/// NOTHING IN THIS REPOSITORY CREATES IT. The comment below used to say it was
-/// "created in the setup phase"; there is no such phase - no script, no
-/// workflow step, no fixture target anywhere in the tree writes this path. The
-/// remedy in the refusal is therefore two commands a developer runs by hand,
-/// not a script to point at.
-const NPM_FIXTURE_DIR: &str = "/tmp/sj-fixture";
+/// `@zeroship/rpc` declares superjson as a devDependency, so the workspace
+/// install places it at `packages/rpc/node_modules/superjson`.
+fn superjson_package_dir() -> std::path::PathBuf {
+    workspace_root().join("packages/rpc/node_modules/superjson")
+}
 
 /// Refuse the run unless `node` answers `node --version`.
 ///
 /// # Panics
 ///
-/// When node is absent. It used to announce a skip, so the one test that proves
-/// npm accepts what we emit - the wire-format contract this file exists to
-/// hold - reported green wherever node was not installed.
+/// When node is absent. This is the one test that proves npm accepts what
+/// we emit - the wire-format contract this file exists to hold.
 fn require_node() {
     let answered = std::process::Command::new("node")
         .arg("--version")
@@ -302,8 +310,7 @@ fn require_node() {
          catch a fixture and an encoder that drifted together.\n\
          \n\
          Install node, then provision the package fixture:\n\
-         \x20 mkdir -p {NPM_FIXTURE_DIR}\n\
-         \x20 cd {NPM_FIXTURE_DIR} && npm install superjson@2\n\
+         \x20 pnpm install --frozen-lockfile\n\
          \n\
          There is no environment variable that makes this a skip."
     );
@@ -314,30 +321,26 @@ fn require_node() {
 #[test]
 fn npm_deserialize_accepts_our_bytes() {
     require_node();
-    // The npm package lives in an untracked tmpdir. `package.json` is the file
-    // probed rather than the directory, because an interrupted install leaves a
-    // `superjson/` that node cannot resolve, and a directory check would call
-    // that present.
-    let tmp = NPM_FIXTURE_DIR;
-    let manifest = format!("{tmp}/node_modules/superjson/package.json");
+    let package = superjson_package_dir();
+    let manifest = package.join("package.json");
     assert!(
-        std::path::Path::new(&manifest).exists(),
+        manifest.is_file(),
         "The npm `superjson` fixture is missing, and this test requires it.\n\
          \n\
          \x20 backend: the npm `superjson` package, run under node\n\
-         \x20 wanted:  {manifest}\n\
+         \x20 wanted:  {}\n\
          \n\
-         NOTHING IN THIS REPOSITORY PROVISIONS THIS PATH - no script, no CI\n\
-         step. Install it by hand:\n\
-         \x20 mkdir -p {tmp}\n\
-         \x20 cd {tmp} && npm install superjson@2\n\
+         The package is owned by the `packages/rpc` devDependency and is\n\
+         installed by:\n\
+         \x20 pnpm install --frozen-lockfile\n\
          \n\
          The major version matters: the fixtures in tests/superjson_fixtures/\n\
          are the 2.x wire format, and this test asserts that npm accepts what we\n\
          emit for it.\n\
          \n\
          There is no environment variable that makes this a skip. Without the\n\
-         package, nothing checks our encoder against the real receiver."
+         package, nothing checks our encoder against the real receiver.",
+        manifest.display()
     );
 
     for name in ["composite", "date", "bigint", "map", "set", "url", "regexp"] {
@@ -346,16 +349,18 @@ fn npm_deserialize_accepts_our_bytes() {
         let our = superjson::to_bytes(&env);
         let our_str = std::str::from_utf8(&our).unwrap();
 
-        // Verify npm can deserialize our output without error.
+        // Verify npm can deserialize our output without error. The package is
+        // required by absolute path, so node resolves this checkout's copy
+        // wherever the test process runs.
         let out = std::process::Command::new("node")
-            .current_dir(tmp)
             .arg("-e")
             .arg(
-                "const s=require('superjson');\
-                 const env=JSON.parse(process.argv[1]);\
+                "const s=require(process.argv[1]);\
+                 const env=JSON.parse(process.argv[2]);\
                  const v=s.deserialize(env);\
                  process.stdout.write('ok');",
             )
+            .arg(&package)
             .arg(our_str)
             .output()
             .expect("spawn node");
