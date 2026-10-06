@@ -38,8 +38,6 @@ const SETTLE_WITHIN: Duration = Duration::from_secs(10);
 ///   milliseconds and never ends.
 /// - `/light` does the same kind of work at a small share of wall time and
 ///   answers once it has run across several windows.
-/// - `/oom` allocates past the heap cap, for the case that needs a recovered
-///   heap kill on the isolate first.
 /// - anything else answers synchronously.
 ///
 /// The `ticks` procedure streams through native RPC: every item is produced by
@@ -93,16 +91,6 @@ const SOURCE: &str = r#"
                     };
                     setTimeout(step, 20);
                 });
-            }
-            if (path === "/oom") {
-                const live = [];
-                let sink = 0;
-                for (let i = 0; i < 400; i++) {
-                    const s = "x".repeat(1024 * 1024) + i;
-                    sink += s.charCodeAt(s.length - 2);
-                    live.push(s);
-                }
-                return new Response(`allocated ${live.length} ${sink}`);
             }
             return new Response("sync");
         },
@@ -324,40 +312,6 @@ fn host_quarantine_fails_a_body_still_streaming_with_its_own_reason() {
         let (received, error) = read_to_end(&body_reader).await;
         assert!(received.starts_with("drip 0\n"), "the body was streaming: {received:?}");
         assert_eq!(error.as_deref(), Some("runtime has been quarantined"));
-    });
-}
-
-/// The cause is the CPU budget even on an isolate whose last detected
-/// termination was a heap kill it recovered from. The stop names its own
-/// cause rather than reporting whichever limit fired last.
-#[test]
-fn a_recovered_heap_kill_does_not_rename_a_pump_share_stop() {
-    let runtime = budgeted().heap_limit_mb(32).build();
-    compio::runtime::Runtime::new().unwrap().block_on(async {
-        runtime.start_pump();
-        let heap_before = zeroship_runtime::heap_limit_callback_hits();
-        let killed = match dispatch(&runtime, "/oom") {
-            FetchOutcome::Response { status, body, .. } => {
-                Ok((status, String::from_utf8_lossy(&body).into_owned()))
-            }
-            FetchOutcome::Pending { rx, .. } => settled("/oom", &rx).await,
-            _ => panic!("/oom answers with a buffered response or an error"),
-        };
-        assert!(
-            zeroship_runtime::heap_limit_callback_hits() > heap_before,
-            "the premise: the heap cap fired on this isolate"
-        );
-        match killed {
-            Ok((status, body)) => assert!(
-                !(200..300).contains(&status),
-                "the premise: /oom is refused by the heap cap, got {status}: {body}"
-            ),
-            Err(error) => assert_eq!(error.message, "memory limit exceeded", "the premise"),
-        }
-        assert_eq!(answered(&runtime, "/"), (200, "sync".into()), "a heap kill is recovered");
-
-        let spinning = pending(&runtime, "/spin");
-        assert_cpu_stop("/spin", settled("/spin", &spinning).await);
     });
 }
 

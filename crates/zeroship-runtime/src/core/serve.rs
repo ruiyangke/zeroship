@@ -2708,23 +2708,18 @@ mod dev_isolate_replacement_tests {
         }
     }
 
-    /// A request the isolate's pump answers, then the next request to the same
-    /// server. The stopped request is answered with the CPU stop's error; the
-    /// request after it runs on a fresh isolate and gets the app's normal body.
-    #[test]
-    fn the_request_after_a_pump_share_stop_runs_on_a_fresh_isolate() {
-        init_v8();
-        const SPIN_REQUEST: &str = "GET /spin HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    /// Send `stop_request`, then a request for `/`, over one connection to a
+    /// server whose slot starts from `plan`, and return both answers.
+    fn the_request_after_a_stop(plan: RuntimePlan, stop_request: &'static str) -> ((u16, String), (u16, String)) {
         const ROOT_REQUEST: &str = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
-
-        let (stopped, after) = block_on(async {
+        block_on(async {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
             let client = compio::runtime::spawn(async move {
                 let mut stream = TcpStream::connect(address).await.unwrap();
                 let mut pending = Vec::new();
-                let BufResult(wrote, _) = stream.write_all(SPIN_REQUEST.as_bytes().to_vec()).await;
-                wrote.expect("the spin request is written");
+                let BufResult(wrote, _) = stream.write_all(stop_request.as_bytes().to_vec()).await;
+                wrote.expect("the stopping request is written");
                 let stopped = read_response(&mut stream, &mut pending).await;
                 let BufResult(wrote, _) = stream.write_all(ROOT_REQUEST.as_bytes().to_vec()).await;
                 wrote.expect("the follow-up request is written");
@@ -2733,12 +2728,24 @@ mod dev_isolate_replacement_tests {
             });
 
             let (stream, _) = listener.accept().await.unwrap();
-            let slot = Rc::new(RuntimeSlot::new(spin_plan()));
+            let slot = Rc::new(RuntimeSlot::new(plan));
             let env = Rc::new(EnvSnapshot::empty());
             let dev_auth = Rc::new(crate::dev_auth::DevAuthSettings::default());
             handle_connection(stream, slot, env, dev_auth).await;
             client.await.unwrap()
-        });
+        })
+    }
+
+    /// A request the isolate's pump answers, then the next request to the same
+    /// server. The stopped request is answered with the CPU stop's error; the
+    /// request after it runs on a fresh isolate and gets the app's normal body.
+    #[test]
+    fn the_request_after_a_pump_share_stop_runs_on_a_fresh_isolate() {
+        init_v8();
+        let (stopped, after) = the_request_after_a_stop(
+            spin_plan(),
+            "GET /spin HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
 
         let (stopped_status, stopped_body) = stopped;
         assert_eq!(
@@ -2748,6 +2755,59 @@ mod dev_isolate_replacement_tests {
         assert!(
             stopped_body.contains("CPU time limit exceeded"),
             "the stop is the cause: {stopped_body}"
+        );
+
+        let (after_status, after_body) = after;
+        assert_eq!(
+            after_status, 200,
+            "the request after the stop is accepted: {after_body}"
+        );
+        assert_eq!(after_body, "served", "it runs on an isolate that answers");
+    }
+
+    /// The app: `/huge`, from a timer its request waits on, makes one
+    /// allocation several times the isolate's heap cap; every other path
+    /// answers normally.
+    const HEAP_APP: &str = r#"
+        export default {
+            fetch(request) {
+                if (new URL(request.url).pathname === "/huge") {
+                    return new Promise(() => setTimeout(() => new Array(20_000_000).fill(1.5), 0));
+                }
+                return new Response("served");
+            }
+        }
+    "#;
+
+    /// A request whose allocation reaches the isolate's heap cap, then the
+    /// next request to the same server. The stopped request is answered with
+    /// the heap cap's error; the request after it runs on a fresh isolate and
+    /// gets the app's normal body.
+    #[test]
+    fn the_request_after_a_heap_cap_stop_runs_on_a_fresh_isolate() {
+        init_v8();
+        let plan = RuntimePlan {
+            heap_limit_bytes: Some(64 << 20),
+            modules: vec![ModuleEntry {
+                specifier: "index.js".into(),
+                source: HEAP_APP.into(),
+            }],
+            pump_cpu_budget: None,
+            ..spin_plan()
+        };
+        let (stopped, after) = the_request_after_a_stop(
+            plan,
+            "GET /huge HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+
+        let (stopped_status, stopped_body) = stopped;
+        assert_eq!(
+            stopped_status, 500,
+            "the stopped request is answered, not stranded: {stopped_body}"
+        );
+        assert!(
+            stopped_body.contains("memory limit exceeded"),
+            "the heap cap is the cause: {stopped_body}"
         );
 
         let (after_status, after_body) = after;

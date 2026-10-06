@@ -19,13 +19,13 @@ creator-assignable, and `unlimited` is operator-only.
 | --- | --- | --- | --- |
 | free | 50 ms | 5 s | 64 MB |
 | pro | 30 s | 30 s | 256 MB |
-| unlimited | none | none | none |
+| unlimited | none | none | 128 MB |
 
 - An app with no plan, or whose plan cannot be read, runs at the **free** tier,
   never unbounded. Read the plan actually in force with
   `GET /api/apps/{id}/billing-status` before you size behavior to a higher tier.
-- **unlimited** removes all three caps and is assigned by an operator, never by
-  an app.
+- **unlimited** removes the CPU budget and the wall timeout, keeps a 128 MB
+  heap cap, and is assigned by an operator, never by an app.
 - The rows above are built-in defaults. The catalog is operator-maintained and
   per deployment, so treat these as what the platform ships, not as a value
   fixed for every deployment.
@@ -73,7 +73,7 @@ your app runs outside any single request: the timer callbacks and promise
 continuations the isolate's event pump executes, which is where a streaming
 loop's per-chunk step runs once a read or write has resolved. That pump work is
 measured against wall time, and the check applies on **every** plan, including
-`unlimited`. It is the one runtime cap `unlimited` does not remove.
+`unlimited`, which keeps it and its heap cap.
 
 The runtime adds up the JavaScript time your app spends in that pump work and
 compares it against the wall time of a window:
@@ -242,20 +242,45 @@ Route large payloads through object storage regardless.
 
 The heap cap bounds the JavaScript heap — the in-memory objects and strings your
 handler holds. It is not a cap on your bundle size or on request/response body
-bytes. On the built-in tiers, free apps are capped at 64 MB and pro at 256 MB;
-the unlimited plan has no cap.
+bytes. On the built-in tiers, free apps are capped at 64 MB, pro at 256 MB and
+unlimited at 128 MB. Every plan has a heap cap.
 
-A handler that keeps allocating past the cap is stopped, and the request fails
-with a JSON error. For an `async` handler the platform answers `500`:
+The cap is a limit, not a target. When your app's heap reaches it, whether
+through one large allocation or through gradual growth, the isolate running
+your app is stopped, the same way an isolate that exceeds its pump CPU share is
+stopped. The heap belongs to the isolate rather than to one request, so the
+stop ends everything that isolate was doing:
 
-```
-500  {"message":"memory limit exceeded","name":"Error"}
-```
+- The request whose code reached the cap fails with a JSON error. When the cap
+  is reached after the handler has `await`ed, which is the normal case for an
+  `async` handler, the platform answers `500`:
 
-A synchronous overrun is answered `503` with the cause blanked
-(`{"message":"internal error","name":"Error","request_id":"<id>"}`). As with the
-CPU limit, there is no `code`, the `name` is always `"Error"`, and "non-2xx" is
-the contract.
+  ```
+  500  {"message":"memory limit exceeded","name":"Error"}
+  ```
+
+  A synchronous overrun, a handler that reaches the cap before it ever
+  `await`s, is answered `503` with the cause blanked:
+
+  ```
+  503  {"message":"internal error","name":"Error","request_id":"<id>"}
+  ```
+
+- Every other request still waiting on that isolate fails at once with the
+  same `500` and `memory limit exceeded`, including a request that allocated
+  nothing.
+- None of your code runs in that isolate again. Its timers and pending
+  operations are cancelled, and work your code had already queued, such as a
+  promise callback, never runs.
+
+The stop cannot be caught: it skips every `catch` and `finally` block of
+yours. As with the CPU limit, there is no `code`, the `name` is always
+`"Error"`, and "non-2xx" is the contract.
+
+The next request to your deployed app is served by a fresh isolate, which runs
+your module's top-level code again, so state held in module scope does not
+survive the stop. The standalone dev server (`zeroship serve`) replaces a
+stopped isolate the same way.
 
 The dev server's heap default is 512 MB (`zeroship serve --heap-limit-mb`, or
 the `ZEROSHIP_HEAP_LIMIT_MB` environment variable), so a bundle that loads large

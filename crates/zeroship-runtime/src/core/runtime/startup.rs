@@ -1,6 +1,6 @@
 //! Application startup, driven by the runtime's existing event pump.
 
-use std::sync::{Arc, atomic::Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use super::{
@@ -17,8 +17,8 @@ impl RuntimeInner {
         modules: &[ModuleEntry],
         env: &crate::EnvSnapshot,
     ) -> Result<bool, String> {
-        if self.host_interrupt.load(Ordering::Acquire) {
-            self.fail_startup("runtime execution interrupted".into());
+        if let Some(cause) = self.halted() {
+            self.fail_startup(cause.into());
         }
         if matches!(self.startup, StartupState::Uninitialized) {
             self.state.borrow_mut().set_env_snapshot(env);
@@ -98,8 +98,8 @@ impl RuntimeInner {
     }
 
     pub(super) fn advance_startup(&mut self) {
-        if self.host_interrupt.load(Ordering::Acquire) {
-            self.fail_startup("runtime execution interrupted".into());
+        if let Some(cause) = self.halted() {
+            self.fail_startup(cause.into());
         }
         for request in std::mem::take(&mut self.waiting_startup_requests) {
             if request.ctx.cancel.is_cancelled() {

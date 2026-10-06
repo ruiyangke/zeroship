@@ -577,3 +577,163 @@ fn subscription_rejects_malformed_hello() {
         assert_eq!(code, 4400, "expected 4400 BAD_REQUEST, got {code}");
     });
 }
+
+// Eviction runs no creator JavaScript on a halted isolate
+// ---------------------------------------------------------------------------
+
+use std::cell::Cell;
+use std::sync::Arc;
+use zeroship_runtime::{NativePlugin, NativeRegistrar};
+
+thread_local! {
+    /// How many times an aborted subscription's listener reported running,
+    /// through `env.probe.ran()`, on this thread.
+    static ABORT_LISTENER_RAN: Cell<u32> = const { Cell::new(0) };
+}
+
+fn abort_listener_ran(_scope: &mut v8::PinScope, _args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
+    ABORT_LISTENER_RAN.with(|c| c.set(c.get() + 1));
+}
+
+/// `env.probe.ran()`, the recorder a subscription's abort listener calls so a
+/// test can see it run without reading V8 state on a quarantined isolate.
+struct AbortProbe;
+
+impl NativePlugin for AbortProbe {
+    fn namespace(&self) -> &'static str {
+        "probe"
+    }
+
+    fn register(&self, r: &mut NativeRegistrar) {
+        r.add("ran", abort_listener_ran);
+    }
+}
+
+/// The app: `sub` registers an abort listener that reports through
+/// `env.probe.ran()` and then stays open; `fetch` allocates past the cap from
+/// a timer, so a dispatch to it reaches the heap cap and stops the isolate.
+const ABORT_SUB_APP: &str = r#"
+    import { currentSignal, env } from "zeroship";
+    async function* sub() {
+        currentSignal().addEventListener("abort", () => { env.probe.ran(); });
+        // Yield once so a test can see the listener is attached before it
+        // evicts, then stay open.
+        yield 0;
+        await new Promise(() => {});
+    }
+    export default {
+        fetch() {
+            return new Promise(() => setTimeout(() => new Array(20_000_000).fill(1.5), 0));
+        },
+        rpc: { sub },
+    };
+"#;
+
+fn abort_sub_runtime(heap_limit_mb: Option<u32>) -> Runtime {
+    init_v8();
+    let mut builder = Runtime::builder()
+        .modules(vec![ModuleEntry { specifier: "index.js".into(), source: ABORT_SUB_APP.into() }])
+        .plugins(vec![Arc::new(AbortProbe) as Arc<dyn NativePlugin>])
+        .idle_gc_after_ms(0);
+    if let Some(mb) = heap_limit_mb {
+        builder = builder.heap_limit_mb(mb);
+    }
+    builder.build()
+}
+
+/// Open the `sub` subscription and drive the pump until its abort listener is
+/// registered (one in-flight signal on the runtime).
+async fn open_sub_with_abort_listener(runtime: &Runtime) -> u32 {
+    let client_id = upgrade(runtime);
+    let server_ws_id = server_id(client_id);
+    runtime.start_pump();
+    inject_server_message(runtime, server_ws_id, r#"{"t":"hello","input":null}"#);
+    // The generator yields once only after it has attached its abort listener,
+    // so a data frame means the listener is wired; registry length alone is
+    // set at open, before the generator runs.
+    pump_until(runtime, || client_saw_data_frame(runtime, client_id)).await;
+    assert!(
+        client_saw_data_frame(runtime, client_id),
+        "the premise: the subscription yielded, so its abort listener is attached",
+    );
+    assert_eq!(runtime.abort_registry_len(), 1, "the premise: the subscription's signal is registered");
+    client_id
+}
+
+/// The control: on a LIVE isolate, eviction aborts the subscription's signal
+/// and the creator's abort listener runs. This is the behaviour the halted
+/// case below must NOT reproduce, so it proves the listener is really wired.
+#[test]
+fn eviction_runs_the_abort_listener_on_a_live_isolate() {
+    let runtime = abort_sub_runtime(None);
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        let _client_id = open_sub_with_abort_listener(&runtime).await;
+        let before = ABORT_LISTENER_RAN.with(Cell::get);
+        runtime.entered_for_eviction();
+        compio::time::sleep(Duration::ZERO).await;
+        assert_eq!(
+            ABORT_LISTENER_RAN.with(Cell::get),
+            before + 1,
+            "eviction of a live isolate runs the subscription's abort listener",
+        );
+        assert_eq!(
+            runtime.abort_registry_len(),
+            0,
+            "eviction of a live isolate drains the signal it aborted",
+        );
+    });
+}
+
+/// An isolate stopped at its heap cap runs no creator JavaScript when it is
+/// later evicted: `entered_for_eviction` would otherwise abort the open
+/// subscription's signal and run the creator's abort listener on the heap the
+/// cap's grants raised. The stop leaves the subscription registered (it drains
+/// only pending requests), so the registry is non-empty at eviction.
+#[test]
+fn eviction_runs_no_abort_listener_on_a_heap_stopped_isolate() {
+    let runtime = abort_sub_runtime(Some(64));
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        let _client_id = open_sub_with_abort_listener(&runtime).await;
+
+        // Reach the heap cap through a fetch; the stop quarantines the isolate.
+        let env = EnvSnapshot::empty();
+        let ctx = RequestCtx::new(CancelFlag::new());
+        let outcome = runtime.call_fetch_handler("GET", "http://localhost/", &[], "", &env, ctx);
+        let FetchOutcome::Pending { rx, .. } = outcome else {
+            panic!("the allocation runs on a timer, so the dispatch is pending");
+        };
+        let settled = compio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("the dispatch is answered, not stranded");
+        match &settled {
+            Err(e) => assert_eq!(
+                e.message, "memory limit exceeded",
+                "the premise: the heap cap stops the isolate",
+            ),
+            Ok(_) => panic!("the premise: the heap cap stops the isolate, but it answered"),
+        }
+        assert!(runtime.is_quarantined(), "the premise: the isolate is quarantined");
+        assert_eq!(
+            runtime.abort_registry_len(),
+            1,
+            "the premise: the subscription's signal survives the stop",
+        );
+
+        let before = ABORT_LISTENER_RAN.with(Cell::get);
+        runtime.entered_for_eviction();
+        compio::time::sleep(Duration::ZERO).await;
+        assert_eq!(
+            ABORT_LISTENER_RAN.with(Cell::get),
+            before,
+            "eviction ran the subscription's abort listener on a halted isolate",
+        );
+        // The gate skips the abort entirely, so the signal is never even
+        // touched: no `build_abort_error` allocation, no dispatch. A drained
+        // registry would mean eviction entered V8 on the halted isolate.
+        assert_eq!(
+            runtime.abort_registry_len(),
+            1,
+            "eviction aborted the signal on a halted isolate instead of skipping it",
+        );
+    });
+}

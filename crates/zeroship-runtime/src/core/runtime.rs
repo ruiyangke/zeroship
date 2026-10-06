@@ -114,12 +114,11 @@ pub const WORKFLOW_DISPATCH_MODULE: &str = "zeroship:workflows/dispatch";
 /// Count of near-heap-limit callback invocations across every isolate in this
 /// process, since start. Monotonic; never reset.
 ///
-/// Exposed because the per-isolate hit counter lives behind a raw pointer that
-/// is deliberately leaked for the isolate's lifetime, so nothing outside the
-/// callback can read it. Without a process-wide count, a heap cap that fails to
-/// bound an isolate is indistinguishable from one V8 never consults - and those
-/// two have different fixes.
-static HEAP_LIMIT_CALLBACK_HITS: std::sync::atomic::AtomicU64 =
+/// The callback keeps no per-isolate count an observer could read. Without a
+/// process-wide count, a heap cap that fails to bound an isolate is
+/// indistinguishable from one V8 never consults - and those two have different
+/// fixes.
+pub(crate) static HEAP_LIMIT_CALLBACK_HITS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 /// Read the process-wide near-heap-limit callback count. See
@@ -134,9 +133,10 @@ pub fn heap_limit_callback_hits() -> u64 {
 ///
 /// `limit` is what V8 believes the cap to be, which is NOT necessarily the
 /// value passed to `heap_limit_mb`: V8 clamps a `max_old_generation_size`
-/// below its own floor, and the near-heap-limit callback raises the live limit
-/// on each hit. Comparing the two answers "did the configured cap take effect"
-/// separately from "was it enforced".
+/// below its own floor, and the heap cap's callback raises the live limit once
+/// the cap is reached, so the allocation in flight can finish while the
+/// isolate terminates. Comparing the two answers "did the configured cap take
+/// effect" separately from "was it enforced".
 #[must_use]
 pub fn heap_used_and_limit(runtime: &Runtime) -> (usize, usize) {
     let mut inner = runtime.inner.borrow_mut();
@@ -420,7 +420,7 @@ impl Runtime {
     /// instead of producing a stored schema-less isolate that fails later. An
     /// evaluation in which a native callback panicked is refused too: the
     /// isolate is quarantined and its startup fails, even when the creator
-    /// caught the error the panic became.
+    /// caught the error the panic became. So is one that reached its heap cap.
     pub async fn initialize(&self, env: &crate::EnvSnapshot) -> Result<(), String> {
         {
             let mut inner = self.inner.borrow_mut();
@@ -431,7 +431,7 @@ impl Runtime {
             let _ = inner.initialize_modules(self.modules.as_slice(), env);
             inner.exit_isolate();
         }
-        self.stop_if_a_callback_panicked();
+        self.stop_if_the_isolate_must_stop();
         let ready = self.inner.borrow().startup_result()?;
         if ready { return Ok(()); }
         self.start_pump();
@@ -506,7 +506,7 @@ impl Runtime {
             inner.exit_isolate();
         }
         drop(inner);
-        self.stop_if_a_callback_panicked();
+        self.stop_if_the_isolate_must_stop();
         r
     }
 
@@ -517,8 +517,26 @@ impl Runtime {
     /// cache entry. Because the registry is owned by the runtime, signals
     /// minted in another runtime on the same thread are never reached.
     pub fn entered_for_eviction(&self) {
+        // Aborting a signal runs the creator's abort listeners, which is
+        // creator JavaScript. A halted isolate runs none: a heap-capped one
+        // would allocate on the headroom granted only for unwinding, and a
+        // host-interrupted one is forbidden app code outright. The listeners
+        // have nowhere to deliver to on an isolate about to be dropped anyway.
+        if self.inner.borrow().halted().is_some() {
+            return;
+        }
         let registry = self.inner.borrow().abort_registry.clone();
         self.with_scope(|scope| registry.entered_for_eviction(scope, self.app_id.as_ref()));
+    }
+
+    /// Register a hook the runtime calls once when this isolate quarantines
+    /// itself (heap cap, pump-CPU share, or a native-callback panic). A caching
+    /// host uses it to drop the cache entry at the stop, so a stopped isolate's
+    /// raised heap is released then rather than held until the app's next
+    /// request or an LRU eviction. The hook runs on this thread with no runtime
+    /// borrow held; it must not call back into this runtime.
+    pub fn set_stop_notifier(&self, on_stop: impl Fn() + 'static) {
+        self.inner.borrow_mut().on_stop = Some(Box::new(on_stop));
     }
 
     /// Number of in-flight RPC signals registered on this runtime.
@@ -620,7 +638,7 @@ impl Runtime {
             ctx,
             user_json,
         );
-        self.stop_if_a_callback_panicked();
+        self.stop_if_the_isolate_must_stop();
         outcome
     }
 
@@ -637,18 +655,19 @@ impl Runtime {
             .inner
             .borrow_mut()
             .call_workflow_dispatch(self.modules.as_slice(), envelope_json, env, ctx);
-        self.stop_if_a_callback_panicked();
+        self.stop_if_the_isolate_must_stop();
         outcome
     }
 
     /// Stop this isolate if a native callback panicked in the window that just
-    /// ended (see [`RuntimeInner::stop_for_caught_panic`]). Every entry point
+    /// ended (see [`RuntimeInner::stop_for_caught_panic`]) or its heap reached
+    /// the cap (see [`RuntimeInner::stop_for_heap_cap`]). Every entry point
     /// that runs script calls it once the isolate is released; the pump checks
     /// after each of its own windows.
-    fn stop_if_a_callback_panicked(&self) {
-        let panicked = self.inner.borrow().take_caught_panic();
-        if panicked {
-            RuntimeInner::stop_for_caught_panic(&self.inner);
+    fn stop_if_the_isolate_must_stop(&self) {
+        let stop = self.inner.borrow().take_isolate_stop();
+        if let Some(stop) = stop {
+            RuntimeInner::stop_isolate(&self.inner, stop);
         }
     }
 
@@ -698,9 +717,9 @@ impl Runtime {
 
     /// True once this runtime is quarantined, by its host through
     /// [`Self::quarantine`] or by the runtime itself when its event pump
-    /// exceeded its CPU share. A quarantined runtime never runs app code
-    /// again, so a host that caches runtimes replaces it rather than
-    /// dispatching to it.
+    /// exceeded its CPU share, a native callback panicked in it, or its heap
+    /// reached the cap. A quarantined runtime never runs app code again, so a
+    /// host that caches runtimes replaces it rather than dispatching to it.
     #[must_use]
     pub fn is_quarantined(&self) -> bool {
         self.state().borrow().tasks.is_closed()
@@ -1075,6 +1094,21 @@ struct PendingRequest {
     rpc_lifetime: Option<crate::rpc::lifetime::RequestLifetime>,
 }
 
+/// Why the runtime stops an isolate on its own, outside any one request.
+#[derive(Clone, Copy)]
+enum IsolateStop {
+    /// A native callback panicked in it: `RuntimeInner::stop_for_caught_panic`.
+    CaughtPanic,
+    /// Its heap reached the cap: `RuntimeInner::stop_for_heap_cap`.
+    HeapCap,
+}
+
+/// What a host-interrupted isolate refuses work with.
+const HOST_INTERRUPT_CAUSE: &str = "runtime execution interrupted";
+
+/// What an isolate whose heap reached its cap answers its requests with.
+const HEAP_CAP_CAUSE: &str = "memory limit exceeded";
+
 fn send_pending_error(req: PendingRequest, error: impl Into<DispatchError>) {
     let error = error.into();
     match req.reply {
@@ -1110,6 +1144,11 @@ macro_rules! enter_v8 {
 /// is [`Runtime`], which wraps `Rc<RefCell<RuntimeInner>>`.
 pub(crate) struct RuntimeInner {
     pub(crate) isolate: v8::OwnedIsolate,
+    /// The heap cap: its callback's registration, and whether the isolate's
+    /// heap reached it. Once it has, the isolate runs no more JavaScript and
+    /// is stopped (`stop_for_heap_cap`). Declared after `isolate`, so it is
+    /// dropped after the isolate is disposed.
+    heap_cap: super::heap_cap::HeapCap,
     pub(crate) context: v8::Global<v8::Context>,
     /// Published HTTP and RPC targets, captured together after validation.
     /// A dispatch holds this snapshot while later loading can replace it.
@@ -1155,16 +1194,14 @@ pub(crate) struct RuntimeInner {
     /// Startup wall deadline. Dispatch hosts use the same configured limit.
     wall_timeout: Option<Duration>,
 
-    /// Set by `near_heap_limit_callback` when it terminates this isolate for
-    /// exceeding its heap cap. Shared with the leaked callback data block.
+    /// Set by the heap cap's callback when it terminates this isolate, and
+    /// taken by `check_v8_terminated`.
     ///
     /// This exists because `Isolate::is_execution_terminating` CANNOT answer
     /// the question after the fact: V8 clears the terminating state once the
     /// termination exception has unwound out of JS, which has already happened
-    /// by the time the dispatch path regains control. Measured - the check
-    /// reads `false` on a dispatch whose callback fired the full five times.
-    /// So the dispatch cannot ask V8 whether it was heap-terminated; the
-    /// callback has to leave a note.
+    /// by the time the dispatch path regains control. So the dispatch cannot
+    /// ask V8 whether it was heap-terminated; the callback has to leave a note.
     terminated_note: Arc<std::sync::atomic::AtomicBool>,
 
     /// Which limit set `terminated_note`. Only a CPU budget writes `true`
@@ -1222,6 +1259,15 @@ pub(crate) struct RuntimeInner {
     /// The app this isolate serves, when the host named one: the identity a
     /// pump-share stop reports in its log line.
     app_id: Option<AppId>,
+
+    /// Invoked once when this isolate quarantines itself, so a caching host can
+    /// drop the entry promptly instead of waiting for the app's next request or
+    /// an LRU eviction. A stopped isolate holds its raised heap until it is
+    /// dropped, so the notification is what bounds that heap to the stop rather
+    /// than to the next time something happens to touch the cache. Runs on the
+    /// isolate's own thread with no `RuntimeInner` borrow held. `None` when no
+    /// host registered one (a workflow or test runtime outside a cache).
+    on_stop: Option<Box<dyn Fn()>>,
 
     /// Net depth of `enter_isolate`/`exit_isolate` pairs. Tracks whether
     /// the V8 isolate is currently the topmost-entered on its thread.
@@ -1325,97 +1371,12 @@ impl RuntimeInner {
         let mut isolate = v8::Isolate::new(params);
         isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
 
-        // Register near-heap-limit callback. V8 invokes this when the
-        // configured heap cap is approached. The callback's return
-        // value is the *new* limit V8 should use:
-        //   - Equal to `current_heap_limit` → V8 GCs and may fatal-
-        //     abort the process if it still can't satisfy.
-        //   - Greater than `current_heap_limit` → V8 grows and lets
-        //     allocation succeed; useful as a one-off escape valve.
-        //
-        // Strategy: on every hit grow the cap modestly (avoids a hard
-        // fatal-abort and lets the in-flight allocation surface as a
-        // catchable JS RangeError on the very next allocation that
-        // doesn't fit). After MAX_HEAP_LIMIT_HITS consecutive hits we
-        // also call `Isolate::terminate_execution`, which fires on the
-        // next interrupt check — guaranteeing the runaway handler
-        // can't pin RSS at the cap forever.
-        //
-        // Data block is heap-allocated and intentionally leaked: one
-        // allocation per Runtime, lifetime is the isolate's. The block
-        // also carries the IsolateHandle so the callback can fire
-        // termination from any thread (V8 contract: `terminate_execution`
-        // is thread-safe).
-        struct HeapLimitData {
-            hits: u32,
-            handle: v8::IsolateHandle,
-            initial_limit: usize,
-            /// Note left for the dispatch path, which cannot ask V8 after the
-            /// fact - see `RuntimeInner::heap_terminated`.
-            terminated: Arc<std::sync::atomic::AtomicBool>,
-        }
-        const MAX_HEAP_LIMIT_HITS: u32 = 5;
+        // Reaching the cap terminates the isolate and lets the allocation in
+        // flight finish within a bounded headroom; see `heap_cap`. The runtime
+        // then enters no more JavaScript in it and stops it.
         let heap_terminated = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let heap_data = Box::into_raw(Box::new(HeapLimitData {
-            hits: 0,
-            handle: isolate.thread_safe_handle(),
-            initial_limit: heap_max,
-            terminated: Arc::clone(&heap_terminated),
-        }));
-
-        unsafe extern "C" fn near_heap_limit_callback(
-            data: *mut std::ffi::c_void,
-            current_heap_limit: usize,
-            _initial_heap_limit: usize,
-        ) -> usize {
-            if data.is_null() {
-                return current_heap_limit;
-            }
-            // SAFETY: `data` was set via `Box::into_raw(Box::new(...))`
-            // below and is never freed during the isolate's lifetime.
-            // V8 invokes this callback only from the isolate's owning
-            // thread per `Isolate::add_near_heap_limit_callback` contract,
-            // so we have exclusive access here.
-            let d = unsafe { &mut *(data as *mut HeapLimitData) };
-            d.hits += 1;
-            // Process-wide, monotonic. `d.hits` is per-isolate and behind a
-            // raw pointer no observer can reach, so without this there is no
-            // way to tell "V8 never consulted the cap" from "it fired and the
-            // growth outran the termination" - the two have completely
-            // different fixes.
-            HEAP_LIMIT_CALLBACK_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if d.hits >= MAX_HEAP_LIMIT_HITS {
-                tracing::error!(
-                    heap_limit_mb = current_heap_limit / 1024 / 1024,
-                    hits = d.hits,
-                    "v8 heap limit hit threshold; terminating isolate"
-                );
-                // Fire termination — V8 checks the flag on the next
-                // interrupt boundary, surfacing as a catchable
-                // `RangeError` to JS or a terminated-state to the
-                // dispatch loop.
-                d.terminated.store(true, std::sync::atomic::Ordering::Relaxed);
-                d.handle.terminate_execution();
-            } else {
-                tracing::warn!(
-                    heap_limit_mb = current_heap_limit / 1024 / 1024,
-                    hits = d.hits,
-                    max_hits = MAX_HEAP_LIMIT_HITS,
-                    "v8 near heap limit"
-                );
-            }
-            // Grow modestly so V8 doesn't fatal-abort the process while
-            // the JS exception / termination flag propagates. Cap the
-            // expansion at 4× the original limit so a wedged isolate
-            // can't claim unbounded RSS before the eviction sweep kills
-            // it.
-            let max_grow = d.initial_limit.saturating_mul(4);
-            current_heap_limit.saturating_add(d.initial_limit / 4).min(max_grow)
-        }
-        isolate.add_near_heap_limit_callback(
-            near_heap_limit_callback,
-            heap_data as *mut std::ffi::c_void,
-        );
+        let heap_cap =
+            super::heap_cap::HeapCap::install(&mut isolate, Arc::clone(&heap_terminated));
 
         // `await import(spec)` — resolves through the per-isolate module
         // registry slot installed by `load_modules`. Bundle-resident
@@ -1463,6 +1424,7 @@ impl RuntimeInner {
 
         Self {
             isolate,
+            heap_cap,
             context,
             application: None,
             creator_entry: None,
@@ -1502,6 +1464,7 @@ impl RuntimeInner {
             pump_max_cpu_fraction: MAX_CPU_FRACTION,
             pump_cpu_unmetered: Duration::ZERO,
             app_id,
+            on_stop: None,
             // `Isolate::new()` enters the isolate, so we boot with depth 1.
             enter_depth: 1,
             last_request_ts: Cell::new(Instant::now()),
@@ -1587,6 +1550,13 @@ impl RuntimeInner {
                 tasks.join().await;
                 drop(keep_alive);
             }).detach();
+        }
+        // Notify the host last, with no `RuntimeInner` borrow held: the hook
+        // may drop the cache entry (one of several strong `Rc`s), which must
+        // not race a live borrow. Taken, so it fires once.
+        let on_stop = this.borrow_mut().on_stop.take();
+        if let Some(on_stop) = on_stop {
+            on_stop();
         }
     }
 
@@ -1726,6 +1696,26 @@ impl RuntimeInner {
                 let Some(runtime) = runtime.upgrade() else { return; };
                 {
                     let mut rt = runtime.borrow_mut();
+                    // Before any JavaScript this iteration runs. The startup
+                    // advance and `cleanup_cancelled_requests` below both enter
+                    // V8, and the cleanup aborts cancelled requests' signals,
+                    // which is creator code. A stop already recorded when this
+                    // iteration begins is taken before either, so neither runs
+                    // on a stopped isolate.
+                    //
+                    // No test drives this position over the after-cleanup check
+                    // below: `reached` is set only by an allocation, which
+                    // happens inside a dispatch or timer window whose end
+                    // already takes the stop, so a fresh pump iteration never
+                    // begins with `reached` newly set. It guards the one path
+                    // that would set it between windows, a GC firing the
+                    // callback, which cannot arise today because a GC does not
+                    // allocate past the cap.
+                    if let Some(stop) = rt.take_isolate_stop() {
+                        drop(rt);
+                        Self::stop_isolate(&runtime, stop);
+                        return;
+                    }
                     if rt.startup.is_pending()
                         || rt
                             .dev_entry_loader
@@ -1747,11 +1737,11 @@ impl RuntimeInner {
                         rt.cleanup_cancelled_requests();
                         rt.bill_pump_cpu(crate::core::init::thread_cpu_time().saturating_sub(cancellation_cpu_start));
                     }
-                    // After the startup advance and the cleanup, and before
-                    // anything else this iteration dispatches.
-                    if rt.take_caught_panic() {
+                    // A stop the startup advance or the cleanup above caused:
+                    // a native-callback panic in a creator abort listener.
+                    if let Some(stop) = rt.take_isolate_stop() {
                         drop(rt);
-                        Self::stop_for_caught_panic(&runtime);
+                        Self::stop_isolate(&runtime, stop);
                         return;
                     }
                     if startup_failed { return; }
@@ -1824,9 +1814,9 @@ impl RuntimeInner {
                     rt.bill_pump_cpu(
                         crate::core::init::thread_cpu_time().saturating_sub(cpu_start),
                     );
-                    if rt.take_caught_panic() {
+                    if let Some(stop) = rt.take_isolate_stop() {
                         drop(rt);
-                        Self::stop_for_caught_panic(&runtime);
+                        Self::stop_isolate(&runtime, stop);
                         return;
                     }
                     ready_timers_pending = !rt.state().borrow().ready_timers.is_empty();
@@ -2014,7 +2004,7 @@ impl RuntimeInner {
                     let mut rt = runtime.borrow_mut();
                     rt.enter_isolate();
                     for ev in batch {
-                        if rt.host_interrupt.load(Ordering::Acquire) {
+                        if rt.halted().is_some() {
                             break;
                         }
                         rt.handle_async_event(ev, &mut work);
@@ -2040,9 +2030,9 @@ impl RuntimeInner {
                     rt.bill_pump_cpu(
                         crate::core::init::thread_cpu_time().saturating_sub(cpu_start),
                     );
-                    if rt.take_caught_panic() {
+                    if let Some(stop) = rt.take_isolate_stop() {
                         drop(rt);
-                        Self::stop_for_caught_panic(&runtime);
+                        Self::stop_isolate(&runtime, stop);
                         return;
                     }
                     if let Some(exceeded) = rt.record_pump_cpu(v8_start.elapsed()) {
@@ -2152,15 +2142,29 @@ impl RuntimeInner {
         }
     }
 
-    /// Report the detected termination cause. Host interruption is permanent;
-    /// CPU and heap terminations can be recovered for an ordinary cached runtime.
+    /// Report the detected termination cause. Host interruption is permanent,
+    /// and so is the heap cap, which stops the isolate; a CPU termination is
+    /// recovered for an ordinary cached runtime.
     fn termination_message(&self) -> &'static str {
         if self.host_interrupt.load(Ordering::Acquire) {
-            "runtime execution interrupted"
+            HOST_INTERRUPT_CAUSE
         } else if self.last_termination_was_heap {
-            "memory limit exceeded"
+            HEAP_CAP_CAUSE
         } else {
             "CPU time limit exceeded"
+        }
+    }
+
+    /// Why this isolate may run no more JavaScript, when it may not: its host
+    /// interrupted it, or its heap reached the cap. Every place the runtime is
+    /// about to enter creator JavaScript asks first.
+    fn halted(&self) -> Option<&'static str> {
+        if self.host_interrupt.load(Ordering::Acquire) {
+            Some(HOST_INTERRUPT_CAUSE)
+        } else if self.heap_cap.reached() {
+            Some(HEAP_CAP_CAUSE)
+        } else {
+            None
         }
     }
 
@@ -2857,7 +2861,7 @@ impl RuntimeInner {
     /// Drain newly spawned ops/timers from RuntimeState into the external
     /// `AsyncWork` (for the pump task).
     pub fn drain_new_tasks_into(&mut self, work: &mut AsyncWork) {
-        if self.host_interrupt.load(Ordering::Acquire) {
+        if self.halted().is_some() {
             return;
         }
         // Fast path
@@ -2895,7 +2899,7 @@ impl RuntimeInner {
     /// path. It settles promises resolved by callbacks and drains cleanup work
     /// before the pump can park again.
     fn service_forwarder_resumes(&mut self, work: &mut AsyncWork) {
-        if self.host_interrupt.load(Ordering::Acquire) {
+        if self.halted().is_some() {
             return;
         }
         let pending: Vec<u32> = {
@@ -2925,7 +2929,7 @@ impl RuntimeInner {
     /// creator runtimes leave `RuntimeState::js_driver` empty, so this hook is a
     /// no-op and the associated globals are never installed.
     fn service_js_driver_commands(&mut self, work: &mut AsyncWork) {
-        if self.host_interrupt.load(Ordering::Acquire) {
+        if self.halted().is_some() {
             return;
         }
         loop {
@@ -2968,7 +2972,7 @@ impl RuntimeInner {
     /// Enters V8 briefly to resolve the op/timer, checks settled promises,
     /// and sends results via oneshot channels.
     pub fn handle_async_event(&mut self, event: AsyncEvent, work: &mut AsyncWork) {
-        if self.host_interrupt.load(Ordering::Acquire) {
+        if self.halted().is_some() {
             return;
         }
         // Pump-driven activity counts — a long-running async procedure
@@ -3375,6 +3379,9 @@ impl RuntimeInner {
         Prep: FnOnce(&SharedState),
         Dispatch: FnOnce(&mut v8::PinScope, &SharedState),
     {
+        if self.halted().is_some() {
+            return;
+        }
         let state_clone = self.state.clone();
         prep(&self.state);
 
@@ -3765,6 +3772,71 @@ impl RuntimeInner {
     /// half done.
     fn take_caught_panic(&self) -> bool {
         crate::callback::CaughtPanicMark::take(&self.isolate)
+    }
+
+    /// Whether this isolate's heap reached its cap and the isolate has not
+    /// been stopped yet.
+    fn heap_cap_stop_due(&self) -> bool {
+        self.heap_cap.reached() && !self.state.borrow().tasks.is_closed()
+    }
+
+    /// The stop this isolate is due, if any. A caught panic is taken, so it is
+    /// reported once.
+    fn take_isolate_stop(&self) -> Option<IsolateStop> {
+        if self.take_caught_panic() {
+            Some(IsolateStop::CaughtPanic)
+        } else if self.heap_cap_stop_due() {
+            Some(IsolateStop::HeapCap)
+        } else {
+            None
+        }
+    }
+
+    fn stop_isolate(this: &Rc<RefCell<Self>>, stop: IsolateStop) {
+        match stop {
+            IsolateStop::CaughtPanic => Self::stop_for_caught_panic(this),
+            IsolateStop::HeapCap => Self::stop_for_heap_cap(this),
+        }
+    }
+
+    /// Stop this isolate because its heap reached the cap.
+    ///
+    /// The heap cap's callback has requested termination and granted headroom
+    /// only for the allocation in flight to finish, so the isolate serves
+    /// nothing more: every request still pending on it is answered with the
+    /// cap's error, and it is quarantined, so [`Runtime::is_quarantined`] tells
+    /// a caching host to replace it before the next request.
+    ///
+    /// No creator JavaScript runs here. The pending requests are answered
+    /// directly, before quarantine's cancellation sweep would enter V8, and a
+    /// full GC releases the heap the cap's grants raised so the isolate does
+    /// not hold it until it is dropped. `low_memory_notification` runs no
+    /// creator JavaScript; the termination the cap requested stays pending for
+    /// whatever script teardown might still enter.
+    fn stop_for_heap_cap(this: &Rc<RefCell<Self>>) {
+        let (failed, app_id) = {
+            let mut rt = this.borrow_mut();
+            let pending: Vec<(u64, PendingRequest)> = rt.pending_requests.drain().collect();
+            let failed = pending.len();
+            for (id, request) in pending {
+                rt.drain_request_logs(id);
+                rt.drop_timers_owned_by(id);
+                send_pending_error(request, HEAP_CAP_CAUSE);
+            }
+            // The cap's grants raised the old-generation limit by up to the
+            // headroom ceiling. Enter the isolate just to GC that back down,
+            // the way the idle ticker does; nothing else here touches V8.
+            rt.enter_isolate();
+            rt.isolate.low_memory_notification();
+            rt.exit_isolate();
+            (failed, rt.app_id.clone())
+        };
+        Self::quarantine(this, HEAP_CAP_CAUSE);
+        tracing::warn!(
+            app_id = app_id.as_ref().map(AppId::as_str),
+            failed_requests = failed,
+            "isolate reached its heap cap; quarantined and its pending requests failed"
+        );
     }
 
     /// Stop this isolate after a native callback panicked in it.

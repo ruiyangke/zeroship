@@ -632,6 +632,13 @@ pub async fn load_app(
             return Err("isolate cache full and every isolate is leased; load deferred".into());
         }
 
+        // Drop this isolate from the cache the moment it quarantines itself
+        // (heap cap, pump-CPU share, or a native-callback panic), so a stopped
+        // isolate's heap is released at the stop rather than held until the
+        // app's next request or an LRU eviction. The hook runs on this thread
+        // with no runtime borrow held.
+        runtime.set_stop_notifier(drop_stopped_isolate(app_id.clone()));
+
         // Start pump task for async V8 ops (timers, fetch, streams) only after
         // capacity is available and the runtime is about to become reachable.
         runtime.start_pump();
@@ -648,6 +655,26 @@ pub async fn load_app(
 
         Ok(())
     })
+}
+
+/// The stop hook `load_app` registers on every isolate: remove this app's
+/// entry from the per-thread cache and its loaded metadata. The runtime calls
+/// it once, on the thread that owns the cache, with no runtime borrow held, so
+/// borrowing the cache here is safe. Dropping the entry releases one of the
+/// isolate's strong references; the quarantine supervisor holds another until
+/// native teardown finishes, so the isolate is disposed only once that is done.
+fn drop_stopped_isolate(app_id: AppId) -> impl Fn() + 'static {
+    move || {
+        CACHE.with(|c| {
+            if let Some(cache) = c.borrow_mut().as_mut() {
+                cache.isolates.remove(&app_id);
+            }
+        });
+        LOADED_META.with(|m| {
+            m.borrow_mut().remove(&app_id);
+        });
+        tracing::info!(app_id = app_id.as_str(), "worker: dropped stopped isolate");
+    }
 }
 
 /// The declared route policy of the deploy this thread has resident, WITHOUT
@@ -2385,51 +2412,36 @@ mod tests {
         .expect("socket close eviction test thread panicked");
     }
 
-    /// An isolate that exceeds its pump CPU share answers the request it holds
-    /// with the CPU termination error, and the next request to the app runs on
-    /// a fresh isolate the worker loads, never on the stopped one.
+    /// Cache `stopping`, built for `worker`'s app from `source`, as that app's
+    /// isolate on this thread, with Control serving `source` as the app's
+    /// deployment, and require the stop to replace it: the cached isolate
+    /// serves `/`; `stop_path` is answered with `500` and `stopped_body`
+    /// rather than stranded; the next request runs on a fresh isolate the
+    /// worker loads from Control, never on the stopped one; and the worker
+    /// releases the stopped isolate.
     ///
-    /// The cached isolate is built here, not through `load_app`, only because
-    /// its budget window has to be short enough for a case to reach; it is the
-    /// app's entry in this thread's cache like any loaded one, and the
-    /// unlimited shape (no CPU limit, no wall timeout) is the plan on which a
-    /// stranded request would wait forever.
-    #[compio::test]
-    async fn an_isolate_stopped_for_its_pump_share_is_replaced_by_the_next_request() {
+    /// The cached isolate is built by the caller, not through `load_app`, only
+    /// because a case needs a limit the plan does not set; it is the app's
+    /// entry in this thread's cache like any loaded one, and the unlimited
+    /// plan the reload uses (no CPU limit, no wall timeout) is the shape on
+    /// which a stranded request would wait forever.
+    async fn assert_a_stopped_isolate_is_replaced(
+        worker: crate::worker_fixture::Worker,
+        source: &'static [u8],
+        stopping: Runtime,
+        stop_path: &str,
+        stopped_body: &str,
+    ) {
         use crate::control_fixture::{route, ControlPlane};
         use crate::identity_fixture::gateway_authorization;
-        use crate::worker_fixture::{dispatch_frame, Worker};
+        use crate::worker_fixture::dispatch_frame;
         use ntex::http::StatusCode;
         use ntex::web::{self, test};
         use sha2::{Digest, Sha256};
         use zeroship_core::service_identity::endpoints;
         use zeroship_core::types::AppVersionInfo;
 
-        let source: &[u8] = br#"
-            export default {
-                fetch(request) {
-                    if (new URL(request.url).pathname === "/spin") {
-                        return new Promise(() => {
-                            const spin = () => {
-                                const end = Date.now() + 20;
-                                while (Date.now() < end) {}
-                                setTimeout(spin, 1);
-                            };
-                            setTimeout(spin, 1);
-                        });
-                    }
-                    return new Response("served");
-                }
-            }
-        "#;
-        let worker = Worker::new();
         let app_id = worker.app_id.clone();
-
-        let stopping = Runtime::builder()
-            .modules(test_modules(source))
-            .app_id(app_id.clone())
-            .pump_cpu_budget(Duration::from_millis(200), 0.5)
-            .build();
         stopping.exit_isolate();
         stopping
             .initialize(&EnvSnapshot::empty())
@@ -2458,7 +2470,7 @@ mod tests {
         }))
         .expect("deployment manifest");
         let version = serde_json::to_string(&AppVersionInfo {
-            deploy_hash: Some("pump-share-deploy".into()),
+            deploy_hash: Some("replacement-deploy".into()),
             plan_id: "unlimited".into(),
             runtime: AppRuntimeLimits::default(),
             env_version: 1,
@@ -2508,15 +2520,12 @@ mod tests {
 
         let stopped = compio::time::timeout(
             Duration::from_secs(10),
-            test::call_service(&service, dispatch("/spin")),
+            test::call_service(&service, dispatch(stop_path)),
         )
         .await
-        .expect("the request holding the pump is answered, not stranded");
+        .expect("the request the stop ended is answered, not stranded");
         assert_eq!(stopped.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(
-            String::from_utf8_lossy(&test::read_body(stopped).await),
-            r#"{"message":"CPU time limit exceeded","name":"Error"}"#,
-        );
+        assert_eq!(String::from_utf8_lossy(&test::read_body(stopped).await), stopped_body);
 
         let after = test::call_service(&service, dispatch("/")).await;
         assert_eq!(after.status(), StatusCode::OK, "the next request runs on a fresh isolate");
@@ -2533,6 +2542,152 @@ mod tests {
         })
         .await
         .expect("the worker released the stopped isolate");
+    }
+
+    /// An isolate that exceeds its pump CPU share answers the request it holds
+    /// with the CPU termination error, and the next request to the app runs on
+    /// a fresh isolate the worker loads. The cached isolate's budget window is
+    /// short enough for a case to reach.
+    #[compio::test]
+    async fn an_isolate_stopped_for_its_pump_share_is_replaced_by_the_next_request() {
+        let source: &[u8] = br#"
+            export default {
+                fetch(request) {
+                    if (new URL(request.url).pathname === "/spin") {
+                        return new Promise(() => {
+                            const spin = () => {
+                                const end = Date.now() + 20;
+                                while (Date.now() < end) {}
+                                setTimeout(spin, 1);
+                            };
+                            setTimeout(spin, 1);
+                        });
+                    }
+                    return new Response("served");
+                }
+            }
+        "#;
+        let worker = crate::worker_fixture::Worker::new();
+        let stopping = Runtime::builder()
+            .modules(test_modules(source))
+            .app_id(worker.app_id.clone())
+            .pump_cpu_budget(Duration::from_millis(200), 0.5)
+            .build();
+        assert_a_stopped_isolate_is_replaced(
+            worker,
+            source,
+            stopping,
+            "/spin",
+            r#"{"message":"CPU time limit exceeded","name":"Error"}"#,
+        )
+        .await;
+    }
+
+    /// An isolate whose heap reaches its cap answers the request that reached
+    /// it with the heap cap's error, and the next request to the app runs on a
+    /// fresh isolate the worker loads. The cached isolate's cap is far smaller
+    /// than the one allocation the route makes.
+    #[compio::test]
+    async fn an_isolate_stopped_at_its_heap_cap_is_replaced_by_the_next_request() {
+        let source: &[u8] = br#"
+            export default {
+                fetch(request) {
+                    if (new URL(request.url).pathname === "/huge") {
+                        return new Promise(() => setTimeout(() => new Array(20_000_000).fill(1.5), 0));
+                    }
+                    return new Response("served");
+                }
+            }
+        "#;
+        let worker = crate::worker_fixture::Worker::new();
+        let stopping = Runtime::builder()
+            .modules(test_modules(source))
+            .app_id(worker.app_id.clone())
+            .heap_limit_mb(64)
+            .build();
+        assert_a_stopped_isolate_is_replaced(
+            worker,
+            source,
+            stopping,
+            "/huge",
+            r#"{"message":"memory limit exceeded","name":"Error"}"#,
+        )
+        .await;
+    }
+
+    /// An isolate that reaches its heap cap is dropped from the per-thread
+    /// cache at the stop, without a later request on that app or an LRU
+    /// eviction: `load_app` registers `drop_stopped_isolate` as the runtime's
+    /// stop notifier, so the quarantine removes the entry. Without the
+    /// notification the entry would linger holding its raised heap until
+    /// `get_runtime` or `evict_lru` happened to touch it.
+    #[compio::test]
+    async fn a_stopped_isolate_leaves_the_cache_without_a_new_request_or_eviction() {
+        let source: &[u8] = br#"
+            export default {
+                fetch() {
+                    return new Promise(() => setTimeout(() => new Array(20_000_000).fill(1.5), 0));
+                }
+            }
+        "#;
+        let worker = crate::worker_fixture::Worker::new();
+        let app_id = worker.app_id.clone();
+        let runtime = Runtime::builder()
+            .modules(test_modules(source))
+            .app_id(app_id.clone())
+            .heap_limit_mb(64)
+            .build();
+        // The exact registration `load_app` performs.
+        runtime.set_stop_notifier(drop_stopped_isolate(app_id.clone()));
+        runtime.exit_isolate();
+        runtime
+            .initialize(&EnvSnapshot::empty())
+            .await
+            .expect("the isolate initializes");
+        runtime.start_pump();
+        // A handle the dispatch holds, so the inner survives the cache removal.
+        let dispatcher = runtime.clone();
+        CACHE.with(|c| {
+            c.borrow_mut().as_mut().expect("the worker installed its cache").isolates.insert(
+                app_id.clone(),
+                entry(app_id.clone(), runtime, Instant::now()),
+            );
+        });
+        assert!(
+            CACHE.with(|c| c.borrow().as_ref().unwrap().isolates.contains_key(&app_id)),
+            "the premise: the isolate is cached",
+        );
+
+        dispatcher.enter_isolate();
+        let outcome = dispatcher.call_fetch_handler(
+            "GET",
+            "http://localhost/",
+            &[],
+            "",
+            &EnvSnapshot::empty(),
+            zeroship_runtime::RequestCtx::new(zeroship_runtime::channel::CancelFlag::new()),
+        );
+        dispatcher.exit_isolate();
+        let zeroship_runtime::FetchOutcome::Pending { rx, .. } = outcome else {
+            panic!("the allocation runs on a timer, so the dispatch is pending");
+        };
+        let settled = compio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+            .await
+            .expect("the dispatch is answered, not stranded");
+        match &settled {
+            Err(e) => assert_eq!(
+                e.message, "memory limit exceeded",
+                "the premise: the heap cap refuses the request",
+            ),
+            Ok(_) => panic!("the premise: the heap cap refuses the request, but it answered"),
+        }
+
+        // No `get_runtime` and no `evict_lru` ran here; only the stop's host
+        // notification could have removed the entry.
+        assert!(
+            !CACHE.with(|c| c.borrow().as_ref().unwrap().isolates.contains_key(&app_id)),
+            "the stopped isolate is gone from the cache without a new request or an eviction",
+        );
     }
 
     /// A response body the stop cuts off reaches the gateway as a body that

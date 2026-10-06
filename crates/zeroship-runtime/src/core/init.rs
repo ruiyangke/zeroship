@@ -651,6 +651,12 @@ fn queue_microtask_callback(
 /// Node is ES module top level, described at the `process.nextTick`
 /// installation in `setup_globals`.
 pub(crate) fn perform_microtask_checkpoint(scope: &mut v8::PinScope) {
+    // The heap cap's termination is spent once it unwinds to the runtime, so
+    // queued microtasks would run on headroom granted only for unwinding. An
+    // isolate past its cap runs none of them.
+    if crate::core::heap_cap::CapReached::in_isolate(scope) {
+        return;
+    }
     for _ in 0..1024 {
         let had_next_ticks_before = drain_next_ticks(scope);
         scope.perform_microtask_checkpoint();

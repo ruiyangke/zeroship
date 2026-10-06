@@ -1,44 +1,30 @@
 //! Heap-cap tests for `RuntimeBuilder::heap_limit_mb`.
 //!
-//! The intended contract: V8's near-heap-limit callback fires before the
-//! allocator hard-fails, the runtime grows the cap a few times, and after
-//! `MAX_HEAP_LIMIT_HITS` it calls `terminate_execution`. The app is supposed to
-//! see a non-2xx, never a success and never a hang.
+//! One process hosts many tenants' isolates, so an isolate whose heap reaches
+//! its cap has to stop alone. The cap's near-heap-limit callback requests
+//! termination and grants bounded headroom for the allocation in flight to
+//! finish (`heap_cap` in the runtime). The runtime then runs no more JavaScript
+//! in that isolate: the request that reached the cap and every request still
+//! pending on the isolate fail with `memory limit exceeded`, and the isolate is
+//! quarantined for its host to replace. The app sees a non-2xx, never a
+//! success and never a hang, and no other isolate notices.
+//!
+//! A case whose failure would abort the process runs through
+//! `in_own_process!`, so the abort fails that case with its own output.
 //!
 //! ## An allocation that is never read is never allocated
 //!
-//! `runtime_heap_cap_enforces_oom` spent a while failing while I recorded a
-//! defect that does not exist: "the cap does not cover large-object space,
-//! because 400 retained 1 MiB strings return 200 and the callback fires zero
-//! times". Both observations were real. The conclusion was wrong.
-//!
 //! Building `"x".repeat(1024 * 1024) + i` does not consume heap. V8 leaves the
-//! value unmaterialised until something reads it, so the loop retained 400
-//! nominal megabytes while `used_heap_size` sat at 1.5 MB and the near-heap-
-//! limit callback had nothing to fire about. Adding one `charCodeAt` per
-//! iteration takes the SAME loop to 58 MB used, five callback hits, and a 503.
-//!
-//! So the cap does cover these allocations, and the test was asserting against
-//! a no-op. The lesson worth keeping is that a test which allocates must prove
-//! it allocated - `used_heap_size` is the check, not the size of the values the
-//! source appears to build.
-//!
-//! What was real, and is fixed: heap-limit termination fired correctly and then
-//! left the request hanging, because nothing converted a terminated isolate
-//! into a response. The callback hit `MAX_HEAP_LIMIT_HITS` (5), called
-//! `terminate_execution` as designed, and the dispatch returned a `Pending`
-//! that never settled at a 30s or a 150s deadline.
-//!
-//! ## Still worth an operator decision, by design rather than by defect
-//!
-//! `heap_limit_mb(32)` does not cap the isolate at 32 MB. The callback grows
-//! the limit by a quarter of the original on each hit, up to 4x, so the
-//! observed ceiling is 128 MB and a dispatch was measured at 72 MB. That is
-//! deliberate - it avoids a hard V8 fatal-abort - but it means the configured
-//! number is a floor that buys headroom, not a bound.
+//! value unmaterialised until something reads it, so a loop retaining such
+//! strings holds far more nominal bytes than its cap while `used_heap_size`
+//! barely moves and the near-heap-limit callback has nothing to fire about.
+//! Reading one character of each forces the allocation. So a test which
+//! allocates must prove it allocated: the callback count is the witness that
+//! the cap, and not some other failure, refused the request.
 
 use crate::support;
 use support::*;
+use crate::in_own_process;
 
 use std::time::Duration;
 
@@ -139,8 +125,8 @@ fn runtime_default_no_heap_cap() {
 // 2 — heap_limit_mb(32): allocate well past the cap, expect a non-2xx.
 // ---------------------------------------------------------------------------
 //
-// The cap DOES bound this allocation, once the allocation is real: see the
-// module header for why an earlier version of this test measured otherwise.
+// The cap bounds this allocation once the allocation is real: see the module
+// header.
 //
 // V8 routes ArrayBuffer backing stores through its array-buffer allocator,
 // which is NOT counted against the heap limit configured by
@@ -163,13 +149,11 @@ fn runtime_heap_cap_enforces_oom() {
             fetch(request, env, ctx) {
                 const live = [];
                 try {
-                    // 1 MiB strings, retained. Building them is NOT enough:
+                    // Large strings, retained. Building them is NOT enough:
                     // until something reads one, V8 leaves the value
-                    // unmaterialised and the heap is never actually consumed -
-                    // measured at 1.5 MB used after 400 iterations, with the
-                    // near-heap-limit callback firing zero times. Touching a
-                    // byte forces materialisation and the same loop reaches
-                    // 58 MB used with the callback firing its full five times.
+                    // unmaterialised and the heap is never consumed, so the
+                    // near-heap-limit callback never fires. Touching a byte
+                    // forces materialisation.
                     let sink = 0;
                     for (let i = 0; i < 400; i++) {
                         const s = "x".repeat(1024 * 1024) + i;
@@ -212,11 +196,9 @@ fn runtime_heap_cap_enforces_oom() {
          body: {body}",
     );
 
-    // Either:
-    //   (a) JS observed the throw → user-handler 500 with `oom:true`.
-    //   (b) V8 terminated mid-allocation before JS regained control →
-    //       runtime 500 with a terminated/exception message.
-    // Both are valid OOM surfaces; the contract is "non-2xx".
+    // Termination cannot be caught, so the handler's own `oom:true` arm
+    // never answers: the runtime refuses the request. The contract is
+    // "non-2xx".
     assert!(
         !(200..300).contains(&status),
         "expected non-2xx with heap_limit_mb(32), got {status}; body: {body}",
@@ -289,13 +271,12 @@ fn near_heap_limit_callback_counter_can_fire() {
     );
 }
 
-/// Defect B: heap-limit termination fires as designed and then nothing settles
-/// the request.
+/// A heap-limit termination settles the request it ended, instead of leaving
+/// the caller waiting.
 ///
-/// This is a REGULAR old-space allocation, so unlike the large-string case
-/// above the near-heap-limit callback does run, reaches its hit threshold, and
-/// calls `terminate_execution`. The isolate really is terminated; the failure
-/// is that no one converts that into a result, so the caller waits forever.
+/// This is a REGULAR old-space allocation, so the near-heap-limit callback
+/// runs and calls `terminate_execution`. The isolate really is terminated, and
+/// something still has to convert that into a result.
 ///
 /// The assertion is only "settles, non-2xx". Which error surfaces is not
 /// pinned - a terminated isolate can be reported as a DispatchError or as a
@@ -334,4 +315,424 @@ fn heap_termination_settles_the_request_instead_of_hanging() {
         !(200..300).contains(&status),
         "expected non-2xx after heap termination, got {status}; body: {body}",
     );
+}
+
+// ---------------------------------------------------------------------------
+// Reaching the cap stops the isolate, never the process
+// ---------------------------------------------------------------------------
+
+/// The cap every stop case runs under.
+const STOP_CAP_MB: u32 = 64;
+
+/// How long a case waits for an answer the stop owes it. Expiring it means
+/// the request was stranded, not that the stop was slow.
+const SETTLE_WITHIN: Duration = Duration::from_secs(30);
+
+/// Routes for the stop cases. Each allocating route allocates in a timer
+/// callback its request is waiting on, so the allocation runs on the event
+/// pump with the request pending: the shape in which a request receives the
+/// cap's error as its answer.
+///
+/// - `/huge` makes one allocation several times the cap: `fill` gives the
+///   array its whole double backing store at once.
+/// - `/grow` grows the heap past the cap in small retained steps.
+/// - `/queued` queues a microtask that reports through `env.probe.ran()`,
+///   makes the `/huge` allocation, and then loops, so the termination the
+///   cap requested is taken at the loop's interrupt check and unwinds to the
+///   runtime with the microtask still queued.
+/// - `/scheduled` does the same with a zero-delay timer in place of the
+///   microtask.
+/// - `/report` queues the same microtask and answers: the control showing a
+///   queued microtask does report.
+/// - `/report-later` answers from a zero-delay timer that reports: the control
+///   showing a queued timer does report.
+/// - `/under` holds a sizeable share of the cap and answers.
+/// - `/park` waits on a promise nothing settles.
+/// - anything else answers at once.
+const STOP_SOURCE: &str = r#"
+    const later = (work) => new Promise(() => setTimeout(work, 0));
+    export default {
+        fetch(request, env) {
+            const path = new URL(request.url).pathname;
+            if (path === "/huge") {
+                return later(() => new Array(20_000_000).fill(1.5));
+            }
+            if (path === "/grow") {
+                return later(() => {
+                    const held = [];
+                    for (;;) held.push({ index: held.length, half: held.length + 0.5 });
+                });
+            }
+            if (path === "/queued") {
+                return later(() => {
+                    queueMicrotask(() => env.probe.ran());
+                    new Array(20_000_000).fill(1.5);
+                    let spins = 0;
+                    for (;;) spins++;
+                });
+            }
+            if (path === "/scheduled") {
+                return later(() => {
+                    setTimeout(() => env.probe.ran(), 0);
+                    new Array(20_000_000).fill(1.5);
+                    let spins = 0;
+                    for (;;) spins++;
+                });
+            }
+            if (path === "/report-later") {
+                return new Promise((resolve) => setTimeout(() => {
+                    env.probe.ran();
+                    resolve(new Response("reported"));
+                }, 0));
+            }
+            if (path === "/report") {
+                queueMicrotask(() => env.probe.ran());
+                return new Response("reported");
+            }
+            if (path === "/under") {
+                const held = new Array(2_000_000).fill(2.5);
+                return new Response(String(held.length));
+            }
+            if (path === "/park") {
+                return new Promise(() => {});
+            }
+            return new Response("served");
+        }
+    };
+"#;
+
+thread_local! {
+    /// Queued work that reported through `env.probe.ran()` on this thread.
+    static QUEUED_WORK_RAN: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+fn ran_callback(_scope: &mut v8::PinScope, _args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
+    QUEUED_WORK_RAN.with(|ran| ran.set(ran.get() + 1));
+}
+
+/// `env.probe.ran()`, through which queued work reports that it ran.
+struct Probe;
+
+impl zeroship_runtime::NativePlugin for Probe {
+    fn namespace(&self) -> &'static str {
+        "probe"
+    }
+
+    fn register(&self, r: &mut zeroship_runtime::NativeRegistrar) {
+        r.add("ran", ran_callback);
+    }
+}
+
+/// A tenant isolate built from [`STOP_SOURCE`] and left exited, as the
+/// worker's per-thread cache keeps every isolate between dispatches.
+fn tenant(heap_limit_mb: Option<u32>) -> Runtime {
+    init_v8();
+    let mut builder = Runtime::builder().modules(m(STOP_SOURCE)).plugin(Probe).idle_gc_after_ms(0);
+    if let Some(mb) = heap_limit_mb {
+        builder = builder.heap_limit_mb(mb);
+    }
+    let runtime = builder.build();
+    runtime.exit_isolate();
+    runtime
+}
+
+/// Dispatch one request the way the worker does: enter the tenant's isolate,
+/// call, exit.
+fn dispatch_entered(runtime: &Runtime, path: &str) -> FetchOutcome {
+    runtime.enter_isolate();
+    let outcome = runtime.call_fetch_handler(
+        "GET",
+        &format!("http://localhost{path}"),
+        &[],
+        "",
+        &EnvSnapshot::empty(),
+        RequestCtx::new(CancelFlag::new()),
+    );
+    runtime.exit_isolate();
+    outcome
+}
+
+/// A synchronous answer.
+fn answered(runtime: &Runtime, path: &str) -> (u16, String) {
+    match dispatch_entered(runtime, path) {
+        FetchOutcome::Response { status, body, .. } => (status, String::from_utf8_lossy(&body).into_owned()),
+        _ => panic!("{path} must answer synchronously"),
+    }
+}
+
+type Reply = zeroship_runtime::ResultReceiver<Result<SettledFetch, zeroship_runtime::runtime::DispatchError>>;
+
+/// A request that must still be waiting on the pump when its dispatch returns.
+fn pending(runtime: &Runtime, path: &str) -> Reply {
+    match dispatch_entered(runtime, path) {
+        FetchOutcome::Pending { rx, .. } => rx,
+        _ => panic!("{path} must be pending on the pump when its dispatch returns"),
+    }
+}
+
+/// Require the answer `path` receives to be the heap cap's error.
+async fn assert_cap_error(path: &str, reply: &Reply) {
+    let settled = compio::time::timeout(SETTLE_WITHIN, reply.recv())
+        .await
+        .unwrap_or_else(|_| panic!("{path} was never answered: the stop stranded it"));
+    match settled {
+        Err(error) => assert_eq!(
+            (error.message.as_str(), error.status),
+            ("memory limit exceeded", 500),
+            "{path} must receive the heap cap's error"
+        ),
+        Ok(_) => panic!("{path} must be failed by the heap cap, but it answered"),
+    }
+}
+
+/// Run `route` on a capped tenant with a request parked beside it, and a
+/// bystander tenant on the same thread, and require the cap to stop the
+/// capped isolate alone: both of its requests receive the cap's error, it is
+/// quarantined and refuses later dispatch with the cause, and the bystander
+/// serves before and after.
+fn assert_route_stops_only_its_isolate(route: &str) {
+    let bystander = tenant(None);
+    let capped = tenant(Some(STOP_CAP_MB));
+    compio::runtime::Runtime::new().expect("compio runtime").block_on(async {
+        bystander.start_pump();
+        capped.start_pump();
+        assert_eq!(answered(&bystander, "/"), (200, "served".to_owned()), "the bystander serves before");
+        assert_eq!(answered(&capped, "/"), (200, "served".to_owned()), "the capped isolate serves before");
+
+        let hits_before = zeroship_runtime::heap_limit_callback_hits();
+        let parked = pending(&capped, "/park");
+        let reaching = pending(&capped, route);
+        assert_cap_error(route, &reaching).await;
+        assert_cap_error("/park", &parked).await;
+        assert!(
+            zeroship_runtime::heap_limit_callback_hits() > hits_before,
+            "the near-heap-limit callback never fired, so the cap did not refuse {route}",
+        );
+
+        assert!(capped.is_quarantined(), "the isolate that reached its cap is quarantined");
+        assert_eq!(
+            answered(&capped, "/"),
+            (500, r#"{"message":"module init failed: memory limit exceeded","name":"Error"}"#.to_owned()),
+            "a stopped isolate refuses dispatch with its cause, and runs no handler",
+        );
+        assert!(!bystander.is_quarantined(), "the bystander is not stopped");
+        assert_eq!(
+            answered(&bystander, "/"),
+            (200, "served".to_owned()),
+            "another tenant's isolate on the same thread keeps serving",
+        );
+    });
+}
+
+/// One allocation several times the cap, larger than any headroom the cap
+/// had left, stops that isolate and leaves the process and the thread's other
+/// isolate serving.
+#[test]
+fn one_allocation_past_the_cap_stops_its_isolate_and_not_the_process() {
+    in_own_process!(one_allocation_past_the_cap_stops_its_isolate_and_not_the_process, {
+        assert_route_stops_only_its_isolate("/huge");
+    });
+}
+
+/// Growing past the cap in small steps stops the isolate the same way, rather
+/// than leaving it serving once the termination has unwound.
+#[test]
+fn gradual_growth_past_the_cap_stops_its_isolate_and_not_the_process() {
+    in_own_process!(gradual_growth_past_the_cap_stops_its_isolate_and_not_the_process, {
+        assert_route_stops_only_its_isolate("/grow");
+    });
+}
+
+/// Run `route` on a fresh capped tenant whose queued work reports through
+/// `env.probe.ran()`, after `control` shows such work does report, and require
+/// the work `route` queued before reaching the cap never to run.
+fn assert_queued_work_never_runs(control: &str, route: &str) {
+    let capped = tenant(Some(STOP_CAP_MB));
+    compio::runtime::Runtime::new().expect("compio runtime").block_on(async {
+        capped.start_pump();
+        let before = QUEUED_WORK_RAN.with(std::cell::Cell::get);
+        match dispatch_entered(&capped, control) {
+            FetchOutcome::Response { status, body, .. } => {
+                assert_eq!((status, String::from_utf8_lossy(&body).into_owned()), (200, "reported".to_owned()));
+            }
+            FetchOutcome::Pending { rx, .. } => {
+                let settled = compio::time::timeout(SETTLE_WITHIN, rx.recv())
+                    .await
+                    .unwrap_or_else(|_| panic!("{control} was never answered"));
+                assert!(settled.is_ok(), "{control} must answer");
+            }
+            _ => panic!("{control} must answer with a buffered response"),
+        }
+        assert_eq!(
+            QUEUED_WORK_RAN.with(std::cell::Cell::get),
+            before + 1,
+            "the control: work {control} queued reports",
+        );
+
+        let reaching = pending(&capped, route);
+        assert_cap_error(route, &reaching).await;
+        assert!(capped.is_quarantined(), "the isolate that reached its cap is quarantined");
+        assert_eq!(
+            QUEUED_WORK_RAN.with(std::cell::Cell::get),
+            before + 1,
+            "work {route} queued before the cap was reached ran after it",
+        );
+    });
+}
+
+/// A microtask queued before the allocation that reached the cap never runs:
+/// the termination is spent once it unwinds to the runtime, and the queued
+/// work would otherwise run on headroom granted only for unwinding.
+#[test]
+fn a_microtask_queued_before_the_cap_is_reached_never_runs() {
+    in_own_process!(a_microtask_queued_before_the_cap_is_reached_never_runs, {
+        assert_queued_work_never_runs("/report", "/queued");
+    });
+}
+
+/// A zero-delay timer queued before the allocation that reached the cap never
+/// fires, for the same reason: the pump drains new timers right after the
+/// termination unwinds, and must not run them on an isolate past its cap.
+#[test]
+fn a_timer_queued_before_the_cap_is_reached_never_fires() {
+    in_own_process!(a_timer_queued_before_the_cap_is_reached_never_fires, {
+        assert_queued_work_never_runs("/report-later", "/scheduled");
+    });
+}
+
+/// The rejection control: an app holding a sizeable share of its cap, but
+/// under it, is untouched. It answers, the callback never fires, and the
+/// isolate keeps serving.
+#[test]
+fn an_app_under_its_cap_is_untouched() {
+    in_own_process!(an_app_under_its_cap_is_untouched, {
+        let capped = tenant(Some(STOP_CAP_MB));
+        compio::runtime::Runtime::new().expect("compio runtime").block_on(async {
+            capped.start_pump();
+            let hits_before = zeroship_runtime::heap_limit_callback_hits();
+            assert_eq!(answered(&capped, "/under"), (200, "2000000".to_owned()));
+            assert_eq!(answered(&capped, "/under"), (200, "2000000".to_owned()));
+            assert_eq!(
+                zeroship_runtime::heap_limit_callback_hits(),
+                hits_before,
+                "the near-heap-limit callback fired for an app under its cap",
+            );
+            assert!(!capped.is_quarantined(), "an app under its cap is not stopped");
+            assert_eq!(answered(&capped, "/"), (200, "served".to_owned()));
+        });
+    });
+}
+
+/// Evidence for `UNWIND_GRANTS`. The largest object V8 builds in a single step
+/// between interrupt checks is a `FixedDoubleArray` at its maximum capacity, a
+/// 1 GiB allocation. Under a small cap this one allocation consults the
+/// near-heap-limit callback exactly twice before it completes and the isolate
+/// terminates: once to cross the cap, once when V8 reconsults after a GC at the
+/// raised limit frees nothing. The process survives and the isolate is
+/// quarantined. `UNWIND_GRANTS` must be at least that count; mutating it to 1
+/// makes this one allocation abort the process (SIGTRAP), which is the
+/// before-the-fix failure this case pins.
+#[test]
+fn a_single_maximal_allocation_is_caught_within_the_grant_ceiling() {
+    in_own_process!(a_single_maximal_allocation_is_caught_within_the_grant_ceiling, {
+        init_v8();
+        // 128 Mi doubles = 1 GiB: `FixedDoubleArray::kMaxLength`, the largest
+        // single heap object, allocated in one builtin call.
+        let runtime = Runtime::builder()
+            .modules(m(r#"
+                export default {
+                    fetch() {
+                        const a = new Array(128 * 1024 * 1024).fill(0.5);
+                        return new Response(String(a.length));
+                    }
+                };
+            "#))
+            .heap_limit_mb(STOP_CAP_MB)
+            .idle_gc_after_ms(0)
+            .build();
+        let before = zeroship_runtime::heap_limit_callback_hits();
+        let (status, body) = compio::runtime::Runtime::new()
+            .expect("compio runtime")
+            .block_on(async {
+                runtime.start_pump();
+                answer(&runtime)
+            });
+        let fired = zeroship_runtime::heap_limit_callback_hits() - before;
+        println!("one maximal allocation consulted the callback {fired} time(s); status {status}");
+        assert_eq!(
+            fired, 2,
+            "the largest single allocation consults the callback twice; \
+             UNWIND_GRANTS must cover that. status {status}, body {body}",
+        );
+        assert!(
+            !(200..300).contains(&status),
+            "the maximal allocation must be refused, got {status}: {body}",
+        );
+        assert!(runtime.is_quarantined(), "the isolate is quarantined after the cap");
+    });
+}
+
+/// Drive one dispatch to a buffered answer, starting the pump only now so a
+/// `Pending` the allocation left settles.
+fn answer(runtime: &Runtime) -> (u16, String) {
+    runtime.enter_isolate();
+    let outcome = runtime.call_fetch_handler(
+        "GET", "http://localhost/", &[], "", &EnvSnapshot::empty(), RequestCtx::new(CancelFlag::new()),
+    );
+    runtime.exit_isolate();
+    match outcome {
+        FetchOutcome::Response { status, body, .. } => (status, String::from_utf8_lossy(&body).into_owned()),
+        other => panic!("expected a buffered Response, got {}", std::any::type_name_of_val(&other)),
+    }
+}
+
+/// The stop releases the heap the cap's grants raised, rather than leaving the
+/// isolate holding it until it is dropped. The allocation that reached the cap
+/// is not retained, so the full GC the stop runs collects it: the isolate's
+/// used heap afterwards is a small fraction of what it allocated. Without that
+/// GC the used heap stays at the allocation's size until disposal.
+#[test]
+fn the_stop_releases_the_raised_heap() {
+    in_own_process!(the_stop_releases_the_raised_heap, {
+        init_v8();
+        // ~160 MiB of doubles, not retained, allocated from a timer so the
+        // request is pending on the pump when the cap is reached.
+        let runtime = Runtime::builder()
+            .modules(m(r#"
+                export default {
+                    fetch() {
+                        return new Promise(() => setTimeout(() => { new Array(20_000_000).fill(1.5); }, 0));
+                    }
+                };
+            "#))
+            .heap_limit_mb(STOP_CAP_MB)
+            .idle_gc_after_ms(0)
+            .build();
+        compio::runtime::Runtime::new().expect("compio runtime").block_on(async {
+            runtime.start_pump();
+            let env = EnvSnapshot::empty();
+            let ctx = RequestCtx::new(CancelFlag::new());
+            let FetchOutcome::Pending { rx, .. } =
+                runtime.call_fetch_handler("GET", "http://localhost/", &[], "", &env, ctx)
+            else {
+                panic!("the allocation runs on a timer, so the dispatch is pending");
+            };
+            let settled = compio::time::timeout(SETTLE_WITHIN, rx.recv())
+                .await
+                .expect("the dispatch is answered, not stranded");
+            match settled {
+                Err(e) => assert_eq!(e.message, "memory limit exceeded", "the premise: the heap cap stops it"),
+                Ok(_) => panic!("the premise: the heap cap stops it, but it answered"),
+            }
+            assert!(runtime.is_quarantined(), "the premise: the isolate is quarantined");
+
+            let (used, _limit) = zeroship_runtime::heap_used_and_limit(&runtime);
+            println!("used heap after the stop: {} MiB", used >> 20);
+            assert!(
+                used < (48 << 20),
+                "the stop did not release the raised heap: {} MiB still used after a ~160 MiB allocation",
+                used >> 20,
+            );
+        });
+    });
 }

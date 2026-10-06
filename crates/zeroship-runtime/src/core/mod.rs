@@ -13,6 +13,7 @@ pub mod dev_auth;
 pub(crate) mod dev_entry;
 pub mod dispatch;
 pub mod dynamic_import;
+pub(crate) mod heap_cap;
 pub mod init;
 pub(crate) mod invocation;
 pub mod modules;

@@ -406,3 +406,34 @@ pub fn dispatch_fetch_with_env(
         ctx,
     )
 }
+
+/// Run the named test's body in a process of its own.
+///
+/// Under nextest the harness passes `--exact` and already gives each test a
+/// process, so the body runs in place; otherwise this re-executes the test
+/// binary for that one test and requires the child to report it passed, so a
+/// child that aborts fails here with its own output.
+#[macro_export]
+macro_rules! in_own_process {
+    ($name:ident, $body:block) => {{
+        if std::env::args().any(|argument| argument == "--exact") {
+            $body
+        } else {
+            let qualified = concat!(module_path!(), "::", stringify!($name));
+            let test_name = qualified
+                .split_once("::")
+                .map(|(_, rest)| rest)
+                .expect("module path names the test binary");
+            let child = std::process::Command::new(
+                std::env::current_exe().expect("the test binary has a path"),
+            )
+            .args(["--exact", test_name, "--nocapture"])
+            .output()
+            .expect("start the isolated case");
+            let stdout = String::from_utf8_lossy(&child.stdout);
+            let stderr = String::from_utf8_lossy(&child.stderr);
+            assert!(child.status.success(), "{test_name} died: {:?}\n{stdout}\n{stderr}", child.status);
+            assert!(stdout.contains("1 passed"), "the child must run {test_name}:\n{stdout}");
+        }
+    }};
+}

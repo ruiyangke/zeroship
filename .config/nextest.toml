@@ -15,12 +15,33 @@ slow-timeout = { period = "60s", terminate-after = 10, grace-period = "30s" }
 [profile.ci.junit]
 path = "junit.xml"
 
-# The cases that build a string past V8's length limit from creator code
-# allocate it for real, several times over. One at a time keeps their peak
-# memory from stacking.
+# The cases that build a string past V8's length limit from creator code, and
+# the cases that allocate past an isolate's heap cap, allocate for real, up to
+# V8's largest single object. One at a time keeps their peak memory from
+# stacking.
 [test-groups]
-v8-string-limit = { max-threads = 1 }
+v8-large-allocation = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = 'package(zeroship-runtime) and test(/callback_safety::an_oversized_/)'
-test-group = 'v8-string-limit'
+test-group = 'v8-large-allocation'
+
+[[profile.default.overrides]]
+filter = 'package(zeroship-runtime) and test(/heap_limits::/)'
+test-group = 'v8-large-allocation'
+
+[[profile.default.overrides]]
+filter = 'package(zeroship-worker) and test(/an_isolate_stopped_at_its_heap_cap_is_replaced_by_the_next_request/)'
+test-group = 'v8-large-allocation'
+
+[[profile.default.overrides]]
+filter = 'package(zeroship-runtime) and test(/the_request_after_a_heap_cap_stop_runs_on_a_fresh_isolate/)'
+test-group = 'v8-large-allocation'
+
+[[profile.default.overrides]]
+filter = 'package(zeroship-runtime) and test(/subscription::eviction_runs_no_abort_listener_on_a_heap_stopped_isolate/)'
+test-group = 'v8-large-allocation'
+
+[[profile.default.overrides]]
+filter = 'package(zeroship-worker) and test(/a_stopped_isolate_leaves_the_cache_without_a_new_request_or_eviction/)'
+test-group = 'v8-large-allocation'
