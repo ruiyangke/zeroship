@@ -778,8 +778,8 @@ return typeof net;
 /// `connect()`.
 ///
 /// A literal is decided by the same address phase that decides a resolved
-/// answer - one ordering, with the platform floor ahead of every creator rule
-/// - and that phase is not reachable before the connect task runs.
+/// answer, one ordering with the platform floor ahead of every creator rule,
+/// and that phase is not reachable before the connect task runs.
 /// `ERR_NET_EGRESS_DENIED` rather than `ERR_NET_SSRF` is the point of the row:
 /// the creator's own rules refused this, not the platform floor.
 #[test]
