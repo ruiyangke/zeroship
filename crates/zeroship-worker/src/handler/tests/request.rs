@@ -64,7 +64,7 @@ async fn dispatch_preserves_non_utf8_request_body_bytes() {
     let worker = Worker::new();
     let app_id = worker.app_id.clone();
     worker
-        .load(source, AppRuntimeLimits::default(), &Manifest::default())
+        .load(source, crate::cache::TEST_LIMITS, &Manifest::default())
         .await;
     let app = test::init_service(web::App::new().configure(worker.configure())).await;
 
@@ -101,7 +101,7 @@ async fn dispatch_preserves_non_utf8_response_body_bytes() {
     let worker = Worker::new();
     let app_id = worker.app_id.clone();
     worker
-        .load(source, AppRuntimeLimits::default(), &Manifest::default())
+        .load(source, crate::cache::TEST_LIMITS, &Manifest::default())
         .await;
     let app = test::init_service(web::App::new().configure(worker.configure())).await;
 

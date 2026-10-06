@@ -118,8 +118,8 @@ impl Platform {
         let plan = zeroship_core::typed_id::new_plan_id();
         self.admin
             .execute(
-                "INSERT INTO zeroship.plans(id,name,runtime_limits_json,workflows_allowed) \
-                 VALUES($1,$2,'{}',true)",
+                "INSERT INTO zeroship.plans(id,name,runtime_limits_json,heap_limit_mb,workflows_allowed) \
+                 VALUES($1,$2,'{}',64,true)",
                 &[&plan, &format!("plan-{name}")],
             )
             .await

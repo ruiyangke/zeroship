@@ -90,7 +90,7 @@ impl DeployedApp {
             version: AppVersionInfo {
                 deploy_hash: Some("initial-deploy".into()),
                 plan_id: "starter".into(),
-                runtime: AppRuntimeLimits::default(),
+                runtime: crate::cache::TEST_LIMITS,
                 env_version: 1,
                 manifest: Some(manifest),
                 net_policy: AppNetPolicy::default(),

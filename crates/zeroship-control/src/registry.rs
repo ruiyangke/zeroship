@@ -9,6 +9,7 @@ use zeroship_core::app_id::AppId;
 use zeroship_core::database_role::DatabaseCapability;
 use zeroship_core::{BindingId, DatabaseId};
 
+use crate::plan_catalog::{heap_cap_from_column, PlanTimeLimits};
 use crate::publication::{
     catalog, Acceptance, AcceptanceResult, Catalog, CatalogError, CatalogOptions, CatalogRole,
     CommandBinding, DeployCommand,
@@ -813,14 +814,14 @@ impl Registry {
     pub async fn get_versions(&self) -> Result<VersionMap, RegistryError> {
         let conn = self.conn().await?;
         // LEFT JOIN the plan catalog so each app's runtime limits come from its
-        // plan row rather than a hardcoded plan-name table. A
-        // missing plan (NULL `runtime_limits_json`) falls back to the
-        // conservative free-tier limits below, so the worker never receives
-        // `(None, None, None)` for an unpriced app.
+        // plan row rather than a hardcoded plan-name table, its heap cap from
+        // the row's required `heap_limit_mb`. A missing plan (NULL columns)
+        // falls back to the conservative free-tier limits below, so the worker
+        // never receives unbounded time limits for an unpriced app.
         let rows = conn
             .query(
                 "SELECT a.id, a.deploy_hash, a.plan_id, a.env_version, a.manifest_json, \
-                        p.runtime_limits_json, p.net_policy_limits_json \
+                        p.runtime_limits_json, p.heap_limit_mb, p.net_policy_limits_json \
                  FROM zeroship.apps a \
                  LEFT JOIN zeroship.plans p ON p.id = a.plan_id",
                 &[],
@@ -994,6 +995,7 @@ impl Registry {
             let env_version: i64 = row.get("env_version");
             let manifest_json: Option<String> = row.get("manifest_json");
             let runtime_limits_json: Option<serde_json::Value> = row.get("runtime_limits_json");
+            let heap_limit_mb: Option<i32> = row.get("heap_limit_mb");
             let net_policy_limits_json: Option<serde_json::Value> =
                 row.get("net_policy_limits_json");
             let egress = rules.remove(&id).unwrap_or_default();
@@ -1026,7 +1028,8 @@ impl Registry {
                     }
                 }
             });
-            let runtime = runtime_limits_from_catalog(runtime_limits_json.as_ref(), &id);
+            let runtime =
+                runtime_limits_from_catalog(runtime_limits_json.as_ref(), heap_limit_mb, &id);
             // An app with no live binding carries the empty set, which is a
             // statement and not an absence: it is what the worker compares its
             // isolate against to find that a binding was withdrawn.
@@ -1254,29 +1257,45 @@ impl Registry {
     }
 }
 
-/// Derive an app's [`AppRuntimeLimits`] from its plan-catalog
-/// `runtime_limits_json` (the LEFT-JOINed column in [`Registry::get_versions`]).
-/// A NULL column (no plan row) or a parse failure falls back to the
-/// conservative free-tier limits. Limits come from the catalog, not a
-/// hardcoded plan-name table.
+/// Derive an app's [`AppRuntimeLimits`] from its plan-catalog row (the
+/// LEFT-JOINed columns in [`Registry::get_versions`]): the CPU budget and wall
+/// timeout from `runtime_limits_json`, the heap cap from `heap_limit_mb`.
+/// Limits come from the catalog, not a hardcoded plan-name table.
+///
+/// NULL columns (no plan row) fall back to the conservative free-tier limits.
+/// A JSON column that fails to parse falls back to the free-tier time limits
+/// and keeps the plan's heap cap, which its own column holds.
 fn runtime_limits_from_catalog(
-    json: Option<&serde_json::Value>,
+    time_limits_json: Option<&serde_json::Value>,
+    heap_limit_mb: Option<i32>,
     app_id: &AppId,
 ) -> AppRuntimeLimits {
-    match json {
-        Some(j) => match serde_json::from_value::<AppRuntimeLimits>(j.clone()) {
-            Ok(limits) => limits,
-            Err(e) => {
-                tracing::warn!(
-                    app_id = %app_id.as_str(),
-                    error = %e,
-                    "registry: plan runtime_limits_json parse failure — using free-tier fallback"
-                );
-                FREE_TIER_RUNTIME_LIMITS
-            }
-        },
-        None => FREE_TIER_RUNTIME_LIMITS,
-    }
+    let (Some(json), Some(heap_limit_mb)) = (time_limits_json, heap_limit_mb) else {
+        return FREE_TIER_RUNTIME_LIMITS;
+    };
+    let time = match serde_json::from_value::<PlanTimeLimits>(json.clone()) {
+        Ok(time) => time,
+        Err(e) => {
+            tracing::warn!(
+                app_id = %app_id.as_str(),
+                error = %e,
+                "registry: plan runtime_limits_json parse failure: using free-tier fallback"
+            );
+            PlanTimeLimits::FREE_TIER
+        }
+    };
+    // The column's `CHECK (heap_limit_mb > 0)` makes the fallback arm
+    // unreachable; it exists so a value the schema refuses is never read as a
+    // cap.
+    let heap = heap_cap_from_column(heap_limit_mb).unwrap_or_else(|| {
+        tracing::error!(
+            app_id = %app_id.as_str(),
+            heap_limit_mb,
+            "registry: plan heap_limit_mb is not a positive cap: using the free-tier cap"
+        );
+        FREE_TIER_RUNTIME_LIMITS.heap_limit_mb
+    });
+    time.with_heap(heap)
 }
 
 /// Derive creator raw-TCP caps from the plan catalog. Destinations come from

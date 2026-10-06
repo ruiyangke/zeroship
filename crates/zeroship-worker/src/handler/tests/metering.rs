@@ -12,7 +12,7 @@ async fn dispatch_meters_unsupported_upgrade_error_body() {
           }
         };
     "#;
-    let result = run_metered_dispatch(source, AppRuntimeLimits::default(), b"sync-upgrade").await;
+    let result = run_metered_dispatch(source, crate::cache::TEST_LIMITS, b"sync-upgrade").await;
 
     assert_generated_error_metering(result, StatusCode::INTERNAL_SERVER_ERROR);
 }
@@ -31,7 +31,7 @@ async fn dispatch_meters_settled_unsupported_upgrade_error_body() {
         };
     "#;
     let result =
-        run_metered_dispatch(source, AppRuntimeLimits::default(), b"settled-upgrade").await;
+        run_metered_dispatch(source, crate::cache::TEST_LIMITS, b"settled-upgrade").await;
 
     assert_generated_error_metering(result, StatusCode::INTERNAL_SERVER_ERROR);
 }
@@ -46,7 +46,7 @@ async fn dispatch_meters_pending_dispatch_error_body() {
           }
         };
     "#;
-    let result = run_metered_dispatch(source, AppRuntimeLimits::default(), b"pending-error").await;
+    let result = run_metered_dispatch(source, crate::cache::TEST_LIMITS, b"pending-error").await;
 
     assert_generated_error_metering(result, StatusCode::INTERNAL_SERVER_ERROR);
 }
@@ -62,7 +62,7 @@ async fn dispatch_meters_timeout_error_body() {
     "#;
     let limits = AppRuntimeLimits {
         wall_timeout_ms: Some(1_000),
-        ..AppRuntimeLimits::default()
+        ..crate::cache::TEST_LIMITS
     };
     let result = run_metered_dispatch(source, limits, b"timeout").await;
 
@@ -81,7 +81,7 @@ async fn dispatch_meters_cpu_burned_on_the_pump_after_an_await() {
           }
         };
     "#;
-    let result = run_metered_dispatch(source, AppRuntimeLimits::default(), b"pump-cpu").await;
+    let result = run_metered_dispatch(source, crate::cache::TEST_LIMITS, b"pump-cpu").await;
 
     assert_eq!(
         result.status,
@@ -136,7 +136,7 @@ fn self_rescheduling_zero_delay_timer_does_not_wedge_the_pump() {
         let runtime = compio::runtime::Runtime::new().expect("compio runtime");
         let _ = tx.send(runtime.block_on(run_metered_dispatch(
             source,
-            AppRuntimeLimits::default(),
+            crate::cache::TEST_LIMITS,
             b"pump-spin",
         )));
     });
@@ -223,7 +223,7 @@ async fn dispatch_cached_runtime_missing_env_records_all_five_platform_counters(
     let request_body = b"missing-env-request-body";
     let worker = Worker::new();
     worker
-        .load(source, AppRuntimeLimits::default(), &Manifest::default())
+        .load(source, crate::cache::TEST_LIMITS, &Manifest::default())
         .await;
     assert!(worker
         .envs
@@ -314,7 +314,7 @@ async fn dispatch_feeds_all_five_platform_counters() {
     let app_id = worker.app_id.clone();
     let meter = worker.meter.clone();
     worker
-        .load(source, AppRuntimeLimits::default(), &Manifest::default())
+        .load(source, crate::cache::TEST_LIMITS, &Manifest::default())
         .await;
     let app = test::init_service(web::App::new().configure(worker.configure())).await;
 

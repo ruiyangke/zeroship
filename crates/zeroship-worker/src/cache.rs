@@ -691,11 +691,17 @@ pub fn get_declared_policy(app_id: &AppId) -> Option<Rc<CompiledManifest>> {
     })
 }
 
+/// The runtime limits an isolate for this app is built with.
+///
+/// Every isolate the worker builds, for requests or for a workflow execution,
+/// takes its limits from here, and the heap cap is always the plan's:
+/// `heap_limit_bytes` is never `None`, so the runtime's own default for a host
+/// that states no cap never applies to a deployed app.
 pub fn runtime_limits_from_app(limits: &AppRuntimeLimits) -> RuntimeLimits {
     RuntimeLimits {
         cpu_limit: limits.cpu_limit_ms.map(std::time::Duration::from_millis),
         wall_timeout: limits.wall_timeout_ms.map(std::time::Duration::from_millis),
-        heap_limit_bytes: limits.heap_limit_mb.map(|mb| (mb as usize) * 1024 * 1024),
+        heap_limit_bytes: Some((limits.heap_limit_mb.get() as usize).saturating_mul(1024 * 1024)),
     }
 }
 
@@ -897,6 +903,18 @@ fn refresh_socket_activity(cache: &mut AppCache) {
     }
 }
 
+/// The limits a test isolate runs under: no CPU budget or wall timeout, and a
+/// heap cap stated the way a plan states one.
+#[cfg(test)]
+pub(crate) const TEST_LIMITS: AppRuntimeLimits = AppRuntimeLimits {
+    cpu_limit_ms: None,
+    wall_timeout_ms: None,
+    heap_limit_mb: match std::num::NonZeroU32::new(128) {
+        Some(cap) => cap,
+        None => panic!("a heap cap is non-zero"),
+    },
+};
+
 #[cfg(test)]
 pub(crate) fn test_modules(source: &[u8]) -> Vec<ModuleEntry> {
     vec![ModuleEntry {
@@ -1096,7 +1114,7 @@ mod tests {
                                 }
                                 export default { fetch() { return new Response("ok"); } }"#,
                         ),
-                        AppRuntimeLimits::default(),
+                        TEST_LIMITS,
                         AppNetPolicy::default(),
                         Some("deploy_build_runtime_guard"),
                         None,
@@ -1688,7 +1706,7 @@ mod tests {
                     crate::cache::test_modules(
                         br#"export default { fetch() { return new Response("ok"); } }"#,
                     ),
-                    AppRuntimeLimits::default(),
+                    TEST_LIMITS,
                     AppNetPolicy {
                         egress: vec![zeroship_core::types::NetEgressEntry {
                             verdict: Verdict::Accept,
@@ -1727,6 +1745,101 @@ mod tests {
         })
         .join()
         .expect("load_app net policy test thread panicked");
+    }
+
+    /// V8's own heap limit for `runtime`'s isolate.
+    fn v8_heap_limit(runtime: &Runtime) -> usize {
+        runtime.enter_isolate();
+        let (_, limit) = zeroship_runtime::heap_used_and_limit(runtime);
+        runtime.exit_isolate();
+        limit
+    }
+
+    /// An isolate the worker builds for an app is built at exactly its plan's
+    /// heap cap, the unlimited tier's included.
+    ///
+    /// For each built-in tier's cap, the limits are decoded from the version
+    /// feed's wire shape and loaded through `load_app`, as every deployed app
+    /// is. The isolate V8 built is compared with one built at that cap
+    /// directly, and with one built stating no cap, the control that the
+    /// comparison can tell the plan's cap from the runtime's default. A plan
+    /// entry that states no cap cannot reach this path at all: it does not
+    /// decode.
+    #[test]
+    fn a_plan_derived_isolate_is_built_at_exactly_the_plans_heap_cap() {
+        std::thread::spawn(|| {
+            let runtime = compio::runtime::Runtime::new().expect("compio runtime");
+            runtime.block_on(async {
+                init_cache(
+                    4,
+                    KernelConfig {
+                        workflows: None,
+                        db_service: None,
+                        kv_store: None,
+                        storage_backend: None,
+                        meter: Arc::new(zeroship_metering::Meter::new()),
+                        residency: None,
+                    },
+                );
+                let unstated = test_runtime();
+                let default_limit = v8_heap_limit(&unstated);
+                drop(unstated);
+
+                for mb in [64_u32, 256, 1024] {
+                    let limits: AppRuntimeLimits = serde_json::from_value(serde_json::json!({
+                        "cpu_limit_ms": null,
+                        "wall_timeout_ms": null,
+                        "heap_limit_mb": mb,
+                    }))
+                    .expect("a feed entry stating a cap decodes");
+                    let app_id = AppId::mint();
+                    load_app(
+                        hold(&app_id),
+                        crate::cache::test_modules(
+                            br#"export default { fetch() { return new Response("ok"); } }"#,
+                        ),
+                        limits,
+                        AppNetPolicy::default(),
+                        None,
+                        None,
+                        &zeroship_bundle::Manifest::default(),
+                        &EnvSnapshot::empty(),
+                    )
+                    .await
+                    .expect("app loads");
+                    let loaded = get_runtime(&app_id).expect("runtime loaded");
+                    let cap_bytes = mb as usize * 1024 * 1024;
+                    assert_eq!(loaded.limits().heap_limit_bytes, Some(cap_bytes), "{mb} MB");
+
+                    let stated = Runtime::builder().heap_limit_bytes(cap_bytes).build();
+                    stated.exit_isolate();
+                    let stated_limit = v8_heap_limit(&stated);
+                    drop(stated);
+                    let plan_limit = v8_heap_limit(&loaded);
+                    assert_eq!(plan_limit, stated_limit, "{mb} MB: V8 holds the plan's cap");
+                    assert_ne!(
+                        plan_limit, default_limit,
+                        "{mb} MB: the isolate is not at the runtime's default"
+                    );
+                }
+            });
+        })
+        .join()
+        .expect("plan heap cap test thread panicked");
+
+        for heap in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::json!(0)),
+        ] {
+            let mut capless = serde_json::json!({ "cpu_limit_ms": null, "wall_timeout_ms": null });
+            if let Some(heap) = heap {
+                capless["heap_limit_mb"] = heap;
+            }
+            serde_json::from_value::<AppRuntimeLimits>(capless.clone()).expect_err(&format!(
+                "a feed entry stating no cap is refused: {capless}"
+            ));
+        }
     }
 
     #[test]
@@ -1775,7 +1888,7 @@ mod tests {
                     let executable = crate::executable::load_executable(&manifest, &blobs).await.unwrap();
                     assert_eq!(executable.modules[0].specifier, "app/z-entry.js");
                     assert_eq!(crate::executable::primary_schema_json(executable.descriptor.as_deref()), serde_json::from_str::<serde_json::Value>(descriptor).unwrap());
-                    load_app(hold(&app_id), executable.modules, AppRuntimeLimits::default(),
+                    load_app(hold(&app_id), executable.modules, TEST_LIMITS,
                         AppNetPolicy::default(), Some(deployment), executable.descriptor.as_deref(),
                         &manifest, &EnvSnapshot::empty()).await.unwrap();
                 }
@@ -1843,7 +1956,7 @@ mod tests {
                 load_app(
                     hold(&app_id),
                     crate::cache::test_modules(br#"export default { fetch() { return new Response("last-good"); } }"#),
-                    AppRuntimeLimits::default(),
+                    TEST_LIMITS,
                     AppNetPolicy::default(),
                     Some("deploy-good"),
                     None,
@@ -1859,7 +1972,7 @@ mod tests {
                 let err = load_app(
                     hold(&app_id),
                     crate::cache::test_modules(br#"export default { fetch() { return new Response("bad-new"); } }"#),
-                    AppRuntimeLimits::default(),
+                    TEST_LIMITS,
                     AppNetPolicy::default(),
                     Some("deploy-bad"),
                     Some(corrupt.as_str()),
@@ -1901,7 +2014,7 @@ mod tests {
                     hold(&app_id),
                     test_modules(br#"await new Promise(resolve => setTimeout(resolve, 10));
                         export default { fetch() { return new Response("ready"); } }"#),
-                    AppRuntimeLimits::default(), AppNetPolicy::default(),
+                    TEST_LIMITS, AppNetPolicy::default(),
                     Some("ready-deploy"), None, &manifest, &env,
                 ));
                 assert!(loading.as_mut().now_or_never().is_none(), "fixture must await startup");
@@ -1913,7 +2026,7 @@ mod tests {
                     hold(&app_id),
                     test_modules(br#"await new Promise(resolve => setTimeout(resolve, 10));
                         throw new Error("candidate startup rejected");"#),
-                    AppRuntimeLimits::default(), AppNetPolicy::default(),
+                    TEST_LIMITS, AppNetPolicy::default(),
                     Some("failed-deploy"), None, &manifest, &env,
                 ));
                 assert!(reloading.as_mut().now_or_never().is_none(), "fixture must await reload");
@@ -1949,7 +2062,7 @@ mod tests {
                 let err = load_app(
                     hold(&app_id),
                     crate::cache::test_modules(br#"export default { fetch() { return new Response("bad-first"); } }"#),
-                    AppRuntimeLimits::default(),
+                    TEST_LIMITS,
                     AppNetPolicy::default(),
                     Some("deploy-bad"),
                     Some(corrupt.as_str()),
@@ -1990,7 +2103,7 @@ mod tests {
                     crate::cache::test_modules(
                         br#"export default { fetch() { return new Response("ok"); } }"#,
                     ),
-                    AppRuntimeLimits::default(),
+                    TEST_LIMITS,
                     AppNetPolicy::default(),
                     None,
                     None,
@@ -2223,7 +2336,7 @@ mod tests {
         load_app(
             hold(app_id),
             test_modules(source),
-            AppRuntimeLimits::default(),
+            TEST_LIMITS,
             AppNetPolicy::default(),
             Some("deploy"),
             None,
@@ -2470,7 +2583,7 @@ mod tests {
         let version = serde_json::to_string(&AppVersionInfo {
             deploy_hash: Some("replacement-deploy".into()),
             plan_id: "unlimited".into(),
-            runtime: AppRuntimeLimits::default(),
+            runtime: TEST_LIMITS,
             env_version: 1,
             manifest: Some(manifest),
             net_policy: AppNetPolicy::default(),

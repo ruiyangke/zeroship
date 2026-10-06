@@ -12,11 +12,17 @@
 //! in `src/pricing.rs`.
 
 
+use std::collections::BTreeMap;
+use std::num::NonZeroU32;
+
+use compio_postgres::error::SqlState;
 use compio_postgres::{connect, NoTls};
 use uuid::Uuid;
 
 use zeroship_control::egress_rules;
-use zeroship_control::plan_catalog::{Plan, PlanCatalog};
+use zeroship_control::plan_catalog::{
+    free_plan_id, pro_plan_id, seed_plans, unlimited_plan_id, Plan, PlanCatalog,
+};
 use zeroship_control::pricing::{charge_cents, MetricWeight, MetricWeights, PlanPrice, FX_SCALE};
 use zeroship_control::Registry;
 use zeroship_core::net_policy::Verdict;
@@ -52,6 +58,11 @@ async fn pg(db_url: &str) -> compio_postgres::Client {
     client
 }
 
+/// A heap cap of `mb` megabytes.
+const fn heap_cap(mb: u32) -> NonZeroU32 {
+    NonZeroU32::new(mb).expect("a non-zero heap cap")
+}
+
 /// Seed a unique unarchived plan into the catalog; return it. Each test mints a
 /// fresh `pln_…` id so parallel runs never collide.
 async fn seed_plan(catalog: &PlanCatalog, name: &str) -> Plan {
@@ -69,7 +80,7 @@ async fn seed_plan(catalog: &PlanCatalog, name: &str) -> Plan {
         runtime: AppRuntimeLimits {
             cpu_limit_ms: Some(30_000),
             wall_timeout_ms: Some(30_000),
-            heap_limit_mb: Some(256),
+            heap_limit_mb: heap_cap(256),
         },
         net: AppNetPolicyLimits {
             max_sockets: 32,
@@ -107,6 +118,11 @@ async fn upsert_and_get_round_trips_pure_types() {
     let catalog = PlanCatalog::new(registry);
 
     let plan = seed_plan(&catalog, "round-trip").await;
+    assert_eq!(
+        plan.runtime.heap_limit_mb,
+        heap_cap(256),
+        "the written plan carries the heap cap it was given"
+    );
     let fetched = catalog.get(&plan.id).await.expect("get").expect("present");
     assert_eq!(
         fetched, plan,
@@ -245,7 +261,7 @@ async fn get_versions_derives_limits_from_catalog_not_hardcode() {
     plan.runtime = AppRuntimeLimits {
         cpu_limit_ms: Some(12_345),
         wall_timeout_ms: Some(23_456),
-        heap_limit_mb: Some(177),
+        heap_limit_mb: heap_cap(177),
     };
     catalog
         .upsert(&plan, Some(plan.archived))
@@ -267,7 +283,365 @@ async fn get_versions_derives_limits_from_catalog_not_hardcode() {
         "from the catalog row, not a name table"
     );
     assert_eq!(info.runtime.wall_timeout_ms, Some(23_456));
-    assert_eq!(info.runtime.heap_limit_mb, Some(177));
+    assert_eq!(info.runtime.heap_limit_mb, heap_cap(177));
+}
+
+/// The heap cap each built-in tier is seeded with, by tier name. Spelled out
+/// rather than read back from the seed, so the case binds the platform
+/// decision: every tier states a cap, and unlimited's is 1024 MB.
+fn seeded_heap_caps() -> BTreeMap<String, i32> {
+    BTreeMap::from([
+        ("free".to_owned(), 64),
+        ("pro".to_owned(), 256),
+        ("unlimited".to_owned(), 1024),
+    ])
+}
+
+/// The `heap_limit_mb` column of each built-in tier's row, by tier name.
+async fn builtin_heap_caps(client: &compio_postgres::Client) -> BTreeMap<String, i32> {
+    client
+        .query(
+            "SELECT name, heap_limit_mb FROM zeroship.plans WHERE id IN ($1, $2, $3)",
+            &[&free_plan_id(), &pro_plan_id(), &unlimited_plan_id()],
+        )
+        .await
+        .expect("read the built-in tiers' heap caps")
+        .iter()
+        .map(|row| (row.get("name"), row.get("heap_limit_mb")))
+        .collect()
+}
+
+#[compio::test(crate = "crate::support::live")]
+async fn seeding_states_every_builtin_tier_heap_cap() {
+    let url = db_url();
+    let client = pg(&url).await;
+    let registry = Registry::new(&url).await.expect("registry");
+    seed_plans(&registry)
+        .await
+        .expect("seed the built-in tiers");
+
+    // The rows themselves carry the caps; the comparison covers all three
+    // tiers, so a seed that wrote fewer rows fails here too.
+    assert_eq!(builtin_heap_caps(&client).await, seeded_heap_caps());
+
+    // And the catalog reads each one back as that tier's runtime heap cap.
+    let catalog = PlanCatalog::new(registry);
+    for (id, mb) in [
+        (free_plan_id(), 64),
+        (pro_plan_id(), 256),
+        (unlimited_plan_id(), 1024),
+    ] {
+        let plan = catalog.get(&id).await.expect("get").expect("seeded");
+        assert_eq!(plan.runtime.heap_limit_mb, heap_cap(mb), "{}", plan.name);
+    }
+}
+
+/// The heap cap the version feed carries for `app`.
+async fn fed_heap_cap(registry: &Registry, app: &AppId) -> NonZeroU32 {
+    registry
+        .get_versions()
+        .await
+        .expect("get_versions")
+        .get(app)
+        .expect("app in versions")
+        .runtime
+        .heap_limit_mb
+}
+
+/// The unlimited tier's cap is the operator's to set. A cap set through the
+/// catalog reaches the version feed the worker builds isolates from, and so
+/// does one set by editing the row; re-running the boot-time seed keeps
+/// either. The seed still refreshes what it owns, which is the control that
+/// shows the re-seed wrote to the row at all.
+#[compio::test(crate = "crate::support::live")]
+async fn an_operator_set_heap_cap_reaches_the_feed_and_survives_reseeding() {
+    let url = db_url();
+    let client = pg(&url).await;
+    let registry = Registry::new(&url).await.expect("registry");
+    let catalog = PlanCatalog::new(registry.clone());
+    let owner = make_user(&client).await;
+    seed_plans(&registry)
+        .await
+        .expect("seed the built-in tiers");
+
+    let name = format!("unlimited-heap-{}", Uuid::new_v4().simple());
+    let app = registry
+        .create_app(&name, &unlimited_plan_id(), &owner, None, None)
+        .await
+        .expect("create an app on the unlimited tier");
+    assert_eq!(
+        fed_heap_cap(&registry, &app.id).await,
+        heap_cap(1024),
+        "the seeded cap"
+    );
+
+    // Through the catalog, together with a CPU budget the seed does not grant.
+    let mut unlimited = catalog
+        .get(&unlimited_plan_id())
+        .await
+        .expect("get")
+        .expect("seeded");
+    unlimited.runtime.heap_limit_mb = heap_cap(2048);
+    unlimited.runtime.cpu_limit_ms = Some(1);
+    catalog
+        .upsert(&unlimited, None)
+        .await
+        .expect("an operator sets the unlimited tier's heap cap");
+    assert_eq!(fed_heap_cap(&registry, &app.id).await, heap_cap(2048));
+
+    seed_plans(&registry)
+        .await
+        .expect("re-seed, as a restart does");
+    let reseeded = catalog
+        .get(&unlimited_plan_id())
+        .await
+        .expect("get")
+        .expect("seeded");
+    assert_eq!(
+        reseeded.runtime.heap_limit_mb,
+        heap_cap(2048),
+        "the re-seed keeps the operator's cap"
+    );
+    assert_eq!(
+        reseeded.runtime.cpu_limit_ms, None,
+        "the control: the re-seed did write the row, restoring the tier's CPU budget"
+    );
+    assert_eq!(fed_heap_cap(&registry, &app.id).await, heap_cap(2048));
+
+    // By editing the row, which is how the catalog is maintained today.
+    client
+        .execute(
+            "UPDATE zeroship.plans SET heap_limit_mb = 3072, updated_at = NOW() WHERE id = $1",
+            &[&unlimited_plan_id()],
+        )
+        .await
+        .expect("an operator edits the unlimited tier's row");
+    seed_plans(&registry)
+        .await
+        .expect("re-seed, as a restart does");
+    assert_eq!(fed_heap_cap(&registry, &app.id).await, heap_cap(3072));
+    assert_eq!(
+        builtin_heap_caps(&client).await.get("unlimited"),
+        Some(&3072),
+        "the row keeps the operator's cap"
+    );
+}
+
+/// Insert a plan row with `heap_limit_mb` set to `heap`, or with the column
+/// left out when `heap` is `None`.
+async fn insert_plan_row(
+    client: &compio_postgres::Client,
+    id: &str,
+    heap: Option<i32>,
+) -> Result<u64, compio_postgres::Error> {
+    match heap {
+        None => {
+            client
+                .execute(
+                    "INSERT INTO zeroship.plans (id, name, runtime_limits_json) \
+                     VALUES ($1, 'no-heap-cap', '{}')",
+                    &[&id],
+                )
+                .await
+        }
+        Some(mb) => {
+            client
+                .execute(
+                    "INSERT INTO zeroship.plans (id, name, runtime_limits_json, heap_limit_mb) \
+                     VALUES ($1, 'heap-cap', '{}', $2)",
+                    &[&id, &mb],
+                )
+                .await
+        }
+    }
+}
+
+/// Set an existing plan row's `heap_limit_mb` to `heap` (NULL for `None`).
+async fn set_plan_heap_cap(
+    client: &compio_postgres::Client,
+    id: &str,
+    heap: Option<i32>,
+) -> Result<u64, compio_postgres::Error> {
+    client
+        .execute(
+            "UPDATE zeroship.plans SET heap_limit_mb = $2 WHERE id = $1",
+            &[&id, &heap],
+        )
+        .await
+}
+
+/// The SQLSTATE and the column or constraint a write was refused on.
+fn refusal(
+    result: Result<u64, compio_postgres::Error>,
+    what: &str,
+) -> (SqlState, Option<String>, Option<String>) {
+    let error = result.expect_err(what);
+    let db = error
+        .as_db_error()
+        .unwrap_or_else(|| panic!("{what}: expected a server refusal, got {error:?}"));
+    (
+        db.code().clone(),
+        db.column().map(str::to_owned),
+        db.constraint().map(str::to_owned),
+    )
+}
+
+/// The database refuses a plan row with no heap cap, a NULL one, zero or a
+/// negative value, on insert and on update, so no path that writes the
+/// catalog can create a plan the worker would have to invent a cap for. A row
+/// with a positive cap is accepted, on insert and on update, which is the
+/// control that each refusal is about the cap.
+#[compio::test(crate = "crate::support::live")]
+async fn a_plan_row_without_a_positive_heap_cap_is_refused() {
+    let url = db_url();
+    let client = pg(&url).await;
+    let not_null = (
+        SqlState::NOT_NULL_VIOLATION,
+        Some("heap_limit_mb".to_owned()),
+        None,
+    );
+    let check = (
+        SqlState::CHECK_VIOLATION,
+        None,
+        Some("plans_heap_limit_mb_check".to_owned()),
+    );
+
+    let absent = insert_plan_row(&client, &zeroship_core::typed_id::new_plan_id(), None).await;
+    assert_eq!(
+        refusal(absent, "a plan row with no heap cap is refused"),
+        not_null
+    );
+    for mb in [0, -1] {
+        let id = zeroship_core::typed_id::new_plan_id();
+        let refused = insert_plan_row(&client, &id, Some(mb)).await;
+        assert_eq!(
+            refusal(refused, "a non-positive heap cap is refused"),
+            check,
+            "{mb}"
+        );
+    }
+
+    let id = zeroship_core::typed_id::new_plan_id();
+    insert_plan_row(&client, &id, Some(1))
+        .await
+        .expect("the control: the smallest positive cap is accepted");
+    let cleared = set_plan_heap_cap(&client, &id, None).await;
+    assert_eq!(
+        refusal(cleared, "clearing a plan's heap cap is refused"),
+        not_null
+    );
+    let zeroed = set_plan_heap_cap(&client, &id, Some(0)).await;
+    assert_eq!(
+        refusal(zeroed, "zeroing a plan's heap cap is refused"),
+        check
+    );
+    assert_eq!(
+        set_plan_heap_cap(&client, &id, Some(i32::MAX))
+            .await
+            .expect("the control: any positive cap is accepted"),
+        1
+    );
+    let stored: i32 = client
+        .query_one(
+            "SELECT heap_limit_mb FROM zeroship.plans WHERE id = $1",
+            &[&id],
+        )
+        .await
+        .expect("read the cap back")
+        .get(0);
+    assert_eq!(stored, i32::MAX);
+}
+
+/// A heap cap the schema refuses is never read as a cap. The constraint is
+/// dropped in this case's own database clone so such a row can exist at all:
+/// the catalog then reports the row undecodable instead of pricing it with a
+/// cap of zero, and the version feed gives its app the free tier's cap.
+#[compio::test(crate = "crate::support::live")]
+async fn a_row_holding_a_refused_heap_cap_is_not_read_as_a_cap() {
+    let url = db_url();
+    let client = pg(&url).await;
+    let registry = Registry::new(&url).await.expect("registry");
+    let catalog = PlanCatalog::new(registry.clone());
+    let owner = make_user(&client).await;
+
+    let plan = seed_plan(&catalog, "refused-heap-cap").await;
+    let name = format!("refused-heap-{}", Uuid::new_v4().simple());
+    let app = registry
+        .create_app(&name, &plan.id, &owner, None, None)
+        .await
+        .expect("create");
+    assert_eq!(
+        fed_heap_cap(&registry, &app.id).await,
+        heap_cap(256),
+        "the control: the plan's own cap, before the row is corrupted"
+    );
+
+    client
+        .batch_execute("ALTER TABLE zeroship.plans DROP CONSTRAINT plans_heap_limit_mb_check")
+        .await
+        .expect("drop the cap's CHECK in this case's clone");
+    set_plan_heap_cap(&client, &plan.id, Some(0))
+        .await
+        .expect("a zero cap lands once the CHECK is gone");
+
+    catalog
+        .get(&plan.id)
+        .await
+        .expect_err("the catalog refuses to decode a zero heap cap");
+    let listed = catalog.list().await.expect("list");
+    assert!(
+        listed.iter().all(|listed| listed.id != plan.id),
+        "list skips the undecodable row"
+    );
+    assert!(
+        !listed.is_empty(),
+        "the control: list still returns the other plans"
+    );
+    assert_eq!(
+        fed_heap_cap(&registry, &app.id).await,
+        zeroship_core::types::FREE_TIER_RUNTIME_LIMITS.heap_limit_mb,
+        "the feed falls back to the free tier's cap"
+    );
+}
+
+/// A cap the column cannot hold is refused at the catalog's write boundary
+/// rather than clamped, and the catalog keeps the plan's previous cap.
+#[compio::test(crate = "crate::support::live")]
+async fn upsert_refuses_a_heap_cap_beyond_the_column_range() {
+    let url = db_url();
+    let _client = pg(&url).await;
+    let registry = Registry::new(&url).await.expect("registry");
+    let catalog = PlanCatalog::new(registry);
+
+    let mut plan = seed_plan(&catalog, "heap-range").await;
+    plan.runtime.heap_limit_mb = heap_cap(i32::MAX.unsigned_abs() + 1);
+    let error = catalog
+        .upsert(&plan, Some(false))
+        .await
+        .expect_err("a heap cap above the INTEGER column's range is refused");
+    assert!(
+        matches!(
+            &error,
+            zeroship_control::registry::RegistryError::InvalidInput(m) if m.contains("heap_limit_mb")
+        ),
+        "{error:?}"
+    );
+    let kept = catalog.get(&plan.id).await.expect("get").expect("present");
+    assert_eq!(
+        kept.runtime.heap_limit_mb,
+        heap_cap(256),
+        "the refused write left the plan's cap as it was"
+    );
+
+    plan.runtime.heap_limit_mb = heap_cap(i32::MAX.unsigned_abs());
+    let written = catalog
+        .upsert(&plan, Some(false))
+        .await
+        .expect("the control: the largest cap the column holds is written");
+    assert_eq!(
+        written.runtime.heap_limit_mb,
+        heap_cap(i32::MAX.unsigned_abs())
+    );
 }
 
 /// The registry projection, driven through the CREATOR authoring path rather
@@ -577,18 +951,21 @@ async fn poison_runtime_limits_still_prices_via_both_list_and_get() {
     let catalog = PlanCatalog::new(registry);
 
     let good = seed_plan(&catalog, "good-row").await;
-    // A poison plan: runtime_limits_json is a STRING, not an AppRuntimeLimits
+    // A poison plan: runtime_limits_json is a STRING, not a time-limits
     // object, so row_to_plan's from_value fails — but its PRICE columns are real
-    // (base 700c, FX = 1 cent/CU) and must survive.
+    // (base 700c, FX = 1 cent/CU) and must survive, and so must its heap cap,
+    // which is a column of its own. The cap is one no tier uses, so reading it
+    // back can only mean it came from this row.
     let poison_id = zeroship_core::typed_id::new_plan_id();
     let fx = FX_SCALE as i64; // 1 cent/CU
     client
         .execute(
             "INSERT INTO zeroship.plans \
                (id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
-                runtime_limits_json, spend_limit_default_cents, archived, \
+                runtime_limits_json, heap_limit_mb, spend_limit_default_cents, archived, \
                 assignable_by_creator) \
-             VALUES ($1, 'poison', 700, 0, $2, '\"not-an-object\"'::jsonb, 0, false, false)",
+             VALUES ($1, 'poison', 700, 0, $2, '\"not-an-object\"'::jsonb, 333, 0, false, \
+                     false)",
             &[&poison_id, &fx],
         )
         .await
@@ -617,10 +994,16 @@ async fn poison_runtime_limits_still_prices_via_both_list_and_get() {
         got.price.base_fee_cents, 700,
         "poison row keeps its real price (get)"
     );
+    let free = zeroship_core::types::FREE_TIER_RUNTIME_LIMITS;
     assert_eq!(
         got.runtime,
-        zeroship_core::types::FREE_TIER_RUNTIME_LIMITS,
-        "poison runtime_limits_json falls back to the conservative free-tier limits",
+        AppRuntimeLimits {
+            cpu_limit_ms: free.cpu_limit_ms,
+            wall_timeout_ms: free.wall_timeout_ms,
+            heap_limit_mb: heap_cap(333),
+        },
+        "poison runtime_limits_json falls back to the conservative free-tier time limits \
+         and keeps the row's own heap cap",
     );
 }
 

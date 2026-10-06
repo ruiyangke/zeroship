@@ -32,8 +32,8 @@ async fn seed(platform: &platform::Platform, app: &AppId, name: &str) {
         .admin
         .execute(
             &format!(
-                "INSERT INTO zeroship.plans(id,name,runtime_limits_json,workflows_allowed) \
-                 VALUES($1,'{name}','{{}}',true)"
+                "INSERT INTO zeroship.plans(id,name,runtime_limits_json,heap_limit_mb,workflows_allowed) \
+                 VALUES($1,'{name}','{{}}',64,true)"
             ),
             &[&plan],
         )

@@ -237,7 +237,7 @@ async fn dispatch_unauthenticated(
     let worker = Worker::new();
     let app_id = worker.app_id.clone();
     worker
-        .load(AUTH_OBLIVIOUS_APP, AppRuntimeLimits::default(), manifest)
+        .load(AUTH_OBLIVIOUS_APP, crate::cache::TEST_LIMITS, manifest)
         .await;
     let app = test::init_service(web::App::new().configure(worker.configure())).await;
     let req = test::TestRequest::post()

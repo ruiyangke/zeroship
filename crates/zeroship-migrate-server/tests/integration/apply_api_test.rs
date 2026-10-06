@@ -405,8 +405,9 @@ async fn seed_app(conn: &Client, app_id: &AppId, owner_id: &UserId) -> DatabaseI
     let plan_id = "pln_migrated_phase1";
     conn.execute(
         "INSERT INTO zeroship.plans \
-            (id, name, base_fee_cents, included_units, spend_limit_default_cents, runtime_limits_json) \
-         VALUES ($1, 'Migrated Phase 1 Test', 0, 0, 0, '{}'::jsonb) \
+            (id, name, base_fee_cents, included_units, spend_limit_default_cents, \
+             runtime_limits_json, heap_limit_mb) \
+         VALUES ($1, 'Migrated Phase 1 Test', 0, 0, 0, '{}'::jsonb, 64) \
          ON CONFLICT (id) DO NOTHING",
         &[&plan_id],
     )
@@ -1575,8 +1576,9 @@ async fn seed_unbound_database(conn: &Client, principal: &UserId, label: &str) -
     let plan_id = "pln_migrated_phase1";
     conn.execute(
         "INSERT INTO zeroship.plans \
-            (id, name, base_fee_cents, included_units, spend_limit_default_cents, runtime_limits_json) \
-         VALUES ($1, 'Migrated Phase 1 Test', 0, 0, 0, '{}'::jsonb) \
+            (id, name, base_fee_cents, included_units, spend_limit_default_cents, \
+             runtime_limits_json, heap_limit_mb) \
+         VALUES ($1, 'Migrated Phase 1 Test', 0, 0, 0, '{}'::jsonb, 64) \
          ON CONFLICT (id) DO NOTHING",
         &[&plan_id],
     )

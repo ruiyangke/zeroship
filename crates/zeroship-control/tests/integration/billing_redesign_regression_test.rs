@@ -62,9 +62,9 @@ async fn seed_organization_app(client: &compio_postgres::Client) -> (String, App
         .execute(
             "INSERT INTO zeroship.plans \
                (id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
-                runtime_limits_json, spend_limit_default_cents) \
+                runtime_limits_json, heap_limit_mb, spend_limit_default_cents) \
              VALUES ($1, 'rd', 0, 0, $2, \
-                     '{\"cpu_limit_ms\":50,\"wall_timeout_ms\":5000,\"heap_limit_mb\":64}', 0)",
+                     '{\"cpu_limit_ms\":50,\"wall_timeout_ms\":5000}', 64, 0)",
             &[&plan_id, &(FX_SCALE as i64)],
         )
         .await

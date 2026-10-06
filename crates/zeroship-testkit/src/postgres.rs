@@ -76,8 +76,9 @@ const SHARED_MAX_CONNECTIONS: usize =
 const TEMPLATE_DATABASE: &str = "zeroship_template";
 
 /// The seed row the platform schema requires an app to reference.
-const SEED_PLAN: &str = "INSERT INTO zeroship.plans (id, name, runtime_limits_json) \
-     VALUES ('free', 'Free', '{}') ON CONFLICT (id) DO NOTHING";
+const SEED_PLAN: &str = "INSERT INTO zeroship.plans \
+     (id, name, runtime_limits_json, heap_limit_mb) \
+     VALUES ('free', 'Free', '{}', 64) ON CONFLICT (id) DO NOTHING";
 
 /// How long the platform server may go unleased before its watchdog removes it.
 ///

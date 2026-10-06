@@ -35,8 +35,8 @@ impl World {
         .expect("declare this test's execution zone");
 
         pg.execute(
-            "INSERT INTO zeroship.plans (id, name, runtime_limits_json) \
-             VALUES ('free', 'free', '{}'::json) ON CONFLICT (id) DO NOTHING",
+            "INSERT INTO zeroship.plans (id, name, runtime_limits_json, heap_limit_mb) \
+             VALUES ('free', 'free', '{}'::json, 64) ON CONFLICT (id) DO NOTHING",
             &[],
         )
         .await

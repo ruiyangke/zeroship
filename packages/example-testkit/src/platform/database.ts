@@ -143,8 +143,8 @@ export class DatabasePlatform extends PlatformBase {
     let config = "";
     if (settings.metering) {
       await this.sql(`
-        INSERT INTO zeroship.plans (id,name,base_fee_cents,included_units,fx_pico_cents_per_unit,runtime_limits_json,spend_limit_default_cents)
-        VALUES ('pln_db_acceptance','Database acceptance',0,0,1000000000000,'{"cpu_limit_ms":5000,"wall_timeout_ms":30000,"heap_limit_mb":256}',100000000);
+        INSERT INTO zeroship.plans (id,name,base_fee_cents,included_units,fx_pico_cents_per_unit,runtime_limits_json,heap_limit_mb,spend_limit_default_cents)
+        VALUES ('pln_db_acceptance','Database acceptance',0,0,1000000000000,'{"cpu_limit_ms":5000,"wall_timeout_ms":30000}',256,100000000);
         INSERT INTO zeroship.pricing_config (id,fx_pico_cents_per_unit) VALUES ('global',1000000000000)
         ON CONFLICT (id) DO UPDATE SET fx_pico_cents_per_unit=EXCLUDED.fx_pico_cents_per_unit;
         INSERT INTO zeroship.billing_metrics (metric,kind,unit) VALUES

@@ -131,7 +131,7 @@ fn version(env_version: i64) -> AppVersionInfo {
     AppVersionInfo {
         deploy_hash: None,
         plan_id: "starter".into(),
-        runtime: zeroship_core::types::AppRuntimeLimits::default(),
+        runtime: crate::cache::TEST_LIMITS,
         env_version,
         manifest: None,
         net_policy: zeroship_core::types::AppNetPolicy::default(),

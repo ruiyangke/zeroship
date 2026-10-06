@@ -118,8 +118,8 @@ async fn seed_browser_client(pg: &compio_postgres::Client, redirect_uri: &str) {
     let project_id = support::unowned_project(pg).await;
     pg.execute(
         "INSERT INTO zeroship.plans \
-            (id, name, runtime_limits_json, assignable_by_creator) \
-         VALUES ('free', 'Free', '{}'::jsonb, TRUE) \
+            (id, name, runtime_limits_json, heap_limit_mb, assignable_by_creator) \
+         VALUES ('free', 'Free', '{}'::jsonb, 64, TRUE) \
          ON CONFLICT (id) DO NOTHING",
         &[],
     )

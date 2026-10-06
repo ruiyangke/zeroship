@@ -788,8 +788,8 @@ async fn a_fresh_database_isolates_rows() {
     let (writer, writer_driver) = connect(first.admin_url().as_str()).await;
     writer
         .batch_execute(
-            "INSERT INTO zeroship.plans (id, name, runtime_limits_json) \
-             VALUES ('fresh_only', 'Fresh Only', '{}')",
+            "INSERT INTO zeroship.plans (id, name, runtime_limits_json, heap_limit_mb) \
+             VALUES ('fresh_only', 'Fresh Only', '{}', 64)",
         )
         .await
         .expect("insert into the clone");

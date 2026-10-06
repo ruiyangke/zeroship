@@ -74,7 +74,7 @@ async fn dispatch_resolves_full_kernel_kv_storage_db_auth() {
     );
     let app_id = worker.app_id.clone();
     worker
-        .load(source, AppRuntimeLimits::default(), &Manifest::default())
+        .load(source, crate::cache::TEST_LIMITS, &Manifest::default())
         .await;
     let app = test::init_service(web::App::new().configure(worker.configure())).await;
 

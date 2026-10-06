@@ -19,9 +19,8 @@ async fn seed_app(database: &Database) -> zeroship_core::AppId {
         .execute(
             "INSERT INTO zeroship.plans \
                  (id, name, base_fee_cents, included_units, spend_limit_default_cents, \
-                  runtime_limits_json) \
-             VALUES ($1, 'Session Visibility Test Plan', 0, 0, 0, \
-                     '{\"cpu_ms\":1000,\"wall_ms\":5000,\"memory_mb\":128,\"concurrency\":10}'::jsonb)",
+                  runtime_limits_json, heap_limit_mb) \
+             VALUES ($1, 'Session Visibility Test Plan', 0, 0, 0, '{}'::jsonb, 128)",
             &[&plan_id],
         )
         .await

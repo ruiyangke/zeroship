@@ -5,7 +5,7 @@ use zeroship_bundle::{
 use zeroship_core::net_policy::Verdict;
 use zeroship_core::types::{
     AccountState, AppNetPolicy, AppRuntimeLimits, AppUsage, AppVersionInfo, ControlEvent,
-    LiveBinding, NetEgressEntry, RouteEntry, SpendState,
+    LiveBinding, NetEgressEntry, RouteEntry, SpendState, FREE_TIER_RUNTIME_LIMITS,
 };
 use std::collections::{BTreeMap, HashMap};
 use zeroship_core::app_id::AppId;
@@ -500,7 +500,7 @@ fn app_version_info_serializes_with_manifest() {
     let info = AppVersionInfo {
         deploy_hash: Some(SHA_A.to_string()),
         plan_id: "pro".into(),
-        runtime: AppRuntimeLimits::default(),
+        runtime: FREE_TIER_RUNTIME_LIMITS,
         env_version: 7,
         manifest: Some(Manifest {
             worker: Some(WorkerCode {
@@ -585,7 +585,7 @@ fn app_version_info_omits_missing_manifest() {
     let info = AppVersionInfo {
         deploy_hash: None,
         plan_id: "free".into(),
-        runtime: AppRuntimeLimits::default(),
+        runtime: FREE_TIER_RUNTIME_LIMITS,
         env_version: 0,
         manifest: None,
         net_policy: AppNetPolicy::default(),
@@ -616,7 +616,7 @@ fn app_version_info_fills_its_defaulted_fields_but_refuses_an_absent_binding_set
     let json = r#"{
         "deploy_hash": null,
         "plan_id": "free",
-        "runtime": {},
+        "runtime": {"heap_limit_mb": 64},
         "env_version": 3,
         "live_bindings": {}
     }"#;
@@ -635,7 +635,7 @@ fn app_version_info_fills_its_defaulted_fields_but_refuses_an_absent_binding_set
     let without = r#"{
         "deploy_hash": null,
         "plan_id": "free",
-        "runtime": {},
+        "runtime": {"heap_limit_mb": 64},
         "env_version": 3
     }"#;
     let error = serde_json::from_str::<AppVersionInfo>(without)
@@ -646,12 +646,49 @@ fn app_version_info_fills_its_defaulted_fields_but_refuses_an_absent_binding_set
     );
 }
 
+/// A plan's heap cap is required on the wire. The worker builds an isolate at
+/// the cap the feed carries, so an entry that omits it, sends `null`, `0` or a
+/// negative number is refused rather than decoded as "no cap stated". The
+/// control is the same entry stating a positive cap, which decodes to exactly
+/// that cap and encodes it back.
+#[test]
+fn app_runtime_limits_require_a_positive_heap_cap() {
+    let stated: AppRuntimeLimits = serde_json::from_str(
+        r#"{"cpu_limit_ms":null,"wall_timeout_ms":null,"heap_limit_mb":1024}"#,
+    )
+    .expect("an entry stating a cap decodes");
+    assert_eq!(stated.heap_limit_mb.get(), 1024);
+    let encoded = serde_json::to_string(&stated).unwrap();
+    assert!(encoded.contains(r#""heap_limit_mb":1024"#), "{encoded}");
+
+    let absent = serde_json::from_str::<AppRuntimeLimits>(
+        r#"{"cpu_limit_ms":null,"wall_timeout_ms":null}"#,
+    )
+    .expect_err("an entry with no heap cap is refused");
+    assert!(
+        absent.to_string().contains("heap_limit_mb"),
+        "the refusal names the missing field: {absent}"
+    );
+    for value in ["null", "0", "-1"] {
+        let json =
+            format!(r#"{{"cpu_limit_ms":null,"wall_timeout_ms":null,"heap_limit_mb":{value}}}"#);
+        serde_json::from_str::<AppRuntimeLimits>(&json)
+            .expect_err(&format!("a heap cap of {value} is refused"));
+    }
+
+    // The same holds for the limits inside a version-feed entry.
+    let entry = r#"{"deploy_hash":null,"plan_id":"free","runtime":{},"env_version":0,
+                    "live_bindings":{}}"#;
+    serde_json::from_str::<AppVersionInfo>(entry)
+        .expect_err("a version-feed entry whose plan states no heap cap is refused");
+}
+
 #[test]
 fn app_version_info_keys_its_binding_set_by_database_id() {
     let database = DatabaseId::mint();
     let binding = BindingId::mint();
     let json = format!(
-        r#"{{"deploy_hash":null,"plan_id":"free","runtime":{{}},"env_version":0,
+        r#"{{"deploy_hash":null,"plan_id":"free","runtime":{{"heap_limit_mb":64}},"env_version":0,
              "live_bindings":{{"{}":{{"binding":"{}","capability":"readonly"}}}}}}"#,
         database.as_str(),
         binding.as_str()
@@ -692,7 +729,7 @@ fn app_version_info_keys_its_binding_set_by_database_id() {
     // for either would be a guess. Its control is the complete entry above,
     // which decodes - the one variable here is the missing field.
     let without_edge = format!(
-        r#"{{"deploy_hash":null,"plan_id":"free","runtime":{{}},"env_version":0,
+        r#"{{"deploy_hash":null,"plan_id":"free","runtime":{{"heap_limit_mb":64}},"env_version":0,
              "live_bindings":{{"{}":{{"capability":"readonly"}}}}}}"#,
         database.as_str()
     );

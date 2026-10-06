@@ -293,7 +293,7 @@ async fn authoritative_policy_requires_complete_inputs_and_preserves_publication
     }
     let alternate_plan = zeroship_core::typed_id::new_plan_id();
     fixture.platform.admin.execute(
-        "INSERT INTO zeroship.plans(id,name,runtime_limits_json,workflows_allowed) VALUES($1,'alternate-policy','{}',true)",
+        "INSERT INTO zeroship.plans(id,name,runtime_limits_json,heap_limit_mb,workflows_allowed) VALUES($1,'alternate-policy','{}',64,true)",
         &[&alternate_plan],
     ).await.unwrap();
     let alternate = AppPolicy {

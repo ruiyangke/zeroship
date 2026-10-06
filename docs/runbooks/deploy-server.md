@@ -533,6 +533,23 @@ docker compose pull && docker compose up -d
 Rollback is the same edit pointing at the previous sha. This is the payoff for
 tagging per commit instead of relying on `latest`.
 
+## Plan heap caps
+
+Every plan in `zeroship.plans` carries a required `heap_limit_mb` (a positive
+integer, in MB). The built-in plans are seeded on Control's first boot; a later
+boot keeps an existing plan's cap, so a cap you set survives restarts.
+
+Set a plan's cap directly; the version feed carries it to the workers, which
+rebuild an app's isolate when its cap changes:
+
+```sql
+UPDATE zeroship.plans SET heap_limit_mb = 2048 WHERE id = '<plan id>';
+```
+
+Because a later boot keeps an existing cap, a release that raises a built-in
+plan's default reaches only fresh databases. To adopt a new default on an
+existing deployment, run the same `UPDATE` with the new value.
+
 ## PostgreSQL connections
 
 Size the server's `max_connections` for every service's sessions at once,

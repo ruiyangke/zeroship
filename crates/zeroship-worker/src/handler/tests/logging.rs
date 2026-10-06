@@ -13,7 +13,7 @@ async fn dispatch_console_lines_are_queryable_from_logs_endpoint() {
     let worker = Worker::new();
     let app_id = worker.app_id.clone();
     worker
-        .load(source, AppRuntimeLimits::default(), &Manifest::default())
+        .load(source, crate::cache::TEST_LIMITS, &Manifest::default())
         .await;
     // Both surfaces are mounted the way the worker binary mounts them, so the
     // URIs below address the routes the process serves rather than a second

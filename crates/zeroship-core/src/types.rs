@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use std::num::NonZeroU32;
 
 use serde::{Deserialize, Serialize};
 use zeroship_bundle::Manifest;
@@ -24,26 +25,39 @@ pub struct AppRecord {
 }
 
 /// Worker-facing runtime limits for a specific app.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+///
+/// There is no `Default`: the heap cap has no value that is right for every
+/// plan, so a value of this type is always one a plan stated.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppRuntimeLimits {
     pub cpu_limit_ms: Option<u64>,
     pub wall_timeout_ms: Option<u64>,
-    /// Maximum V8 heap in megabytes. `None` → 128 MB default in the worker.
-    /// Free-tier apps should be capped low (64 MB); paid tiers can go higher.
-    pub heap_limit_mb: Option<u32>,
+    /// The app's JavaScript heap cap in megabytes, copied from its plan.
+    ///
+    /// Required and non-zero, on the wire and in memory. Every plan carries an
+    /// operator-set cap, and the worker hands it to the isolate it builds, so
+    /// a version-feed entry that omits it, sends `null` or sends `0` fails to
+    /// decode rather than reaching the runtime as "no cap stated".
+    pub heap_limit_mb: NonZeroU32,
 }
+
+/// The free tier's heap cap in megabytes.
+const FREE_TIER_HEAP_LIMIT_MB: NonZeroU32 = match NonZeroU32::new(64) {
+    Some(cap) => cap,
+    None => panic!("the free tier's heap cap is non-zero"),
+};
 
 /// Conservative free-tier runtime limits — the single shared source of truth.
 ///
 /// Used by the control-plane catalog seed (`plan_catalog::builtin_plans`
 /// free tier) and the registry's fallback for an app whose plan row is missing
 /// or whose `runtime_limits_json` fails to parse. Keeping ONE const stops the
-/// two copies from drifting. The worker
-/// therefore never gets `(None, None, None)` (unbounded) for an unpriced app.
+/// two copies from drifting. The worker therefore never gets an unbounded CPU
+/// budget and wall timeout for an unpriced app.
 pub const FREE_TIER_RUNTIME_LIMITS: AppRuntimeLimits = AppRuntimeLimits {
     cpu_limit_ms: Some(50),
     wall_timeout_ms: Some(5_000),
-    heap_limit_mb: Some(64),
+    heap_limit_mb: FREE_TIER_HEAP_LIMIT_MB,
 };
 
 /// Worker-facing raw TCP egress policy for creator isolates.

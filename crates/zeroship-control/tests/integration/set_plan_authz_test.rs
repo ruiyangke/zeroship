@@ -171,7 +171,7 @@ async fn seed_plan(catalog: &PlanCatalog, name: &str, assignable: bool) -> Plan 
         runtime: AppRuntimeLimits {
             cpu_limit_ms: Some(30_000),
             wall_timeout_ms: Some(30_000),
-            heap_limit_mb: Some(256),
+            heap_limit_mb: std::num::NonZeroU32::new(256).expect("a non-zero heap cap"),
         },
         net: AppNetPolicyLimits {
             max_sockets: 32,

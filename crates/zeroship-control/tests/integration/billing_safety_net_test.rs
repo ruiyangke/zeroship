@@ -449,9 +449,10 @@ async fn make_plan(state: &AppState) -> String {
         .execute(
             "INSERT INTO zeroship.plans \
                (id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
-                runtime_limits_json, net_policy_limits_json, spend_limit_default_cents) \
+                runtime_limits_json, heap_limit_mb, net_policy_limits_json, \
+                spend_limit_default_cents) \
              VALUES ($1, 'safety-test', 0, 0, 1000, \
-                     '{\"cpu_limit_ms\":50,\"wall_timeout_ms\":5000,\"heap_limit_mb\":64}', \
+                     '{\"cpu_limit_ms\":50,\"wall_timeout_ms\":5000}', 64, \
                      '{\"max_sockets\":4,\"egress_ceiling_bytes\":10485760}', 100000)",
             &[&plan_id],
         )

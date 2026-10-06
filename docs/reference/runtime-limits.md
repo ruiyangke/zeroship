@@ -19,16 +19,17 @@ creator-assignable, and `unlimited` is operator-only.
 | --- | --- | --- | --- |
 | free | 50 ms | 5 s | 64 MB |
 | pro | 30 s | 30 s | 256 MB |
-| unlimited | none | none | 128 MB |
+| unlimited | none | none | 1024 MB |
 
 - An app with no plan, or whose plan cannot be read, runs at the **free** tier,
   never unbounded. Read the plan actually in force with
   `GET /api/apps/{id}/billing-status` before you size behavior to a higher tier.
-- **unlimited** removes the CPU budget and the wall timeout, keeps a 128 MB
-  heap cap, and is assigned by an operator, never by an app.
-- The rows above are built-in defaults. The catalog is operator-maintained and
-  per deployment, so treat these as what the platform ships, not as a value
-  fixed for every deployment.
+- **unlimited** removes the CPU budget and the wall timeout, keeps a heap cap,
+  and is assigned by an operator, never by an app.
+- The rows above are the values the built-in tiers ship with. The operator of
+  each deployment sets every plan's limits, its heap cap included, and can
+  change them, so read them as what the platform ships, not as values fixed for
+  every deployment.
 
 "None" means no runtime cap of that kind — not a zero-sized one.
 
@@ -162,9 +163,10 @@ The standalone dev server (`zeroship serve`, and therefore `pnpm dev`) applies
 no wall timeout and no CPU limit unless you set them. A handler that runs longer
 than your plan's wall timeout therefore works locally and fails in production
 with the `504` above, and dev gives no warning. Wall time is not the only limit
-dev relaxes: its CPU limit is off by default and its heap default is above both
-paid tiers (see "Heap limit"). The single limit dev applies *stricter* than
-deployed is request-body size (below).
+dev relaxes: its CPU limit is off by default and its heap default is above the
+free and pro tiers' caps (see "Heap limit"). Against those tiers, the single
+limit dev applies *stricter* than deployed is request-body size (below); the
+unlimited tier's shipped heap cap is also above dev's default.
 
 You can reproduce the deployed behavior for wall time and CPU locally — the dev
 server accepts the same budgets as flags (both in milliseconds):
@@ -242,8 +244,9 @@ Route large payloads through object storage regardless.
 
 The heap cap bounds the JavaScript heap — the in-memory objects and strings your
 handler holds. It is not a cap on your bundle size or on request/response body
-bytes. On the built-in tiers, free apps are capped at 64 MB, pro at 256 MB and
-unlimited at 128 MB. Every plan has a heap cap.
+bytes. Every plan has a heap cap, and the operator sets it per plan. The
+built-in tiers ship with 64 MB for free, 256 MB for pro and 1024 MB for
+unlimited, and a deployment's operator can set different caps.
 
 The cap is a limit, not a target. When your app's heap reaches it, whether
 through one large allocation or through gradual growth, the isolate running

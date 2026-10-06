@@ -261,8 +261,10 @@ that's ~2 GB resident. Three levers, listed by effort × impact:
 ### 1. Per-isolate `--max-old-space-size` cap — SHIPPED 2026-05-06
 
 Wired via `RuntimeBuilder::heap_limit_mb(mb)` →
-`Isolate::CreateParams::heap_limits(0, max)`. Default 128 MB; control
-plane surfaces `AppRuntimeLimits.heap_limit_mb` per app. The
+`Isolate::CreateParams::heap_limits(0, max)`. The worker states every
+app's plan cap (`AppRuntimeLimits.heap_limit_mb`, which every plan
+carries); the builder's 128 MB default applies only to a host that
+states none. The
 near-heap-limit callback grows the cap by `initial / 4` per hit
 (escape valve, capped at 4 × initial) and calls
 `IsolateHandle::terminate_execution` once hits ≥ 5 — surfaces as a

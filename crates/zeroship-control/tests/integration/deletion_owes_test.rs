@@ -190,8 +190,8 @@ impl Fx {
             .execute(
                 "INSERT INTO zeroship.plans \
                    (id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
-                    spend_limit_default_cents, runtime_limits_json) \
-                 VALUES ($1, $1, $2, $3, 1000000000, 0, '{}'::jsonb)",
+                    spend_limit_default_cents, runtime_limits_json, heap_limit_mb) \
+                 VALUES ($1, $1, $2, $3, 1000000000, 0, '{}'::jsonb, 64)",
                 &[&id, &base_fee_cents, &included_units],
             )
             .await

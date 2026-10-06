@@ -243,7 +243,9 @@ pub enum AsyncEvent {
 pub struct RuntimeLimits {
     pub cpu_limit: Option<Duration>,
     pub wall_timeout: Option<Duration>,
-    /// V8 heap limit in bytes. `None` → 128 MB default.
+    /// V8 heap limit in bytes. `None` is the library default for a host that
+    /// states no cap, such as a test or an embedding; the worker states its
+    /// app's plan cap on every isolate it builds.
     pub heap_limit_bytes: Option<usize>,
 }
 
@@ -863,13 +865,12 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Cap the V8 isolate's heap (megabytes). Default off — V8 grows
-    /// past multi-GB before GC pressure kicks in. When set, V8 forces
-    /// earlier GC and surfaces OOM rather than growing past the cap.
+    /// Cap the V8 isolate's heap (megabytes). A builder that states no cap
+    /// gets the library default. Reaching the cap stops the isolate rather
+    /// than letting it grow past it.
     ///
     /// Recommended floor is 32 MB; lower caps thrash on burst load.
-    /// The control plane / worker config surface this as a per-app
-    /// setting.
+    /// The worker sets this from each app's plan through [`Self::limits`].
     pub fn heap_limit_mb(mut self, mb: u32) -> Self {
         self.limits.heap_limit_bytes = Some((mb as usize) * 1024 * 1024);
         self
@@ -1361,10 +1362,10 @@ impl RuntimeInner {
     ) -> Self {
         init_v8();
 
-        // Default 128 MB per isolate. Control-plane can tune per-app:
-        // free-tier → 64 MB, paid → 256 MB. A per-isolate cap keeps app heap,
-        // isolate count and worker thread count from multiplying into a
-        // machine-sized allocation.
+        // The library default, for a host that states no cap. The worker
+        // never relies on it: every isolate it builds carries its app's plan
+        // cap. A per-isolate cap keeps app heap, isolate count and worker
+        // thread count from multiplying into a machine-sized allocation.
         const DEFAULT_HEAP: usize = 128 * 1024 * 1024;
         let heap_max = heap_limit_bytes.unwrap_or(DEFAULT_HEAP);
         let params = v8::CreateParams::default().heap_limits(0, heap_max);

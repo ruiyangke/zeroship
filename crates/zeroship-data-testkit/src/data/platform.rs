@@ -261,8 +261,8 @@ async fn app_project(admin: &Pool, app: &str) -> String {
     let slug = app.replace('_', "-");
     admin
         .execute(
-            "INSERT INTO zeroship.plans (id, name, runtime_limits_json) \
-             VALUES ('free', 'Free', '{}') ON CONFLICT (id) DO NOTHING",
+            "INSERT INTO zeroship.plans (id, name, runtime_limits_json, heap_limit_mb) \
+             VALUES ('free', 'Free', '{}', 64) ON CONFLICT (id) DO NOTHING",
             &[],
         )
         .await

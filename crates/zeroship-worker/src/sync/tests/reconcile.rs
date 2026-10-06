@@ -711,7 +711,7 @@ async fn an_environment_refresh_skips_an_app_nothing_holds() {
         AppVersionInfo {
             deploy_hash: None,
             plan_id: "starter".into(),
-            runtime: AppRuntimeLimits::default(),
+            runtime: crate::cache::TEST_LIMITS,
             env_version: 2,
             manifest: None,
             net_policy: AppNetPolicy::default(),

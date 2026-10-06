@@ -125,9 +125,9 @@ async fn make_app_with_plan_default(
         .execute(
             "INSERT INTO zeroship.plans \
                (id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
-                runtime_limits_json, spend_limit_default_cents) \
+                runtime_limits_json, heap_limit_mb, spend_limit_default_cents) \
              VALUES ($1, 'sl', 0, 0, NULL, \
-                     '{\"cpu_limit_ms\":50,\"wall_timeout_ms\":5000,\"heap_limit_mb\":64}', $2)",
+                     '{\"cpu_limit_ms\":50,\"wall_timeout_ms\":5000}', 64, $2)",
             &[&plan_id, &plan_default],
         )
         .await

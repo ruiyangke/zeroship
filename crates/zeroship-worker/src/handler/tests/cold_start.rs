@@ -84,7 +84,7 @@ async fn version_of(
     serde_json::to_string(&AppVersionInfo {
         deploy_hash: Some("cold-deploy".into()),
         plan_id: "starter".into(),
-        runtime: AppRuntimeLimits::default(),
+        runtime: crate::cache::TEST_LIMITS,
         env_version: 1,
         manifest: Some(manifest),
         net_policy: AppNetPolicy::default(),

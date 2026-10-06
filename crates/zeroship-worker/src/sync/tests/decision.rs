@@ -67,7 +67,7 @@ fn needs_reload_true_when_a_database_is_bound_under_a_running_isolate() {
     let main_edge = BindingId::mint();
     let analytics = DatabaseId::mint();
     let analytics_edge = BindingId::mint();
-    let mut info = version_info(Some("h1"), 7, AppRuntimeLimits::default());
+    let mut info = version_info(Some("h1"), 7, crate::cache::TEST_LIMITS);
     info.live_bindings = bindings(&[
         (&main, &main_edge, DatabaseCapability::ReadWrite),
         (&analytics, &analytics_edge, DatabaseCapability::ReadOnly),
@@ -101,7 +101,7 @@ fn needs_reload_true_when_a_binding_is_withdrawn_under_a_running_isolate() {
     let main_edge = BindingId::mint();
     let analytics = DatabaseId::mint();
     let analytics_edge = BindingId::mint();
-    let mut info = version_info(Some("h1"), 7, AppRuntimeLimits::default());
+    let mut info = version_info(Some("h1"), 7, crate::cache::TEST_LIMITS);
     info.live_bindings = bindings(&[(&main, &main_edge, DatabaseCapability::ReadWrite)]);
     let mut loaded = loaded_meta(Some("h1"), 7);
     loaded.live_bindings = bindings(&[
@@ -143,7 +143,7 @@ fn needs_reload_true_when_a_binding_is_withdrawn_under_a_running_isolate() {
 fn needs_reload_true_when_a_capability_changes_under_an_unchanged_set_size() {
     let main = DatabaseId::mint();
     let main_edge = BindingId::mint();
-    let mut info = version_info(Some("h1"), 7, AppRuntimeLimits::default());
+    let mut info = version_info(Some("h1"), 7, crate::cache::TEST_LIMITS);
     info.live_bindings = bindings(&[(&main, &main_edge, DatabaseCapability::ReadOnly)]);
     let mut loaded = loaded_meta(Some("h1"), 7);
     loaded.live_bindings = bindings(&[(&main, &main_edge, DatabaseCapability::ReadWrite)]);
@@ -201,7 +201,7 @@ fn needs_reload_true_when_a_database_is_rebound_onto_a_fresh_edge() {
         "the premise: an unbind and a rebind are two edges, because bind mints \
          a fresh id and unbind deletes the row"
     );
-    let mut info = version_info(Some("h1"), 7, AppRuntimeLimits::default());
+    let mut info = version_info(Some("h1"), 7, crate::cache::TEST_LIMITS);
     info.live_bindings = bindings(&[(&main, &regranted, DatabaseCapability::ReadWrite)]);
     let mut loaded = loaded_meta(Some("h1"), 7);
     loaded.live_bindings = bindings(&[(&main, &retired, DatabaseCapability::ReadWrite)]);
@@ -238,7 +238,7 @@ fn matching_limits(runtime: &AppRuntimeLimits) -> RuntimeLimits {
 
 #[test]
 fn needs_reload_false_when_state_matches() {
-    let info = version_info(Some("h1"), 7, AppRuntimeLimits::default());
+    let info = version_info(Some("h1"), 7, crate::cache::TEST_LIMITS);
     let loaded = loaded_meta(Some("h1"), 7);
     assert!(
         !needs_reload(Some(&loaded), Some(matching_limits(&info.runtime)), &info),
@@ -249,7 +249,7 @@ fn needs_reload_false_when_state_matches() {
 
 #[test]
 fn needs_reload_true_when_only_env_version_bumps() {
-    let info = version_info(Some("h1"), 2, AppRuntimeLimits::default());
+    let info = version_info(Some("h1"), 2, crate::cache::TEST_LIMITS);
     let loaded = loaded_meta(Some("h1"), 1);
     assert!(
         needs_reload(Some(&loaded), Some(matching_limits(&info.runtime)), &info),
@@ -271,7 +271,7 @@ fn poll_interval_of_zero_is_rejected() {
 
 #[test]
 fn needs_reload_true_when_the_deploy_goes_away() {
-    let info = version_info(None, 7, AppRuntimeLimits::default());
+    let info = version_info(None, 7, crate::cache::TEST_LIMITS);
     let loaded = loaded_meta(Some("h1"), 7);
     assert!(
         needs_reload(Some(&loaded), Some(matching_limits(&info.runtime)), &info),
@@ -282,7 +282,7 @@ fn needs_reload_true_when_the_deploy_goes_away() {
 
 #[test]
 fn needs_reload_true_when_deploy_hash_changes() {
-    let info = version_info(Some("h2"), 7, AppRuntimeLimits::default());
+    let info = version_info(Some("h2"), 7, crate::cache::TEST_LIMITS);
     let loaded = loaded_meta(Some("h1"), 7);
     assert!(needs_reload(
         Some(&loaded),
@@ -298,20 +298,48 @@ fn needs_reload_true_when_limits_change() {
         7,
         AppRuntimeLimits {
             cpu_limit_ms: Some(123),
-            ..AppRuntimeLimits::default()
+            ..crate::cache::TEST_LIMITS
         },
     );
     let loaded = loaded_meta(Some("h1"), 7);
     assert!(needs_reload(
         Some(&loaded),
-        Some(matching_limits(&AppRuntimeLimits::default())),
+        Some(matching_limits(&crate::cache::TEST_LIMITS)),
+        &info
+    ));
+}
+
+/// An operator who changes a plan's heap cap changes it for the app's resident
+/// isolate too: the cap is fixed when an isolate is built, so a heap-only
+/// change has to replace it.
+#[test]
+fn needs_reload_true_when_only_the_heap_cap_changes() {
+    let raised = AppRuntimeLimits {
+        heap_limit_mb: std::num::NonZeroU32::new(2048).expect("a non-zero heap cap"),
+        ..crate::cache::TEST_LIMITS
+    };
+    assert_ne!(
+        raised.heap_limit_mb,
+        crate::cache::TEST_LIMITS.heap_limit_mb
+    );
+    let info = version_info(Some("h1"), 7, raised);
+    let loaded = loaded_meta(Some("h1"), 7);
+    assert!(needs_reload(
+        Some(&loaded),
+        Some(matching_limits(&crate::cache::TEST_LIMITS)),
+        &info
+    ));
+    // The rejection control: the isolate built at the raised cap stays.
+    assert!(!needs_reload(
+        Some(&loaded),
+        Some(matching_limits(&info.runtime)),
         &info
     ));
 }
 
 #[test]
 fn needs_reload_true_when_net_policy_changes() {
-    let info = version_info(Some("h1"), 7, AppRuntimeLimits::default());
+    let info = version_info(Some("h1"), 7, crate::cache::TEST_LIMITS);
     let loaded = cache::LoadedMeta {
         deploy_hash: Some("h1".to_string()),
         env_version: 7,
@@ -335,7 +363,7 @@ fn needs_reload_true_when_net_policy_changes() {
 
 #[test]
 fn needs_reload_true_when_isolate_meta_missing() {
-    let info = version_info(Some("h1"), 0, AppRuntimeLimits::default());
+    let info = version_info(Some("h1"), 0, crate::cache::TEST_LIMITS);
     assert!(needs_reload(
         None,
         Some(matching_limits(&info.runtime)),

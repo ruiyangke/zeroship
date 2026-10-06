@@ -260,8 +260,8 @@ async fn reaper_erases_a_user_holding_every_previously_blocking_reference() {
         // RESTRICT; the schema apply record belongs to the app, not the human.
         db.execute(
             "INSERT INTO zeroship.plans \
-            (id, name, runtime_limits_json, assignable_by_creator) \
-         VALUES ('free', 'Free', '{}'::jsonb, TRUE) ON CONFLICT (id) DO NOTHING",
+            (id, name, runtime_limits_json, heap_limit_mb, assignable_by_creator) \
+         VALUES ('free', 'Free', '{}'::jsonb, 64, TRUE) ON CONFLICT (id) DO NOTHING",
             &[],
         )
         .await

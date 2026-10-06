@@ -48,8 +48,8 @@ impl Principals {
             .unwrap();
         admin
             .execute(
-                "INSERT INTO zeroship.plans (id, name, runtime_limits_json, assignable_by_creator) \
-                 VALUES ('free', 'Free', '{}'::jsonb, TRUE) ON CONFLICT (id) DO NOTHING",
+                "INSERT INTO zeroship.plans (id, name, runtime_limits_json, heap_limit_mb, assignable_by_creator) \
+                 VALUES ('free', 'Free', '{}'::jsonb, 64, TRUE) ON CONFLICT (id) DO NOTHING",
                 &[],
             )
             .await

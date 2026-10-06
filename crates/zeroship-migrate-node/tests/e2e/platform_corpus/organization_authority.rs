@@ -131,8 +131,8 @@ fn apps_keep_matching_ownership_until_deleted() {
     Platform::with_database(async |client| {
         let graph = seed_graph(client).await;
         client.execute(
-            "INSERT INTO zeroship.plans (id, name, runtime_limits_json) VALUES ('free', 'Free', '{}')
-             ON CONFLICT (id) DO NOTHING", &[],
+            "INSERT INTO zeroship.plans (id, name, runtime_limits_json, heap_limit_mb)
+             VALUES ('free', 'Free', '{}', 64) ON CONFLICT (id) DO NOTHING", &[],
         ).await.unwrap();
         let app = AppId::mint();
         let insert = "INSERT INTO zeroship.apps (id, name, project_id, organization_id)

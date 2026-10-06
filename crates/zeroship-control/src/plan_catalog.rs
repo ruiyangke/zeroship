@@ -9,10 +9,16 @@
 //! The catalog is a GLOBAL operator config (not tenant-scoped) — `plans` has no
 //! RLS; control is `BYPASSRLS`. Under compute-unit pricing the price
 //! model is SCALAR (`included_units` + a nullable per-plan FX) — read back into
-//! the pure [`crate::pricing::PlanPrice`]; only `runtime_limits_json` stays
-//! JSONB ([`AppRuntimeLimits`]).
+//! the pure [`crate::pricing::PlanPrice`]. A plan's runtime limits
+//! ([`AppRuntimeLimits`]) span two columns: the optional CPU budget and wall
+//! timeout stay JSONB in `runtime_limits_json` ([`PlanTimeLimits`]), and the
+//! heap cap is the `heap_limit_mb` column, `NOT NULL` and `CHECK (> 0)`, so a
+//! row without an operator-set cap cannot exist.
+
+use std::num::NonZeroU32;
 
 use compio_postgres::Row;
+use serde::{Deserialize, Serialize};
 use zeroship_core::types::{
     AppNetPolicyLimits, AppRuntimeLimits, FREE_TIER_NET_POLICY_LIMITS, FREE_TIER_RUNTIME_LIMITS,
 };
@@ -20,6 +26,58 @@ use zeroship_core::workflow_policy::{AppPolicy, FREE_TIER_MAX_CHILD_OUTPUT_BYTES
 
 use crate::pricing::PlanPrice;
 use crate::registry::{Registry, RegistryError};
+
+/// The part of a plan's [`AppRuntimeLimits`] kept in `runtime_limits_json`.
+///
+/// `None` is "no cap of this kind". The heap cap is not here: it is the
+/// `heap_limit_mb` column, which the schema requires, so the JSON never
+/// carries a second copy of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PlanTimeLimits {
+    pub(crate) cpu_limit_ms: Option<u64>,
+    pub(crate) wall_timeout_ms: Option<u64>,
+}
+
+impl PlanTimeLimits {
+    /// The free tier's time limits: the fallback for a JSON column that does
+    /// not decode.
+    pub(crate) const FREE_TIER: Self = Self {
+        cpu_limit_ms: FREE_TIER_RUNTIME_LIMITS.cpu_limit_ms,
+        wall_timeout_ms: FREE_TIER_RUNTIME_LIMITS.wall_timeout_ms,
+    };
+
+    const fn of(limits: &AppRuntimeLimits) -> Self {
+        Self {
+            cpu_limit_ms: limits.cpu_limit_ms,
+            wall_timeout_ms: limits.wall_timeout_ms,
+        }
+    }
+
+    /// These time limits with a plan's heap cap.
+    pub(crate) const fn with_heap(self, heap_limit_mb: NonZeroU32) -> AppRuntimeLimits {
+        AppRuntimeLimits {
+            cpu_limit_ms: self.cpu_limit_ms,
+            wall_timeout_ms: self.wall_timeout_ms,
+            heap_limit_mb,
+        }
+    }
+}
+
+/// Read the `heap_limit_mb` column. `None` for a value the column's
+/// `CHECK (heap_limit_mb > 0)` refuses, so a caller cannot read one as a cap.
+pub(crate) fn heap_cap_from_column(value: i32) -> Option<NonZeroU32> {
+    u32::try_from(value).ok().and_then(NonZeroU32::new)
+}
+
+/// What an upsert landing on an existing row does with its heap cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeapCapOnConflict {
+    /// Write the caller's cap: an operator setting a plan's cap.
+    Replace,
+    /// Keep the row's cap: the boot-time seed, which states a built-in tier's
+    /// cap only for a row it creates, so an operator-set cap survives restarts.
+    Keep,
+}
 
 /// One catalog entry: the typed id, display name, the resolved price model, the
 /// runtime limits this tier grants, and whether it has been archived (archived
@@ -81,7 +139,7 @@ impl PlanCatalog {
         let rows = conn
             .query(
                 "SELECT id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
-                        runtime_limits_json, net_policy_limits_json, \
+                        runtime_limits_json, heap_limit_mb, net_policy_limits_json, \
                         spend_limit_default_cents, archived, \
                         assignable_by_creator \
                  FROM zeroship.plans ORDER BY id",
@@ -105,21 +163,35 @@ impl PlanCatalog {
         Ok(plans)
     }
 
-    /// Insert-or-update a plan (operator / master-key gated at the HTTP layer).
-    /// The id is the primary key; an existing id is updated in place (so the
-    /// built-in tiers are idempotently re-seeded on every boot). Returns the
-    /// written [`Plan`].
+    /// Insert-or-update a plan: how an operator creates a plan or changes any
+    /// of its fields, its heap cap included. The id is the primary key; an
+    /// existing id is updated in place. Returns the written [`Plan`].
     ///
     /// `archived` controls the archived flag on the UPSERT:
     ///   - `Some(b)` — set `archived = b` explicitly (the only way to UN-archive
     ///     is `Some(false)`; un-archiving must be deliberate).
     ///   - `None` — PRESERVE the existing row's `archived` on conflict
-    ///     (`COALESCE($9, plans.archived)`); a brand-new row defaults to
+    ///     (`COALESCE($10, plans.archived)`); a brand-new row defaults to
     ///     `false`. This is what a PUT without an `archived` field maps to, so a
     ///     name/price edit can't silently resurrect an archived plan.
     ///
     /// `plan.archived` is ignored for the flag — pass the intent via `archived`.
+    ///
+    /// The heap cap is `plan.runtime.heap_limit_mb`, which its type makes
+    /// present and non-zero. A cap above the column's `INTEGER` range is
+    /// refused rather than clamped.
     pub async fn upsert(&self, plan: &Plan, archived: Option<bool>) -> Result<Plan, RegistryError> {
+        self.write(plan, archived, HeapCapOnConflict::Replace).await
+    }
+
+    /// [`Self::upsert`], with the caller choosing what a write that lands on
+    /// an existing row does with that row's heap cap.
+    async fn write(
+        &self,
+        plan: &Plan,
+        archived: Option<bool>,
+        heap_on_conflict: HeapCapOnConflict,
+    ) -> Result<Plan, RegistryError> {
         // MINOR (write-path i64 clamps): validate the price model at the write
         // boundary as DEFENSE IN DEPTH. The HTTP handler already validates, but
         // a direct `upsert` (bootstrap seed, future internal callers) must not
@@ -129,8 +201,14 @@ impl PlanCatalog {
         // out-of-range plan write is a HARD ERROR, not a silent clamp.
         plan.price.validate().map_err(RegistryError::InvalidInput)?;
 
-        let runtime_limits_json = serde_json::to_value(&plan.runtime)
+        let runtime_limits_json = serde_json::to_value(PlanTimeLimits::of(&plan.runtime))
             .map_err(|e| RegistryError::InvalidInput(format!("runtime_limits_json: {e}")))?;
+        let heap_limit_mb = i32::try_from(plan.runtime.heap_limit_mb.get()).map_err(|_| {
+            RegistryError::InvalidInput(format!(
+                "heap_limit_mb {} exceeds the INTEGER column: refusing to clamp",
+                plan.runtime.heap_limit_mb
+            ))
+        })?;
         let net_policy_limits_json = serde_json::to_value(&plan.net)
             .map_err(|e| RegistryError::InvalidInput(format!("net_policy_limits_json: {e}")))?;
         // `base_fee` and `spend_limit_default` have no explicit ceiling in
@@ -169,29 +247,32 @@ impl PlanCatalog {
         let conn = self.registry.conn().await?;
         let rows = conn
             .query(
-                // INSERT defaults a new row's archived to COALESCE($9, false);
-                // ON CONFLICT preserves the existing value when $9 is NULL
-                // (COALESCE($9, plans.archived)) so a PUT without `archived`
-                // never un-archives.
+                // INSERT defaults a new row's archived to COALESCE($10, false);
+                // ON CONFLICT preserves the existing value when $10 is NULL
+                // (COALESCE($10, plans.archived)) so a PUT without `archived`
+                // never un-archives. A new row always takes the caller's heap
+                // cap; an existing row's is replaced only when $12 says so.
                 "INSERT INTO zeroship.plans \
                    (id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
-                    runtime_limits_json, net_policy_limits_json, \
+                    runtime_limits_json, heap_limit_mb, net_policy_limits_json, \
                     spend_limit_default_cents, archived, \
                     assignable_by_creator, updated_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, false), $10, NOW()) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10, false), $11, NOW()) \
                  ON CONFLICT (id) DO UPDATE SET \
                     name = EXCLUDED.name, \
                     base_fee_cents = EXCLUDED.base_fee_cents, \
                     included_units = EXCLUDED.included_units, \
                     fx_pico_cents_per_unit = EXCLUDED.fx_pico_cents_per_unit, \
                     runtime_limits_json = EXCLUDED.runtime_limits_json, \
+                    heap_limit_mb = CASE WHEN $12 THEN EXCLUDED.heap_limit_mb \
+                                         ELSE zeroship.plans.heap_limit_mb END, \
                     net_policy_limits_json = EXCLUDED.net_policy_limits_json, \
                     spend_limit_default_cents = EXCLUDED.spend_limit_default_cents, \
-                    archived = COALESCE($9, zeroship.plans.archived), \
+                    archived = COALESCE($10, zeroship.plans.archived), \
                     assignable_by_creator = EXCLUDED.assignable_by_creator, \
                     updated_at = NOW() \
                  RETURNING id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
-                           runtime_limits_json, net_policy_limits_json, \
+                           runtime_limits_json, heap_limit_mb, net_policy_limits_json, \
                            spend_limit_default_cents, archived, \
                            assignable_by_creator",
                 &[
@@ -201,10 +282,12 @@ impl PlanCatalog {
                     &included_units,
                     &fx_pico,
                     &runtime_limits_json,
+                    &heap_limit_mb,
                     &net_policy_limits_json,
                     &spend_default,
                     &archived,
                     &plan.assignable_by_creator,
+                    &(heap_on_conflict == HeapCapOnConflict::Replace),
                 ],
             )
             .await?;
@@ -278,7 +361,7 @@ pub async fn get_on<C: compio_postgres::GenericClient + Sync>(
     let rows = conn
         .query(
             "SELECT id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
-                    runtime_limits_json, net_policy_limits_json, \
+                    runtime_limits_json, heap_limit_mb, net_policy_limits_json, \
                     spend_limit_default_cents, archived, \
                     assignable_by_creator \
              FROM zeroship.plans WHERE id = $1",
@@ -298,30 +381,41 @@ pub async fn get_on<C: compio_postgres::GenericClient + Sync>(
 /// NOT fail the decode. Pricing only needs the scalar price columns
 /// (`base_fee_cents`, `included_units`, `fx`, `spend_limit_default_cents`) —
 /// NOT the runtime limits. A row whose JSONB can't parse falls back to the
-/// conservative [`FREE_TIER_RUNTIME_LIMITS`] (with a `warn!`) so BOTH `list()`
-/// (spend enforcement) and `get()` (billing reconcile) still PRICE the app; a
-/// poison row must never leave an app both uncapped AND unbilled. The
-/// runtime-limits consumer in `registry.rs::get_versions` has its OWN
-/// conservative fallback and does not go through this decoder, so a real
-/// runtime-limits read is unaffected.
+/// conservative free-tier time limits ([`PlanTimeLimits::FREE_TIER`], with a
+/// `warn!`) so BOTH `list()` (spend enforcement) and `get()` (billing
+/// reconcile) still PRICE the app; a poison row must never leave an app both
+/// uncapped AND unbilled. The runtime-limits consumer in
+/// `registry.rs::get_versions` has its OWN conservative fallback and does not
+/// go through this decoder, so a real runtime-limits read is unaffected.
+///
+/// The heap cap is read from its own column whatever the JSON holds. The
+/// schema keeps that column present and positive, so a value outside that is
+/// an undecodable row, which `list()` skips and `get()` reports.
 fn row_to_plan(row: &Row) -> Result<Plan, RegistryError> {
     let base_fee: i64 = row.get("base_fee_cents");
     let included_units: i64 = row.get("included_units");
     let fx_pico: Option<i64> = row.get("fx_pico_cents_per_unit");
     let spend_default: i64 = row.get("spend_limit_default_cents");
     let runtime_limits_json: serde_json::Value = row.get("runtime_limits_json");
+    let heap_limit_mb: i32 = row.get("heap_limit_mb");
     let net_policy_limits_json: serde_json::Value = row.get("net_policy_limits_json");
     let id: String = row.get("id");
 
-    let runtime: AppRuntimeLimits = serde_json::from_value(runtime_limits_json).unwrap_or_else(|e| {
+    let heap_limit_mb = heap_cap_from_column(heap_limit_mb).ok_or_else(|| {
+        RegistryError::Database(format!(
+            "plan {id}: heap_limit_mb {heap_limit_mb} is not a positive heap cap"
+        ))
+    })?;
+    let time: PlanTimeLimits = serde_json::from_value(runtime_limits_json).unwrap_or_else(|e| {
         tracing::warn!(
             plan_id = %id,
             error = %e,
             "plan_catalog: runtime_limits_json parse failure — using free-tier fallback so the \
              plan still PRICES (MAJOR-2 poison tolerance); enforcement + billing both see the app"
         );
-        FREE_TIER_RUNTIME_LIMITS
+        PlanTimeLimits::FREE_TIER
     });
+    let runtime = time.with_heap(heap_limit_mb);
     let net: AppNetPolicyLimits =
         serde_json::from_value(net_policy_limits_json).unwrap_or_else(|e| {
             tracing::warn!(
@@ -428,12 +522,28 @@ fn builtin_workflow_policy(tier: &str) -> AppPolicy {
     AppPolicy::default()
 }
 
+/// A heap cap in megabytes, checked non-zero where the constant is evaluated.
+const fn heap_cap_mb(mb: u32) -> NonZeroU32 {
+    match NonZeroU32::new(mb) {
+        Some(cap) => cap,
+        None => panic!("a heap cap is non-zero"),
+    }
+}
+
+/// The pro tier's seeded heap cap.
+const PRO_HEAP_LIMIT_MB: NonZeroU32 = heap_cap_mb(256);
+
+/// The unlimited tier's seeded heap cap. "Unlimited" lifts the CPU budget and
+/// wall timeout; the heap stays capped, at a value the operator can change.
+const UNLIMITED_HEAP_LIMIT_MB: NonZeroU32 = heap_cap_mb(1024);
+
 /// Build the three built-in tiers, `[free, pro, unlimited]`.
 ///
-/// `runtime_limits_json` is the tier matrix: free = 50ms/5s/64MB,
-/// pro = 30s/30s/256MB, unlimited = None/None/None. Under compute-unit pricing
-/// the price model is scalar: `base_fee_cents`, `included_units`, and an FX
-/// where `None` inherits the global `pricing_config` default.
+/// The runtime tier matrix (CPU budget / wall timeout / heap cap): free =
+/// 50ms/5s/64MB, pro = 30s/30s/256MB, unlimited = none/none/1024MB. Every tier
+/// states its heap cap. Under compute-unit pricing the price model is scalar:
+/// `base_fee_cents`, `included_units`, and an FX where `None` inherits the
+/// global `pricing_config` default.
 fn builtin_plans() -> Vec<BuiltinPlan> {
     // Free: spend_limit == base (0) means quota-capped with no card. Runtime
     // limits come from the shared const so the seed and the registry's
@@ -469,7 +579,7 @@ fn builtin_plans() -> Vec<BuiltinPlan> {
             runtime: AppRuntimeLimits {
                 cpu_limit_ms: Some(30_000),
                 wall_timeout_ms: Some(30_000),
-                heap_limit_mb: Some(256),
+                heap_limit_mb: PRO_HEAP_LIMIT_MB,
             },
             net: AppNetPolicyLimits {
                 max_sockets: 32,
@@ -482,8 +592,9 @@ fn builtin_plans() -> Vec<BuiltinPlan> {
         workflow_policy: builtin_workflow_policy("pro"),
     };
 
-    // Unlimited / enterprise: no runtime caps, no included CU, no spend cap.
-    // OPERATOR-only: a creator self-assigning it would escape every cap.
+    // Unlimited / enterprise: no CPU budget or wall timeout, no included CU, no
+    // spend cap; the heap keeps a cap. OPERATOR-only: a creator self-assigning
+    // it would escape every other cap.
     let unlimited = BuiltinPlan {
         plan: Plan {
             id: unlimited_plan_id(),
@@ -497,7 +608,7 @@ fn builtin_plans() -> Vec<BuiltinPlan> {
             runtime: AppRuntimeLimits {
                 cpu_limit_ms: None,
                 wall_timeout_ms: None,
-                heap_limit_mb: None,
+                heap_limit_mb: UNLIMITED_HEAP_LIMIT_MB,
             },
             net: AppNetPolicyLimits {
                 max_sockets: 256,
@@ -532,8 +643,10 @@ impl std::error::Error for PlanSeedError {}
 
 /// Idempotently seed the built-in plan tiers into the catalog.
 ///
-/// Refresh built-in pricing and runtime defaults under deterministic plan IDs.
-/// Preserve operator archival and workflow policy when the process restarts.
+/// Refresh built-in pricing, CPU budgets and wall timeouts under deterministic
+/// plan IDs. Preserve operator archival, workflow policy and heap caps when the
+/// process restarts: a built-in tier's seeded heap cap is written only when
+/// its row is created, so a cap the operator set stays in force across boots.
 /// `main.rs` calls this before app creation because `apps.plan_id` references
 /// the catalog.
 ///
@@ -547,7 +660,7 @@ pub async fn seed_plans(registry: &Registry) -> Result<(), PlanSeedError> {
     } in builtin_plans()
     {
         catalog
-            .upsert(&plan, None)
+            .write(&plan, None, HeapCapOnConflict::Keep)
             .await
             .map_err(|e| PlanSeedError::Db(format!("seed plan '{}': {e}", plan.id)))?;
         catalog

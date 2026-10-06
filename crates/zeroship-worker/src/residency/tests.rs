@@ -251,7 +251,7 @@ async fn a_request_holding_its_app_keeps_reading_encrypted_data_after_the_cache_
     cache::load_app(
         hold,
         cache::test_modules(br#"export default { fetch() { return new Response("ok"); } }"#),
-        zeroship_core::types::AppRuntimeLimits::default(),
+        crate::cache::TEST_LIMITS,
         zeroship_core::types::AppNetPolicy::default(),
         None,
         None,

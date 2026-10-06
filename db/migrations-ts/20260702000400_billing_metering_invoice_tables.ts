@@ -293,6 +293,7 @@ export default {
         workflows_allowed: t.boolean().required().default(false),
         workflow_policy_json: t.json(),
         runtime_limits_json: t.json().required(),
+        heap_limit_mb: t.int().required(),
         archived: t.boolean().required().default(false),
         created_at: t.timestamp().required().default(now()),
         updated_at: t.timestamp().required().default(now()),
@@ -301,6 +302,7 @@ export default {
       primaryKey: ["id"],
     });
     table("plans", { schema: "zeroship" }).check("plans_base_fee_cents_check").add({ expr: (col) => col("base_fee_cents").ge(0) });
+    table("plans", { schema: "zeroship" }).check("plans_heap_limit_mb_check").add({ expr: (col) => col("heap_limit_mb").gt(0) });
     table("plans", { schema: "zeroship" }).check("plans_fx_pico_cents_per_unit_check").add({ expr: (col) => col("fx_pico_cents_per_unit").isNull().or(col("fx_pico_cents_per_unit").ge(1000)) });
     table("plans", { schema: "zeroship" }).check("plans_included_units_check").add({ expr: (col) => col("included_units").ge(0) });
     table("plans", { schema: "zeroship" }).check("plans_spend_limit_default_cents_check").add({ expr: (col) => col("spend_limit_default_cents").ge(0) });

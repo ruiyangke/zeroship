@@ -123,10 +123,10 @@ fn cmd_serve(args: &[String]) {
     let cpu_limit = parse_flag_u64(args, "--cpu-limit").map(std::time::Duration::from_millis);
     let wall_timeout = parse_flag_u64(args, "--wall-timeout").map(std::time::Duration::from_millis);
     let dev_entry_loader = parse_flag(args, "--dev-entry-loader");
-    // The dev default is larger than the production worker's: single-tenant
-    // dev apps routinely load big libraries (LangChain + provider SDKs), while
-    // the worker's default is sized for multi-tenant isolation, not for
-    // single-process dev. CLI flag or ZEROSHIP_HEAP_LIMIT_MB overrides.
+    // The dev server states its own heap cap. A deployed app runs at its
+    // plan's cap; dev has no plan, and single-tenant dev apps routinely load
+    // big libraries (LangChain + provider SDKs), so its default sits above
+    // the free and pro tiers' caps. CLI flag or ZEROSHIP_HEAP_LIMIT_MB overrides.
     let heap_limit_bytes = parse_flag_usize(args, "--heap-limit-mb")
         .or_else(|| {
             zeroship_core::declared_env!(cli, "ZEROSHIP_HEAP_LIMIT_MB", crate::ZeroshipCliConsumer)

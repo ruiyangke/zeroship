@@ -17,7 +17,7 @@
   {
     "file": "20260702000400_billing_metering_invoice_tables.ts",
     "name": "billing_metering_invoice_tables",
-    "opCount": 83
+    "opCount": 84
   },
   {
     "file": "20260702000600_constraints_indexes_fks.ts",

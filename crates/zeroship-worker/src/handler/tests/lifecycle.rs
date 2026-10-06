@@ -16,7 +16,7 @@ async fn in_flight_dispatch_pins_its_isolate_against_eviction() {
         }
     "#;
     worker
-        .load(source, AppRuntimeLimits::default(), &Manifest::default())
+        .load(source, crate::cache::TEST_LIMITS, &Manifest::default())
         .await;
     let service = test::init_service(web::App::new().configure(worker.configure())).await;
     let request = |path: &str| {
@@ -51,7 +51,7 @@ async fn in_flight_dispatch_pins_its_isolate_against_eviction() {
             crate::cache::test_modules(
                 br#"export default { fetch() { return new Response("b"); } }"#,
             ),
-            AppRuntimeLimits::default(),
+            crate::cache::TEST_LIMITS,
             Default::default(),
             None,
             None,
@@ -90,7 +90,7 @@ async fn unwinding_releases_worker_resources_before_the_next_case() {
         worker
             .load(
                 br#"export default { fetch() { return new Response("ok"); } }"#,
-                AppRuntimeLimits::default(),
+                crate::cache::TEST_LIMITS,
                 &Manifest::default(),
             )
             .await;
@@ -118,7 +118,7 @@ async fn unwinding_releases_worker_resources_before_the_next_case() {
     assert!(next.storage.path().exists());
     next.load(
         br#"export default { fetch() { return new Response("next-worker"); } }"#,
-        AppRuntimeLimits::default(),
+        crate::cache::TEST_LIMITS,
         &Manifest::default(),
     )
     .await;
