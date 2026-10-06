@@ -144,6 +144,9 @@ struct Metadata {
     /// How long the next renewal call takes before it answers; taken by the
     /// call it delays, so a retry of the same attempt answers at once.
     renewal_delay: Cell<Option<Duration>>,
+    /// The gate the case releases to issue a renewal, or `None` to keep the
+    /// transport's lease fraction. Taken by the one renewal it places.
+    renewal_gate: RefCell<Option<oneshot::Receiver<()>>>,
     /// How far one renewal extends the manager lease; the fixture lease when
     /// unset. Never past the attempt the delivery carries, as the manager caps it.
     renewal: Cell<Option<Duration>>,
@@ -279,6 +282,21 @@ impl JobTransport for Metadata {
             settlement: JobTransport::settle(self, journal, lease).await?,
             receipt,
         })
+    }
+    /// The case's gate, or the transport's lease fraction when none is set.
+    ///
+    /// A case that races a short lease or phase installs a gate and releases
+    /// it at the point it chooses, so the renewal lands where the case places
+    /// it rather than where a loaded host schedules the wait. Every renewal
+    /// after the gated one keeps the lease fraction.
+    async fn wait_for_renewal(&self, remaining: Duration) {
+        let gate = self.renewal_gate.borrow_mut().take();
+        match gate {
+            Some(gate) => {
+                let _ = gate.await;
+            }
+            None => super::default_renewal_wait(remaining).await,
+        }
     }
 }
 
@@ -782,6 +800,11 @@ async fn a_renewal_that_extends_nothing_interrupts_the_execution_at_that_renewal
         let (started, running) = oneshot::channel();
         fixture.probe.started.replace(Some(started));
         let mut slot = fixture.slot(Duration::from_secs(30));
+        // Hold the first renewal until the policy is reissued, so which policy
+        // the renewal answers is the case's choice and not a race with the
+        // wall clock.
+        let (open, gate) = oneshot::channel();
+        *fixture.metadata.renewal_gate.borrow_mut() = Some(gate);
         let claim = claimed(&fixture.app, fixture.lease.clone()).await.unwrap();
         let run = slot.run(&fixture.app, claim).boxed_local();
         let Either::Left((Ok(()), run)) = futures::future::select(running, run).await else {
@@ -794,6 +817,7 @@ async fn a_renewal_that_extends_nothing_interrupts_the_execution_at_that_renewal
             },
             2,
         );
+        open.send(()).unwrap();
         // The renewal delay is a third of the task lease, so two whole leases
         // hold at least one renewal for either case.
         let window = Duration::from_millis(u64::try_from(policy.lease_ms).unwrap()) * 2;
@@ -1090,6 +1114,12 @@ async fn paired_renewal_reaches_creator_before_execution_continues() {
     .await;
     fixture.probe.mode.set(Mode::AfterCreatorRenewal);
     let mut slot = fixture.slot(Duration::from_secs(5));
+    // The renewal is placed by the case, not by the wall clock: the first
+    // renewal fires as soon as the claim is accepted, so a loaded host cannot
+    // push it past the creator lease and turn the attempt into a timeout.
+    let (open, gate) = oneshot::channel();
+    *fixture.metadata.renewal_gate.borrow_mut() = Some(gate);
+    open.send(()).unwrap();
     assert!(matches!(
         slot.run(&fixture.app, claimed(&fixture.app, fixture.lease.clone()).await.unwrap()).await.unwrap(),
         DeliveryOutcome::Settled { .. }
@@ -1114,6 +1144,11 @@ async fn an_execution_bound_below_the_lease_still_renews_inside_the_attempt() {
     // Far below the fraction of the lease at which a lease-derived delay would
     // put the first renewal, and below the creator task lease as well.
     let mut slot = fixture.slot(MANAGER_LEASE / 32);
+    // Place the first renewal inside the short bound instead of letting the
+    // bound race the wall clock.
+    let (open, gate) = oneshot::channel();
+    *fixture.metadata.renewal_gate.borrow_mut() = Some(gate);
+    open.send(()).unwrap();
     assert_eq!(
         slot.run(&fixture.app, claimed(&fixture.app, fixture.lease.clone()).await.unwrap())
             .await
@@ -1172,6 +1207,11 @@ async fn a_control_intent_on_a_renewal_interrupts_without_settling() {
         .await
         .unwrap();
     let mut slot = fixture.slot(MANAGER_LEASE / 32);
+    // Place the renewal, rather than let the short phase race it: the intent
+    // rides the first renewal, which fires as soon as the claim is accepted.
+    let (open, gate) = oneshot::channel();
+    *fixture.metadata.renewal_gate.borrow_mut() = Some(gate);
+    open.send(()).unwrap();
     assert!(matches!(
         Box::pin(slot.run(&fixture.app, claim))
             .await
@@ -1204,6 +1244,11 @@ async fn an_attempt_bound_ending_before_the_lease_still_renews_inside_the_attemp
         .renewal_deadline
         .set(Some(fixture.lease.attempt_ends));
     let mut slot = fixture.slot_bounding_operations(MANAGER_LEASE, SETTLEMENT_INSIDE_A_SHORT_ATTEMPT);
+    // Place the first renewal inside the attempt bound rather than race the
+    // bound that has to count it.
+    let (open, gate) = oneshot::channel();
+    *fixture.metadata.renewal_gate.borrow_mut() = Some(gate);
+    open.send(()).unwrap();
     let started = Instant::now();
     slot.run(&fixture.app, claimed(&fixture.app, fixture.lease.clone()).await.unwrap())
         .await
@@ -1599,6 +1644,12 @@ async fn renewed_authority_does_not_extend_hard_execution_budget() {
     .await;
     fixture.probe.mode.set(Mode::HardTimeout);
     let mut slot = fixture.slot(Duration::from_secs(2));
+    // The first renewal is placed by the case so the execution is known to have
+    // renewed before the hard budget ends it; later renewals keep the
+    // transport's lease fraction, so the budget is still the bound that fires.
+    let (open, gate) = oneshot::channel();
+    *fixture.metadata.renewal_gate.borrow_mut() = Some(gate);
+    open.send(()).unwrap();
     assert!(matches!(
         slot.run(&fixture.app, claimed(&fixture.app, fixture.lease.clone()).await.unwrap()).await,
         Err(WorkflowServiceError::Timeout)
@@ -1657,6 +1708,10 @@ async fn substituted_renewal_stops_without_ack_or_checkpoint() {
     fixture.probe.mode.set(Mode::Pending);
     fixture.metadata.substitute_renewal.set(true);
     let mut slot = fixture.slot(Duration::from_secs(5));
+    // Place the substituting renewal rather than race the bound against it.
+    let (open, gate) = oneshot::channel();
+    *fixture.metadata.renewal_gate.borrow_mut() = Some(gate);
+    open.send(()).unwrap();
     assert!(matches!(
         slot.run(&fixture.app, claimed(&fixture.app, fixture.lease.clone()).await.unwrap()).await,
         Err(WorkflowServiceError::PermissionDenied)
@@ -1700,6 +1755,10 @@ async fn a_refused_renewal_ends_the_attempt_without_retrying() {
     fixture.probe.mode.set(Mode::Pending);
     fixture.metadata.reject_renewal.set(true);
     let mut slot = fixture.slot(Duration::from_secs(5));
+    // Place the refused renewal rather than race the bound against it.
+    let (open, gate) = oneshot::channel();
+    *fixture.metadata.renewal_gate.borrow_mut() = Some(gate);
+    open.send(()).unwrap();
     assert!(matches!(
         slot.run(&fixture.app, claimed(&fixture.app, fixture.lease.clone()).await.unwrap()).await,
         Err(WorkflowServiceError::PermissionDenied)

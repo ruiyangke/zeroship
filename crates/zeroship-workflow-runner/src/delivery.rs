@@ -137,6 +137,28 @@ pub trait JobTransport {
         journal: &Self::Journal,
         job: &JobSpec,
     ) -> impl Future<Output = Result<Option<JobReceipt>, WorkflowServiceError>>;
+    /// Wait until the next renewal is due, given the least authority still
+    /// bounding the attempt: the smaller of the delivery's remaining lease and
+    /// the phase's.
+    ///
+    /// The default waits a third of that authority, which is the production
+    /// cadence: a renewal lands inside every attempt that outlives one, so the
+    /// manager counts the attempt into its delivery ceiling before the attempt
+    /// ends. A transport that owns its cadence answers with its own wait
+    /// instead; the test transport waits on a case-controlled gate, so a
+    /// renewal lands at a chosen point rather than on how a loaded host
+    /// schedules the wait.
+    fn wait_for_renewal(&self, remaining: Duration) -> impl Future<Output = ()> {
+        default_renewal_wait(remaining)
+    }
+}
+
+/// The production renewal cadence: wait a third of the least authority still
+/// bounding the attempt, so a renewal lands inside every attempt that outlives
+/// one and the manager counts the attempt into its delivery ceiling before the
+/// attempt ends.
+async fn default_renewal_wait(remaining: Duration) {
+    compio::time::sleep(remaining / 3).await;
 }
 
 /// Why a host gives back a claim it began nothing of.
@@ -824,8 +846,13 @@ async fn renew<T: JobTransport>(
     options: DeliveryOptions,
 ) -> Result<ControlIntent, WorkflowServiceError> {
     loop {
-        let delay = available(&claims.borrow())?.min(phase.remaining()?) / 3;
-        compio::time::sleep(delay).await;
+        // The transport owns the wait before a renewal: it is handed the least
+        // authority still bounding the attempt and waits on its own cadence.
+        // The default waits a third of that authority, which places a renewal
+        // inside every attempt that outlives one; a test transport waits on a
+        // case-controlled gate so the renewal lands where the case chooses.
+        let window = available(&claims.borrow())?.min(phase.remaining()?);
+        transport.wait_for_renewal(window).await;
         // ONE RENEWAL, RETRIED INSIDE ITS OWN BUDGET. A heartbeat whose reply
         // misses the per-call bound is retried while the grant and the phase
         // still leave room, so transport delay inside the lease does not end an

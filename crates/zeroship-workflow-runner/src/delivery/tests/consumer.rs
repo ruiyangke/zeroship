@@ -1256,9 +1256,21 @@ struct NativeManager {
     /// own flag, because both claimants can settle in one case and their
     /// order is not the case's to decide.
     worker_loses_ack: Cell<bool>,
+    /// Every settlement the manager committed for this worker, in order, so a
+    /// lost acknowledgement's retry is seen to present identical metadata. A
+    /// call the operation bound cancelled before it reached the manager is not
+    /// one of them.
     requests: RefCell<Vec<JournalSettlement>>,
     settled: flume::Sender<()>,
     completion: flume::Receiver<()>,
+    /// A claim waits on this before asking the queue, for a case that has to
+    /// establish the lane's publication before a worker can be handed the
+    /// work. Taken by the one claim it gates.
+    claim_gate: RefCell<Option<oneshot::Receiver<()>>>,
+    /// Opened by [`Self::sweep_publishing`] once the reconciliation has
+    /// committed the work its dispatch publishes, releasing a claim gated on
+    /// [`Self::claim_gate`].
+    publish_gate: RefCell<Option<oneshot::Sender<()>>>,
 }
 
 impl NativeManager {
@@ -1316,6 +1328,13 @@ impl NativeManager {
         else {
             panic!("the lane's dispatch settles the row it claimed")
         };
+        // The dispatch has committed the work it publishes, including the
+        // creator work a gated consumer waits to be handed. Opening the gate
+        // only now makes the ordering the case names a fact: no worker claim
+        // reaches the queue before the duty has published the creator work.
+        if let Some(published) = self.publish_gate.borrow_mut().take() {
+            let _ = published.send(());
+        }
         // Construct once and retry the same request, the way a lane owes a lost
         // acknowledgement: the queue commits the first attempt, the reply is
         // dropped, and the retry must present identical metadata.
@@ -1351,6 +1370,8 @@ impl NativeManager {
             requests: RefCell::new(Vec::new()),
             settled,
             completion,
+            claim_gate: RefCell::new(None),
+            publish_gate: RefCell::new(None),
         })
     }
 
@@ -1414,6 +1435,13 @@ impl JobTransport for NativeManager {
         &self,
         request: &ClaimJobs,
     ) -> Result<ClaimedBatch<Self::Lease>, WorkflowServiceError> {
+        // A gated case establishes the lane's publication before any worker
+        // claim reaches the queue, so the ordering it asserts is a fact rather
+        // than a race. The gate is taken by the one claim it holds.
+        let gated = self.claim_gate.borrow_mut().take();
+        if let Some(gate) = gated {
+            let _ = gate.await;
+        }
         let claim = zeroship_workflow_manager::coordinator::ZoneClaim {
             worker: &self.worker,
             zone: &ZoneId::default_zone(),
@@ -1471,13 +1499,18 @@ impl JobTransport for NativeManager {
         journal: &AppWorkflows,
         lease: &Self::Lease,
     ) -> Result<SettlementReceipt, WorkflowServiceError> {
-        let request = &committed_settlement(journal, lease).await?;
-        self.requests.borrow_mut().push(request.clone());
+        let request = committed_settlement(journal, lease).await?;
         let receipt = self
             .coordinator
-            .settle_job(&self.worker, request, || async { Ok(self.worker.clone()) })
+            .settle_job(&self.worker, &request, || async { Ok(self.worker.clone()) })
             .await
             .map_err(manager_error)?;
+        // RECORDED ONCE THE MANAGER COMMITTED, not when the call was made. A
+        // settlement the operation bound cancels mid-flight never reached the
+        // manager, and the retry that follows replays it; recording the
+        // cancelled call would count the bound's timing as an acknowledgement
+        // the transport lost.
+        self.requests.borrow_mut().push(request);
         if self.worker_loses_ack.replace(false) {
             return Err(WorkflowServiceError::Timeout);
         }
@@ -1758,8 +1791,13 @@ async fn manager_reconciliation_publishes_creator_work_before_the_consumer_execu
     // Two claimants, one consumer run. The reconciliation is `Work::Maintenance`,
     // which `Claimant::Worker` denies, so the lane takes it; its settlement
     // carries the creator Advance, and THAT is what the consumer executes. The
-    // order is the point: the duty publishes creator work before any worker can
-    // be handed some.
+    // order is the point: the consumer's claim is gated until the lane's
+    // dispatch has committed the creator work, so the duty publishes that work
+    // before any worker can be handed some rather than racing how a loaded host
+    // interleaves the two claimants.
+    let (published, publication) = oneshot::channel();
+    *manager.publish_gate.borrow_mut() = Some(published);
+    *manager.claim_gate.borrow_mut() = Some(publication);
     let swept = RefCell::new(None);
     finished(consumer.run_until(async {
         *swept.borrow_mut() = Some(
@@ -1791,8 +1829,8 @@ async fn manager_reconciliation_publishes_creator_work_before_the_consumer_execu
     );
     assert!(fixture.app.pending_jobs(None, 1).await.unwrap().is_empty());
     assert!(manager.offers_nothing().await);
-    // The lane and the worker settle concurrently, so each claimant's retried
-    // settlement is asserted on its own job rather than on their interleaving.
+    // Each claimant's retried settlement is asserted on its own job, so the
+    // assertions do not depend on their interleaving.
     let requests = manager.requests.borrow();
     let (lane, worker): (Vec<_>, Vec<_>) = requests
         .iter()
