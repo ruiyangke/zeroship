@@ -868,7 +868,7 @@ export default {
 };
 ```
 
-## C1 — foreign-key referential actions
+## Foreign-key referential actions
 
 A `.foreignKey(name).add({...})` (and a `create({ foreignKeys: [...] })` entry)
 takes optional `onDelete` / `onUpdate` of
@@ -889,7 +889,7 @@ export default {
 };
 ```
 
-## C2 — `.column().add()` honors `.unique()` / `.primaryKey()`
+## `.column().add()` honors `.unique()` / `.primaryKey()`
 
 `.column(name).add({ type })` honors **every** modifier on `type`. An ADD COLUMN
 has no inline `UNIQUE`, so a `t.*.unique()` / `t.*.primaryKey()` on an added
