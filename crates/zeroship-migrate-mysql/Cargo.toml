@@ -49,10 +49,11 @@ zeroship-migrate-policy = { workspace = true }
 # its canned `information_schema` rows are the premise of both suites and two copies
 # drift silently.
 #
-# The recorder crate names THIS one, for `MysqlInflightDdlMarker`. This entry is the
-# edge back and it is a DEV edge, which Cargo resolves: this crate's lib compiles
-# without the recorder, the recorder compiles against that lib, and this crate's test
-# targets compile against both. A shipping `zeroship-migrate-mysql` links none of it.
+# The recorder holds the canned inflight marker as its own plain `String` fields,
+# not this crate's `MysqlInflightDdlMarker`, so it names no edge back here: this
+# is a DEV edge in one direction only. Neither crate names the other in its
+# normal dependencies, so this crate's test targets link one copy of it, and a
+# shipping `zeroship-migrate-mysql` links none of the recorder.
 zeroship-migrate-mysql-recording = { workspace = true }
 # TEST-ONLY: the async apply/backend surface is `async`, so the unit tests that
 # drive it spin a throwaway compio run loop per test (zero tokio), exactly as the

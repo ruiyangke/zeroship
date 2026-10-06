@@ -13,7 +13,7 @@
 //! This module hands out only URLs, ports and the minted [`case_prefix`]: it
 //! carries no dependency on `compio-redis`, because `compio-redis` itself is
 //! a consumer of this testkit (`cargo xtask test repository`'s
-//! `no_dev_only_package_depends_on_a_crate_whose_tests_use_it` enforces this
+//! `no_crate_dev_depends_on_a_package_that_links_it` enforces this
 //! shape at the manifest level, not just at the type level - a `RedisConfig`
 //! built here would pull the forbidden edge straight back). A caller that
 //! wants a typed `RedisConfig`/`Topology` builds it in its own test support

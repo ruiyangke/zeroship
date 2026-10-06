@@ -8477,7 +8477,6 @@ version = "0.1.0"
 dependencies = [
  "zeroship-migrate-backend",
  "zeroship-migrate-ir",
- "zeroship-migrate-mysql",
 ]
 
 [[package]]

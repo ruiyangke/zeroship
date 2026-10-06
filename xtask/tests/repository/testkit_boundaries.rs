@@ -1,26 +1,31 @@
-//! A dev-only package must not depend on a crate whose own tests dev-depend on
-//! it: cargo would then build that crate twice when its tests compile, and the
-//! two copies' types would not unify. A domain type named inside a testkit is
-//! what would pull such a normal edge back.
+//! A path package must not dev-depend on a package whose own normal closure
+//! reaches it: cargo would then build that package twice when the dev-only
+//! consumer's tests compile (once as a plain library for the consumer's own
+//! sake, once more as the unit-test binary), and the two copies' types would
+//! not unify. A domain type named inside a dev-only helper is what would pull
+//! such a normal edge back.
 //!
-//! The rule is read from `cargo metadata`, not from manifest text: a dependency
-//! is identified by its real package name whatever alias a `package =` rename
-//! gives it, and a target-specific table counts like any other normal edge.
+//! The rule is read from `cargo metadata`, not from manifest text: a
+//! dependency is identified by its real package name whatever alias a
+//! `package =` rename gives it, a target-specific table counts like any
+//! other normal edge, and the scan covers every path package `cargo metadata`
+//! resolves - a workspace member or a path dependency the root manifest
+//! excludes - because the double-copy hazard does not care which one a
+//! package is.
 
 use crate::architecture::repo;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Whether the manifest classifies the package itself `test-dev-tool`.
-fn self_classified_test_dev_tool(package: &Value) -> bool {
-    let name = package["name"].as_str().expect("package name");
-    package["metadata"]["zeroship-config"]["targets"]
+/// Every local package `cargo metadata` resolves: no registry or git source,
+/// whether or not the root manifest lists it as a workspace member.
+fn path_packages() -> Vec<&'static Value> {
+    repo::metadata()["packages"]
         .as_array()
-        .is_some_and(|targets| {
-            targets
-                .iter()
-                .any(|target| target["target"] == name && target["class"] == "test-dev-tool")
-        })
+        .expect("packages")
+        .iter()
+        .filter(|package| package["source"].is_null())
+        .collect()
 }
 
 /// The real package names `package` declares on dev edges, under any alias and
@@ -35,20 +40,20 @@ fn dev_dependencies(package: &Value) -> BTreeSet<String> {
         .collect()
 }
 
-/// Each dev-only package's consumers that its own normal closure reaches.
+/// Each package's consumers that its own normal closure reaches.
 fn back_edges(
-    workspace: &[&Value],
+    packages: &[&Value],
     closure: impl Fn(&str) -> BTreeSet<String>,
 ) -> (usize, BTreeMap<String, Vec<String>>) {
     let mut examined = 0;
     let mut violations = BTreeMap::new();
-    for testkit in workspace.iter().filter(|package| self_classified_test_dev_tool(package)) {
-        let name = testkit["name"].as_str().unwrap();
+    for package in packages {
+        let name = package["name"].as_str().unwrap();
         let reached = closure(name);
-        let consumers: Vec<String> = workspace
+        let consumers: Vec<String> = packages
             .iter()
-            .filter(|package| dev_dependencies(package).contains(name))
-            .map(|package| package["name"].as_str().unwrap().to_owned())
+            .filter(|candidate| dev_dependencies(candidate).contains(name))
+            .map(|candidate| candidate["name"].as_str().unwrap().to_owned())
             .collect();
         examined += consumers.len();
         let crossing: Vec<String> = consumers
@@ -63,18 +68,18 @@ fn back_edges(
 }
 
 #[test]
-fn no_dev_only_package_depends_on_a_crate_whose_tests_use_it() {
-    let workspace = repo::workspace();
-    let (examined, violations) = back_edges(&workspace, repo::normal_closure);
+fn no_crate_dev_depends_on_a_package_that_links_it() {
+    let packages = path_packages();
+    let (examined, violations) = back_edges(&packages, repo::normal_closure);
     assert!(
         examined >= 10,
-        "the dev-only consumer scan lost its corpus: {examined}"
+        "the dev edge scan lost its corpus: {examined}"
     );
     assert!(
         violations.is_empty(),
-        "a dev-only package's normal closure reaches a crate whose tests \
-         dev-depend on it; those tests would link that crate twice and its \
-         types would not unify: {violations:?}"
+        "a package's normal closure reaches a crate that dev-depends on it; \
+         that crate's tests would link it twice and its types would not \
+         unify: {violations:?}"
     );
 }
 
@@ -100,24 +105,44 @@ fn the_reader_sees_renamed_and_target_specific_edges() {
         "name": "zeroship-bystander",
         "dependencies": [{"name": "zeroship-testkit", "kind": null, "target": null}]
     });
-    let workspace = [&testkit, &consumer, &bystander];
-
-    // The rejection control: the testkit's closure reaches its consumer.
-    let (examined, violations) = back_edges(&workspace, |_| {
-        BTreeSet::from(["zeroship-testkit".to_owned(), "zeroship-domain".to_owned()])
+    // An unclassified helper, with no `metadata.zeroship-config` block at all:
+    // the scan examines it on its name alone, not on a self-classification.
+    let helper = serde_json::json!({
+        "name": "zeroship-helper",
+        "dependencies": []
     });
-    assert_eq!(examined, 1, "only the dev edge names a consumer");
+    let helper_consumer = serde_json::json!({
+        "name": "zeroship-helper-consumer",
+        "dependencies": [{"name": "zeroship-helper", "kind": "dev", "target": null}]
+    });
+    let packages = [&testkit, &consumer, &bystander, &helper, &helper_consumer];
+
+    // The rejection control: both the classified testkit's closure and the
+    // unclassified helper's closure reach their own dev-dependent consumer.
+    let (examined, violations) = back_edges(&packages, |name| match name {
+        "zeroship-testkit" => {
+            BTreeSet::from(["zeroship-testkit".to_owned(), "zeroship-domain".to_owned()])
+        }
+        "zeroship-helper" => BTreeSet::from([
+            "zeroship-helper".to_owned(),
+            "zeroship-helper-consumer".to_owned(),
+        ]),
+        _ => BTreeSet::new(),
+    });
+    assert_eq!(examined, 2, "only the two dev edges name a consumer");
     assert_eq!(
         violations,
-        BTreeMap::from([(
-            "zeroship-testkit".to_owned(),
-            vec!["zeroship-domain".to_owned()]
-        )])
+        BTreeMap::from([
+            ("zeroship-testkit".to_owned(), vec!["zeroship-domain".to_owned()]),
+            (
+                "zeroship-helper".to_owned(),
+                vec!["zeroship-helper-consumer".to_owned()]
+            ),
+        ])
     );
 
-    // The same consumer, out of the testkit's closure, passes.
-    let (examined, violations) =
-        back_edges(&workspace, |_| BTreeSet::from(["zeroship-testkit".to_owned()]));
-    assert_eq!(examined, 1);
+    // The same two consumers, out of their package's own closure, pass.
+    let (examined, violations) = back_edges(&packages, |name| BTreeSet::from([name.to_owned()]));
+    assert_eq!(examined, 2);
     assert!(violations.is_empty());
 }

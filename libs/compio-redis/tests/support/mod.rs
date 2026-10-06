@@ -4,9 +4,9 @@
 //! `zeroship-testkit`'s `redis` module hands out only URLs, ports and a
 //! minted prefix and carries no dependency on this crate (`compio-redis`),
 //! which is what lets this dev-dependency point back at it: `cargo xtask test
-//! repository`'s `no_dev_only_package_depends_on_a_crate_whose_tests_use_it`
-//! forbids the edge shape where a dev-only package's normal closure reaches a
-//! crate whose own tests dev-depend on it, and a `RedisConfig` built inside
+//! repository`'s `no_crate_dev_depends_on_a_package_that_links_it`
+//! forbids the edge shape where a package's normal closure reaches a crate
+//! whose own tests dev-depend on it, and a `RedisConfig` built inside
 //! the testkit would be exactly that edge.
 
 pub use zeroship_testkit::redis::case_prefix;

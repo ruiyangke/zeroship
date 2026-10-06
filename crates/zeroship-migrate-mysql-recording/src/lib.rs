@@ -21,11 +21,12 @@
 //! had already corrected. So there is ONE recorder, it lives here, and both sides
 //! name this crate under `[dev-dependencies]`.
 //!
-//! [`MysqlInflightDdlMarker`] is the vendor's own operator-recovery type and a canned
-//! marker IS one, so this crate names `zeroship-migrate-mysql`. The edge from that
-//! crate back to here is a `[dev-dependency]`, which Cargo resolves: the vendor's lib
-//! compiles without this crate, this crate compiles against that lib, and the
-//! vendor's test targets compile against both. Nothing shipped links any of it.
+//! The canned inflight marker is plain data here, not the vendor's own
+//! operator-recovery type: five `String` fields the vendor's unit tests read
+//! back one at a time (`outcome.marker.version`, and so on), never the struct
+//! as a value. Naming the vendor's type would put this crate in its normal
+//! closure while the vendor's own tests dev-depend on this crate - building
+//! the vendor twice, with two copies of that type that would not unify.
 //!
 //! It returns canned rows for the reads the MySQL apply path issues: `GET_LOCK(...)`
 //! -> a single `got=1` row (lock acquired); the `information_schema.triggers`
@@ -40,7 +41,18 @@ use zeroship_migrate_backend::requirements::{DatabaseFeature, DatabaseRequiremen
 use zeroship_migrate_backend::step::BindValue;
 use zeroship_migrate_ir::migration::{Checksum, Migration, MigrationFlags, MigrationId};
 use zeroship_migrate_ir::probe::GuardProbe;
-use zeroship_migrate_mysql::MysqlInflightDdlMarker;
+
+/// The canned inflight-marker fields the MySQL apply path's recovery reads
+/// return, shaped like the vendor's own operator-recovery marker but owned
+/// here as plain data so this crate names no vendor type.
+#[derive(Debug, Clone)]
+struct InflightMarker {
+    version: String,
+    name: String,
+    checksum: String,
+    applied_by: String,
+    started_at: String,
+}
 
 /// The MySQL connection id the canned holder probe reports. Distinct from the
 /// `performance_schema` thread id the lock rows carry, because the reply must
@@ -59,7 +71,7 @@ pub struct RecordingSession {
     pub log: RefCell<Vec<String>>,
     pub binds: RefCell<Vec<Vec<Bind>>>,
     pub applied: RefCell<Option<(String, String)>>,
-    pub inflight_marker: RefCell<Option<MysqlInflightDdlMarker>>,
+    inflight_marker: RefCell<Option<InflightMarker>>,
     pub table_engine: RefCell<String>,
     pub server_version: String,
     pub default_storage_engine: String,
@@ -231,7 +243,7 @@ impl RecordingSession {
 
     pub fn with_inflight(migration: &Migration, applied_by: &str) -> Self {
         let session = Self::new();
-        *session.inflight_marker.borrow_mut() = Some(MysqlInflightDdlMarker {
+        *session.inflight_marker.borrow_mut() = Some(InflightMarker {
             version: migration.version.as_str().to_string(),
             name: migration.name.clone(),
             checksum: migration.checksum.as_str().to_string(),

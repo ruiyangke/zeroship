@@ -13,12 +13,6 @@ zeroship-migrate-backend = { workspace = true }
 # The migration identity the canned journal answers are keyed on: `MigrationId`,
 # `Checksum`, `MigrationFlags`, `Migration` and the `GuardProbe` vocabulary.
 zeroship-migrate-ir = { workspace = true }
-# `MysqlInflightDdlMarker` is this vendor's own operator-recovery type, and the
-# canned inflight marker IS one - the double cannot fake the shape the backend
-# reads back. The edge from the vendor to here is a `[dev-dependency]`, so the
-# vendor's shipped lib compiles without this crate, this crate compiles against
-# that lib, and the vendor's test targets compile against both.
-zeroship-migrate-mysql = { workspace = true }
 
 [lints]
 workspace = true
