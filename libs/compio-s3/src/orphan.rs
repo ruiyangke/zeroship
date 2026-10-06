@@ -8,7 +8,7 @@
 //!
 //! The cancellation happens in a synchronous `Drop`, where we MUST NOT spawn or
 //! await (spawning in `Drop` panics off-runtime; a panic in `Drop` while
-//! unwinding aborts the process — the C1 rule). So the `Drop` guard does the
+//! unwinding aborts the process). So the `Drop` guard does the
 //! only two sound things:
 //!
 //! 1. `tracing::warn!` that parts may be orphaned, and
@@ -85,7 +85,7 @@ pub fn queued_orphan_count() -> usize {
 /// 2. enqueues `(key, upload_id)` via [`record_orphan`] for a later async
 ///    `drain_orphaned_uploads`.
 ///
-/// `Drop` is SYNC and never spawns/awaits/panics — the C1 rule. The real abort
+/// `Drop` is SYNC and never spawns/awaits/panics. The real abort
 /// happens later, in async context, off this queue.
 ///
 /// The guard is single-owner: `put_stream` / `put_blob_stream` keep it on their

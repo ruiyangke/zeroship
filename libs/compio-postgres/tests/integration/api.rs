@@ -4729,7 +4729,7 @@ const FD_PROBE_TEST: &str =
 ///
 /// This file is a module inside the consolidated suite binary, so the harness
 /// calls the test `<module>::<name>` rather than `<name>`. The bare literal
-/// selected nothing, the child ran `0 tests`, and the parent then failed on the
+/// selects nothing, so the child runs no tests and the parent fails on the
 /// missing probe line rather than on anything about descriptors - a filter miss
 /// wearing the costume of a leak. Derived from `module_path!` rather than
 /// spelled with a prefix so that moving this file again cannot silently

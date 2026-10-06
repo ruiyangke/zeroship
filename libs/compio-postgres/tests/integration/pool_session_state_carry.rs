@@ -8,8 +8,9 @@
 //!
 //! `Pool::return_client` queues a `ROLLBACK`, not a `DISCARD ALL`, and
 //! `src/pool.rs` carries a long comment explaining why: `DISCARD ALL` would
-//! drop session-scoped advisory locks (`crates/plugin-db`'s `LockGuard` holds
-//! one on a pooled client), every prepared statement (this driver's own
+//! drop session-scoped advisory locks (`LockGuard` in
+//! `crates/zeroship-data-orm/src/backend/postgres/lock_guard.rs` holds one on a
+//! pooled client), every prepared statement (this driver's own
 //! type-info cache holds those for the life of the `Client`, so the next use of
 //! a cached entry would fail), and every session GUC -- and it cannot run
 //! inside a transaction block at all, which is the very state the rollback

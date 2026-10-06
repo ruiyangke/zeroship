@@ -3229,10 +3229,10 @@ impl<'a> Parser<'a> {
             // no longer asks for TLS. Only a genuinely exhausted input is a
             // clean stop; anything else left in the string is a parse error.
             //
-            // tokio-postgres 0.7.18 conflates them too (`parameter()` at its
-            // config.rs:963 is otherwise identical), so this is a libpq
-            // divergence inherited from upstream rather than one introduced
-            // here. libpq rejects the empty option name.
+            // tokio-postgres 0.7.18 conflates them too (its `parameter()` is
+            // otherwise identical), so this is a libpq divergence inherited
+            // from upstream rather than one introduced here. libpq rejects the
+            // empty option name.
             //
             // Whitespace was skipped and `keyword` takes every character but
             // whitespace and `=`, so what stands here is always a `=`. The
@@ -6348,8 +6348,8 @@ mod dsn_parse_tests {
     ///
     /// libpq rejects the empty option name rather than treating it as the end
     /// of the string. tokio-postgres 0.7.18 has this same hole (its
-    /// `parameter()` at config.rs:963 is identical), so this is a divergence
-    /// from libpq that the port inherited rather than one it introduced.
+    /// `parameter()` is identical), so this is a divergence from libpq that
+    /// the port inherited rather than one it introduced.
     #[test]
     fn a_malformed_keyword_does_not_silently_drop_the_settings_after_it() {
         let parsed = "host=127.0.0.1 =typo sslmode=require".parse::<Config>();

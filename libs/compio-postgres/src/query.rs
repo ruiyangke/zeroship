@@ -102,12 +102,10 @@ where
             // before waking the response consumer. This idempotent call is a
             // defensive second check.
             //
-            // The last sentence here used to add that local send/read errors
-            // "cannot make it observable alone", which read as: no test can
-            // see this. Not so - a scripted 26000 in the start slot reaches it
-            // directly, and `a_stale_start_error_invalidates_the_cached_
-            // statement` binds this line and the `execute` twin at :573.
-            // Deleting either reddens that test and nothing else.
+            // A scripted 26000 in the start slot reaches this line directly,
+            // and `a_stale_start_error_invalidates_the_cached_statement` binds
+            // it and the `execute` twin's `invalidate_cache_on_error` call in
+            // `query.rs`. Deleting either reddens that test and nothing else.
             statement.invalidate_cache_on_error(&error);
             return Err(error);
         }

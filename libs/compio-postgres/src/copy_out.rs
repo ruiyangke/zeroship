@@ -53,8 +53,9 @@ async fn copy_out_inner(
             Err(error) => {
                 // DEFENSIVE SECOND CHECK, not the primary invalidation. A
                 // pre-BindComplete ErrorResponse has already crossed the connection
-                // dispatcher, which invalidates this same statement at
-                // `connection.rs:1356` before waking this consumer, and
+                // dispatcher, which invalidates this same statement through
+                // `Statement::invalidate_cache_on_error` before waking this
+                // consumer, and
                 // `invalidate_cached_statement_on_error` returns early unless the
                 // error is a genuine stale-statement one. `query.rs` carries the
                 // same call with the same reasoning spelled out; the sites in

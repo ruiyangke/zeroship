@@ -11,10 +11,10 @@
 //!
 //! The severity assertions matter for a second reason. A `NoticeResponse`
 //! carries severity twice: a localized `S` field and a non-localized `V` field
-//! added in PostgreSQL 9.6. Earlier today an unrecognised `V` was made
-//! non-fatal (it used to discard the whole message); these tests walk the
-//! ordinary path through that same code, so the common case stays covered
-//! rather than only the hostile one.
+//! added in PostgreSQL 9.6. An unrecognised `V` is non-fatal (it does not
+//! discard the whole message); these tests walk the ordinary path through that
+//! same code, so the common case stays covered rather than only the hostile
+//! one.
 //!
 //! WHAT THE MUTATION ESTABLISHED, and what it did not. Flattening `WARNING`
 //! into `Severity::Notice` in the severity table turns
@@ -22,13 +22,11 @@
 //! green, so the severity assertions discriminate and the second test is a
 //! real control rather than a duplicate.
 //!
-//! The DELIVERY half is mutation-proven too, closed later the same day once
-//! `connection.rs` was no longer being edited by another agent (mutating a
-//! file underneath someone else's work gives a result neither of us can
-//! trust). Replacing the `AsyncMessage::Notice` send with the `log::info!`
-//! arm -- so a notice is logged and dropped rather than routed -- turns ALL
-//! THREE tests below red on the delivery timeout, and restoring it makes them
-//! green. So a notice that stops reaching the caller now fails here.
+//! The DELIVERY half is mutation-proven too. Replacing the
+//! `AsyncMessage::Notice` send with the `log::info!` arm -- so a notice is
+//! logged and dropped rather than routed -- turns the tests below red on the
+//! delivery timeout, and restoring it makes them green. So a notice that stops
+//! reaching the caller fails here.
 
 use compio_postgres::AsyncMessage;
 use compio_postgres::error::Severity;

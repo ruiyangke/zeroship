@@ -5411,8 +5411,8 @@ async fn a_misplaced_message_after_the_parameter_description_is_refused() {
 /// complete Parse/Describe prefix is not the outcome of the exchange - a
 /// terminal `ErrorResponse` can still follow it. `prepare_preserves_a_terminal
 /// _error_after_its_description` drives exactly that error case, so the arm
-/// that refuses a NON-error frame in the same slot (`prepare.rs:285`) had
-/// never run: the three siblings above stop one message earlier.
+/// in `prepare.rs` that refuses a NON-error frame in the same slot had never
+/// run: the three siblings above stop one message earlier.
 ///
 /// A second `ParseComplete` is the payload because it is well framed and
 /// individually legal; only its POSITION is wrong. Accepting it would hand
@@ -6175,8 +6175,9 @@ async fn a_duplicate_copy_out_command_complete_is_refused() {
 }
 
 /// A COPY that is established correctly and then delivers a `DataRow` mid
-/// stream. This is the site at `copy_out.rs:88`, the one where resynchronising
-/// would hand the caller unparsed bytes as if they were copy data.
+/// stream. This is the site in `copy_out.rs`'s `start`, the one where
+/// resynchronising would hand the caller unparsed bytes as if they were copy
+/// data.
 #[compio::test]
 async fn a_non_copy_data_message_mid_stream_is_refused() {
     compio::time::timeout(ASYNC_WATCHDOG, async {
@@ -6621,8 +6622,8 @@ async fn protocol_copy_done_without_the_binary_trailer_is_a_parse_error() {
 /// A `RowDescription` format code outside {0, 1} is refused by name.
 ///
 /// `SimpleQueryFormat::from_code` accepts 0 for text and 1 for binary and
-/// errors on anything else, and `simple_query.rs:41-44` never ran: a real
-/// server only ever sends those two, so only a hostile peer reaches it.
+/// errors on anything else, and that error arm in `simple_query.rs` never ran:
+/// a real server only ever sends those two, so only a hostile peer reaches it.
 ///
 /// The value is that the refusal is EXPLICIT. The field is an `i16` the peer
 /// controls, and a driver that treated "not 1" as text would hand the caller

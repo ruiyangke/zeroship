@@ -263,14 +263,12 @@ where
 }
 
 // Only the crate versions `compio-postgres` exposes a passthrough feature for
-// are carried. The fork previously also held bit_vec 0.6/0.7, cidr 0.2,
-// eui48 0.4, geo-types 0.6, jiff 0.1, time 0.2 and uuid 0.8. Nothing in this
-// workspace could reach them: `compio-postgres` declares no passthrough, so no
-// test could compile them, and their dependencies are absent from Cargo.lock -
-// `cargo build --all-features --offline` on this package fails asking to
-// download eight crates. Carrying an untestable second copy of each codec is
-// how `cidr_02` kept emitting the INET flag for a CIDR value for as long as it
-// did, after `cidr_03` had been repaired.
+// are carried. Nothing in this workspace can reach the other codec versions:
+// `compio-postgres` declares no passthrough, so no test can compile them, and
+// their dependencies are absent from Cargo.lock - `cargo build --all-features
+// --offline` on this package fails asking to download them. Carrying an
+// untestable second copy of each codec lets a defect in it outlive the same
+// codec's repair in another version.
 #[cfg(feature = "with-bit-vec-0_8")]
 mod bit_vec_08;
 #[cfg(feature = "with-bit-vec-0_9")]

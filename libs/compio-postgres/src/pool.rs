@@ -1123,8 +1123,8 @@ impl Pool {
             }
         });
         // Carry a completed handle out before destroying it. `Task::drop` reads
-        // a completed output inline (async-task 4.7.1, task.rs:249-264), and a
-        // housekeeper panic can carry a caller-owned payload from `after_connect`.
+        // a completed output inline (async-task 4.7.1), and a housekeeper panic
+        // can carry a caller-owned payload from `after_connect`.
         // Its destructor is therefore arbitrary code and may re-enter the pool.
         let replaced = self.inner.housekeeper.borrow_mut().replace(handle);
         drop(replaced);
@@ -1661,8 +1661,8 @@ impl Pool {
         // to `transaction_status() == None` is not enough either: `None` only
         // says some request is unsettled, never that the unsettled one is the
         // ROLLBACK rather than a `BEGIN` a cancelled borrower left in flight
-        // behind it. So the correctness action is unconditional, and a
-        // heuristic flag no longer gets a veto over it. The cost is one
+        // behind it. So the correctness action is unconditional, and no
+        // heuristic flag gets a veto over it. The cost is one
         // redundant ROLLBACK frame on a session that is not provably idle -
         // fire-and-forget, pipelined behind the one already queued, drained by
         // the same checkout barrier, and answered with a `no transaction in
@@ -1815,11 +1815,10 @@ impl Pool {
             // Evicted entries are CARRIED OUT, not dropped here. Dropping a
             // `PoolEntry` inside this borrow runs arbitrary user code: the entry
             // owns a `Client`, whose `QueryObserver` owns the `QueryEvent`
-            // sender, and dropping the last sender calls
-            // `recv_task.wake()` (futures-channel 0.3.32, mpsc/mod.rs:969 ->
-            // :515). That waker belongs to whoever polls the PUBLIC
-            // `Client::query_events`, so it is user code reachable from safe
-            // Rust via `impl Wake`.
+            // sender, and dropping the last sender wakes the receive task (an
+            // unbounded `mpsc` sender drop). That waker belongs to whoever
+            // polls the PUBLIC `Client::query_events`, so it is user code
+            // reachable from safe Rust via `impl Wake`.
             //
             // A waker that touches the pool would panic here with
             // `BorrowMutError`, and the unwind would escape BEFORE the

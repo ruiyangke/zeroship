@@ -87,16 +87,12 @@ pub(crate) async fn connect_socket(
 /// `icsk_user_timeout` while the socket is still in SYN_SENT, so the option
 /// bounds the handshake only if it is already set when the SYN goes out;
 /// applied afterwards it can bound nothing but an already-established
-/// connection. libpq depends on exactly that: `setTCPUserTimeout` runs at
-/// `fe-connect.c:3427`, inside the `addr_cur->family != AF_UNIX` block, and
-/// `connect()` is not reached until `fe-connect.c:3481`.
+/// connection. libpq depends on exactly that: `setTCPUserTimeout` runs inside
+/// the non-unix branch of the address walk, before `connect()`.
 ///
-/// Measured on Linux 6.12.90 against a blackholed address, one variable apart:
-/// with the option set beforehand `connect` fails at 3.01s for a 3000ms
-/// setting; on the same socket with the option unset it was still retrying at
-/// 19.63s. Setting it afterwards, as this function's caller used to, left a
-/// configured `tcp_user_timeout` inert during the one phase it was asked to
-/// bound - and when the dial never completed, the option was never set at all.
+/// Setting it afterwards leaves a configured `tcp_user_timeout` inert during
+/// the one phase it is asked to bound - and when the dial never completes, the
+/// option is never set at all.
 ///
 /// `compio::net::TcpStream::connect` only hands back a socket that is already
 /// connected, and compio-net 0.11.1's `SocketOpts` (`src/opts.rs`) carries no
@@ -858,8 +854,7 @@ mod tests {
 
     /// A keepalive that is not a whole number of seconds is not expressible:
     /// `TCP_KEEPIDLE` and `TCP_KEEPINTVL` take whole seconds, and socket2
-    /// converts a `Duration` with `as_secs()`, which TRUNCATES (socket2 0.6.3,
-    /// `src/sys/unix.rs:1294`).
+    /// converts a `Duration` with `as_secs()`, which TRUNCATES.
     ///
     /// That truncation fails in two ways, and both are covered below. Under one
     /// second it reaches the kernel as 0, which Linux refuses with EINVAL,

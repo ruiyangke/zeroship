@@ -11,7 +11,7 @@
 //! `Connection::run` picks its loop by whether the transport splits into owned
 //! halves. **Both transports this crate ships split** - a plain socket, and
 //! rustls since `tls_sansio` drives the session directly rather than through an
-//! adapter that owns the socket (`maybe_tls_stream.rs:208`, `connection.rs:652`).
+//! adapter that owns the socket (`maybe_tls_stream.rs`, `connection.rs`).
 //! So both take the MULTIPLEXED loop. What still reaches the serialized one is
 //! a custom `TlsConnect` whose stream answers `Err` to `try_into_split` - which
 //! in practice means these tests and nothing else.

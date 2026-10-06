@@ -1083,8 +1083,8 @@ mod tests {
 
     /// `cancel_query_confirmed` carries its OWN copy of the policy check, and
     /// the four tests above cannot reach it: they all drive `cancel_query`.
-    /// Dropping the confirmed path's `validate_cancel_tls_connector` left all
-    /// 1448 tests green, so nothing held pool timeout recovery to the session's
+    /// Dropping the confirmed path's `validate_cancel_tls_connector` is not
+    /// caught by the tests above; this test holds pool timeout recovery to the
     /// recorded TLS policy. That path is the one a pool takes on its own
     /// initiative, with no caller watching, and the leak it would permit is
     /// SNI or a client certificate offered to a connector that never attested

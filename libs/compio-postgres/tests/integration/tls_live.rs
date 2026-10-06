@@ -308,9 +308,9 @@ async fn prefer_uses_tls_when_the_server_offers_it() {
 
 /// `prefer` against a plaintext-only server connects anyway, unencrypted.
 ///
-/// This is the half of `prefer` the pool used to get wrong in the other
-/// direction: it hardcoded plaintext, so this passed for the wrong reason and
-/// the test above could not have passed at all.
+/// This is the half of `prefer` the pool must not get wrong in the other
+/// direction: hardcoding plaintext here would make this pass for the wrong
+/// reason and the test above unable to pass at all.
 #[compio::test]
 async fn prefer_falls_back_to_plaintext_when_the_server_refuses_tls() {
     let s = servers();
@@ -829,10 +829,10 @@ async fn sslcertmode_require_cannot_finish_on_plaintext() {
 /// Its certificate is signed by the CA but carries the wrong name, so the
 /// second half below is a session that a `verify-full` verifier would have
 /// rejected and this connector accepts. Handing that connector a `verify-full`
-/// `Config` therefore used to produce a live, queryable session whose
-/// certificate nothing had checked - `pg_stat_ssl` said `ssl=true` and the
-/// connection string said `verify-full`, and neither was a claim about
-/// identity. `connect_raw` now refuses it by name.
+/// `Config` must not produce a live, queryable session whose certificate
+/// nothing checked - `pg_stat_ssl` would say `ssl=true` and the connection
+/// string would say `verify-full`, and neither is a claim about identity.
+/// `connect_raw` refuses it by name.
 #[compio::test]
 async fn a_connector_that_verifies_nothing_cannot_serve_a_verifying_sslmode() {
     let s = servers();

@@ -251,7 +251,7 @@ async fn rows_affected_marks_the_last_page_and_counts_only_that_execute() {
 /// `Portal` holds a `Weak<InnerClient>`, and `with_live_on` compares it by
 /// pointer against the client being asked to run it. Nothing covered the
 /// mismatch arm: every existing portal test binds and drains on one client, so
-/// `portal.rs:124` never ran.
+/// the mismatch arm in `portal.rs` never ran.
 ///
 /// The guard is not bookkeeping. Portal names are per-connection, and this
 /// suite already has `portal_name_collision` cases proving the same name can

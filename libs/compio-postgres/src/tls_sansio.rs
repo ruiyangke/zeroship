@@ -1720,9 +1720,9 @@ mod tests {
     /// check stop the loop. So the surplus exists only when the queue was
     /// ALREADY at the cap when more ciphertext appeared - which is the idle
     /// `LISTEN` case the cap was added for: the read path answers key updates
-    /// while nothing drains the queue. A flush arriving in that state used to
-    /// write the queue, find it empty, and return success with rustls still
-    /// holding bytes.
+    /// while nothing drains the queue. A flush arriving in that state must
+    /// drain the surplus rather than stop at the queue, or it returns success
+    /// with rustls still holding bytes.
     ///
     /// This test does NOT prove the cap is enforced - `a_full_outbound_queue_
     /// stops_draining_the_session` does that.

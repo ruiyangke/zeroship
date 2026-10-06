@@ -177,11 +177,12 @@ where
     // cancel secret, a bearer credential, and `negotiate_tls` converts an
     // unavailable TLS transport to plaintext under `sslmode=prefer` - which
     // would put that secret on the wire in the clear for a session the caller
-    // established over TLS. This used to be an `exact_encryption: bool`; all
-    // four callers passed `true`, so the downgrade arm was unreachable, and a
-    // bool at a call site names the mechanism rather than the consequence. If a
-    // renegotiating mode is ever wanted, give it an enum that says what it
-    // costs.
+    // established over TLS. The parameter is an `Encryption` value rather than
+    // a bool: a bool at a call site names the mechanism rather than the
+    // consequence. This call passes the session's recorded `Encryption`, and
+    // `negotiate_tls_exact` never converts an unavailable TLS transport to
+    // plaintext, so a downgrade is unrepresentable. If a renegotiating mode is
+    // ever wanted, give it an enum that says what it costs.
     let mut stream =
         connect_tls::negotiate_tls_exact(stream, encryption, mode, negotiation, tls, has_hostname)
             .await?;

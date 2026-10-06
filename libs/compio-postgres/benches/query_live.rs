@@ -1,41 +1,27 @@
-//! Hot-path cost of the opt-in per-operation work, measured against a live
-//! server.
+//! Hot-path cost of the opt-in per-operation work, against a live server.
 //!
-//! THIS BENCHMARK CANNOT ANSWER THE QUESTION IT WAS BUILT FOR, and the
-//! measurement that says so is worth more than the one it was meant to
-//! produce. Measured 2026-08-21 on an otherwise idle machine, two runs of this
-//! file at one commit, against one database, nothing changed in between:
+//! THIS BENCHMARK CANNOT ANSWER THE QUESTION IT WAS BUILT FOR. Each iteration
+//! is a full round trip to PostgreSQL, so the sample is dominated by server and
+//! socket variance. The costs this file set out to price - an atomic load, a
+//! counter check, an Option test - are invisible against that variance; a run
+//! that reports them is reporting noise, and modes that only add work can
+//! measure FASTER than baseline for it.
 //!
-//!   mode                     run 1        run 2      drift
-//!   baseline                 358.49 us    416.28 us   +16%
-//!   cache_immediate          144.33 us    202.16 us   +40%
-//!   cache_counting_only      317.25 us    332.43 us    +5%
-//!   read_deadline_armed      342.01 us    337.53 us    -1%
-//!   observer_never_reports   341.51 us    574.49 us   +68%
-//!
-//! Each iteration is a full round trip to PostgreSQL, so the sample is
-//! dominated by server and socket variance. The costs this file set out to
-//! price - an atomic load, a counter check, an Option test - are tens of
-//! nanoseconds against ~350 us of round trip, a ratio near 1:10000. They are
-//! not small here; they are INVISIBLE, and a run that reports them is
-//! reporting noise. Three of the five modes came out FASTER than baseline in
-//! run 1, which they cannot be, because they only add work.
-//!
-//! What survives: `cache_immediate` runs at 0.40 and 0.49 of baseline in the
-//! two runs. That agrees in direction and rough size across the noise and
-//! matches the mechanism (a named prepared statement is reused instead of
-//! reparsed). Quote that one; do not quote the others.
+//! What survives: `cache_immediate` sits consistently below baseline across
+//! runs, in the direction the mechanism predicts (a named prepared statement is
+//! reused instead of reparsed). Quote that one; do not quote the others.
 //!
 //! A benchmark target links the crate as a normal library, so it prices those
 //! paths through the public operation that exercises each one: a query carrying
-//! the corresponding `Config` option, which is what the modes below measure. Do not add samples to chase the noise: the noise
-//! floor is a property of the round trip, not of the sample count.
+//! the corresponding `Config` option, which is what the modes below measure. Do
+//! not add samples to chase the noise: the noise floor is a property of the
+//! round trip, not of the sample count.
 //!
-//! Four features added work to paths every query crosses, and each was
-//! justified on correctness rather than cost: the socket read deadline
-//! consults an obligation counter on the read poll, the statement cache's
-//! execution threshold does a candidate lookup per query, and the query
-//! observer decides per completion whether to build an event.
+//! Four features add work to paths every query crosses, and each is justified
+//! on correctness rather than cost: the socket read deadline consults an
+//! obligation counter on the read poll, the statement cache's execution
+//! threshold does a candidate lookup per query, and the query observer decides
+//! per completion whether to build an event.
 //!
 //! Every mode is a case in ONE criterion group so a single run compares them
 //! against each other on one machine, in one process, with criterion's own

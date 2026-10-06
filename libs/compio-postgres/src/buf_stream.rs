@@ -593,11 +593,6 @@ where
 /// `tls_sansio`). What they own separately is the socket, which is the same
 /// already-safe split as the plaintext case.
 ///
-/// This paragraph used to claim the opposite, and the claim cost every TLS
-/// connection the multiplexed loop: a transport was deciding which protocol
-/// implementation ran, so `LISTEN` delivered nothing between queries over
-/// TLS while working perfectly in plaintext.
-///
 /// Returning `Err(self)` remains a legitimate implementation, and the only
 /// one available to a stream that genuinely cannot be torn in two: the
 /// caller falls back to the serialized loop, which is correct but reads only

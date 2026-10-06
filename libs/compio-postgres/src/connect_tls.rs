@@ -5,11 +5,11 @@
 // identical. We only swap `tokio::io::AsyncReadExt::read_exact(&mut [u8])`
 // for compio's `AsyncReadExt::read_exact(buf: T: IoBufMut)`.
 //
-// The `sslmode` policy that used to live here does NOT any more. This file
-// performs ONE attempt on ONE socket; choosing which transport to attempt, and
-// what to do when an attempt fails, is `connect.rs`'s job, because the answer
-// for `allow` and `prefer` is "open a different socket" and a socket is not
-// something this function owns.
+// The `sslmode` policy does NOT live here. This file performs ONE attempt on
+// ONE socket; choosing which transport to attempt, and what to do when an
+// attempt fails, is `connect.rs`'s job, because the answer for `allow` and
+// `prefer` is "open a different socket" and a socket is not something this
+// function owns.
 
 use crate::Error;
 use crate::config::{SslMode, SslNegotiation};

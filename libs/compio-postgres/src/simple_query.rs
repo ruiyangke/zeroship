@@ -120,11 +120,10 @@ const COPY_IN_UNSUPPORTED: &str = "simple query execution cannot supply COPY dat
 pub(crate) const COPY_IN_UNSUPPORTED_EXTENDED: &str =
     "extended query execution cannot supply COPY data; use copy_in";
 
-/// PostgreSQL refuses a target list wider than this, so no well-formed
-/// `RowDescription` can describe more columns. Used to bound a reservation,
-/// never to reject: a peer that sends more simply makes the Vec grow.
-/// MEASURED on 16.14, 2026-08-26: 1664 columns succeed, 1665 fails with
-/// "target lists can have at most 1664 entries".
+/// PostgreSQL refuses a target list wider than this with "target lists can
+/// have at most 1664 entries", so no well-formed `RowDescription` can describe
+/// more columns. Used to bound a reservation, never to reject: a peer that
+/// sends more simply makes the Vec grow.
 const MAX_TARGET_LIST_ENTRIES: usize = 1664;
 
 /// Route a possible simple-query COPY through the connection-owned producer.

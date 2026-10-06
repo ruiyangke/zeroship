@@ -1738,10 +1738,10 @@ impl InnerClient {
         // The REPLACED observer is carried out and destroyed after the lock is
         // released. Assigning through the guard would drop it while the lock is
         // held, and that drop is not inert: the observer owns the `QueryEvent`
-        // sender, and dropping the last one calls `recv_task.wake()`
-        // (futures-channel 0.3.32, mpsc/mod.rs:969 -> :515). That waker belongs
-        // to whoever polls the PUBLIC `Client::query_events`, so it is user code
-        // reachable from safe Rust via `impl Wake`.
+        // sender, and dropping the last one wakes the receive task (an unbounded
+        // `mpsc` sender drop). That waker belongs to whoever polls the PUBLIC
+        // `Client::query_events`, so it is user code reachable from safe Rust
+        // via `impl Wake`.
         //
         // `query_observer` is a `parking_lot::Mutex`, which is NOT reentrant, so
         // a waker that calls back into anything taking this lock - installing a
@@ -2202,8 +2202,8 @@ pub(crate) enum Addr {
     /// correct scope is accepted and the connection is attempted.
     ///
     /// libpq never narrows either - `store_conn_addrinfo` memcpy's the whole
-    /// `ai_addr` and keeps `salen` (fe-connect.c:5167), and that full sockaddr
-    /// reaches `connect(2)` at fe-connect.c:3481 with the zone intact.
+    /// `ai_addr` and keeps `salen`, and that full sockaddr reaches `connect(2)`
+    /// with the zone intact.
     Tcp { ip: IpAddr, scope_id: u32 },
     #[cfg(unix)]
     Unix(PathBuf),
@@ -2212,8 +2212,8 @@ pub(crate) enum Addr {
 impl Addr {
     /// Keep the whole resolved address, zone included.
     ///
-    /// Every site that used to write `Addr::Tcp(addr.ip())` threw the zone
-    /// away; this is the one conversion, so there is no second place to forget.
+    /// This is the one conversion from a resolved `SocketAddr`, so there is no
+    /// second place to forget the zone.
     pub(crate) fn tcp(addr: SocketAddr) -> Self {
         Self::Tcp {
             ip: addr.ip(),
@@ -2784,14 +2784,12 @@ impl Client {
     ///
     /// `query_raw` reaches this from two entry paths - one for a statement
     /// promoted out of the probationary unnamed slot, one for an already-named
-    /// cached statement - and until 2026-09-03 each carried its own verbatim
-    /// copy. Only the second copy was held by a test: mutating the propagated
-    /// error in the probationary branch left the lib (771) and suite (797)
-    /// suites green, while the same mutation in the other failed
+    /// cached statement - and both share this one error path. The shared path
+    /// is what the tests hold: mutating the propagated error here fails
     /// `statement_cache_does_not_retry_0a000_after_parameter_input` and
     /// `statement_cache_requires_server_provenance_before_retrying_26000`.
-    /// One path means those two now hold the behaviour for both callers, and
-    /// the copies can no longer drift apart.
+    /// One path holds the behaviour for both callers, so the two cannot drift
+    /// apart.
     async fn query_cached_with_one_reprepare<P>(
         &self,
         statement: Statement,
@@ -3683,10 +3681,10 @@ mod query_observer_reentrancy_tests {
     /// Replacing the query observer must not DESTROY the old one under its lock.
     ///
     /// The observer owns the `QueryEvent` sender, and dropping the last one
-    /// calls `recv_task.wake()` (futures-channel 0.3.32, mpsc/mod.rs:969 ->
-    /// :515). That waker belongs to whoever polls the PUBLIC
-    /// `Client::query_events`, so it is user code reachable from safe Rust via
-    /// `impl Wake` - which is exactly what this test installs.
+    /// wakes the receive task (an unbounded `mpsc` sender drop). That waker
+    /// belongs to whoever polls the PUBLIC `Client::query_events`, so it is
+    /// user code reachable from safe Rust via `impl Wake` - which is exactly
+    /// what this test installs.
     ///
     /// `query_observer` is a `parking_lot::Mutex` and NOT reentrant, so a waker
     /// that reaches anything taking this lock DEADLOCKS rather than panicking.

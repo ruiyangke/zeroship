@@ -1,12 +1,10 @@
-//! The hard failure that replaced this crate's skip announcer.
+//! The hard failure when Postgres cannot be reached.
 //!
 //! NO `skip` FUNCTION AND NO `ZEROSHIP-TEST-SKIPPED` MARKER, and their absence
-//! is the change. Both were here, copied from `crates/test-support`, and
-//! `require_pg` announced through them when Postgres could not be reached - a
-//! skip, which cargo counts as a pass. This crate is the PostgreSQL driver;
-//! there is no test in it that means anything without a server, so there is
-//! nothing left for an announcer to announce. Every path that used to skip now
-//! calls [`postgres_unreachable`], which panics.
+//! is the invariant. This crate is the PostgreSQL driver; there is no test in
+//! it that means anything without a server, so there is nothing for an
+//! announcer to announce. Every path that cannot reach Postgres calls
+//! [`postgres_unreachable`], which panics.
 //!
 //! `compio-postgres` is a standalone, publishable driver with no zeroship
 //! dependency, so this helper is local rather than shared.
@@ -541,9 +539,9 @@ pub fn test_url() -> String {
     // URL form, NOT the fixture's key=value form. Callers append their own
     // parameters (`schema_scoped_url` adds `options=-c search_path=...`) and
     // they choose `?` or `&` by looking for a `?`. A key=value DSN has no `?`,
-    // so every one of those appends landed INSIDE the last value: the
-    // sslrootcert path became `/path/ca.crt?options=-c%20search_path%3D...`
-    // and 20 tests failed with "cannot read PEM: No such file or directory".
+    // so every one of those appends lands INSIDE the last value: the
+    // sslrootcert path becomes `/path/ca.crt?options=-c%20search_path%3D...`,
+    // and the PEM read fails with "cannot read PEM: No such file or directory".
     suite_test_url(format!(
         "postgres://{}:{}@{}:{}/{}?sslmode=verify-full&sslrootcert={}",
         keyword(server, "user"),
@@ -615,10 +613,9 @@ fn keyword(dsn: &str, key: &str) -> String {
 ///
 /// A test that panics or trips its watchdog never reaches its own cleanup, and
 /// a logical slot outlives the connection that made it: it stays, and it PINS
-/// WAL until something drops it. Six had accumulated by 2026-08-24 and took
-/// the server to 9 of its 20 slots; the first symptom was an unrelated probe
-/// failing with `max_replication_slots` exhausted, which reads as a server
-/// misconfiguration rather than as test litter.
+/// WAL until something drops it. The first symptom of accumulation is an
+/// unrelated probe failing with `max_replication_slots` exhausted, which reads
+/// as a server misconfiguration rather than as test litter.
 ///
 /// The sweep is keyed on the PID that [`test_object_name`] embeds, and drops
 /// only slots whose process is no longer running. A slot belonging to a LIVE
@@ -809,12 +806,11 @@ pub fn replication_config(application_name: &str) -> compio_postgres::Config {
     for port in parsed.get_ports() {
         config.port(*port);
     }
-    // The TLS settings are part of the endpoint, not decoration. This rebuilt
-    // config used to drop them, so under `suite-over-tls` every replication
-    // test asked for the default `sslmode=prefer` while `suite_tls()` handed
-    // it a connector attesting `verify-full` - and `connect_raw` refused the
-    // pair with `TlsUnattested` before a socket was opened. Eleven tests
-    // failed that way, none of them for a reason that had anything to do with
+    // The TLS settings are part of the endpoint, not decoration: dropping them
+    // makes every replication test under `suite-over-tls` ask for the default
+    // `sslmode=prefer` while `suite_tls()` hands it a connector attesting
+    // `verify-full`, and `connect_raw` refuses the pair with `TlsUnattested`
+    // before a socket is opened - a failure that has nothing to do with
     // replication.
     config.ssl_mode(parsed.get_ssl_mode());
     config.ssl_root_cert(parsed.get_ssl_root_cert().clone());
@@ -861,13 +857,13 @@ pub fn plaintext_url() -> String {
 /// Replace the password in a `postgres://user:pass@host/db` DSN.
 ///
 /// Returns `None` when the DSN carries no password to replace, which is the
-/// whole reason this exists. `wrong_password` used to build its bad DSN with
-/// `url.replace(":zeroship@", ":wrong_password_xyz@")` - a literal that is
-/// correct for the default plaintext DSN and matches NOTHING otherwise. Under
-/// `--features suite-over-tls` the password is different, so the replacement
-/// silently did nothing and the test connected with the RIGHT password and
-/// then failed at "expected connection to fail". A test that can degrade into
-/// asserting the opposite of its name should not depend on a string literal.
+/// whole reason this exists. A replacement built from a string literal -
+/// `:zeroship@`, say - is correct for the default plaintext DSN and matches
+/// NOTHING otherwise. Under `--features suite-over-tls` the password is
+/// different, so such a replacement would silently do nothing and the test
+/// would connect with the RIGHT password, then fail at "expected connection to
+/// fail". A test that can degrade into asserting the opposite of its name
+/// should not depend on a string literal.
 ///
 /// The userinfo is located exactly as [`redact_dsn`] locates it: the scan for
 /// the `@` runs to the end of the authority, so a password containing `@`

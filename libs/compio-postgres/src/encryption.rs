@@ -2,12 +2,10 @@
 //!
 //! This is a LEAF on purpose. `Encryption` is shared vocabulary: five modules
 //! name it - `connect`, `connect_tls`, `maybe_tls_stream`, `cancel_token` and
-//! `cancel_query_raw` - and it used to live in `connect_tls.rs`, the module
-//! that performs the negotiation. That made `maybe_tls_stream` depend on
-//! `connect_tls` purely to name the answer, while `connect_tls` depends on
-//! `maybe_tls_stream` to build the stream. Those two edges were a two-module
-//! cycle, and cutting either one takes the crate's connection core from ten
-//! mutually-dependent modules to eight.
+//! `cancel_query_raw`. Keeping it here lets `maybe_tls_stream` name the answer
+//! without depending on `connect_tls`, while `connect_tls` depends on
+//! `maybe_tls_stream` to build the stream; those two edges would otherwise form
+//! a two-module cycle.
 //!
 //! A type that answers "what did we end up on" belongs beside neither the code
 //! that decides it nor the code that carries it. Nothing here may depend on

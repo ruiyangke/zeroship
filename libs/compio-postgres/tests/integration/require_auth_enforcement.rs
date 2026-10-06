@@ -39,13 +39,11 @@
 //!
 //! NOT covered here: SCRAM channel binding, or TLS.
 //!
-//! GSSAPI IS covered, at the bottom of this file. This note used to exclude it
-//! on the grounds that the driver "cannot perform" it and accepts it "only in
-//! negative policies" - true of what a policy may CONTAIN, since
-//! `require_auth=gss` is refused while parsing, but not of what a policy
-//! REFUSES. A positive policy naming another method does not allow `Gss`, so a
-//! GSSAPI demand still reaches `check_require_auth` and is turned away by
-//! name. SSPI is the same shape and is left to the GSSAPI pair.
+//! GSSAPI IS covered, at the bottom of this file. A policy cannot CONTAIN
+//! `gss` - `require_auth=gss` is refused while parsing - but a positive policy
+//! naming another method does not allow `Gss`, so a GSSAPI demand still
+//! reaches `check_require_auth` and is turned away by name. SSPI is the same
+//! shape and is left to the GSSAPI pair.
 
 use compio_postgres::Config;
 use compio_postgres::config::{AuthMethod, AuthMethods, RequireAuth, SslMode};

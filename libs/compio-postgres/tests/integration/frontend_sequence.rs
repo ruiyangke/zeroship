@@ -565,10 +565,11 @@ async fn a_completed_copy_in_ends_with_copy_done_and_sync() {
 /// FRAME itself is asserted; no other test in the suite names a `CopyFail` tag.
 ///
 /// It is NOT the only guard, and saying so would overstate it. Both halves are
-/// already observable through behaviour: deleting the Sync fails 13 tests
-/// here, and giving the reason a non-empty string fails 10, because the live
-/// resync tests read the server error text that reason produces. What this
-/// test adds is the claim stated directly rather than inferred from recovery.
+/// already observable through behaviour: deleting the Sync fails the tests
+/// here, and giving the reason a non-empty string fails others, because the
+/// live resync tests read the server error text that reason produces. What
+/// this test adds is the claim stated directly rather than inferred from
+/// recovery.
 ///
 /// The abort is only observable if the client outlives the sink. An earlier
 /// version of this test dropped the client immediately after the sink and saw

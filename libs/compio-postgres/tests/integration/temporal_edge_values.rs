@@ -123,8 +123,8 @@ async fn time_crate_does_not_alias_postgres_end_of_day_to_midnight() {
     );
 }
 
-/// A duration that fits in `u64` microseconds but not `i64` used to wrap
-/// through `as i64`, turning a remote future into one second before 2000.
+/// A duration that fits in `u64` microseconds but not `i64` must not wrap
+/// through `as i64`: it would turn a remote future into one second before 2000.
 #[compio::test]
 async fn system_time_larger_than_the_timestamp_wire_cannot_wrap() {
     let client = connect_client().await;
@@ -183,7 +183,7 @@ async fn system_time_beyond_the_microsecond_multiply_cannot_wrap() {
     assert_eq!(recovered, 43);
 }
 
-/// The negative endpoint used to narrow to `i64::MIN` and then panic while
+/// The negative endpoint must not narrow to `i64::MIN` and panic while
 /// negating it. A value outside `PostgreSQL`'s finite range is an error, not a
 /// process abort.
 #[compio::test]

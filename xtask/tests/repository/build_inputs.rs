@@ -265,7 +265,7 @@ fn build_inputs() -> Vec<BuildInput> {
         // `include_str!`, at src/tests/startup_policy.rs. It is a different
         // artifact from the adapter above and was declared by neither rule, so a
         // test binary could compile against an SDK bundle older than its sources
-        // and answer from what the facade used to export.
+        // and answer from the stale facade it carries.
         BuildInput {
             artifacts: vec!["packages/db/dist/index.js".to_owned()],
             sources: also(

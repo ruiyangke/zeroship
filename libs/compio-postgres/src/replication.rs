@@ -36,7 +36,7 @@
 //! today. Keeping protocol here gives plugin-db (and any future
 //! consumer - e.g. a CDC export job) a clean async-stream API.
 //!
-//! ## What this module ships in P8a.2
+//! ## What this module ships
 //!
 //! - [`ReplicationMode`] / [`Config::replication`] (in [`crate::config`])
 //! - [`connect_replication`] - TCP + TLS + handshake + auth +

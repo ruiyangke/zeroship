@@ -1,10 +1,10 @@
 //! The row count carried by a `CommandComplete` tag.
 //!
 //! This is a LEAF on purpose. The function below is shared by three modules -
-//! `query`, `simple_query`, and the query observer in `client` - and it used to
-//! live in `query.rs`. That made `simple_query` depend on `query` for a single
-//! pure function, which was the whole of one direction of the
-//! `query <-> simple_query` dependency cycle.
+//! `query`, `simple_query`, and the query observer in `client`. It lives in
+//! this leaf so `simple_query` never depends on `query` for a single pure
+//! function, which is the whole of one direction of the `query <-> simple_query`
+//! dependency cycle.
 //!
 //! Nothing here may take a dependency on the modules that call it.
 

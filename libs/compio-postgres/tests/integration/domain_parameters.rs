@@ -7,11 +7,10 @@
 //! executed at all -- while psql does it trivially, because libpq performs no
 //! client-side type check.
 //!
-//! The RESULT direction is problem-free ONLY FOR A SCALAR domain, and this
-//! header used to claim it was problem-free full stop. PostgreSQL reports the
-//! BASE type in `RowDescription` for `SELECT 7::d`, which is why that always
-//! worked - but for `d[]` it reports the domain ARRAY, so reading failed in
-//! exactly the way binding did. Both are covered below.
+//! The RESULT direction has one array case to see through. PostgreSQL reports
+//! the BASE type in `RowDescription` for `SELECT 7::d`, but for `d[]` it
+//! reports the domain ARRAY, so the client must see through an array whose
+//! element is a domain. Both are covered below.
 //!
 //! This is not a theoretical shape. `@zeroship/migrate` can create domains, and
 //! `crates/zeroship-migrate-server/src/session.rs` already carries a `resolve_domain()`

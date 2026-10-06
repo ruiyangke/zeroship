@@ -1,17 +1,16 @@
 //! What a caller is told when a message exceeds this driver's size limit.
 //!
-//! `buf_stream::MAX_MESSAGE_SIZE` caps a single backend message at 64 MB -
-//! deliberately below PostgreSQL's own 1 GB, because a header claiming a
-//! gigabyte would otherwise make this driver buffer one. That cap is a design
+//! `buf_stream::DEFAULT_MAX_MESSAGE_SIZE` caps a single backend message at
+//! 64 MB - deliberately below PostgreSQL's own 1 GB, because a header claiming
+//! a gigabyte would otherwise make this driver buffer one. That cap is a design
 //! decision and not what these tests are about.
 //!
 //! What they are about is the DIAGNOSIS. `validate_length` builds a precise
-//! error - "message too large: N bytes (max M)" - and the caller used to
-//! receive `connection closed` with an empty cause chain, because the
-//! connection task died holding the explanation while the waiting request only
-//! saw its response channel drop. A limit nobody can discover from the error
-//! reads exactly like an unexplained disconnect, and the first thing a user
-//! does about an unexplained disconnect is retry it.
+//! error - "message too large: N bytes (max M)" - and the connection task
+//! reports it before dying, so the waiting request sees the cause chain
+//! instead of only its response channel dropping. A limit nobody can discover
+//! from the error reads exactly like an unexplained disconnect, and the first
+//! thing a user does about an unexplained disconnect is retry it.
 
 use crate::support;
 

@@ -1,8 +1,8 @@
 //! The named `SqlState` constants must match the codes PostgreSQL really sends.
 //!
-//! `src/error/sqlstate.rs` is a GENERATED table -- 269 lines of constants, and
-//! the lowest-covered file in the crate at around 5%. Coverage there is a
-//! meaningless number (one line per constant, and no test needs all of them),
+//! `src/error/sqlstate.rs` is a GENERATED table of constants, and the
+//! lowest-covered file in the crate. Coverage there is a meaningless number
+//! (one line per constant, and no test needs all of them),
 //! but a transcription error in it would be invisible in exactly the way that
 //! matters: `SqlState::UNIQUE_VIOLATION` carrying the wrong five characters
 //! still compiles, still compares equal to itself, and still reads correctly in

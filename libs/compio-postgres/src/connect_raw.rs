@@ -242,18 +242,12 @@ where
     ///
     /// Returns a `Message`, never an `Option<Message>`.
     ///
-    /// It used to return `Result<Option<Message>, Error>`, and the `None` was
-    /// unreachable: the body is a `loop` with no `break`, its only success
-    /// returns are the two `Ok(..)` below, and every other exit is an `Err`. A
-    /// peer that hangs up does not produce `None` either - the read fails
-    /// first, with `buf_stream.rs`'s `UnexpectedEof` ("connection closed by
-    /// server"), which `a_peer_that_hangs_up_during_authentication_is
+    /// There is no `None` case: the body is a `loop` with no `break`, its only
+    /// success returns are the two `Ok(..)` below, and every other exit is an
+    /// `Err`. A peer that hangs up does not produce `None` either - the read
+    /// fails first, with `buf_stream.rs`'s `UnexpectedEof` ("connection closed
+    /// by server"), which `a_peer_that_hangs_up_during_authentication_is
     /// _reported_as_closed` pins at two cut points.
-    ///
-    /// That `Option` cost six `None => Err(Error::closed())` arms across this
-    /// function's callers, all dead, all reported by coverage as untested.
-    /// They were measured dead on 2026-09-01 - mutating two of them left the
-    /// hang-up test green - and removed with the `Option` itself.
     ///
     /// Do not reintroduce it: a caller that needs "the peer went away" already
     /// gets it as an `Err` from the `?` on this call.
@@ -1188,8 +1182,8 @@ where
             ))?;
             authenticate_sasl(handshake, body, config).await?;
         }
-        // The four methods this driver does not implement. Each names ITSELF:
-        // all four used to return the same "unsupported authentication method",
+        // The four methods this driver does not implement. Each names ITSELF
+        // rather than returning a shared "unsupported authentication method",
         // which tells an operator nothing about what their server asked for or
         // what to reconfigure. This crate already holds refusals to that
         // standard elsewhere -- `libpq_parameter_parity` requires a refused
@@ -1482,9 +1476,8 @@ where
             // as async, and `read_backend` never leaves a notice inside a
             // `Normal` batch: at offset zero it returns `Async`, and further in
             // it ends the batch before the frame. So a notice cannot reach this
-            // match, and the arm that used to sit here was unreachable - it
-            // queued into `delayed` a second time, which is why the byte budget
-            // has exactly one enforcement point rather than two.
+            // match, and the byte budget has exactly one enforcement point
+            // rather than two.
             Message::ReadyForQuery(_) => {
                 handshake.finish_startup();
                 let (process_id, secret_key) = match handshake.backend_key.take() {
@@ -3438,18 +3431,15 @@ mod tests {
     /// A peer that opens SCRAM, waits for the client's first message, and then
     /// answers `AuthenticationOk` instead of continuing the exchange.
     ///
-    /// RETURNS THE CLIENT-FIRST MESSAGE, and that is not a convenience. This
-    /// helper used to `.detach()` its task and return only the socket, so the
-    /// one thing separating this scenario from
-    /// `require_scram_refuses_authentication_ok_without_an_exchange` -- that a
-    /// SCRAM exchange was demonstrably STARTED -- lived in `unwrap()`s inside a
-    /// detached task, where a failure cannot fail a test. Both tests then
-    /// asserted the same two substrings on the same error, and measured
-    /// 2026-08-23 the driver produces a BYTE-IDENTICAL chain for the two:
-    /// `authentication method requirement "scram-sha-256" failed: server did
-    /// not complete authentication`. So if this peer had quietly stopped
-    /// reaching client-first, the test would have become a duplicate of its
-    /// sibling and stayed green. The caller now asserts the exchange began.
+    /// RETURNS THE CLIENT-FIRST MESSAGE, and that is not a convenience. It
+    /// carries the one thing separating this scenario from
+    /// `require_scram_refuses_authentication_ok_without_an_exchange`: proof
+    /// that a SCRAM exchange was demonstrably STARTED. Left in `unwrap()`s
+    /// inside a detached task, that proof cannot fail a test; the caller
+    /// asserts it instead. Both tests assert the same two substrings on an
+    /// error whose chain is byte-identical, so a peer that stopped reaching
+    /// client-first would make this test a duplicate of its sibling and it
+    /// would stay green.
     async fn scripted_scram_server_sending_early_ok()
     -> (crate::Socket, oneshot::Receiver<Result<Vec<u8>, String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

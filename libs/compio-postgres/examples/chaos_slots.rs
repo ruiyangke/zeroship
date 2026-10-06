@@ -76,7 +76,7 @@ async fn main() {
     // single-shot by design, so it refuses in about a millisecond. Pool warm-up
     // retries three times, sleeping 100ms then 400ms between failures, so its
     // refusal necessarily costs about 500ms. Quoting one number for the other
-    // makes a healthy driver look 380x slower or faster than it is.
+    // makes a healthy driver look far slower or faster than it is.
     let mut pool_config = PoolConfig::new();
     pool_config.max_size(2);
     pool_config.min_idle(2);
