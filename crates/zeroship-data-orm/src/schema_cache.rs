@@ -212,13 +212,12 @@ mod tests {
         );
     }
 
-    /// **L24 regression guard.** An undeclared collection must be an ERROR, not
-    /// `None` that a caller can shrug off - treating a miss as "carry on" is
-    /// what let a read served before the schema arrived return every physical
-    /// column and accept any field name.
+    /// An undeclared collection must be an ERROR, not `None` that a caller can
+    /// shrug off - treating a miss as "carry on" would let a read served
+    /// before the schema arrive return every physical column and accept any
+    /// field name.
     ///
-    /// The guard lives beside the rule now. It was in the adapter's
-    /// `descriptor.rs` tests, one indirection away from the code it protects.
+    /// The guard lives beside the rule it protects.
     #[test]
     fn an_undeclared_collection_is_an_error_and_never_a_silent_miss() {
         let mut cache = SchemaCache::new();

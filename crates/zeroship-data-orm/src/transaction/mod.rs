@@ -401,8 +401,8 @@ pub async fn exec_begin_or_savepoint(
 /// Lower a frame guard's refusal to the creator-visible error.
 ///
 /// `savepoint_depth_exceeded` keeps the hinted validation shape it has always
-/// had; the frame stack is where the cap now lives, so this is the only place
-/// that spells it.
+/// had; the frame stack enforces the cap, so this is the only place that
+/// spells it.
 fn frame_refusal(refusal: reducer::TxProtocolError, detail: Option<DbError>) -> DbError {
     if refusal
         == reducer::TxProtocolError::Frame(reducer::frames::FrameError::SavepointDepthExceeded)

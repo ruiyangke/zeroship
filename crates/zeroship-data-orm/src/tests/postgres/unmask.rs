@@ -106,9 +106,9 @@ fn unmask_fetch_runs_under_the_binding_and_unmask_roles_via_rls() {
                 provision_platform_login_pool(&admin_pool, &url, login_role, "test", &role, app)
                     .await;
 
-            // The SENSITIVE value now lives in the raw sibling column (the storage
-            // flip), so that is the column this proof must show is unreachable by
-            // direct SQL before `dispatch_unmask` narrows to the binding role.
+            // The SENSITIVE value lives in the raw sibling column, so that is the
+            // column this proof must show is unreachable by direct SQL before
+            // `dispatch_unmask` narrows to the binding role.
             let blocked = login_pool
                 .query_text_params(
                     &format!("SELECT \"{ssn_raw}\" FROM \"{alias}\".\"{coll}\" WHERE id = 'u1'"),

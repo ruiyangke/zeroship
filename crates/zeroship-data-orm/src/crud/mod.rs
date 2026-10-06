@@ -167,11 +167,9 @@ pub fn aggregate_group_fields(pipeline: &Value) -> Vec<String> {
 // find — read path
 // ---------------------------------------------------------------------------
 
-// `dispatch_find_one` does not exist: `Collection.findOne` was removed
-// (Convex-style consolidation). The SDK reaches the same "first matching
-// row" semantic via `find(filter).first()` / `.unique()` / `.last()` on
-// the Query terminal, which composes the existing `dispatch_find` with
-// `LIMIT 1` (or `LIMIT 2` for strict `.unique()`).
+// Single-row reads are `find` narrowed by `LIMIT 1` (or `LIMIT 2` for
+// strict `.unique()`), which the SDK reaches via `.first()` / `.unique()` /
+// `.last()` on the Query terminal.
 
 fn invalid_read_option(message: impl Into<String>) -> DbError {
     DbError::validation("invalid_read", message.into())

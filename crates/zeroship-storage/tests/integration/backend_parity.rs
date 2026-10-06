@@ -32,7 +32,7 @@ const APP: &str = "app_test";
 const BUCKET: &str = "uploads";
 
 /// Generous buffered-get cap for the happy-path parity calls (well above any
-/// object they read). The C2 cap behaviour is exercised separately below.
+/// object they read). The cap behaviour is exercised separately below.
 const GET_CAP: u64 = 64 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
@@ -450,7 +450,7 @@ async fn run_large_stream(backend: &dyn Backend, label: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// C2 regression: buffered `get` must cap allocation by `max_bytes`.
+// Buffered `get` must cap allocation by `max_bytes`.
 //
 // A backend that advertises a huge `Content-Length` (`meta.size`) must NOT
 // drive `Vec::with_capacity(meta.size)` — the buffered `get` rejects it as a
@@ -464,7 +464,7 @@ use std::time::SystemTime;
 use zeroship_storage::backend::ObjectMeta;
 
 /// A fake backend whose `get_stream` reports a chosen `advertised_size` but
-/// only ever yields `body` bytes. Lets the C2 test assert both the
+/// only ever yields `body` bytes. Lets this test assert both the
 /// pre-allocation check (advertised size) and the running-total check.
 #[derive(Debug)]
 struct LyingSizeBackend {
@@ -759,8 +759,8 @@ async fn run_s3_slow_producer_overlap(server: &S3Server) {
     backend.delete(APP, BUCKET, key).await.unwrap();
 }
 
-/// C1 regression (plugin-storage `S3::put_stream`): a mid-upload error must
-/// abort the multipart explicitly — no panic/process-abort, no orphaned upload.
+/// A mid-upload error during `S3::put_stream` must abort the multipart
+/// explicitly - no panic/process-abort, no orphaned upload.
 #[cfg(feature = "s3")]
 async fn run_s3_mid_upload_abort(backend: &zeroship_storage::S3, server: &S3Server) {
     // 8 MiB part size; yield 1.25 parts then error → create_multipart + ≥1
@@ -800,13 +800,13 @@ async fn run_s3_mid_upload_abort(backend: &zeroship_storage::S3, server: &S3Serv
 }
 
 /// H2 regression: a stream that would exceed the configured max object size
-/// fails fast (and the C1-style abort leaves no orphaned upload).
+/// fails fast (and the explicit abort leaves no orphaned upload).
 #[cfg(feature = "s3")]
 async fn run_s3_part_limit_fast_fail(server: &S3Server) {
     use zeroship_storage::S3UploadTuning;
     // Cap at 12 MiB so the first full 8 MiB part is flushed (creating a real
     // multipart upload) before the running total trips the cap - exercising the
-    // fast-fail AND the C1 abort of an already-started upload. The ceiling is
+    // fast-fail AND the abort of an already-started upload. The ceiling is
     // an argument to this backend, so it binds THIS upload and nothing else in
     // the process.
     let backend = make_s3_tuned(server, S3UploadTuning {
@@ -826,7 +826,7 @@ async fn run_s3_part_limit_fast_fail(server: &S3Server) {
         "H2: unexpected error: {err}"
     );
 
-    // The fast-fail must still abort any started multipart upload (C1 path).
+    // The fast-fail must still abort any started multipart upload.
     let raw = s3_raw_client(server);
     let key_prefix = format!("{APP}/{BUCKET}/{obj_key}");
     let uploads = raw
@@ -896,8 +896,8 @@ async fn run_s3_parallel_many_parts(server: &S3Server) {
     backend.delete(APP, BUCKET, key).await.unwrap();
 }
 
-/// C1 under concurrency: with several part-uploads in flight (concurrency = 4),
-/// an injected reader error must still abort the multipart explicitly — the
+/// Under concurrency: with several part-uploads in flight (concurrency = 4),
+/// an injected reader error must still abort the multipart explicitly - the
 /// other in-flight uploads are dropped/cancelled and no orphaned (billed)
 /// multipart upload remains listable.
 #[cfg(feature = "s3")]

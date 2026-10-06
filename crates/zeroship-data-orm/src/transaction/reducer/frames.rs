@@ -10,7 +10,7 @@
 //!
 //! `ROLLBACK TO SAVEPOINT` deliberately **leaves the savepoint defined**, and
 //! PostgreSQL resolves a savepoint name to the **most recently established**
-//! one (`libs/compio-postgres/src/transaction.rs:63-82`). A depth-derived name
+//! one (`libs/compio-postgres/src/transaction.rs`). A depth-derived name
 //! is therefore reused after the depth decrements, so a leftover savepoint
 //! shadows an enclosing frame of the same name and sends the enclosing rollback
 //! **to the wrong scope**.

@@ -100,10 +100,8 @@ pub fn resolve_list_limit(limit: Option<f64>) -> usize {
 
 /// Parse an already-read value as a positive `u64`.
 ///
-/// This takes the VALUE, not the name. As `env_u64(name: &str)` it performed
-/// the read itself, so the two names this file governs were invisible to any
-/// scan of it: the literals sat at the call sites and the read sat here. The
-/// read now lives next to its literal in each resolver.
+/// This takes the VALUE, not the name: each resolver reads its own environment
+/// variable next to its literal.
 fn positive_u64(raw: Option<String>) -> Option<u64> {
     raw.and_then(|v| v.trim().parse::<u64>().ok())
         .filter(|&n| n > 0)

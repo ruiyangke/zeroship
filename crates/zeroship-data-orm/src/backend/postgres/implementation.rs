@@ -364,7 +364,7 @@ pub(crate) async fn apply_session_authority(
 
 /// Project PostgreSQL's command tag onto SC-1's terminal result.
 ///
-/// **L8: a `COMMIT` answered `ROLLBACK` is a FAILED transaction.** PostgreSQL
+/// **A `COMMIT` answered `ROLLBACK` is a FAILED transaction.** PostgreSQL
 /// replies with the tag `ROLLBACK` when the transaction is in the failed state,
 /// and a driver reading only "did it error" reports a discarded transaction as
 /// committed - which is what published change events for writes that never
@@ -583,10 +583,9 @@ mod begin_render_tests {
     use super::render_begin;
     use zeroship_data_orm::error::{BeginIntent, IsolationLevel};
 
-    /// The dialect half of what `build_begin_sql` used to do in the engine.
-    /// Its validation half is now `IsolationLevel::parse`, tested in data-core -
-    /// the split is the point: a typo cannot reach here, because the only way
-    /// in is a variant.
+    /// Renders the PostgreSQL BEGIN dialect. Its validation half is
+    /// `IsolationLevel::parse`, tested in data-core - the split is the point:
+    /// a typo cannot reach here, because the only way in is a variant.
     #[test]
     fn every_intent_renders_its_postgres_statement() {
         assert_eq!(render_begin(BeginIntent::Default), "BEGIN");
@@ -626,7 +625,7 @@ mod terminal_projection_tests {
         );
     }
 
-    /// The control the L8 rule needs: a healthy commit differs from the case
+    /// The control this rule needs: a healthy commit differs from the case
     /// above in the TAG ALONE, and must not be swept up by it.
     #[test]
     fn a_commit_answered_commit_is_a_commit() {

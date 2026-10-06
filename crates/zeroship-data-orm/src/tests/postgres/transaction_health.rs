@@ -46,8 +46,8 @@ fn ack_for(status: Option<TransactionStatus>) -> CleanupAck {
     }
 }
 
-/// **The L8 oracle.** A `COMMIT` issued in a failed transaction block is
-/// answered with the command tag `ROLLBACK`.
+/// **The failed-commit oracle.** A `COMMIT` issued in a failed transaction
+/// block is answered with the command tag `ROLLBACK`.
 ///
 /// The reducer maps `(SettleIntent::Commit, TerminalResult::RolledBack)`
 /// to `TerminalOutcome::RolledBack`, which publishes nothing. That mapping
@@ -55,7 +55,7 @@ fn ack_for(status: Option<TransactionStatus>) -> CleanupAck {
 ///
 /// Where this would fail today: on a server that answers `COMMIT` to a
 /// poisoned commit, or errors instead of answering. Either would make the
-/// reducer's L8 arm model a behaviour that does not exist.
+/// reducer's failed-commit arm model a behaviour that does not exist.
 #[test]
 fn a_commit_in_a_failed_transaction_is_answered_with_the_rollback_tag() {
     Host::test(|host| {

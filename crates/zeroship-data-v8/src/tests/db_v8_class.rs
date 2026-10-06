@@ -256,9 +256,6 @@ fn db_brand_check_rejects_non_db() {
 // ---------------------------------------------------------------------------
 
 /// `db.transaction` is a native method (function) on the `Db` v8 surface.
-/// (Previously the tx entry point on `Db` was `beginTransaction`; the
-/// creator-facing `transaction` was a bootstrap-installed JS function.
-/// `transaction` is now the native method.)
 #[test]
 fn db_transaction_is_a_native_method() {
     init_v8();
@@ -277,9 +274,8 @@ fn db_transaction_is_a_native_method() {
     );
 }
 
-/// `db.beginTransaction` is GONE — not on the instance, not up the
-/// prototype chain. The native primitive was deleted entirely
-/// (not hidden behind `__platform`).
+/// `db.beginTransaction` is not exposed: absent from the instance and the
+/// prototype chain, and not hidden behind `__platform`.
 #[test]
 fn db_begin_transaction_is_not_exposed() {
     init_v8();

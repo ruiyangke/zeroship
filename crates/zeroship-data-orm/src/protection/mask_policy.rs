@@ -465,11 +465,8 @@ mod tests {
         roles_b.insert("support".to_string(), support_set);
         let policy_b = MaskPolicy { roles: roles_b };
 
-        // Drives the thread-local cache directly. It used to build a private
-        // `ThreadDbContext` instead, to "avoid touching the thread-local so
-        // test ordering is irrelevant" - but ordering was never the hazard it
-        // implied: libtest gives every `#[test]` its own OS thread even under
-        // `--test-threads=1` (measured 2026-09-01), so no other test can
+        // Drives the thread-local cache directly. libtest gives every `#[test]`
+        // its own OS thread even under `--test-threads=1`, so no other test can
         // observe or disturb these entries.
         cache_put(&crate::tests::fixtures::harness_binding("app_a"), Some(policy_a.clone()));
         cache_put(&crate::tests::fixtures::harness_binding("app_b"), Some(policy_b.clone()));

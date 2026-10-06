@@ -20,7 +20,7 @@
 //! The handler self-asserts a multi-chunk upload → download round-trip
 //! (byte-compare) and returns `{ok:true}`; the Rust side asserts 200+ok.
 //!
-//! Harness mirrors `crates/zeroship-kv-v8/tests/e2e_runtime.rs`.
+//! Harness mirrors `crates/zeroship-kv-v8/tests/integration/e2e_runtime.rs`.
 
 #![allow(clippy::future_not_send)]
 
@@ -390,15 +390,14 @@ fn usage_value(
 }
 
 // ---------------------------------------------------------------------------
-// Backpressure regression (ISS-32 PR4): a `putStream` whose total size far
-// exceeds the StreamWriter buffer cap (4 MiB) MUST succeed. Before the
-// forwarder learned to pause/resume the V8 read loop on the buffer high/low
-// water marks, the eager read loop drained the whole source into the channel
-// in one microtask burst and overflowed at 4 MiB — the upload failed with
-// "upload stream exceeded the buffer backpressure cap". This drives 24 MiB of
-// 256 KiB chunks through the real V8 -> stream_forwarder -> UploadReader ->
-// LocalFs path and asserts the full round-trip, proving backpressure bounds
-// the buffer instead of overflowing it.
+// Backpressure regression: a `putStream` whose total size far exceeds the
+// StreamWriter buffer cap MUST succeed. The forwarder pauses/resumes the V8
+// read loop on the buffer high/low water marks; without that, the eager read
+// loop drains the whole source into the channel in one microtask burst and
+// overflows the cap. This drives data through the real V8 ->
+// stream_forwarder -> UploadReader -> LocalFs path and asserts the full
+// round-trip, proving backpressure bounds the buffer instead of overflowing
+// it.
 const STORAGE_STREAM_BACKPRESSURE_APP: &str = r#"
 export default {
     async fetch(request, env, ctx) {

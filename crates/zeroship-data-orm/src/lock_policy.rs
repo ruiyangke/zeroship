@@ -203,16 +203,13 @@ mod tests {
             other => panic!("expected DbError::LockContention, got {other:?}"),
         }
 
-        // The third assertion this test used to make - that the contention error
-        // lowers to the JS code `lock_not_available` - is NOT here, and its
-        // absence is the tier boundary rather than a gap. `to_op_error` is the
-        // adapter's `ToOpError`, which was lifted OUT of this crate for the
-        // same reason the policy above could not stay on the contract: a domain
-        // type may not name a delivery mechanism. Naming it here would put
-        // `zeroship_runtime` in data-core's test build.
+        // The contention error lowers to the JS code `lock_not_available` in
+        // the adapter, not here: `to_op_error` is the adapter's `ToOpError`,
+        // and naming it here would put `zeroship_runtime` in data-core's test
+        // build. A domain type may not name a delivery mechanism.
         //
         // The lowering is covered where the lowering lives:
-        // `zeroship-data-v8/src/op_error.rs` table-tests
+        // `crates/zeroship-data-v8/src/op_error.rs` table-tests
         // `DbError::LockContention` -> `"lock_not_available"` directly.
     }
 

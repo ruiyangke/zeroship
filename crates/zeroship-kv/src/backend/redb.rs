@@ -91,11 +91,10 @@ impl std::fmt::Debug for RedbBackend {
 ///
 /// THIS EXISTS TO COLLAPSE A CROSS-LANGUAGE SEAM. The dev server has to tell a
 /// state-dir lock apart from a port clash, because the two remedies contradict
-/// each other (task #221). It used to do that by matching redb's own prose in
-/// TypeScript - a library's wording, matched in another language, with nothing
-/// holding the two together. redb could reword its error in a patch release and
-/// both test suites would stay green while the banner silently reverted to
-/// advising a port change.
+/// each other. Matching redb's own prose in TypeScript would pair a library's
+/// wording, in another language, with nothing holding the two together: redb
+/// could reword its error in a patch release and both test suites would stay
+/// green while the banner silently reverted to advising a port change.
 ///
 /// So the prose match lives HERE, next to the crate that produces the prose,
 /// and what crosses the language boundary is a token we own. `packages/vite-plugin/

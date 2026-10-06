@@ -94,9 +94,7 @@ CREATE INDEX IF NOT EXISTS "{coll}_created_by_idx" ON "{alias}"."{coll}" ("creat
 /// # Panics
 ///
 /// When the extension is not available on the server, with the image that
-/// carries it. It used to return `false` and the callers announced a skip - so
-/// a `--ignored` run on a stock `postgres:16` printed the same green as a run
-/// that had exercised a single vector query.
+/// carries it.
 pub(super) async fn require_pgvector(pool: &Pool) {
     // The CREATE is best-effort and its result is deliberately not the verdict:
     // an environment that ships the extension pre-installed can refuse the
@@ -260,10 +258,7 @@ pub(super) async fn provision_platform_login_pool(
 ///
 /// # Panics
 ///
-/// When the extension is not available on the server, with what carries it. It
-/// used to return `false` and the callers announced a skip, so a `--ignored`
-/// run on a stock `postgres:16` printed the same green as one that had
-/// exercised a spatial query.
+/// When the extension is not available on the server, with what carries it.
 pub(super) async fn require_postgis(pool: &Pool) {
     // Best-effort CREATE, catalogue-decided verdict; see `require_pgvector`.
     let _ = pool

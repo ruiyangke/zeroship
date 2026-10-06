@@ -45,8 +45,8 @@ use zeroship_data_orm::error::DbError;
 /// is hosting more apps than it has transaction connections for, and the
 /// creator's code is blameless. `transaction_connection_busy` is the opposite
 /// case - two calls overlapping inside one of the creator's own transactions,
-/// which only the creator can fix. Defect L22b is what happens when one code
-/// covers both.
+/// which only the creator can fix. One code covering both would leave the
+/// creator unable to tell which remedy applies.
 pub(crate) const TX_LANES_EXHAUSTED: &str = "transaction_lanes_exhausted";
 
 /// One-shot `sqlite-vec` auto-extension registration.
@@ -613,9 +613,8 @@ impl SqliteSession {
     ///
     /// The admission key is `(session, app_id)`, the same key SC-1 gives a
     /// transaction slot, because a session is one runtime instance's SQLite
-    /// resources. One shared connection per session meant app B's
-    /// `db.transaction()` was refused while app A held one, which is defect
-    /// L22b.
+    /// resources. One shared connection per session would refuse app B's
+    /// `db.transaction()` while app A held one.
     pub(crate) async fn reserve_transaction(
         self: &Rc<Self>,
         app_id: &str,
@@ -1842,8 +1841,8 @@ impl Actor {
     /// applied. Rather than the thread waiting for the holder, the command goes
     /// into `deferred` and the thread returns here - which is the only way the
     /// holder's own `COMMIT`, sitting further down this very queue, can ever
-    /// run. The budget the busy handler used to spend inside the C call is
-    /// spent here instead, as a deadline per command.
+    /// run. The busy-handler budget is spent here as a deadline per command,
+    /// not inside the C call.
     ///
     /// **Ordering.** A deferred command is attempted before anything still in
     /// the queue the moment its backoff elapses, and it was enqueued before all
@@ -2088,9 +2087,8 @@ impl Actor {
         error: DbError,
     ) {
         let now = std::time::Instant::now();
-        // The deadline starts at the first refusal, which is where
-        // `busy_timeout` used to start counting: the budget buys waiting for a
-        // lock, not queueing for the actor.
+        // The deadline starts at the first refusal: the budget buys waiting for
+        // a lock, not queueing for the actor.
         let (deadline, backoff) = match previous {
             Some(schedule) => (
                 schedule.deadline,

@@ -226,18 +226,12 @@ fn encrypted_randomised_row_swap_rejected() {
 ///   - read raw rows back, finalize through the REAL read pipeline -> decrypts
 ///     the encrypted column to plaintext and wraps the masked column.
 ///
-/// **The metadata source changed and the round trip did not.** This test used to
-/// plant `COMMENT ON COLUMN ... 'zero-migrate:enc:...'` / `'zero-migrate:mask:...'` sentinels and
-/// assert the data plane recovered encryption and mask policy from the
-/// live catalog. That recovery is deleted: the sentinels were emitted by the
-/// migration engine out of the same DSL the descriptor is folded from, so the
-/// catalog could only ever agree with the descriptor or be stale, and the read
-/// cost one whole-schema catalog walk per cold collection. The metadata is now
-/// installed by `cache_schema` from a descriptor-shaped field map,
-/// matching the native runtime descriptor hook. Everything after that line is unchanged,
-/// so what this still proves is what it always mattered for: the encrypt/mask
-/// write stages and the decrypt/mask-wrap read stages agree, against a real
-/// Postgres table, end to end.
+/// **The metadata source and the round trip are independent.** The metadata is
+/// installed by `cache_schema` from a descriptor-shaped field map, matching the
+/// native runtime descriptor hook, so the read does not walk the live catalog.
+/// What this proves is that the encrypt/mask write stages and the
+/// decrypt/mask-wrap read stages agree, against a real Postgres table, end to
+/// end.
 #[test]
 fn p4_round_trip_encrypted_masked_vector_via_descriptor_metadata() {
     Host::test(|host| {
@@ -275,7 +269,7 @@ fn p4_round_trip_encrypted_masked_vector_via_descriptor_metadata() {
             // than hidden: `embedding` gets a bare `vector(3)` column and NO ANN index.
             // The declared schema asks for a cosine vector index, and the engine DOES
             // emit one -- `vector_index_snapshot` in
-            // `zeroship-migrate-core/src/render/declarative.rs:2888` renders
+            // `crates/zeroship-migrate-core/src/render/declarative.rs` renders
             // `USING ivfflat ("embedding" vector_cosine_ops) WITH (lists = 100)`. This
             // fixture just does not reproduce it, because it hand-writes the DDL rather
             // than running the engine.
@@ -403,8 +397,8 @@ CREATE TABLE "{alias}"."people" ({PG_COMMON_FIXTURE_COLUMNS},
 
             // ----- READ (real pipeline, introspected metadata) -----
             // Fetch the raw row the way the SELECT builder would: the encrypted blob
-            // as bytes, and `phone` read directly. Reads no longer alias anything
-            // after the storage flip -- the field's own column already holds the mask.
+            // as bytes, and `phone` read directly. Reads do not alias anything:
+            // the field's own column already holds the mask.
             let raw = pool
                 .query_text_params(
                     &format!(

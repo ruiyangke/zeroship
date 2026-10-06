@@ -1209,7 +1209,7 @@ fn poisoned_refuses_data_sql_but_a_rollback_to_recovers_it() {
 // Publication
 // ---------------------------------------------------------------------------
 
-/// Invariant 12 and the L8 case: a `COMMIT` answered `ROLLBACK` is a failed
+/// Invariant 12: a `COMMIT` answered `ROLLBACK` is a failed
 /// transaction and publishes nothing.
 ///
 /// Where this would fail today: on an implementation that reads the result

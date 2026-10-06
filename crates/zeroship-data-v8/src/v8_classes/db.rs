@@ -236,12 +236,11 @@ fn js_type_name(v: v8::Local<v8::Value>) -> &'static str {
 /// (`"read committed"`). Rejects anything else with a `TypeError`.
 ///
 /// **This returns a variant, not a normalised string, and that is the point.**
-/// It used to hand back `"READ COMMITTED"` for the engine to re-validate
-/// against its own list - two lists, accepting different things (only this one
-/// takes camelCase), agreeing only because this one always ran first. A caller
-/// that reached the engine directly with the creator's spelling would have been
-/// refused by the second list for a level the first accepts. Past this
-/// function the value cannot be a typo.
+/// A normalised string would be re-validated against a second list that accepts
+/// different things (only this one takes camelCase); a caller reaching the
+/// engine directly with the creator's spelling would be refused by the second
+/// list for a level the first accepts. Past this function the value cannot be a
+/// typo.
 fn normalize_isolation_level(raw: &str) -> Result<IsolationLevel, OpError> {
     let trimmed = raw.trim();
     let level = match trimmed {
@@ -473,11 +472,9 @@ mod tests {
     /// deploy installed, and see nothing at all for a collection the other
     /// deploy declared.
     ///
-    /// The property is unchanged; what carries it is not. It used to be pinned
-    /// on the deploy-keyed live-metadata cache, which is deleted. It is now
-    /// pinned on the descriptor store — `cache_schema` in, `collection_schema`
-    /// out — which is the only schema authority the data plane has left, so
-    /// this is the same isolation guarantee measured one layer closer to the
+    /// The guarantee is pinned on the descriptor store - `cache_schema` in,
+    /// `collection_schema` out - which is the only schema authority the data
+    /// plane has, so this measures the same isolation one layer closer to the
     /// reads that depend on it.
     #[test]
     fn co_resident_deploy_bindings_keep_tokens_and_schema_entries_isolated() {

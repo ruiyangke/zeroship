@@ -63,8 +63,8 @@ pub(crate) struct TxLaneId(pub(crate) u32);
 /// admits one top-level transaction per `(runtime_instance_id, app_id)`; a
 /// single shared transaction connection enforced one per
 /// `(runtime_instance_id, session)` instead, so app B's `db.transaction()` was
-/// refused while app A held one (defect L22b). Carrying the lane id here is
-/// what makes the two keys the same key.
+/// refused while app A held one. Carrying the lane id here is what makes the
+/// two keys the same key.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Lane {
     /// `op_conn` - autocommit operations, each wrapped in
@@ -377,10 +377,10 @@ pub enum CancelCleanup {
 /// The terminal fate of a reservation, as classified by `is_autocommit`.
 ///
 /// `CommitIndeterminate` is a first-class outcome and not an error. Collapsing
-/// it into failure is defect L8's mistake in the other direction: there the
-/// plugin believed a `COMMIT` that PostgreSQL had answered with a `ROLLBACK`
-/// tag; here the temptation is to report a loss that may not have happened.
-/// Both resolve an uncertainty by assumption. This type represents it instead.
+/// it into failure is the mirror mistake: believing a `COMMIT` that PostgreSQL
+/// answered with a `ROLLBACK` tag, versus reporting a loss that may not have
+/// happened. Both resolve an uncertainty by assumption. This type represents it
+/// instead.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum TerminalOutcome {
     /// The only confirmed-commit arm: `COMMIT` returned `Ok` **and**

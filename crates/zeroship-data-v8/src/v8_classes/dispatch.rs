@@ -481,15 +481,10 @@ pub(crate) fn dispatch_unmask_field<'s>(
     let binding = binding.clone();
     let result_binding = binding.clone();
     // The route is captured HERE, on the adapter side, while the V8 frame is
-    // live, and handed to the engine. `protection::unmask` used to open a backend
-    // itself through `exec::ensure_backend_for_shared_sql`, which read
-    // `crate::context` from an ENGINE file.
-    //
-    // **This captured NOTHING until 2026-09-03**, on the stated grounds that
-    // "an unmask is not a routed statement". It is: the ciphertext read is a
-    // SELECT, and one issued inside a `db.transaction(fn)` callback has to run
-    // on that transaction's connection or it cannot see a row the transaction
-    // has just written.
+    // live, and handed to the engine. The ciphertext read is a SELECT, and one
+    // issued inside a `db.transaction(fn)` callback has to run on that
+    // transaction's connection or it cannot see a row the transaction has just
+    // written.
     let route = crate::tx_scope::capture_route(scope, &binding);
 
     // The parse error folds into `settle`'s error arm via `?`; it made the same

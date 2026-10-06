@@ -191,8 +191,8 @@ fn concurrent_dedicated_clients_are_bounded_by_the_pool() {
                 .await
                 .expect("first dedicated client");
 
-            // THE INVERSION THIS STEP OWNS: a transaction that used to get a
-            // connection of its own now queues, and refuses when the wait expires.
+            // A transaction queues for a pool connection and refuses when the
+            // wait expires, rather than holding a connection of its own.
             // Conservative policy, and OWED a real decision: queue on the pool's
             // acquire timeout rather than refuse immediately, no per-app fairness, and
             // the ceiling is whatever the shared data pool is sized to.

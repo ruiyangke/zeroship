@@ -304,7 +304,7 @@ fn emit_for_rows(
 /// If a transaction is active on this thread, queue the event in
 /// the per-isolate context's `pending_emits` slot for the settle
 /// path to drain on COMMIT. Otherwise (autocommit), fire it
-/// immediately. Subscribers no longer observe pre-commit state.
+/// immediately. Subscribers observe committed state only.
 fn queue_or_emit(
     route: &crate::binding::DbRoute,
     in_tx: bool,

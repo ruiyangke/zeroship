@@ -387,7 +387,7 @@ function checkField(
     }
     return;
   } else if (type === "literal") {
-    // C2 — strict equality check against the declared literal value.
+    // Strict equality check against the declared literal value.
     if (value !== def.literalValue) {
       errors[key] = {
         path: key,
@@ -396,7 +396,7 @@ function checkField(
       return;
     }
   } else if (type === "union") {
-    // C2 — discriminated union dispatch. Find the variant whose
+    // Discriminated union dispatch. Find the variant whose
     // discriminator literal matches the value at the discriminator key,
     // then run nested validation against that variant's shape.
     if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -524,7 +524,7 @@ function checkField(
  * Returns the (possibly default-filled) document on success.
  */
 export function validateDoc(doc: Doc, schema: NormalizedSchema): Doc {
-  // C2 — flat-expanded discriminated-union schema. Locate the
+  // Flat-expanded discriminated-union schema. Locate the
   // discriminator column (FieldDef.discriminator === "__discriminator__"),
   // dispatch on the document's value at that key, and validate against
   // the matched variant's shape only. Fields not in the active variant
@@ -596,7 +596,7 @@ export function validateDoc(doc: Doc, schema: NormalizedSchema): Doc {
 
 /**
  * @internal
- * C2 — validate a document against a flat-expanded union schema.
+ * Validate a document against a flat-expanded union schema.
  * Dispatches on the discriminator value, validates against the matched
  * variant's shape, applies defaults for missing optional fields. Throws
  * `ValidationError` for unknown discriminator values OR for variant

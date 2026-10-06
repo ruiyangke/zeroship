@@ -13,11 +13,9 @@ use zeroship_data_orm::backend::{
 
 /// Refuse the run unless `tool` answers `--version` on PATH.
 ///
-/// The callers used to `#[ignore]` themselves statically, so this refusal was
-/// reachable only from a run that passed `--ignored` - and nothing in this
-/// repository passes it. The attribute therefore did not defer the check, it
-/// deleted the tests from every job that could have run them, which is the same
-/// silent green the refusal exists to prevent.
+/// A static `#[ignore]` would defer the check to a `--ignored` run, so the
+/// check lives here rather than behind the attribute: the same silent green the
+/// refusal exists to prevent.
 ///
 /// It takes the binary NAME because restore needs `pg_restore` as well as
 /// `pg_dump`, and a probe of only the first reports a machine as ready when the

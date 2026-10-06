@@ -293,8 +293,8 @@ pub fn transaction_dispatch<'s>(
 
     // The savepoint-depth cap is NOT re-checked here. `FrameStack::open_child`
     // refuses the (MAX+1)-th simultaneous frame before any `SAVEPOINT` reaches
-    // the wire and answers `savepoint_depth_exceeded`, which is the same code
-    // this used to produce. A second copy of the rule beside the state machine
+    // the wire and answers `savepoint_depth_exceeded`, the same code the state
+    // machine produces. A second copy of the rule beside the state machine
     // is a copy that can disagree with it.
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
@@ -306,11 +306,9 @@ pub fn transaction_dispatch<'s>(
         // never leaks into this one.
         // Serialise top-level transactions for this app on this isolate.
         // Only ONE tx connection slot exists per (app, isolate), so a
-        // second concurrent top-level transaction has nowhere to live: it
-        // used to evict the first (Postgres) or be refused by the single
-        // SQLite writer with `cannot start a transaction within a
-        // transaction`. Waiting turns both of those into "runs second and
-        // succeeds", which is what a creator writing
+        // second concurrent top-level transaction has nowhere to live and
+        // waits its turn: waiting turns the backend's refusal into "runs
+        // second and succeeds", which is what a creator writing
         // `Promise.all([db.transaction(a), db.transaction(b)])` means.
         //
         // Cannot deadlock: a genuinely NESTED call skips this (it does not
@@ -343,11 +341,9 @@ pub fn transaction_dispatch<'s>(
         // `Err` arm as a begin failure, so the admission claim is dropped and
         // released on that path too.
         //
-        // BEHAVIOUR CHANGE, stated rather than discovered: a cold
-        // `initialize_backend` now runs HERE, after `TxAdmission::acquire` but
-        // before the BEGIN, where it used to run deeper inside `open_session`.
-        // It shortens the window the claim is held across, but it is a change
-        // to admission timing, not a refactor.
+        // A cold `initialize_backend` runs HERE, after `TxAdmission::acquire`
+        // but before the BEGIN, which shortens the window the claim is held
+        // across. This is admission timing, not a refactor.
         let began = match crate::tx_scope::ensure_backend().await {
             Ok(backend) => {
                 match parent_scope
@@ -840,10 +836,8 @@ mod tests {
 
     /// The settle's own code reaches the creator, UNWRAPPED.
     ///
-    /// It used to be re-wrapped in `commit_failed_indeterminate`, which
-    /// labelled every failing settle "indeterminate" - including a COMMIT the
-    /// server answered `ROLLBACK`, whose outcome is not unknown at all. The
-    /// codes now come from `driver::outcome_error`, one per outcome.
+    /// `driver::outcome_error` maps one code per outcome, so a COMMIT the
+    /// server answered `ROLLBACK` is not labelled "indeterminate".
     #[test]
     fn a_settles_own_code_reaches_the_creator_unwrapped() {
         use crate::transaction::SettleOutcome;

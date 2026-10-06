@@ -239,7 +239,7 @@ function createTxQuery<S>(
       requireActiveTransaction(active);
       return unwrap(await query.paginate(opts));
     },
-    // **P9 PR 1** — Result→throw shims for the new terminals so the
+    // Result->throw shims for the new terminals so the
     // tx-callback contract (throw, not return Result) stays uniform.
     async first(): Promise<Row<S> | null> {
       requireActiveTransaction(active);
@@ -288,10 +288,7 @@ const RESERVED_ENV_DB_NAMES = new Set<string>([
   "__proto__",
   "collection",
   "constructor",
-  // **P9 PR 3** — `beginTransaction` removed: the native primitive was
-  // deleted entirely (transaction orchestration moved into Rust). The
-  // creator-facing `transaction` (below) is now a native method on
-  // `env.db`, so it stays reserved.
+  // `transaction` is a native method on `env.db`, so it stays reserved.
   "transaction",
   "live",
   "from",
@@ -382,7 +379,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
     return createLive<R>(queryFn, liveOptions);
   }
 
-  // **P9 PR 3** — transaction orchestration moved into Rust.
+  // Transaction orchestration lives in Rust.
   //
   // The native `env.db.transaction(callback, opts)` v8_method owns
   // begin / commit / rollback / nested-savepoint (see

@@ -789,7 +789,7 @@ fn a_transaction_lane_cannot_address_another_apps_tables() {
 /// own ATTACH by that name. No creator path reaches it - admission queues a
 /// second transaction for the route before reserving - so it is an internal
 /// refusal rather than a creator-facing code, and its message says which
-/// database it is, the distinction defect L22b names.
+/// database it is.
 #[test]
 fn a_second_reservation_of_the_same_database_is_refused_and_names_it() {
     Host::test(|host| {

@@ -1269,7 +1269,7 @@ fn bulk_args(row_pk: &str, columns: &[&str], actor: Option<Value>) -> BulkUnmask
         actor,
         reason: Some("mask_flip integration test".to_string()),
         // Args built in Rust never pass the sanitiser, so there is no refused
-        // claim to carry. The DB-3 tests drive `parse_bulk_args` instead.
+        // claim to carry; the `parse_bulk_args` tests cover the sanitised path.
         rejected_claim: None,
     }
 }

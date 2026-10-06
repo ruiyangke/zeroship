@@ -28,9 +28,9 @@ fn module(source: &str) -> Vec<ModuleEntry> {
 /// Build a real `Runtime` for `app_id` over `dir`, with the REAL
 /// `StorageBinding` registered (same path the worker takes).
 ///
-/// The trailing `exit_isolate()` mirrors `crates/zeroship-worker/src/cache.rs:405`
-/// ("Exit isolate so other isolates can be created/entered on this thread") —
-/// it is what lets several isolates coexist on one OS thread, and therefore
+/// The trailing `exit_isolate()` mirrors `Runtime::exit_isolate`
+/// (`crates/zeroship-runtime/src/core/runtime.rs`): it is what lets several
+/// isolates coexist on one OS thread, and therefore
 /// what makes a `thread_local!` registry shared across apps.
 fn build_runtime(app_id: &str, dir: &Path, source: &str) -> Runtime {
     let mut env_vars = HashMap::new();
@@ -53,8 +53,8 @@ fn build_runtime(app_id: &str, dir: &Path, source: &str) -> Runtime {
 ///
 /// `enter_isolate` / `exit_isolate` around the dispatch is mandatory for
 /// multi-isolate-per-thread callers (`Runtime::enter_isolate` doc,
-/// `crates/zeroship-runtime/src/core/runtime.rs:492`) and is exactly what
-/// `crates/zeroship-worker/src/handler.rs:386-396` does per request.
+/// `crates/zeroship-runtime/src/core/runtime.rs`) and is exactly what
+/// `crates/zeroship-worker/src/handler.rs` does per request.
 async fn fetch(runtime: &Runtime, headers: &[(String, String)]) -> (u16, String) {
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());
@@ -104,7 +104,7 @@ fn json_field<'a>(body: &'a str, key: &str) -> Option<&'a str> {
 // Apps
 // ---------------------------------------------------------------------------
 
-/// App A, phase 1: write an object and OPEN a download stream, then return
+/// App A: write an object and OPEN a download stream, then return
 /// its id WITHOUT draining it. The stream stays live in the registry.
 const APP_A_OPEN: &str = r#"
 export default {
@@ -174,7 +174,7 @@ fn cross_tenant_read_chunk_cannot_reach_another_apps_stream() {
         let rt_a_open = build_runtime("app_alpha", &dir, APP_A_OPEN);
         let rt_b = build_runtime("app_beta", &dir, APP_B_PROBE);
 
-        // -- phase 1: A opens a stream and leaves it live -------------------
+        // -- A opens a stream and leaves it live ----------------------------
         let (status, body) = fetch(&rt_a_open, &[]).await;
         assert_eq!(status, 200, "app A open failed; body: {body}");
         let stream_id = json_field(&body, "streamId")
@@ -188,7 +188,7 @@ fn cross_tenant_read_chunk_cannot_reach_another_apps_stream() {
 
         let hdr = vec![("x-stream-id".to_string(), stream_id.clone())];
 
-        // -- phase 2: B probes and cancels every id it can name -------------
+        // -- B probes and cancels every id it can name ----------------------
         let (status, body_b) = fetch(&rt_b, &hdr).await;
         assert_eq!(status, 200, "app B probe failed; body: {body_b}");
 
@@ -205,7 +205,7 @@ fn cross_tenant_read_chunk_cannot_reach_another_apps_stream() {
              B's response: {body_b}"
         );
 
-        // -- phase 3: A's stream must have survived B's cancel sweep --------
+        // -- A's stream must have survived B's cancel sweep -----------------
         let (status, body_a) = fetch(&rt_a_open, &hdr).await;
         assert_eq!(status, 200, "app A drain failed; body: {body_a}");
         assert_eq!(

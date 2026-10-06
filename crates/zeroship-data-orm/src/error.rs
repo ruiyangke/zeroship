@@ -128,11 +128,11 @@ impl IsolationLevel {
 
 /// How a transaction should be opened.
 ///
-/// **The protocol transports this, not SQL.** SC-1's step configuration used to
-/// carry a rendered `BEGIN [ISOLATION LEVEL ...]` string - a PostgreSQL dialect
-/// artifact threaded through the vendor-neutral state machine for the benefit of
-/// exactly one of the two backends, since the SQLite arm ignored it and sent a
-/// hardcoded `BEGIN`. The intent goes down; each lane spells it.
+/// **The protocol transports this, not SQL.** A rendered
+/// `BEGIN [ISOLATION LEVEL ...]` string is a PostgreSQL dialect object that
+/// would thread through the vendor-neutral state machine for the benefit of
+/// exactly one of the two backends, since the SQLite arm sends a hardcoded
+/// `BEGIN`. The intent goes down; each lane spells it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BeginIntent {
     /// Open at the backend's default isolation.
@@ -717,11 +717,9 @@ pub fn prefix_message(err: &mut DbError, prefix: &str) {
 }
 
 /// Return the first row from a query result slice, or surface a
-/// [`DbError::Internal`] naming the operation. Used to close the
-/// silent-empty-RETURNING bug class: callers that previously chained
-/// `.first().map(...).unwrap_or_default()` coerced an empty RETURNING
-/// set into a sentinel value (the audit-id=0 bug; the replication-slot
-/// empty-LSN twin was fixed alongside it). The helper
+/// [`DbError::Internal`] naming the operation. This closes the
+/// silent-empty-RETURNING bug class: a `.first().map(...).unwrap_or_default()`
+/// chain would coerce an empty RETURNING set into a sentinel value. The helper
 /// names the predicate in one place so every empty-RETURNING site
 /// emits the same `DbError::Internal { message: "<op>: returned no
 /// row" }` shape for every empty-`RETURNING` site.
@@ -842,8 +840,7 @@ impl From<zeroship_core::schema_name::SchemaNameError> for DbError {
 mod isolation_level_tests {
     use super::{DbError, IsolationLevel};
 
-    /// The validation half of what `transaction::build_begin_sql` used to do
-    /// in the engine, before the protocol stopped transporting SQL. Parsing is
+    /// The validation half of begin rendering: parsing is
     /// the ONLY place a creator's string is interpreted; the rendering half is
     /// `backend::postgres::render_begin`.
     #[test]

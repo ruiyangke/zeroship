@@ -24,7 +24,7 @@
 //!
 //! ## Harness
 //!
-//! Mirrors `crates/zeroship-runtime/tests/call_fetch_handler.rs::async_response`:
+//! Mirrors `crates/zeroship-runtime/tests/integration/call_fetch_handler.rs::async_response`:
 //! build a `Runtime` with the JS app + `KvBinding::new(...)` + an
 //! `APP_ID` env var, `start_pump()`, `call_fetch_handler(...)`, then drive
 //! the (likely Pending) outcome to a `SettledFetch::Response` via the
@@ -680,7 +680,8 @@ fn module(source: &str) -> Vec<ModuleEntry> {
 /// call the fetch handler, and return `(status, body)`. The handler is
 /// async (every assertion awaits a KV op), so `call_fetch_handler` returns
 /// `Pending` and the pump delivers the final `SettledFetch` via the
-/// receiver — same idiom as `call_fetch_handler.rs::async_response`.
+/// receiver, same idiom as
+/// `crates/zeroship-runtime/tests/integration/call_fetch_handler.rs::async_response`.
 fn run_e2e(store: KvStore, app_id: &str) -> (u16, String) {
     run_app(store, KV_E2E_APP, app_id)
 }

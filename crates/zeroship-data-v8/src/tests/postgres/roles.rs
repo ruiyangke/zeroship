@@ -262,14 +262,13 @@ async fn pool_reconnect_naming_a_binding_role_stays_internal() {
 
     // A SHORT lifetime the warm entry then outlives, not `Duration::ZERO`.
     //
-    // Zero used to work and stopped: `is_expired` is `Instant::now() >=
-    // expiry`, so a zero lifetime expires the entry at the instant it is
-    // created, and the pool's warm-up eligibility recheck then refuses to
-    // publish a pool at all - `warm-up connection 1 became unusable before pool
-    // publication`. That recheck is correct and deliberately covers lifetime:
-    // an entry that sat across later connects/hooks may genuinely have aged
-    // out. What was wrong was this fixture asking for a pool that can hold
-    // nothing in order to force one reconnect.
+    // `is_expired` is `Instant::now() >= expiry`, so a zero lifetime expires
+    // the entry at the instant it is created, and the pool's warm-up
+    // eligibility recheck refuses to publish a pool at all - `warm-up
+    // connection 1 became unusable before pool publication`. That recheck
+    // deliberately covers lifetime: an entry that sat across later
+    // connects/hooks may genuinely have aged out. The fixture asks for a pool
+    // that can hold nothing in order to force one reconnect.
     //
     // The sleep is a one-directional wait past a deadline, not a race: the
     // entry is eligible when `connect_with_pool_config` publishes it

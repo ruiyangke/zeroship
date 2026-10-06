@@ -1287,9 +1287,9 @@ impl TxReducer {
         // the root finish result was committed. A `Committed` result against a
         // rollback intent is a terminal-result mismatch, not a commit.
         //
-        // The two `RolledBack` arms stay separate deliberately: one is the L8
-        // case - a COMMIT the server refused - and the other is an ordinary
-        // rollback succeeding. They agree on the outcome for different reasons.
+        // The two `RolledBack` arms stay separate deliberately: one is a COMMIT
+        // the server refused and the other is an ordinary rollback succeeding.
+        // They agree on the outcome for different reasons.
         #[allow(
             clippy::match_same_arms,
             reason = "the L8 arm and the ordinary rollback arm agree on the \
@@ -1297,7 +1297,7 @@ impl TxReducer {
         )]
         let outcome = match (intent, result) {
             (SettleIntent::Commit, TerminalResult::Committed) => TerminalOutcome::Committed,
-            // The L8 case: a COMMIT PostgreSQL answered with the tag ROLLBACK
+            // A COMMIT PostgreSQL answered with the tag ROLLBACK
             // is a FAILED transaction, and it publishes nothing.
             (SettleIntent::Commit, TerminalResult::RolledBack) => TerminalOutcome::RolledBack,
             (SettleIntent::Rollback, TerminalResult::RolledBack) => TerminalOutcome::RolledBack,

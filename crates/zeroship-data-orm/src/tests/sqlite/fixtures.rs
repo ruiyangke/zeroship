@@ -107,12 +107,11 @@ pub(super) async fn unmask_setup_with_schema(
         .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
         .await
         .expect("ensure_app_schema");
-    // The audit table, APPLY-AHEAD. `crud/unmask.rs` used to create it itself
-    // on every dispatch; it no longer emits DDL at all, so something has to
-    // stand in here for the dev-tier apply host
-    // (`zeroship-migrate-node`'s `applyIr` under an in-process driver), exactly
-    // as the `apply_schema_ahead_of_runtime` fixtures stand in for it for
-    // creator tables.
+    // The audit table, APPLY-AHEAD. `protection/unmask.rs` emits no DDL
+    // on dispatch, so something has to stand in here for the dev-tier apply
+    // host (`zeroship-migrate-node`'s `applyIr` under an in-process driver),
+    // exactly as the `apply_schema_ahead_of_runtime` fixtures stand in for it
+    // for creator tables.
     //
     // These are the PRODUCTION bytes, from the production generator, not a copy
     // of them: `audit_unmask_ddl` is the same function the host calls. The

@@ -24,20 +24,11 @@ async fn parity_matrix_pg_matches_sqlite_projection() {
     assert_eq!(pg.seed, sqlite.seed);
     assert_eq!(pg.tx, sqlite.tx);
 
-    // THE BYTES DIVERGENCE IS GONE, and it used to be pinned right here. Until
-    // `crud::bytes_pass` landed, this block excluded `payload_bytes` from the
-    // comparison and pinned the two OBSERVED values instead: `M3EyKzd3PT0=` on
-    // Postgres and `3q2+7w==` on SQLite. The first of those is the base64 of the
-    // second - the write path had no `bytes` branch, so the SDK's base64 string
-    // was bound as text at a `bytea` column, Postgres parsed it in ESCAPE format
-    // and stored the 8 ASCII characters, and the read path (which is correct)
-    // base64'd those 8 bytes back out. Both pins were copied from what the code
-    // returned, which is why neither ever went red.
-    //
-    // What replaces them is not another pin: `expected_typed_projection` derives
-    // the expectation from `parity::TYPED_BYTES_RAW`, the four bytes the caller
-    // wrote, and `bytes_column_stores_raw_bytes_on_postgres` (below) reads the
-    // stored cell with a query that does not go through the SDK.
+    // Every typed field, `payload_bytes` included, is compared across both
+    // backends and against `parity::expected_typed_projection()`, which derives
+    // the expectation from `parity::TYPED_BYTES_RAW`, the bytes the caller wrote;
+    // `bytes_column_stores_raw_bytes_on_postgres` (below) reads the stored cell
+    // with a query that does not go through the SDK.
     assert_eq!(
         pg.typed, sqlite.typed,
         "every typed field must project identically on both backends"

@@ -528,7 +528,7 @@ impl Backend for S3 {
         // complete. If THIS future is drop-cancelled mid-flight (wall-timeout
         // cancel, client disconnect, LRU eviction), the guard's sync `Drop`
         // warns + enqueues the orphaned upload for a later async abort — the
-        // abort a `Drop` cannot itself perform (C1: no spawn/await in Drop).
+        // abort a `Drop` cannot itself perform (no spawn/await in Drop).
         let guard = compio_s3::MultipartGuard::new(s3_key.clone());
 
         let result = self
@@ -698,10 +698,9 @@ impl ChunkSource for S3Chunks {
 /// Render an S3 failure for the app, naming the operation that failed.
 ///
 /// `op` is mandatory rather than defaulted: every caller here goes through a
-/// different S3 verb, and eight of them used to collapse to the same
-/// contentless "s3 op" prefix, so a creator seeing a failure could not tell a
-/// refused HEAD from a failed multipart upload without the underlying S3
-/// message happening to say so.
+/// different S3 verb, and collapsing them to the same contentless "s3 op"
+/// prefix would leave a creator unable to tell a refused HEAD from a failed
+/// multipart upload unless the underlying S3 message happened to say so.
 ///
 /// `key` is the internal `<app_id>/<bucket>/<key>` layout. That is the app's
 /// own id and bucket, not another tenant's, so this is a layout detail rather

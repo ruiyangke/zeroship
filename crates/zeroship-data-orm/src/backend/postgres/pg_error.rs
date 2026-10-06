@@ -190,7 +190,7 @@ mod tests {
     //
     // `compio_postgres::Error` has no public constructor, so the SQLSTATE
     // arm itself is measured against a live server in
-    // `crates/zeroship-data-orm/tests/postgres_binding_fence.rs`. What is
+    // `crates/zeroship-data-orm/tests/integration/postgres_binding_fence.rs`. What is
     // pinned here is what a binding NAMES and what the codes are.
     // -----------------------------------------------------------------
 
