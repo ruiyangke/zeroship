@@ -10,8 +10,8 @@ import { fieldsOf, generatedSchema } from "./_install-helper.js";
  * - `insert()` without an `id` lets the platform mint one (no client-side
  *   mint required).
  *
- * Mirrors the Rust-side `dispatch_insert` auto-mint pass landed in this
- * PR (see `crates/zeroship-data-orm/src/crud/assignment_pass.rs`).
+ * Mirrors the Rust-side `dispatch_insert` auto-mint pass (see
+ * `crates/zeroship-data-orm/src/crud/assignment_pass.rs`).
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
@@ -24,7 +24,7 @@ type AnyRec = Record<string, unknown>;
 
 const postsSchema = { ...generatedSchema, title: t.string().required() };
 
-describe("P7 PR 3 — IdLoader accepts typed_id strings", () => {
+describe("IdLoader accepts typed_id strings", () => {
   test("id_loader_accepts_typed_id_string", async () => {
     const loader = new IdLoader<{ id: string; name: string }>(
       async (ids) => {
@@ -62,7 +62,7 @@ describe("P7 PR 3 — IdLoader accepts typed_id strings", () => {
   });
 });
 
-describe("P7 PR 3 — Collection.get(string) routes through the loader", () => {
+describe("Collection.get(string) routes through the loader", () => {
   function makeNative(rows: Record<string, AnyRec>) {
     const calls: { find: AnyRec[]; findOne: AnyRec[] } = { find: [], findOne: [] };
     const native = {
@@ -114,7 +114,7 @@ describe("P7 PR 3 — Collection.get(string) routes through the loader", () => {
 
 });
 
-describe("P7 PR 3 — Row<S>['id'] type widened to string", () => {
+describe("Row<S>['id'] type widened to string", () => {
   test("row_id_type_is_string", () => {
     type UserSchema = { name: TypeBuilder<string, true> };
     // Compile-time check via assignability — the literal succeeds iff
@@ -137,7 +137,7 @@ describe("P7 PR 3 — Row<S>['id'] type widened to string", () => {
   });
 });
 
-describe("P7 PR 3 — insert returns the platform-minted id", () => {
+describe("insert returns the platform-minted id", () => {
   test("insert_returns_row_with_string_id", async () => {
     // The native `insert` mock simulates the Rust-side
     // `dispatch_insert` returning the row with a minted typed_id.

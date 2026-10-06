@@ -1,12 +1,12 @@
 /**
- * R7 regression — top-level `t.json()` validation + tightened
+ * Top-level `t.json()` validation + tightened
  * `isJsonSerializable` predicate.
  *
  *  `checkField` has a `type === "json"` case, so a top-level
  *      `t.json()` field rejects non-JSON-serializable values
  *      (functions, symbols, cycles), mirroring the array-item branch.
  *
- *  m2. `isJsonSerializable` accepted `Map`/`Set`/typed-arrays because
+ *  `isJsonSerializable` accepted `Map`/`Set`/typed-arrays because
  *      `Object.values(...)` is empty on those built-ins — they would
  *      silently round-trip as `{}` through JSON.stringify. Tightened
  *      with an explicit instance-of check + a plain-object prototype
@@ -19,7 +19,7 @@ import { validateDoc, isJsonSerializable } from "../../../crates/zeroship-data-v
 import { fieldsOf } from "./_install-helper.js";
 import { ValidationError } from "../src/errors.js";
 
-describe("R7 M1 — top-level t.json() validates the value", () => {
+describe("top-level t.json() validates the value", () => {
   const schema = fieldsOf({ payload: t.json() });
 
   test("accepts plain JSON values (object, array, scalar, null)", () => {
@@ -68,7 +68,7 @@ describe("R7 M1 — top-level t.json() validates the value", () => {
   });
 });
 
-describe("R7 m2 — isJsonSerializable rejects Map/Set/typed-arrays/etc.", () => {
+describe("isJsonSerializable rejects Map/Set/typed-arrays/etc.", () => {
   test("rejects Map (Object.values is empty — would silently serialise as {})", () => {
     assert.equal(isJsonSerializable(new Map([["a", 1]])), false);
     assert.equal(isJsonSerializable(new Map()), false);

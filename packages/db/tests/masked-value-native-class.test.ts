@@ -17,10 +17,10 @@ import { generatedSchema } from "./_install-helper.js";
  *     plaintext map back through `_toField`.
  *
  * The RUNTIME behaviour of the native `MaskedValue` (brand check,
- * `toString` / `toJSON` → masked string, `unmask` success / failure,
+ * `toString` / `toJSON` -> masked string, `unmask` success / failure,
  * multi-column unmask, `canUnmask` probe) is exercised by the Rust
  * unit tests in `crates/zeroship-data-v8/src/v8_classes/masked_value.rs` and
- * the SQLite integration target — they require the V8 data adapter
+ * the SQLite integration target - they require the V8 data adapter
  * runtime, which this Node test harness does not host. The type-level
  * checks below pin the SDK's ambient `declare class MaskedValue` shape.
  */
@@ -39,7 +39,7 @@ type AnyRec = Record<string, unknown>;
 // 1. mapResultDoc passes native MaskedValue instances through
 // ---------------------------------------------------------------------------
 
-describe("P9 PR 2 — mapResultDoc passes native MaskedValue instances through", () => {
+describe("mapResultDoc passes native MaskedValue instances through", () => {
   const identity = (s: string) => s;
 
   test("a native-MaskedValue-shaped value is NOT reconstructed (passes by reference)", () => {
@@ -94,7 +94,7 @@ function makeNativeWithBulkUnmask(
   return { native: native as unknown as NativeDb, captured };
 }
 
-describe("P9 PR 2 — Collection.bulkUnmask → native Collection.bulkUnmask", () => {
+describe("Collection.bulkUnmask -> native Collection.bulkUnmask", () => {
   function makeDb(native: NativeDb) {
     return installSchemaForTest(
       {
@@ -156,7 +156,7 @@ describe("P9 PR 2 — Collection.bulkUnmask → native Collection.bulkUnmask", (
   });
   test("a native row missing from results yields an empty record for that row", async () => {
     const { native } = makeNativeWithBulkUnmask(async () => ({
-      // Native returned a different rowPk — defensive: SDK must not throw.
+      // Native returned a different rowPk - defensive: SDK must not throw.
       results: { usr_other: { ssn: "should-not-leak" } },
     }));
     const db = makeDb(native);
@@ -175,7 +175,7 @@ describe("P9 PR 2 — Collection.bulkUnmask → native Collection.bulkUnmask", (
 //    ambient declare class shape is honoured.
 // ---------------------------------------------------------------------------
 
-describe("P9 PR 2 — MaskedValue declare-class type surface (compile-time)", () => {
+describe("MaskedValue declare-class type surface (compile-time)", () => {
   // Compile-time assertion helper: a no-op at runtime; the win is `tsc`
   // rejecting a mismatched assignment.
   function assertType<T>(_v: T): void {
@@ -208,7 +208,7 @@ describe("P9 PR 2 — MaskedValue declare-class type surface (compile-time)", ()
   test("the declare class exposes the documented getters + method return types", () => {
     // Pure type-level: the assertions live inside a function that is
     // NEVER invoked (the methods are called on a `null` placeholder, so
-    // executing them would throw). `tsc` still typechecks the body — if
+    // executing them would throw). `tsc` still typechecks the body - if
     // a getter or method were dropped from the declare class, or its
     // signature changed, this file fails to compile.
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -227,7 +227,7 @@ describe("P9 PR 2 — MaskedValue declare-class type surface (compile-time)", ()
         mv.unmask(["ssn", "email"], { actor: { kind: "user" } }),
       );
     };
-    // No runtime work — the type assertions above are the gate.
+    // No runtime work - the type assertions above are the gate.
     assert.ok(true);
   });
 });

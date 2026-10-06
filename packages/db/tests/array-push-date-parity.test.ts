@@ -1,5 +1,5 @@
 /**
- * R7 m1 regression — `validateArrayPushOps`'s `date` branch was laxer
+ * `validateArrayPushOps`'s `date` branch was laxer
  * than `validate.ts`'s array-of-date branch: it accepted any string,
  * while `checkField` also requires `isParseableDateString`. So
  * `insert({dates: ["xyz"]})` was rejected but
@@ -15,7 +15,7 @@ import { fieldsOf } from "./_install-helper.js";
 import { ValidationError } from "../src/errors.js";
 import { validateArrayPushOps } from "../../../crates/zeroship-data-v8/js/runtime/collection.js";
 
-describe("R7 m1 — validateArrayPushOps date branch parity with array-validate", () => {
+describe("validateArrayPushOps date branch parity with array-validate", () => {
   const schema = fieldsOf({ dates: t.array(t.timestamp()) });
 
   test("validateDoc rejects an unparseable date string in the array", () => {

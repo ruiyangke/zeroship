@@ -49,7 +49,7 @@ export type {
 export type { NormalizedSchema } from "../../../packages/db/src/schema";
 export { validateCollectionIdentity } from "../../../packages/db/src/schema";
 
-// Test-only hooks — collected here so tests
+// Test-only hooks - collected here so tests
 // reaching into Collection's warning state hit the SAME module
 // instance as the runtime CRUD path.
 export {
@@ -61,13 +61,13 @@ export {
   __zeroshipDbWarnedAccShapesSize,
 } from "./runtime/utils";
 
-// Internal validation entry points — used by the c2-union tests which
+// Internal validation entry points - used by the discriminated-union tests which
 // exercise the validator against synthetic schemas without going
 // through Collection.{insert,update}. Same module-identity logic as
 // the warning hooks above.
 export { validateDoc, checkPartial } from "./runtime/validate";
 
-// Aggregate-pipeline translator — used by warned-acc-shapes-cap to
+// Aggregate-pipeline translator - used by warned-acc-shapes-cap to
 // drive the dedup state the matching test hook inspects.
 export { translateAggregatePipeline } from "./runtime/utils";
 

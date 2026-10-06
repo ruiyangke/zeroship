@@ -75,7 +75,7 @@ function makeNativeTxMock(rowsByTable: Record<string, AnyRec[]> = {}) {
   return native as unknown as import("../src/native.js").NativeDb & { _settles: string[] };
 }
 
-describe("P9 PR 3 — native env.db.transaction(fn)", () => {
+describe("native env.db.transaction(fn)", () => {
   test("transaction(fn) commits on resolve", async () => {
     const native = makeNativeTxMock();
     const db = installSchemaForTest(

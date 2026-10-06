@@ -82,7 +82,7 @@ function makeNativeRecording() {
   return { native: native as unknown as NativeDb, captured };
 }
 
-describe("P7 PR 5 — soft-delete: purge + restore + include_deleted opt-out", () => {
+describe("soft-delete: purge + restore + include_deleted opt-out", () => {
   test("purge_method_exists_and_resolves_with_row", async () => {
     const { native, captured } = makeNativeRecording();
     const db = installSchemaForTest(

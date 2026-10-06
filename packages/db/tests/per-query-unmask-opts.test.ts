@@ -28,7 +28,7 @@ import assert from "node:assert/strict";
 // `unmaskColumns` on one side without updating the other). The
 // type assertion at compile time is the real test; the runtime body
 // just asserts the shape is structurally usable.
-describe("P5.5 PR 7 — per-query unmask hint opts shape", () => {
+describe("per-query unmask hint opts shape", () => {
   test("ZeroshipDbFindOpts accepts unmask + actor + unmaskReason", () => {
     const opts: ZeroshipDbFindOpts = {
       unmask: ["ssn", "email"],

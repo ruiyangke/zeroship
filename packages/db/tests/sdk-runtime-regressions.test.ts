@@ -1,8 +1,9 @@
 /**
- * Round-1 critique regression tests. One test per CRITICAL fix the
- * fixer-agent landed; the suite exists so a future refactor that
- * accidentally re-introduces any of these regressions fails loud
- * here rather than in a downstream user app.
+ * Regressions across the SDK runtime: live query consumer bookkeeping,
+ * unindexed-query warnings, transaction routing across async
+ * continuations, the loader tx-race error code, and typed collections
+ * after `installSchema`. A future refactor that re-introduces any of
+ * these failures is caught here.
  */
 import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -23,7 +24,7 @@ function installEnv(native: unknown): void {
 // two `next()` calls settles both in order.
 // ---------------------------------------------------------------------------
 
-describe("CRITICAL #2 — db.live: FIFO pendingConsumers", () => {
+describe("db.live: FIFO pendingConsumers", () => {
   type SubEvent =
     | { kind: "change"; op: "insert" | "update" | "delete"; collection: string; pk: number; columns: string[] }
     | { kind: "resync" }
@@ -144,10 +145,9 @@ describe("CRITICAL #2 — db.live: FIFO pendingConsumers", () => {
   });
 
   test("rerun error rejects EVERY pending next() (FIFO error-path drain)", async () => {
-    // Round-2 regression — the original FIFO fix only rejected the
-    // head consumer on an error event; subsequent pending consumers
-    // would leak forever. Two racing iter.next() calls must BOTH
-    // observe the failure when the producer pumps an error.
+    // An error event must reject EVERY pending consumer, not only the
+    // head; two racing iter.next() calls must BOTH observe the failure
+    // when the producer pumps an error.
     let runCount = 0;
     const subs: ReturnType<typeof makeFakeSub>[] = [];
     const native = {
@@ -214,13 +214,13 @@ describe("CRITICAL #2 — db.live: FIFO pendingConsumers", () => {
 });
 
 // ---------------------------------------------------------------------------
-// CRITICAL #3 — _filterCoveredByIndex: multi-key filters require either
-// a covering compound index OR every key to be marked. The prior rule
-// silently hid scans like `find({userId, done})` when only `done` had
-// a single-field marker.
+// _filterCoveredByIndex: multi-key filters require either a covering
+// compound index OR every key to be marked. Otherwise scans like
+// `find({userId, done})` are silently hidden when only `done` has a
+// single-field marker.
 // ---------------------------------------------------------------------------
 
-describe("CRITICAL #3 — unindexed-query warning is strict for multi-key filters", () => {
+describe("unindexed-query warning is strict for multi-key filters", () => {
   let warnings: string[] = [];
   let origWarn: typeof console.warn;
 
@@ -398,11 +398,11 @@ describe("transaction bookkeeping follows async continuations", () => {
 });
 
 // ---------------------------------------------------------------------------
-// IMPORTANT #12 — loader.ts tx-race rejection must stamp a `code`
-// for callers branching on error.code.
+// loader.ts tx-race rejection must stamp a `code` for callers
+// branching on error.code.
 // ---------------------------------------------------------------------------
 
-describe("IMPORTANT #12 — loader tx-race rejection carries error.code", () => {
+describe("loader tx-race rejection carries error.code", () => {
   test("rejection from snapshot-vs-current mismatch has code === loader_tx_race", async () => {
     const { IdLoader } = await import("../../../crates/zeroship-data-v8/js/runtime/loader.js");
     let currentDepth = 0;
@@ -431,12 +431,12 @@ describe("IMPORTANT #12 — loader tx-race rejection carries error.code", () => 
 });
 
 // ---------------------------------------------------------------------------
-// CRITICAL #1 — Db<T> type erosion: not directly observable at runtime,
-// but a runtime sanity check on `db.users.Id` access shape and a smoke
+// Db<T> type erosion is not directly observable at runtime, but a
+// runtime sanity check on `db.users.Id` access shape and a smoke
 // `find().with(...)` call confirms the wiring still resolves.
 // ---------------------------------------------------------------------------
 
-describe("CRITICAL #1 — typed collections after installSchema", () => {
+describe("typed collections after installSchema", () => {
   test("collection wrappers carry their name and resolve relations", async () => {
     type AnyRec = Record<string, unknown>;
     const callLog: { table: string; filter: AnyRec }[] = [];
@@ -482,8 +482,7 @@ describe("CRITICAL #1 — typed collections after installSchema", () => {
     // Compile-time-only: the brand exists on the type but is never
     // assigned. Accessing it at runtime is `undefined`; the assertion
     // here is the wrapper itself has the property declared (the type
-    // wiring is what we actually care about — preserved by the
-    // CRITICAL #1 fix).
+    // wiring is what we actually care about).
     assert.equal(typeof db.users, "object");
     assert.equal(typeof db.todos, "object");
 

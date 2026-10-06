@@ -1,5 +1,5 @@
 /**
- * R4 IMPORTANT-2 regression — nested `db.live` whose `queryFn` touches
+ * Nested `db.live` whose `queryFn` touches
  * Collections must NOT leak reads into an enclosing live's tracker
  * when the inner live opts out of auto-tracking via explicit
  * `{ tables: [...] }`. Pre-fix the explicit-tables branch in
@@ -83,7 +83,7 @@ function makeMockNative() {
   return { native: native as unknown as NativeDb, rowsByTable, subs };
 }
 
-describe("R4 IMPORTANT-2 — nested live tracker isolation (explicit tables)", () => {
+describe("nested live tracker isolation (explicit tables)", () => {
   test("inner db.live({tables}) inside outer db.live() must NOT leak reads upward", async () => {
     const ctx = makeMockNative();
     installEnv(ctx.native);

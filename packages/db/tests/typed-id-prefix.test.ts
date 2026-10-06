@@ -15,7 +15,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { t } from "../src/index.js";
 
-describe("P7 — t.typedId(prefix) fence", () => {
+describe("t.typedId(prefix) fence", () => {
   test("t_id_blog_carries_idPrefix", () => {
     const def = t.typedId("blog").toFieldDef();
     assert.equal(def.type, "string");

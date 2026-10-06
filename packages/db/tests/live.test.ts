@@ -121,7 +121,7 @@ function makeMockNative(options?: { ready?: (name: string) => Promise<void> }) {
           // verbatim with no id at all, which was fine for tests that
           // never read the id back - until the "live + with" test
           // below needed a real FK value to join on. Mint one the same
-          // deterministic way `p9-pr3-native-transaction.test.ts`'s
+          // deterministic way `native-transaction.test.ts`'s
           // mock does.
           const minted = { id: `${name}_${(rowsByTable[name]?.length ?? 0) + 1}`, ...row };
           (rowsByTable[name] ??= []).push(minted);

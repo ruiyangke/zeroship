@@ -105,7 +105,7 @@ function extractUpdateFields(update: PlainObject): PlainObject {
  * Throws ValidationError if any pushed value does not match the declared items type.
  * Numeric operators ($inc, $dec, $mul) are skipped — they are inherently numeric.
  *
- * Exported for in-process regression tests (see `r5-array-item-validation.test.ts`).
+ * Exported for in-process regression tests (see `array-item-validation.test.ts`).
  * Production callers go through the collection update path.
  */
 export function validateArrayPushOps(

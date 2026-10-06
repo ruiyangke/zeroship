@@ -18,7 +18,7 @@
  *
  * This file is a type-only regression test in the `@ts-expect-error`
  * idiom already used elsewhere in this package (see
- * `filter-encryption-types.test.ts`, `c2-union.test.ts`): each marked
+ * `filter-encryption-types.test.ts`, `discriminated-union.test.ts`): each marked
  * line MUST fail to typecheck, or `tsc --noEmit` reports an "unused
  * @ts-expect-error directive" error. Verified directly (not only via
  * `node --test`, which runs these files through `tsx` and does not

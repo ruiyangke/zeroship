@@ -3,7 +3,7 @@
   // package's base tsconfig.json, whose `include` is `["src"]`. That means
   // nothing under `tests/` ever entered the TypeScript program, so the
   // `@ts-expect-error` type-only assertions carried by several tests/*.test.ts
-  // files (filter-encryption-types, c2-union, r5-array-item-validation,
+  // files (filter-encryption-types, discriminated-union, array-item-validation,
   // isolation-level-vocabulary) were checked by NOTHING: `tsc --noEmit`
   // never saw them, and `npm test` runs them through `tsx`, which strips
   // types without checking them.

@@ -24,7 +24,7 @@ import { generatedSchema } from "./_install-helper.js";
  *
  * The `MaskedValue` coercion / `unmask` / `canUnmask` invariants are pinned
  * by the Rust unit tests in `masked_value.rs` + the
- * `p9-pr2-masked-value-v8-class`
+ * `masked-value-native-class`
  * suite, not by `new MaskedValue(...)` in JS.
  */
 
@@ -36,10 +36,10 @@ import { t } from "../src/index.js";
 // (no runtime constructor). Its runtime behaviour (coercion, unmask,
 // brand check) is covered by the Rust unit tests in
 // `crates/zeroship-data-v8/src/v8_classes/masked_value.rs` and the
-// `p9-pr2-masked-value-v8-class` suite.
+// `masked-value-native-class` suite.
 import type { Row, MaskedValue } from "../src/index.js";
 
-describe("P5.5 PR 1 — .encrypted() default-mask rule", () => {
+describe(".encrypted() default-mask rule", () => {
   test("bare .encrypted() auto-populates mask = { kind: 'full', classification: 'pii' }", () => {
     const b = t.string().encrypted();
     const def = b.toFieldDef();
@@ -71,7 +71,7 @@ describe("P5.5 PR 1 — .encrypted() default-mask rule", () => {
   });
 });
 
-describe("P5.5 PR 1 — t.string().mask(...) DSL modifier", () => {
+describe("t.string().mask(...) DSL modifier", () => {
   test("t.string().mask({ kind: 'email' }) records mask metadata", () => {
     const b = t.string().mask({ kind: "email" });
     const def = b.toFieldDef();
@@ -118,7 +118,7 @@ describe("P5.5 PR 1 — t.string().mask(...) DSL modifier", () => {
     );
   });
 
-  test(".mask() on t.ref('users') rejects with encrypted_on_ref_unsupported (Q-P5-I)", () => {
+  test(".mask() on t.ref('users') rejects with encrypted_on_ref_unsupported", () => {
     assert.throws(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       () => (t.ref("users") as any).mask({ kind: "full" }),
@@ -151,7 +151,7 @@ describe("P5.5 PR 1 — t.string().mask(...) DSL modifier", () => {
   });
 });
 
-describe("P5.5 PR 1 — Row<S> type inference (compile-time)", () => {
+describe("Row<S> type inference (compile-time)", () => {
   // `MaskedValue` is a type-only `declare class`, so the
   // masked-column slots below use `as unknown as MaskedValue<string>`
   // casts rather than `new MaskedValue(...)`. The load-bearing

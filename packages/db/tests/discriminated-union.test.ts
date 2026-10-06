@@ -18,10 +18,10 @@ import { fieldsOf } from "./_install-helper.js";
 import type { NativeDb } from "../src/native.js";
 
 // ---------------------------------------------------------------------------
-// t.literal() — primitive literal field
+// t.literal() - primitive literal field
 // ---------------------------------------------------------------------------
 
-describe("C2 — t.literal()", () => {
+describe("t.literal()", () => {
   test("t.literal('login') produces FieldDef.type === 'literal' with literalValue", () => {
     const def = t.literal("login").toFieldDef();
     assert.equal(def.type, "literal");
@@ -38,20 +38,20 @@ describe("C2 — t.literal()", () => {
   });
 
   test("t.literal rejects null / undefined / object", () => {
-    // @ts-expect-error — null not allowed
+    // @ts-expect-error - null not allowed
     assert.throws(() => t.literal(null));
-    // @ts-expect-error — undefined not allowed
+    // @ts-expect-error - undefined not allowed
     assert.throws(() => t.literal(undefined));
-    // @ts-expect-error — object not allowed
+    // @ts-expect-error - object not allowed
     assert.throws(() => t.literal({}));
   });
 });
 
 // ---------------------------------------------------------------------------
-// t.union() — discriminator auto-detection
+// t.union() - discriminator auto-detection
 // ---------------------------------------------------------------------------
 
-describe("C2 — t.union() discriminator auto-detection", () => {
+describe("t.union() discriminator auto-detection", () => {
   test("auto-detects 'kind' when every variant uses it as a literal", () => {
     const def = t
       .union(
@@ -96,7 +96,7 @@ describe("C2 — t.union() discriminator auto-detection", () => {
 
   test("rejects ambiguous discriminator (two candidate literals)", () => {
     // Both `kind` and `tag` are literals in every variant with distinct
-    // values — ambiguous, must throw.
+    // values - ambiguous, must throw.
     assert.throws(
       () =>
         t.union(
@@ -108,7 +108,7 @@ describe("C2 — t.union() discriminator auto-detection", () => {
   });
 
   test("rejects when literal values are not distinct", () => {
-    // Both variants use `kind: "same"` — can't dispatch on the
+    // Both variants use `kind: "same"` - can't dispatch on the
     // discriminator. With no other literal field that's distinct, this
     // is rejected.
     assert.throws(
@@ -122,7 +122,7 @@ describe("C2 — t.union() discriminator auto-detection", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Validation — discriminator dispatch
+// Validation - discriminator dispatch
 // ---------------------------------------------------------------------------
 
 /**
@@ -149,7 +149,7 @@ function flatUnionSchema(union: { toFieldDef(): FieldDef }): Record<string, Fiel
   };
 }
 
-describe("C2 — validation dispatch on discriminator", () => {
+describe("validation dispatch on discriminator", () => {
   function eventsSchema() {
     return flatUnionSchema(
       t.union(
@@ -172,7 +172,7 @@ describe("C2 — validation dispatch on discriminator", () => {
     );
   }
 
-  test("c2_union_validate_login_variant — valid login event passes", () => {
+  test("valid login event passes", () => {
     const s = eventsSchema();
     const out = validateDoc({ kind: "login", userId: 7, ip: "10.0.0.1" }, s);
     assert.equal(out.kind, "login");
@@ -183,16 +183,16 @@ describe("C2 — validation dispatch on discriminator", () => {
     assert.equal(out.name, undefined);
   });
 
-  test("c2_union_validate_error_variant — valid error event passes", () => {
+  test("valid error event passes", () => {
     const s = eventsSchema();
     const out = validateDoc({ kind: "error", message: "boom" }, s);
     assert.equal(out.kind, "error");
     assert.equal(out.message, "boom");
-    // Optional `stack` absent → stripped
+    // Optional `stack` absent -> stripped
     assert.equal(out.stack, undefined);
   });
 
-  test("c2_union_rejects_wrong_discriminator — kind: 'unknown' fails", () => {
+  test("rejects wrong discriminator - kind: 'unknown' fails", () => {
     const s = eventsSchema();
     try {
       validateDoc({ kind: "unknown", message: "x" }, s);
@@ -204,7 +204,7 @@ describe("C2 — validation dispatch on discriminator", () => {
     }
   });
 
-  test("c2_union_rejects_missing_required_in_variant — login without userId fails", () => {
+  test("rejects missing required field in matched variant - login without userId fails", () => {
     const s = eventsSchema();
     try {
       validateDoc({ kind: "login", ip: "1.2.3.4" }, s);
@@ -249,7 +249,7 @@ describe("C2 — validation dispatch on discriminator", () => {
 // Partial-update validation (`checkPartial` via Collection.update)
 // ---------------------------------------------------------------------------
 
-describe("C2 — partial update against a flat-expanded union", () => {
+describe("partial update against a flat-expanded union", () => {
   function makeMockNative() {
     const native = {
       collection(_name: string) {
@@ -266,7 +266,7 @@ describe("C2 — partial update against a flat-expanded union", () => {
   test("update({id}, {kind: 'invalidLiteral'}) rejects with ValidationError on the enum guard", async () => {
     // The flat expansion turns the discriminator into a `string` column
     // with `enum: ["login", "error"]`. `checkPartial` exercises the
-    // enum branch — invalid literals must reject.
+    // enum branch - invalid literals must reject.
     const eventsSchema = {
       ...flatUnionSchema(t.union(
         t.object({
@@ -297,7 +297,7 @@ describe("C2 — partial update against a flat-expanded union", () => {
   // Patching a valid discriminator value without re-stating the new
   // variant's required fields must fail rather than leave the row in an
   // inconsistent state.
-  test("c2_union_gap_j_discriminator_only_patch_rejects_missing_variant_required", () => {
+  test("discriminator-only patch rejects a missing variant-required field", () => {
     const s = flatUnionSchema(
       t.union(
         t.object({
@@ -321,7 +321,7 @@ describe("C2 — partial update against a flat-expanded union", () => {
     );
   });
 
-  test("c2_union_gap_j_discriminator_with_variant_fields_passes", () => {
+  test("discriminator patch carrying the variant fields passes", () => {
     const s = flatUnionSchema(
       t.union(
         t.object({
@@ -339,9 +339,9 @@ describe("C2 — partial update against a flat-expanded union", () => {
     );
   });
 
-  test("c2_union_gap_j_non_discriminator_patch_unaffected", () => {
+  test("non-discriminator patch is unaffected", () => {
     // A patch that doesn't touch the discriminator must not invoke
-    // the Gap J variant-required check.
+    // the variant-required check.
     const s = flatUnionSchema(
       t.union(
         t.object({
@@ -357,7 +357,7 @@ describe("C2 — partial update against a flat-expanded union", () => {
     assert.doesNotThrow(() => checkPartial({ userId: 42 }, s));
   });
 
-  test("c2_union_gap_j_multiple_missing_listed_in_message", () => {
+  test("multiple missing variant fields are listed in the message", () => {
     const s = flatUnionSchema(
       t.union(
         t.object({ kind: t.literal("a"), x: t.string().required() }),
@@ -381,10 +381,10 @@ describe("C2 — partial update against a flat-expanded union", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Nested t.union() inside t.object() — validation passes through
+// Nested t.union() inside t.object() - validation passes through
 // ---------------------------------------------------------------------------
 
-describe("C2 — nested t.union() inside t.object()", () => {
+describe("nested t.union() inside t.object()", () => {
   test("nested union dispatch via t.object validator", () => {
     const s = fieldsOf({
       payload: t.union(

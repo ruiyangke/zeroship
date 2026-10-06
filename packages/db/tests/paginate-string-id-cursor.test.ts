@@ -1,5 +1,5 @@
 /**
- * R7 m4 regression — `Query.paginate` cursor semantics.
+ * `Query.paginate` cursor semantics.
  *
  * The cursor now carries string ids directly. Terminal pages still
  * normalize `continueCursor` to `""`.
@@ -52,7 +52,7 @@ describe("Query.paginate string-id cursor handling", () => {
   });
 });
 
-describe("R7 m4 — Query.paginate returns continueCursor === \"\" when isDone", () => {
+describe("Query.paginate returns continueCursor === \"\" when isDone", () => {
   test("first-and-only page (rows < numItems+1): continueCursor is \"\"", async () => {
     const { fn } = makeMockNative([[{ id: "1" }, { id: "2" }]]);
     const { data } = await new Query("u", {}, fn).paginate({ numItems: 5 });

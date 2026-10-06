@@ -43,7 +43,7 @@ function makeNativeOptimisticConcurrencyFailure() {
   return native as unknown as NativeDb;
 }
 
-describe("P7 PR 4 — update() + version CAS via runtime", () => {
+describe("update() + version CAS via runtime", () => {
   test("update_returns_row_with_incremented_version", async () => {
     const { native, captured } = makeNativeCapturingUpdate();
     const db = installSchemaForTest(

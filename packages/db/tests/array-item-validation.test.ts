@@ -31,7 +31,7 @@ test("documents and array operators reject unknown item metadata", () => {
   }
 });
 
-describe("R5 MINOR — t.array() rejects non-primitive item types", () => {
+describe("t.array() rejects non-primitive item types", () => {
   test("rejects t.array(t.ref('users'))", () => {
     try {
       t.array(t.ref("users"));
@@ -115,13 +115,12 @@ describe("R5 MINOR — t.array() rejects non-primitive item types", () => {
 });
 
 /**
- * R6 MINOR regression — R5 admitted `"json"` and `"calendarDate"` to
- * `PRIMITIVE_ITEM_TYPES` at declaration time, but the runtime array-item
- * validators in `validate.ts` and `collection.ts` (`validateArrayPushOps`)
- * only branched on the original four primitives, so the two new types
- * passed through unvalidated. Cover both validators here.
+ * `json` and `calendarDate` are admitted to `PRIMITIVE_ITEM_TYPES` at
+ * declaration time, but the runtime array-item validators in
+ * `validate.ts` and `collection.ts` (`validateArrayPushOps`) must also
+ * validate each item. Cover both validators here.
  */
-describe("R6 MINOR — t.array(t.calendarDate()) validates each item", () => {
+describe("t.array(t.calendarDate()) validates each item", () => {
   const schema = fieldsOf({ days: t.array(t.calendarDate()) });
 
   test("accepts a list of YYYY-MM-DD strings", () => {
@@ -177,7 +176,7 @@ describe("R6 MINOR — t.array(t.calendarDate()) validates each item", () => {
   });
 });
 
-describe("R6 MINOR — t.array(t.json()) validates each item", () => {
+describe("t.array(t.json()) validates each item", () => {
   const schema = fieldsOf({ data: t.array(t.json()) });
 
   test("accepts JSON-serialisable items (objects, arrays, scalars, null)", () => {

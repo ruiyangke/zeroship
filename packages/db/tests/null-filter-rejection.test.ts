@@ -60,7 +60,7 @@ function makeRecordingNative() {
   return { native: native as unknown as NativeDb, calls };
 }
 
-describe("R4 IMPORTANT-1 — null/non-object filter rejection", () => {
+describe("null/non-object filter rejection", () => {
   test("deleteMany(null) resolves to Result.error with code=INVALID_FILTER", async () => {
     const { native, calls } = makeRecordingNative();
     installEnv(native);
