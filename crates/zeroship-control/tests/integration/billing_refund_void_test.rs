@@ -1839,7 +1839,7 @@ async fn refund_to_credit_double_drive_appends_exactly_one_grant() {
 // ===========================================================================
 
 #[compio::test(crate = "crate::support::live")]
-async fn void_reissue_is_redrivable_after_phase1_crash() {
+async fn void_reissue_is_redrivable_after_a_void_only_crash() {
     let url = db_url();
     let fx = build_fixture(&url, "redrive").await;
     let now = now_for_closed_period().await;

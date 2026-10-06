@@ -85,9 +85,9 @@ scope = "all"
 //    fresh ambient recorder, and read the drained envelope back off a global.
 //    Here that graph wires the package's v1 recorder and emits ir_version:1.
 
-/// The Stage-2 authoring glue (imports the migration + the recorder seam, runs
-/// `schema()`, emits the v1 envelope on `globalThis.__zsStage2IR`).
-const STAGE2_RECORDER_JS: &str = include_str!("stage2_recorder.js");
+/// The v1 authoring glue (imports the migration + the recorder seam, runs
+/// `schema()`, emits the v1 envelope on `globalThis.__zsRecorderV1IR`).
+const RECORDER_V1_JS: &str = include_str!("recorder_v1.js");
 
 /// The `@zeroship/migrate` recorder bundle — the CURRENT v1 DSL + recorder
 /// (`table()`/`t.*` → `__begin`/`__drain`). This is the engine package's
@@ -121,8 +121,8 @@ fn author_v1_envelope(migration_source: &str, name: &str) -> String {
     // `@zeroship/migrate` (mapped to the package's v1 bundle).
     let modules = vec![
         ModuleEntry {
-            specifier: "stage2_recorder.js".to_string(),
-            source: STAGE2_RECORDER_JS.to_string(),
+            specifier: "recorder_v1.js".to_string(),
+            source: RECORDER_V1_JS.to_string(),
         },
         ModuleEntry {
             // The registry is keyed on NORMALISED specifiers: `resolve_specifier`
@@ -160,11 +160,11 @@ fn author_v1_envelope(migration_source: &str, name: &str) -> String {
         scope.perform_microtask_checkpoint();
 
         let global = scope.get_current_context().global(scope);
-        let k = v8::String::new(scope, "__zsStage2IR").ok_or("alloc __zsStage2IR key")?;
+        let k = v8::String::new(scope, "__zsRecorderV1IR").ok_or("alloc __zsRecorderV1IR key")?;
         let v = global
             .get(scope, k.into())
             .filter(|v| v.is_string())
-            .ok_or("glue left no __zsStage2IR string")?;
+            .ok_or("glue left no __zsRecorderV1IR string")?;
         Ok(v.to_rust_string_lossy(scope))
     });
 

@@ -84,7 +84,7 @@ describe("relay listener — postMessage handshake (gateway §4.4)", () => {
   });
 });
 
-describe("relay listener — state filtering (MAJOR fix: no cross-flow delivery)", () => {
+describe("relay listener - state filtering (no cross-flow delivery)", () => {
   test("IGNORES (keeps waiting) an envelope whose state does not match", async () => {
     const h = makeHarness();
     const env = resolveEnv(h.env);

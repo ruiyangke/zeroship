@@ -687,7 +687,7 @@ export function checkPartial(doc: Doc, schema: NormalizedSchema): void {
     if (value === undefined || value === null) continue;
     checkField(key, value, def, errors);
 
-    // Gap J — `checkPartial` has no row context, so a patch that
+    // `checkPartial` has no row context, so a patch that
     // changes a flat-expanded union discriminator must also carry
     // every variant-required field for the new variant. Otherwise
     // `{kind: "signup"}` would leave the row claiming kind=signup

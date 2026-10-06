@@ -1,5 +1,5 @@
 /**
- * R3 IMPORTANT-5 — type-shape error clarity.
+ * Type-shape error clarity.
  *
  * When a user writes `{ name: "string" }` instead of `{ name: t.string() }`
  * the type layer must produce an actionable error message. The constraint
@@ -25,7 +25,7 @@ const native = {
   collection: (_n: string) => ({ async find() { return []; }, async findOne() { return null; }, async insert(r: Record<string, unknown>) { return r; } }),
 } as unknown as NativeDb;
 
-describe("schema-shape error clarity (R3 IMPORTANT-5)", () => {
+describe("schema-shape error clarity", () => {
   test("valid t.* builder fields compile and install", () => {
     const db = installSchemaForTest(
       { users: { name: t.string().required() } },

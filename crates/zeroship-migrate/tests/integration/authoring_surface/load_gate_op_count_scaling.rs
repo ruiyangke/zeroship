@@ -104,7 +104,7 @@ fn validate_ir_does_not_scale_quadratically_in_op_count() {
          ({small:.3}s -> {large:.3}s), over the 3.0x ceiling this guard holds. \
          Quadratic is ~4x for a doubling and linear-ish is ~2x, so a ratio this \
          high means the per-op cost is growing with N again - the quadratic scan \
-         F664 removed. Re-run on an IDLE machine before believing it: these are \
+         the fix removed. Re-run on an IDLE machine before believing it: these are \
          wall-clock ratios, and heavy background load inflates them"
     );
 }
@@ -114,7 +114,7 @@ fn validate_ir_does_not_scale_quadratically_in_op_count() {
 /// The test above asserts a general-sounding claim -- "validate_ir does not scale
 /// quadratically in op count" -- while building its envelope entirely from
 /// `dropTable`. `createTable` takes a different path through the declaration
-/// map, and that path stayed quadratic long after F664 was fixed: 4000 -> 8000
+/// map, and that path stayed quadratic long after the pass above was fixed: 4000 -> 8000
 /// ops cost 0.68s -> 3.10s (4.5x). A guard whose name is broader than its
 /// fixture reads as covering ground it never touched.
 ///

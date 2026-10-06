@@ -144,7 +144,7 @@ test("@zeroship/migrate core exports enumType, pg vendor names, and omits old na
   assert.equal((imported as any).pgDomain, undefined);
 });
 
-test("SA-7: enumType.create rejects an empty values[] at authoring time", () => {
+test("enumType.create rejects an empty values[] at authoring time", () => {
   assert.throws(
     () => record(() => enumType("empty_enum").create({ values: [] })),
     (e: any) => e.code === "OP_INVALID" && /non-empty string\[\]/.test(e.message),
@@ -165,7 +165,7 @@ test("enumType is inert until a terminal records", () => {
   ]);
 });
 
-test("SA-6: sequence({ as }) rejects a type outside { int, bigInt }", () => {
+test("sequence({ as }) rejects a type outside { int, bigInt }", () => {
   assert.throws(
     () => record(() => sequence("s").create({ as: t.text() })),
     (e: any) => e.code === "OP_INVALID" && /as must be one of int \| bigInt/.test(e.message),
@@ -761,7 +761,7 @@ test("named type payloads record the same ColType tokens", () => {
   assert.equal(ops[0].columns.find((col: any) => col.name === "embedding").vectorMetric, "cosine");
 });
 
-test("C2 — create() column that is both .unique() + .primaryKey() emits NO column-level unique", () => {
+test("create() column that is both .unique() + .primaryKey() emits NO column-level unique", () => {
   // A PRIMARY KEY already implies uniqueness, so the per-column image must NOT
   // carry `unique:true` (lock-step with the addColumn-path suppression + the
   // differ) — only the top-level primaryKey is recorded.
@@ -869,7 +869,7 @@ test("public and engine recorders match for nextval defaults", () => {
   assert.deepEqual(publicOps, engineOps);
 });
 
-test("C2 — .column().add({ type: t.text().unique() }) emits the column + a follow-on unique", () => {
+test(".column().add({ type: t.text().unique() }) emits the column + a follow-on unique", () => {
   const ops = record(() => table("u").column("email").add({ type: t.text().required().unique() }));
   assert.equal(ops.length, 2, "an addColumn + a follow-on addConstraint(unique)");
   assert.equal(ops[0].op, "addColumn");
@@ -881,7 +881,7 @@ test("C2 — .column().add({ type: t.text().unique() }) emits the column + a fol
   assert.deepEqual(ops[1].constraint, { kind: { kind: "unique", columns: ["email"] } });
 });
 
-test("C2 — primary key is create-time only: .column().add({ type: t.uuid().primaryKey() }) records NO pk follow-on", () => {
+test("primary key is create-time only: .column().add({ type: t.uuid().primaryKey() }) records NO pk follow-on", () => {
   // The always-refused user PRIMARY KEY constraint shape is deleted; `.primaryKey()`
   // on an added column records only the addColumn (no addConstraint(pk)). PKs are
   // authored at create time via `create({ primaryKey })` / a create() column facet.
@@ -894,7 +894,7 @@ test("C2 — primary key is create-time only: .column().add({ type: t.uuid().pri
   );
 });
 
-test("C2 — .column().add({ type: t.text().unique().primaryKey() }) records the unique follow-on (no pk shape)", () => {
+test(".column().add({ type: t.text().unique().primaryKey() }) records the unique follow-on (no pk shape)", () => {
   // With the pk constraint shape gone, the `.unique()` follow-on is unconditional:
   // the added column emits addColumn + addConstraint(unique).
   const ops = record(() => table("u").column("id").add({ type: t.text().unique().primaryKey() }));
@@ -1130,7 +1130,7 @@ test("foreignKey().add validates its name and ordered tuple arity before recordi
   );
 });
 
-test("C1 — .foreignKey().add({ onDelete }) emits onDelete/onUpdate; absent ⇒ omitted", () => {
+test(".foreignKey().add({ onDelete }) emits onDelete/onUpdate; absent means omitted", () => {
   const withAction = record(() =>
     table("orders").foreignKey("fk").add({
       columns: ["customer_id"],
@@ -2163,7 +2163,7 @@ test("col.case validates the object branch shape", () => {
   );
 });
 
-test("eq(null)/ne(null) are record-time errors steering to isNull()/isNotNull() (P4)", () => {
+test("eq(null)/ne(null) are record-time errors steering to isNull()/isNotNull()", () => {
   assert.throws(
     () => record(() => table("t").check("c_eq").add({ expr: (col) => col("a").eq(null) })),
     /eq\(null\) is always UNKNOWN in SQL — use isNull\(\)/,

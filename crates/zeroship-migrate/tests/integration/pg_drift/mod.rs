@@ -13,7 +13,7 @@ mod drift_noop_index_predicate_pg;
 mod drift_plain_column_default_pg;
 mod drift_unattributed_snapshot;
 mod drift_view_body_pg;
-mod f721_unguarded_index_shape;
+mod unguarded_index_shape_is_refused;
 mod fold_cross_schema_drift_pg;
 mod index_exact_name_shape_pg;
 mod index_name_scheme_alias_pg;

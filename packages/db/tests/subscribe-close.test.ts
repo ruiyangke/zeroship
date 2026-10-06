@@ -1,5 +1,5 @@
 /**
- * Robustness — `Subscription` iterator close semantics (Gap N / AA).
+ * Robustness - `Subscription` iterator close semantics.
  *
  * Three edges:
  *   1. `next()` after explicit `close()` → iterator yields `{done: true}`.

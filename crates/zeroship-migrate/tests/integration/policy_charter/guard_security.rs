@@ -1121,7 +1121,7 @@ fn flags_for_non_transactional_sets_transactional_false() {
 }
 
 // ===========================================================================
-// ROUND 2 — slot-class hardening (typed qualified-name walk)
+// slot-class hardening (typed qualified-name walk)
 // ===========================================================================
 
 // ---------------------------------------------------------------------------
@@ -1413,7 +1413,7 @@ fn sequence_owned_by_own_table_passes() {
 }
 
 // ---------------------------------------------------------------------------
-// ROUND 3 — type-creation target confinement (MAJOR-1)
+// Type-creation target confinement
 //
 // `CREATE TYPE`/`CREATE TYPE … AS RANGE`/`ALTER TYPE … ADD VALUE` carry their
 // target schema in a `type_name` qualified-name list (NOT a `TypeName.names`
@@ -1490,7 +1490,7 @@ fn alter_type_set_in_own_schema_passes() {
 }
 
 // ---------------------------------------------------------------------------
-// ROUND 3 — identity SEQUENCE NAME target confinement (MAJOR-2)
+// Identity SEQUENCE NAME target confinement
 //
 // `GENERATED … AS IDENTITY (SEQUENCE NAME <schema>.s)` carries the foreign
 // schema in a `sequence_name` DefElem whose arg is a `List[schema, name]` —
@@ -1535,7 +1535,7 @@ fn identity_sequence_name_unqualified_passes() {
 }
 
 // ---------------------------------------------------------------------------
-// ROUND 3 — qualified-builtin over-denial (MINOR)
+// qualified-builtin over-denial
 //
 // A qualified builtin opclass/collation (`pg_catalog.text_ops`,
 // `pg_catalog."C"`) is legitimate and must PASS — `pg_catalog` is exempt for
@@ -1564,7 +1564,7 @@ fn index_opclass_control_schema_stays_cross_schema() {
 }
 
 // ---------------------------------------------------------------------------
-// ROUND 3 (convergence) — DROP <obj> <foreign>.x via the `objects` list slot
+// DROP <obj> <foreign>.x via the `objects` list slot
 //
 // `DropStmt.objects` is a *plural* list whose items are `List`/`TypeName`/
 // `ObjectWithArgs` nodes carrying the qualified object name. The walk read the
@@ -1616,9 +1616,9 @@ fn drop_own_schema_objects_pass() {
 }
 
 #[test]
-fn round3_legit_own_schema_batch_has_no_new_over_denials() {
-    // A spread of realistic own-schema migrations touching every slot the
-    // round-3 fixes added: enums/range/identity-sequences/qualified-builtin
+fn legit_own_schema_batch_has_no_new_over_denials() {
+    // A spread of realistic own-schema migrations touching every schema-bearing
+    // slot: enums/range/identity-sequences/qualified-builtin
     // opclass+collate/composite/OF-type. All must PASS.
     for sql in [
         "CREATE TYPE project_acme.mood AS ENUM ('happy','sad')",
@@ -2049,7 +2049,7 @@ fn xpath_over_xml_value_passes() {
 // ===========================================================================
 
 #[test]
-fn t2_func_def_target_under_single_is_cross_schema() {
+fn single_scope_func_def_target_is_cross_schema() {
     // site 2 (check_func_def_target): a CREATE/ALTER FUNCTION defining into a
     // schema other than the single project schema is CrossSchema.
     assert_cross_schema("CREATE FUNCTION public.f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$");
@@ -2059,7 +2059,7 @@ fn t2_func_def_target_under_single_is_cross_schema() {
 }
 
 #[test]
-fn t2_literal_schema_refs_under_single_is_cross_schema() {
+fn single_scope_literal_schema_refs_are_cross_schema() {
     // site 3 (check_literal_schema_refs): a schema named inside a reg* cast /
     // name-resolving builtin literal is held to the single-schema policy.
     assert_cross_schema("SELECT 'control.t'::regclass");
@@ -2071,7 +2071,7 @@ fn t2_literal_schema_refs_under_single_is_cross_schema() {
 }
 
 #[test]
-fn t2b_privileged_constructs_still_denied_under_confined() {
+fn confined_still_denies_privileged_constructs() {
     // Everything the Platform profile flips MUST stay denied for a creator.
     assert_denied("CREATE ROLE evil");
     assert_denied("ALTER ROLE evil SET search_path = control");

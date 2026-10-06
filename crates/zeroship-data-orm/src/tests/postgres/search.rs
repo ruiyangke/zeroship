@@ -271,7 +271,7 @@ fn pgvector_extension_missing_reports_typed_error() {
             // SHARED, cluster-/db-wide object (the `vector` extension lives in
             // `public`, not in a per-app schema), so leaving it dropped breaks every
             // vector-dependent test ordered after this one in a single-threaded run
-            // (e.g. `p4_round_trip_encrypted_masked_vector_via_descriptor_metadata`).
+            // (e.g. `round_trip_encrypted_masked_vector_via_descriptor_metadata`).
             // Restore happens before the
             // assertions so a failed assertion can never leak the dropped state.
             pool.execute("CREATE EXTENSION IF NOT EXISTS vector", &[])

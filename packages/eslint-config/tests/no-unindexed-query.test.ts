@@ -1,5 +1,5 @@
 /**
- * Unit tests for the D1 ESLint rule. We mock the bare ESLint RuleContext
+ * Unit tests for the no-unindexed-query ESLint rule. We mock the bare ESLint RuleContext
  * shape so the test stays free of the `eslint` dep (which is a peer
  * dependency consumers supply). The mock simulates ESLint walking
  * call-expression nodes; we hand it ESTree-ish literal nodes and assert
@@ -49,7 +49,7 @@ function callExpr(method: string, props: Array<[string, unknown]>): object {
   };
 }
 
-describe("D1 — no-unindexed-query rule", () => {
+describe("no-unindexed-query rule", () => {
   test("rule metadata is well-formed", () => {
     assert.equal(rule.meta.type, "suggestion");
     assert.ok(rule.meta.docs.description);
@@ -64,7 +64,7 @@ describe("D1 — no-unindexed-query rule", () => {
     assert.equal(reports[0].data?.keys, "name");
   });
 
-  test("does NOT flag findOne (deleted in P9 PR 1)", () => {
+  test("does NOT flag findOne", () => {
     // The native `Collection.findOne` v8_method is absent;
     // cardinality is expressed via Query terminals (`first()` /
     // `unique()` / `last()`), which apply LIMIT on the existing `.find`

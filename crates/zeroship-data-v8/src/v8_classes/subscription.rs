@@ -285,7 +285,7 @@ pub fn mint_subscription<'s>(
     //
     // ATTACH ONLY A NON-EMPTY SET. `Subscription::accepts` treats `None` as
     // "coarse - take everything" but `Some(vec![])` as "take nothing" (see
-    // `broker::tests::b8b_empty_read_set_filters_everything_on_collection`).
+    // `broker::tests::empty_read_set_filters_everything_on_collection`).
     // A `query()` that subscribes without having read this collection - or a
     // `mutation`/`action`, where capture is inert by design - would otherwise
     // attach an empty set and go permanently silent, which is strictly worse

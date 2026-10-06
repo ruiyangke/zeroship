@@ -14,7 +14,7 @@ use crate::tests::fixtures::DatabaseFixture;
 /// migration emitter for a system default and the runtime compiler for a
 /// caller-provided instant, then inspects what each actually stored.
 #[test]
-fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
+fn sqlite_timestamp_spellings_invert_same_day_ordering() {
     Host::test(|host| {
         host.run(async {
             let app = "t134_spelling";

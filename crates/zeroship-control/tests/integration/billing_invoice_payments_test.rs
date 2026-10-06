@@ -276,7 +276,7 @@ async fn cash_collected_sums_payments_without_touching_finalized_invoice() {
 // ---------------------------------------------------------------------------
 
 #[compio::test(crate = "crate::support::live")]
-async fn pr1_schema_objects_present() {
+async fn invoice_payment_schema_objects_present() {
     let url = db_url();
     let client = pg(&url).await;
 

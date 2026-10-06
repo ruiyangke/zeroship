@@ -2146,7 +2146,7 @@ fn byob_byobrequest_respond_advances_descriptor() {
 }
 
 #[test]
-fn byob_d15_respond_zero_on_close_with_nonempty_queue_throws() {
+fn byob_respond_zero_on_close_with_nonempty_queue_throws() {
     // After controller.close() with a non-empty queue,
     // closeRequested === true but state is still 'readable'. respond(0)
     // MUST throw TypeError in this window.
@@ -2208,7 +2208,7 @@ fn byob_d15_respond_zero_on_close_with_nonempty_queue_throws() {
 }
 
 #[test]
-fn byob_d16_enqueue_with_detached_buffer_throws() {
+fn byob_enqueue_with_detached_buffer_throws() {
     // Enqueue with a view whose buffer was already detached must
     // throw TypeError.
     let r = run_with_streams(
@@ -2243,7 +2243,7 @@ fn byob_d16_enqueue_with_detached_buffer_throws() {
 }
 
 #[test]
-fn byob_d16_respond_with_new_view_detached_throws() {
+fn byob_respond_with_new_view_detached_throws() {
     // RespondWithNewView with a view whose buffer is detached
     // must throw TypeError.
     let r = run_with_streams(

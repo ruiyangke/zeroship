@@ -11,16 +11,16 @@
 //! whole map, but once per OP -- N*(N*C), which is linear in C. The per-column
 //! pass was N^2*C^2, quadratic in C. Varying C with N pinned is therefore the
 //! only measurement that tells the two apart: it isolates the axis this fix
-//! changed. An op-count sweep (f664_scaling.rs) moves both together and would
+//! changed. An op-count sweep (load_gate_op_count_scaling.rs) moves both together and would
 //! have reported the fix as a modest constant-factor win.
 //!
 //! The per-column pass is linear in C, so doubling C does not quadruple the work.
 //!
 //! THE ASSERTION IS THE SHAPE OF THE CURVE, not a wall-clock budget, for the
-//! reason spelled out in f664_scaling.rs: a timing threshold flakes on a loaded
+//! reason spelled out in load_gate_op_count_scaling.rs: a timing threshold flakes on a loaded
 //! machine and says nothing about complexity.
 //!
-//! `#[ignore]`d and run in the `scaling` CI job, for the reasons f664_scaling.rs
+//! `#[ignore]`d and run in the `scaling` CI job, for the reasons load_gate_op_count_scaling.rs
 //! sets out in full, including why the 3.0x ceiling is not relaxed and why CPU time
 //! was measured and rejected as an instrument.
 //!
@@ -32,7 +32,7 @@
 use std::time::Instant;
 
 /// The best of `REPEATS` timings of `run` - the same instrument, and the same
-/// argument for it, as `f664_scaling.rs::best_of`. Scheduler noise, page faults and
+/// argument for it, as `load_gate_op_count_scaling.rs::best_of`. Scheduler noise, page faults and
 /// a busy machine only ever ADD time, so the smallest observation is the closest one
 /// to the real cost, and this file compares a RATIO of two such numbers where noise
 /// in the denominator inflates the result twice over.
@@ -93,6 +93,6 @@ fn validate_ir_does_not_scale_quadratically_in_column_count() {
         "doubling the columns per table at a FIXED op count multiplied validate_ir \
          cost by {ratio:.1}x ({narrow:.3}s -> {wide:.3}s). Above ~4x means a pass is \
          scanning the whole declaration map once per column again, which is the \
-         quadratic F665 removed"
+         quadratic scan the fix removed"
     );
 }

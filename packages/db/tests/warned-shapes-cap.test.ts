@@ -1,5 +1,5 @@
 /**
- * Gap P — `_warnedShapes` is bounded.
+ * `_warnedShapes` is bounded.
  *
  * Module-scope dedup state can grow without bound if an AI-generated app
  * synthesises filter shapes (metric names, dynamic identifiers, etc.).
@@ -24,7 +24,7 @@ import {
 
 const MAX_WARNED_SHAPES = 1024;
 
-describe("Gap P — _warnedShapes is bounded at MAX_WARNED_SHAPES", () => {
+describe("_warnedShapes is bounded at MAX_WARNED_SHAPES", () => {
   let warnings: string[];
   let origWarn: typeof console.warn;
 

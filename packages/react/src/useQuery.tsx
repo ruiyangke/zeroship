@@ -19,7 +19,7 @@
  *    subscription per (component-instance × factory). The mount/unmount/
  *    re-mount sequence reuses the freshly-opened subscription via a
  *    cleanup-skip guard tied to a microtask. See test
- *    `b8b4_useQuery_strictmode_safe`.
+ *    `useQuery_strictmode_safe`.
  * 6. Dependency change: the user passes the query as a closure. The hook
  *    treats the closure identity as the cache key; a new closure ==
  *    a new query. Most call sites inline the closure so changes

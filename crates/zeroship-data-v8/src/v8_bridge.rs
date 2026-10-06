@@ -142,7 +142,7 @@ fn decode_native_depth(
     budget: &mut DecodeBudget,
 ) -> Result<Value, DecodeError> {
     budget.take_node()?;
-    // DB-6: stop descending past the cap (before recursing into the
+    // Stop descending past the cap (before recursing into the
     // array/object branches below) so a pathological nesting can't overflow
     // the native stack.
     if depth > MAX_DECODE_DEPTH {
@@ -351,8 +351,8 @@ mod tests {
     use zeroship_runtime::init_v8;
 
     #[test]
-    fn decode_caps_recursion_depth_db6() {
-        // DB-6: a deeply-nested arg must not overflow the worker thread's
+    fn decode_caps_recursion_depth() {
+        // A deeply-nested arg must not overflow the worker thread's
         // native stack inside the recursive decoder. Build an array nested far
         // past MAX_DECODE_DEPTH (via a loop, not a literal, to avoid V8's own
         // parser depth limit), decode it, and assert (a) the process does NOT
@@ -469,7 +469,7 @@ mod tests {
     /// every tenant's rows. That is a tenant-isolation defect, not a
     /// robustness one, which is why this is a security test.
     #[test]
-    fn decode_must_not_silently_drop_a_key_whose_getter_throws_l5() {
+    fn decode_must_not_silently_drop_a_key_whose_getter_throws() {
         init_v8();
         let mut isolate = v8::Isolate::new(v8::CreateParams::default());
         v8::scope!(let handle_scope, &mut isolate);

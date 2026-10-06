@@ -182,7 +182,7 @@ async fn rollback_drop_column_additive() {
 // error — NOT a silent skip, NOT a broken rebuild. Nothing is rolled back.
 // ---------------------------------------------------------------------------
 #[compio::test]
-async fn rollback_rebuild_needed_returns_p3b_deferred_error() {
+async fn rollback_rebuild_needed_reports_a_deferred_error() {
     let p = paths("rb_rebuild");
     let be = backend(&p);
     // The `up` is additive; the `down` is a type-change reversal that SQLite cannot

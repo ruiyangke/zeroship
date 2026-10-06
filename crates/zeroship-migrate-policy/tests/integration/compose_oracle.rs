@@ -514,7 +514,7 @@ fn pinned_strictly_inside_accepts() {
 /// exclude (folding the two charter rules), compute `app_secret` as covered, and
 /// wrongly ACCEPT. Subtracting one rule at a time keeps the exclude -> reject.
 #[test]
-fn pinned_c1_disjoint_exclude_escalation_rejects() {
+fn pinned_disjoint_exclude_escalation_rejects() {
     let reg = registry();
     let root = RootCharter::parse_toml(
         r#"policy_version = 1

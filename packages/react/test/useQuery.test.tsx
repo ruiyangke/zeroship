@@ -134,11 +134,11 @@ async function flush(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// b8b4_useQuery_initial_render_returns_undefined
+// useQuery_initial_render_returns_undefined
 // ---------------------------------------------------------------------------
 
 describe("useQuery", () => {
-  test("b8b4_useQuery_initial_render_returns_undefined", () => {
+  test("useQuery_initial_render_returns_undefined", () => {
     const client = makeClient();
     let observed: unknown = "not-set";
 
@@ -159,10 +159,10 @@ describe("useQuery", () => {
   });
 
   // -------------------------------------------------------------------------
-  // b8b4_useQuery_resolves_with_initial_snapshot
+  // useQuery_resolves_with_initial_snapshot
   // -------------------------------------------------------------------------
 
-  test("b8b4_useQuery_resolves_with_initial_snapshot", async () => {
+  test("useQuery_resolves_with_initial_snapshot", async () => {
     const client = makeClient();
     const rows = [{ id: 1, body: "hello" }, { id: 2, body: "world" }];
     let observed: unknown;
@@ -190,10 +190,10 @@ describe("useQuery", () => {
   });
 
   // -------------------------------------------------------------------------
-  // b8b4_useQuery_re_renders_on_broker_event
+  // useQuery_re_renders_on_broker_event
   // -------------------------------------------------------------------------
 
-  test("b8b4_useQuery_re_renders_on_broker_event", async () => {
+  test("useQuery_re_renders_on_broker_event", async () => {
     const client = makeClient();
     let counter = 0;
     const renders: unknown[] = [];
@@ -244,10 +244,10 @@ describe("useQuery", () => {
   });
 
   // -------------------------------------------------------------------------
-  // b8b4_useQuery_cleanup_on_unmount
+  // useQuery_cleanup_on_unmount
   // -------------------------------------------------------------------------
 
-  test("b8b4_useQuery_cleanup_on_unmount", async () => {
+  test("useQuery_cleanup_on_unmount", async () => {
     const client = makeClient();
 
     function Probe(): React.ReactElement | null {
@@ -275,7 +275,7 @@ describe("useQuery", () => {
   });
 
   // -------------------------------------------------------------------------
-  // b8b4_useQuery_strictmode_safe
+  // useQuery_strictmode_safe
   // -------------------------------------------------------------------------
   //
   // Under React.StrictMode in development, components mount, immediately
@@ -291,7 +291,7 @@ describe("useQuery", () => {
   // This proves: no broker-side leak across StrictMode double-mount, AND
   // the steady-state is single-subscription per component instance.
 
-  test("b8b4_useQuery_strictmode_safe", async () => {
+  test("useQuery_strictmode_safe", async () => {
     const client = makeClient();
 
     function Probe(): React.ReactElement | null {
@@ -331,10 +331,10 @@ describe("useQuery", () => {
   });
 
   // -------------------------------------------------------------------------
-  // b8b4_useQuery_handles_query_throw
+  // useQuery_handles_query_throw
   // -------------------------------------------------------------------------
 
-  test("b8b4_useQuery_handles_query_throw", async () => {
+  test("useQuery_handles_query_throw", async () => {
     const client = makeClient();
     let observed: unknown = "not-set";
 
@@ -389,10 +389,10 @@ describe("useQuery", () => {
   });
 
   // -------------------------------------------------------------------------
-  // b8b4_useQuery_dependency_change
+  // useQuery_dependency_change
   // -------------------------------------------------------------------------
 
-  test("b8b4_useQuery_dependency_change", async () => {
+  test("useQuery_dependency_change", async () => {
     const client = makeClient();
     const renders: Array<unknown> = [];
 

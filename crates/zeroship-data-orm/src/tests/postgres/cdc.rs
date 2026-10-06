@@ -6,7 +6,7 @@ use crate::tests::fixtures::Host;
 use compio_postgres::Pool;
 
 #[test]
-fn c1_broker_event_delivered_for_insert_via_emit() {
+fn broker_event_delivered_for_insert_via_emit() {
     Host::test(|_| {
         // End-to-end of the local-emit path: the broker, attached
         // on the same thread the test runs on, receives an insert event
@@ -46,7 +46,7 @@ fn c1_broker_event_delivered_for_insert_via_emit() {
 }
 
 /// Helper: build a minimal ChangeEvent for the queue-mechanics tests.
-fn gapb_ev(app: &str, collection: &str, pk: i64) -> zeroship_data_orm::cdc::ChangeEvent {
+fn insert_change_event(app: &str, collection: &str, pk: i64) -> zeroship_data_orm::cdc::ChangeEvent {
     zeroship_data_orm::cdc::ChangeEvent {
         route: crate::tests::fixtures::harness_route(app),
         collection: collection.to_string(),
@@ -59,7 +59,7 @@ fn gapb_ev(app: &str, collection: &str, pk: i64) -> zeroship_data_orm::cdc::Chan
 }
 
 #[test]
-fn gap_b_commit_drains_pending_emits_to_broker() {
+fn commit_drains_pending_emits_to_broker() {
     Host::test(|host| {
         // Subscribe BEFORE pushing events, mid-"transaction" push two,
         // then drain — the broker should receive both.
@@ -71,8 +71,8 @@ fn gap_b_commit_drains_pending_emits_to_broker() {
             "users",
         );
 
-        host.push_pending_emit(app, gapb_ev(app, "users", 1));
-        host.push_pending_emit(app, gapb_ev(app, "users", 2));
+        host.push_pending_emit(app, insert_change_event(app, "users", 1));
+        host.push_pending_emit(app, insert_change_event(app, "users", 2));
         // Pre-drain: subscriber must observe nothing (events still queued).
         assert!(sub.pop().is_none(), "events must not leak before commit");
 
@@ -91,7 +91,7 @@ fn gap_b_commit_drains_pending_emits_to_broker() {
 }
 
 #[test]
-fn gap_b_rollback_clears_pending_emits_silently() {
+fn rollback_clears_pending_emits_silently() {
     Host::test(|host| {
         // Push events, then `clear` (rollback path). The broker must
         // never see them.
@@ -103,8 +103,8 @@ fn gap_b_rollback_clears_pending_emits_silently() {
             "users",
         );
 
-        host.push_pending_emit(app, gapb_ev(app, "users", 42));
-        host.push_pending_emit(app, gapb_ev(app, "users", 43));
+        host.push_pending_emit(app, insert_change_event(app, "users", 42));
+        host.push_pending_emit(app, insert_change_event(app, "users", 43));
         host.clear_pending_emits(app);
 
         assert!(
@@ -118,7 +118,7 @@ fn gap_b_rollback_clears_pending_emits_silently() {
 }
 
 #[test]
-fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
+fn insert_inside_tx_defers_emit_until_commit() {
     Host::test(|host| {
         host.run(async {
             // End-to-end: real Postgres tx, real `exec_mutation_with_emit`
@@ -200,7 +200,7 @@ fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
             // Mid-transaction: subscriber must see nothing.
             assert!(
                 sub.pop().is_none(),
-                "pre-commit broker must be empty (Gap B)"
+                "pre-commit broker must be empty"
             );
 
             // Settlement commits the row before publishing its buffered event.

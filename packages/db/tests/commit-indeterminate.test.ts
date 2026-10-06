@@ -7,8 +7,8 @@
  *   - `result.error.cause` is the original commit rejection (so callers
  *     can walk the cause chain to surface the underlying driver error)
  *
- * The rollback rejection is silently swallowed by the SDK today — the
- * robustness audit flagged that as a separate gap (Gap E); this test only pins what IS reachable from
+ * The rollback rejection is not surfaced on `result.error`;
+ * this test pins what IS reachable from
  * `result.error`.
  */
 import { test, describe } from "node:test";

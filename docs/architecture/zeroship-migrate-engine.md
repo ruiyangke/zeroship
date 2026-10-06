@@ -1095,7 +1095,7 @@ Three layered gates catch an error at the shallowest possible seam:
 
 - **tsc (compile-time, JS):** catches shape/arity errors. But names are **plain strings, not live-schema-bound**, so a reference to a dropped column *type-checks cleanly* (`validate.rs:6788-6801`).
 - **validate (load-time, Rust — THIS gate):** the authoritative structural gate, everything statically decidable from the IR + target dialect. Runs pre-connect.
-- **apply/render (resolve-time, Rust):** re-runs rule (c) with the *live* column set for DML/`setColumnType`/`addConstraint`/`createIndex`, where the live schema is unknown at load. Test `pr5_nonexistent_column_name_fails_at_apply_not_at_load_with_structured_error` (`validate.rs:6802`) pins that a bad name is caught at apply with the *same* structured `AuthoringError`, never a silent mis-apply.
+- **apply/render (resolve-time, Rust):** re-runs rule (c) with the *live* column set for DML/`setColumnType`/`addConstraint`/`createIndex`, where the live schema is unknown at load. Test `nonexistent_column_name_fails_at_apply_not_at_load_with_structured_error` in `crates/zeroship-migrate-core/src/model/validate.rs` pins that a bad name is caught at apply with the *same* structured `AuthoringError`, never a silent mis-apply.
 
 The one deliberate exception (A3): raw view-body validation calls the guard's read-only body scanner after the structural `SELECT` checks.
 

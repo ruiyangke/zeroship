@@ -648,7 +648,7 @@ mod tests {
     //  (c) clear_pending_emits drops the queue without firing
     //
     // The in-tx queue branch is exercised by the integration suite
-    // (gap_b_subscriber_does_not_observe_pre_commit_state in
+    // (commit_drains_pending_emits_to_broker in
     // crates/zeroship-data-orm/src/tests/postgres/cdc.rs).
 
     /// In autocommit mode (`has_tx() == false`), `queue_or_emit` must
@@ -1249,7 +1249,7 @@ mod tests {
     // open tx, and — on Postgres — A's binding role).
 
     #[test]
-    fn sec1_app_b_query_must_not_route_through_app_a_parked_tx() {
+    fn app_b_query_must_not_route_through_app_a_parked_tx() {
         reset_world("app_a");
         reset_world("app_b");
         run(async {

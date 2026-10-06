@@ -381,7 +381,7 @@ CREATE INDEX IF NOT EXISTS "{alias}"."{collection}_created_by_idx" ON "{collecti
 }
 
 #[test]
-fn p6c_data_plane_reaches_the_app_file_on_demand() {
+fn data_plane_reaches_the_app_file_on_demand() {
     Host::test(|host| {
         host.run(async {
             let dir = tempfile::tempdir().expect("create tempdir");

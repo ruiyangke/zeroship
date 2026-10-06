@@ -134,7 +134,7 @@ const KNOWN_ACCUMULATOR_OPS = new Set([
  *
  * Bounded LRU: a `Map<string, true>` whose insertion-order iteration is
  * guaranteed by the JS spec. On overflow we evict the oldest entry —
- * mirrors `_warnedShapes` in `collection.ts` (Gap P / R3 MINOR-12). An
+ * mirrors `_warnedShapes` in `collection.ts`. An
  * AI-generated pipeline that synthesises new accumulator names would
  * otherwise leak one entry per shape forever.
  */

@@ -35,7 +35,7 @@ test("CHAIN: terminals return the handle, so calls chain", () => {
   );
 });
 
-test("VAR-ASSIGN: a var-held handle is reusable across statements ({ schema } set once)", () => {
+test("a var-held handle is reusable across statements ({ schema } set once)", () => {
   const ops = record(() => {
     const users = table("users", { schema: "app" });
     users.column("email").add({ type: t.text().required() });
@@ -46,7 +46,7 @@ test("VAR-ASSIGN: a var-held handle is reusable across statements ({ schema } se
   for (const op of ops) assert.equal(op.schema, "app", `op ${op.op} carries the handle schema`);
 });
 
-test("B7 (L10): rename() rebinds the handle — chained ops target the NEW name", () => {
+test("rename() rebinds the handle so chained ops target the NEW name", () => {
   const ops = record(() => {
     table("a").rename({ to: "b" }).column("x").add({ type: t.text() });
   });

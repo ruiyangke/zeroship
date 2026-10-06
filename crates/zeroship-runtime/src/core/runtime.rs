@@ -2848,7 +2848,7 @@ impl RuntimeInner {
                 // yields the remaining chunks via setTimeout/await, which only
                 // advance while the pump is running; if the pump went idle after
                 // a PRIOR request, the 2nd+ stream on this isolate would deliver
-                // its first (sync) frame and then stall (ISS-71b). Mirrors the
+                // its first (sync) frame and then stall (during the second streamed response). Mirrors the
                 // `Pending` path, which already notifies (see `track_pending`).
                 self.notify_pump();
                 crate::FetchOutcome::Stream { status, headers, body_reader: reader, logs }

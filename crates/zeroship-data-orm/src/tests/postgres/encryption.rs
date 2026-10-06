@@ -233,7 +233,7 @@ fn encrypted_randomised_row_swap_rejected() {
 /// decrypt/mask-wrap read stages agree, against a real Postgres table, end to
 /// end.
 #[test]
-fn p4_round_trip_encrypted_masked_vector_via_descriptor_metadata() {
+fn round_trip_encrypted_masked_vector_via_descriptor_metadata() {
     Host::test(|host| {
         host.run(async {
             let (_postgres, url) = require_pg(host).await;

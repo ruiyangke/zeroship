@@ -2819,7 +2819,7 @@ columns = [
     }
 
     #[test]
-    fn p7_id_prefix_decl_emits_single_id_column() {
+    fn id_prefix_decl_emits_single_id_column() {
         // A legacy internal ID descriptor is a prefix declaration for the
         // policy-injected `id` PK column, NOT a second column. The emitter must
         // skip it: exactly one `id` column (the injected PK), no duplicate,
@@ -2848,7 +2848,7 @@ columns = [
     }
 
     #[test]
-    fn p7_id_prefix_decl_with_reserved_usr_is_rejected() {
+    fn id_prefix_decl_with_reserved_usr_is_rejected() {
         // Defense in depth: a hand-built wire payload declaring
         // an internal descriptor using the reserved `usr` prefix must be rejected
         // at DDL build (mirrors the
@@ -2879,7 +2879,7 @@ columns = [
     }
 
     #[test]
-    fn p7_id_prefix_decl_with_malformed_prefix_is_rejected() {
+    fn id_prefix_decl_with_malformed_prefix_is_rejected() {
         let schema = json!({ "id": {"type": "id", "idPrefix": "1bad"} });
         let err =
             build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline).unwrap_err();
@@ -2890,7 +2890,7 @@ columns = [
     }
 
     #[test]
-    fn p7_id_with_non_id_type_still_rejected() {
+    fn id_with_non_id_type_still_rejected() {
         // A field literally named `id` with a NON-"id" type is NOT a
         // prefix declaration - it must still trip the reserved-name fence.
         let schema = json!({ "id": {"type": "string"} });
@@ -2907,7 +2907,7 @@ columns = [
     // -----------------------------------------------------------------
 
     #[test]
-    fn b2_create_table_with_ref_emits_inline_fk() {
+    fn create_table_with_ref_emits_inline_fk() {
         let schema = json!({
             "title": {"type": "string", "required": true},
             "authorId": {"type": "ref", "refTarget": "users", "refColumn": "id"},
@@ -2930,7 +2930,7 @@ columns = [
     }
 
     #[test]
-    fn b2_explicit_fk_constraint_name_renders_on_every_dialect() {
+    fn explicit_fk_constraint_name_renders_on_every_dialect() {
         let schema = json!({
             "accountId": {
                 "type": "ref",
@@ -2964,7 +2964,7 @@ columns = [
     }
 
     #[test]
-    fn b2_ref_on_delete_cascade_override() {
+    fn ref_on_delete_cascade_override() {
         let schema = json!({
             "authorId": {
                 "type": "ref",
@@ -3023,7 +3023,7 @@ columns = [
     }
 
     #[test]
-    fn b2_ref_deferrable_false_skips_clause() {
+    fn ref_deferrable_false_skips_clause() {
         let schema = json!({
             "authorId": {
                 "type": "ref",
@@ -3037,7 +3037,7 @@ columns = [
     }
 
     #[test]
-    fn b2_ref_explicit_restrict_and_deferrable_render() {
+    fn ref_explicit_restrict_and_deferrable_render() {
         let schema = json!({
             "authorId": {
                 "type": "ref",
@@ -3058,7 +3058,7 @@ columns = [
     }
 
     #[test]
-    fn b2_sqlite_inline_fk_uses_unqualified_parent_table() {
+    fn sqlite_inline_fk_uses_unqualified_parent_table() {
         let schema = json!({
             "authorId": {
                 "type": "ref",
@@ -3082,7 +3082,7 @@ columns = [
     }
 
     #[test]
-    fn b2_build_add_foreign_key_emits_alter_table() {
+    fn build_add_foreign_key_emits_alter_table() {
         let def = json!({
             "type": "ref",
             "refTarget": "users", "refColumn": "id",
@@ -3109,7 +3109,7 @@ columns = [
     }
 
     #[test]
-    fn b2_build_drop_foreign_key() {
+    fn drop_foreign_key_renders_a_guarded_drop_constraint() {
         let sql = build_drop_foreign_key(
             crate::test_fixtures::VENDORS,
             "app1",
@@ -3124,7 +3124,7 @@ columns = [
     }
 
     #[test]
-    fn b2_fk_constraint_name_short() {
+    fn fk_constraint_name_short() {
         assert_eq!(
             fk_constraint_name(crate::test_fixtures::VENDORS, "posts", "authorId", None),
             "posts_authorId_fkey"
@@ -3132,14 +3132,14 @@ columns = [
     }
 
     #[test]
-    fn b2_fk_constraint_name_truncated() {
+    fn fk_constraint_name_truncated() {
         let long = "a".repeat(80);
         let name = fk_constraint_name(crate::test_fixtures::VENDORS, "posts", &long, None);
         assert!(name.len() <= 63, "got {} bytes: {name}", name.len());
     }
 
     #[test]
-    fn b2_deferred_emission_skips_unknown_target() {
+    fn deferred_emission_skips_unknown_target() {
         let schema = json!({
             "authorId": {"type": "ref", "refTarget": "users", "refColumn": "id"},
         });
@@ -3154,7 +3154,7 @@ columns = [
     }
 
     #[test]
-    fn b2_deferred_emission_inlines_self_ref() {
+    fn deferred_emission_inlines_self_ref() {
         // Self-ref (employee.managerId -> employee) inlines even when
         // existing-set is empty because the table being created IS the
         // target.
@@ -3240,11 +3240,11 @@ columns = [
 
     /// Negative pin: NO ref column anywhere in the DDL should emit
     /// `INTEGER` for the column type. A regression that
-    /// flipped the arm back would trip the `b2_create_table_with_ref_emits_inline_fk`
+    /// flipped the arm back would trip the `create_table_with_ref_emits_inline_fk`
     /// test too, but this assertion stays independent so a future
     /// fixture-touch can't mask the regression.
     #[test]
-    fn fk_ref_field_does_not_emit_integer_post_pr3() {
+    fn fk_ref_field_does_not_emit_integer() {
         let schema = json!({
             "authorId": {"type": "ref", "refTarget": "users", "refColumn": "id"},
             "title": {"type": "string"},
@@ -3266,7 +3266,7 @@ columns = [
     // -----------------------------------------------------------------
 
     #[test]
-    fn d2_object_field_emits_jsonb_column() {
+    fn object_field_emits_jsonb_column() {
         let schema = json!({
             "profile": {
                 "type": "object",
@@ -3310,7 +3310,7 @@ columns = [
     // -----------------------------------------------------------------
 
     #[test]
-    fn d3_calendar_date_emits_date_column() {
+    fn calendar_date_emits_date_column() {
         let schema = json!({
             "birthday": { "type": "calendarDate" },
         });
@@ -3322,7 +3322,7 @@ columns = [
     }
 
     #[test]
-    fn d3_calendar_date_distinct_from_date() {
+    fn calendar_date_distinct_from_date() {
         // Verify t.timestamp() emits TIMESTAMPTZ alongside DATE for the
         // calendar variant - no overlap.
         let schema = json!({
@@ -3336,7 +3336,7 @@ columns = [
     }
 
     #[test]
-    fn d3_add_column_calendar_date() {
+    fn add_column_calendar_date() {
         // ALTER TABLE ADD COLUMN for a calendarDate field must also
         // emit DATE so subsequent migrations stay consistent.
         let sql = build_add_column(
@@ -3368,7 +3368,7 @@ columns = [
     // -----------------------------------------------------------------
 
     #[test]
-    fn d4_version_column_default_one() {
+    fn version_column_defaults_to_one() {
         let schema = json!({
             "title": { "type": "string", "required": true },
             "schema_revision": { "type": "number", "default": 1 },
@@ -3396,7 +3396,7 @@ columns = [
     //     for the active variant are NOT NULL
     // -----------------------------------------------------------------
 
-    fn c2_events_union_schema() -> serde_json::Value {
+    fn events_union_schema() -> serde_json::Value {
         // Equivalent of:
         //   events: t.union(
         //     t.object({ kind: t.literal("login"), userId: t.number().required(), ip: t.string().required() }),
@@ -3437,10 +3437,10 @@ columns = [
     }
 
     #[test]
-    fn c2_union_emits_per_variant_check_constraints() {
+    fn union_emits_per_variant_check_constraints() {
         // Each variant gets a CHECK constraint of the
         // form: `kind <> 'login' OR (userId IS NOT NULL AND ip IS NOT NULL)`.
-        let schema = c2_events_union_schema();
+        let schema = events_union_schema();
         let sql =
             build_create_table_with_fks("app1", "events", &schema, &FkEmission::Inline).unwrap();
 
@@ -3473,8 +3473,8 @@ columns = [
     }
 
     #[test]
-    fn c2_union_constraint_names_are_unique_per_variant() {
-        let schema = c2_events_union_schema();
+    fn union_constraint_names_are_unique_per_variant() {
+        let schema = events_union_schema();
         let sql =
             build_create_table_with_fks("app1", "events", &schema, &FkEmission::Inline).unwrap();
         // Each variant constraint name follows `<table>_<disc>_<value>_chk`.
@@ -3493,7 +3493,7 @@ columns = [
     }
 
     #[test]
-    fn c2_union_with_only_optional_variants_skips_check() {
+    fn union_with_only_optional_variants_skips_check() {
         // A variant with no required (non-discriminator) fields should
         // not emit a CHECK constraint - the discriminator IN-list is
         // sufficient.
@@ -3528,7 +3528,7 @@ columns = [
     }
 
     #[test]
-    fn c2_union_numeric_discriminator() {
+    fn union_numeric_discriminator() {
         // Discriminator can be a number - verify the literal renders
         // without single quotes and the IN-list does the same.
         let schema = json!({
@@ -3680,7 +3680,7 @@ columns = [
     }
 
     #[test]
-    fn c2_standalone_literal_field_emits_check_equality() {
+    fn standalone_literal_field_emits_check_equality() {
         // A top-level (non-union) literal field - `kind: t.literal("login")`
         // alone - gets a `CHECK (kind = 'login')` constraint.
         let schema = json!({
@@ -3693,7 +3693,7 @@ columns = [
     }
 
     #[test]
-    fn c2_union_value_with_special_chars_sanitized_in_constraint_name() {
+    fn union_value_with_special_chars_sanitized_in_constraint_name() {
         // Discriminator values containing characters not legal in a
         // Postgres identifier (hyphens, dots, etc.) must be sanitised
         // for the constraint name; the literal itself is still SQL-

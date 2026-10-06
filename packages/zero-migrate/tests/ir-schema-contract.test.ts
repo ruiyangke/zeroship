@@ -342,7 +342,7 @@ test("ExistenceGuard tokens match the schema", () => {
   assert.deepEqual(enumTokens(schema.$defs.ExistenceGuard), TS.ExistenceGuard);
 });
 
-test("RefAction tokens match the schema (C1 FK actions)", () => {
+test("RefAction tokens match the schema (foreign-key actions)", () => {
   assert.deepEqual(enumTokens(schema.$defs.RefAction), TS.RefAction);
 });
 

@@ -5690,7 +5690,7 @@ mod tests {
     }
 
     #[test]
-    fn p2a_absent_facets_serialize_to_zero_bytes() {
+    fn absent_facets_are_omitted_from_the_wire() {
         // The serialized column carries NEITHER key - an absent optional is OMITTED
         // (not `null`), the precondition the byte-identity rests on.
         let op = text_create_table_op();
@@ -5717,7 +5717,7 @@ mod tests {
     }
 
     #[test]
-    fn p2a_text_column_canonical_bytes_byte_identical_to_pre_p2a() {
+    fn text_column_canonical_bytes_are_byte_identical_without_facets() {
         use crate::migration::{Checksum, MigrationFlags};
         // BYTE-IDENTITY: the canonical image of the typed `IrColumn`-with-None-facets
         // createTable must equal the canonical image of an INDEPENDENTLY hand-built

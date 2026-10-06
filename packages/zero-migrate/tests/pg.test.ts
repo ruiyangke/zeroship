@@ -46,7 +46,7 @@ test("@zeroship/migrate root exports vendor names and /pg subpath is retired", a
   assert.equal(imported.sql, undefined);
 });
 
-test("SA-8: grant/revoke reject empty privilege/role arrays and a non-object target", () => {
+test("grant/revoke reject empty privilege/role arrays and a non-object target", () => {
   assert.throws(
     () => record(() => grant({ privileges: [], on: { kind: "table", names: ["u"] }, to: ["r"] } as any)),
     (e: any) => e.code === "OP_INVALID" && /privileges must be a non-empty array/.test(e.message),

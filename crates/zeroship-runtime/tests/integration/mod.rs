@@ -138,7 +138,7 @@ mod form_data;
 mod headers;
 mod heap_limits;
 mod idle_gc;
-mod iss71_sequential_streams;
+mod sequential_streams_same_isolate;
 mod message_event;
 mod modules;
 mod plugin_modules;

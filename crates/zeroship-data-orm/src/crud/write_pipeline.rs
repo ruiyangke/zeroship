@@ -31,7 +31,7 @@ pub fn inspect_update(schema: &FieldMap, patch: &mut Value) -> Result<(), DbErro
     super::assignment_pass::apply_assignments_on_update(patch, schema)
 }
 
-/// DB-8: validate every top-level field key of a plain write document
+/// Validate every top-level field key of a plain write document
 /// (insert / insertMany element / upsert) with the same `validate_field_name`
 /// fence the read/filter path enforces. Runs on the raw user document before
 /// protection and assignment passes add reserved storage keys.
@@ -119,7 +119,7 @@ fn validate_upsert_conflict_fields(
     Ok(())
 }
 
-/// DB-8 (update patch): an update patch's top-level keys are either field names
+/// An update patch's top-level keys are either field names
 /// (`{ name: "x", views: { $inc: 1 } }`) or the document-level `$set`/`$setOnInsert`
 /// operators whose nested keys are field names. Validate the field-name keys
 /// (skipping `$`-prefixed operator keys, whose own nested fields are checked).
@@ -814,7 +814,7 @@ mod tests {
     use crate::backend::sqlite::SqliteBackend;
 
     #[test]
-    fn db8_rejects_reserved_and_malformed_user_doc_keys() {
+    fn rejects_reserved_and_malformed_user_doc_keys() {
         use crate::value;
         // A normal document passes.
         assert!(validate_user_doc_keys(
@@ -859,7 +859,7 @@ mod tests {
     }
 
     #[test]
-    fn db8_update_patch_validates_field_keys_not_operators() {
+    fn update_patch_validates_field_keys_not_operators() {
         use crate::value;
         // Plain field keys + a field-scoped operator value pass.
         assert!(

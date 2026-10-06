@@ -3625,7 +3625,7 @@ mod white_box_tests {
     /// dangerous token off from its adjacent multi-byte char so the word-scan
     /// misses it. This pins faithful extraction.
     #[test]
-    fn m3_extract_string_literals_preserves_multibyte_utf8() {
+    fn extract_string_literals_preserves_multibyte_utf8() {
         let body = "EXECUTE 'café λ pg_read_file 名→ done'";
         let got = extract_string_literals(body);
         assert_eq!(

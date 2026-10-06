@@ -1,4 +1,4 @@
-//! B3 runtime capability enforcement — JS-side smoke tests.
+//! Runtime capability enforcement: JS-side smoke tests.
 //!
 //! Covers:
 //!   - kind-transition globals hidden from creator code
@@ -210,7 +210,7 @@ async fn interleaved_isolates_retain_their_capability_frame() {
 /// need a live server — the rejection arrives via the returned
 /// Promise.
 #[test]
-fn b3_runtime_mutation_refuses_fetch() {
+fn runtime_mutation_refuses_fetch() {
     let user_code = r#"
 function doMut(_input, _ctx) {
     // This call should reject synchronously with capability_violation.
@@ -244,7 +244,7 @@ const _procedures = { doMut };
 /// follow-up) would not permit outbound I/O anyway. The wrapper field
 /// is `"query"` and the remediation points the dev at action().
 #[test]
-fn b3_runtime_query_refuses_fetch() {
+fn runtime_query_refuses_fetch() {
     let user_code = r#"
 function doQ(_input, _ctx) {
     return fetch("http://localhost:1/never");
@@ -268,7 +268,7 @@ const _procedures = { doQ };
 /// (different error shape — no `capability_violation` code, no
 /// `wrapper` field).
 #[test]
-fn b3_runtime_action_allows_fetch() {
+fn runtime_action_allows_fetch() {
     let user_code = r#"
 async function doAct(_input, _ctx) {
     try {
@@ -311,7 +311,7 @@ const _procedures = { doAct };
 /// Procedure capability state must not be exposed through creator-callable
 /// globals.
 #[test]
-fn b3_runtime_kind_globals_hidden_from_creator_scope() {
+fn runtime_kind_globals_hidden_from_creator_scope() {
     let user_code = r#"
 function inspectGlobals(_input, _ctx) {
     return {

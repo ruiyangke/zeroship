@@ -353,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn h1_a_star_a_idempotent_excludes_a() {
+    fn a_star_a_intersection_is_idempotent_and_excludes_a() {
         // Intersecting a*a with itself must be {a*a}, and must NOT admit "a".
         let g = SegGlob::infix(b"a".to_vec(), b"a".to_vec());
         let r = intersect_seg(&g, &g);

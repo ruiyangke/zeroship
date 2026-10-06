@@ -768,7 +768,7 @@ mod tests {
     }
 
     #[test]
-    fn e1_adds_nullable_column_transactionally() {
+    fn add_column_online_runs_transactionally() {
         let plan = author().author(&rename()).expect("author");
         let e1 = &plan.expand[0];
         assert_eq!(
@@ -783,7 +783,7 @@ mod tests {
     }
 
     #[test]
-    fn e2_trigger_fn_is_plpgsql_invoker_never_security_definer() {
+    fn dual_write_trigger_is_plpgsql_invoker_never_security_definer() {
         let plan = author().author(&rename()).expect("author");
         let e2 = &plan.expand[1];
         assert!(e2.up.contains("LANGUAGE plpgsql"), "{}", e2.up);
@@ -797,7 +797,7 @@ mod tests {
     }
 
     #[test]
-    fn e2_has_recursion_amplification_guard() {
+    fn dual_write_trigger_has_recursion_amplification_guard() {
         let plan = author().author(&rename()).expect("author");
         let e2 = &plan.expand[1];
         // IS DISTINCT FROM guards prevent write amplification.

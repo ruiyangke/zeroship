@@ -53,7 +53,7 @@ impl ChangeSink for BrokerChangeSink {
 /// proposal's stated default. Overflow triggers a `resync` event.
 pub const DEFAULT_QUEUE_DEPTH: usize = 1024;
 
-/// DB-12: max concurrent (live) subscriptions one app may hold. Each
+/// Max concurrent (live) subscriptions one app may hold. Each
 /// subscription carries a [`DEFAULT_QUEUE_DEPTH`]-slot queue and is iterated on
 /// every matching publish, so an unbounded `for (…) db.t.subscribe(…)` loop
 /// would grow the isolate's memory and per-event fan-out cost without bound.
@@ -414,7 +414,7 @@ impl Broker {
                 ),
             });
         }
-        // DB-12: cap the app's concurrent subscriptions and prune closed
+        // Cap the app's concurrent subscriptions and prune closed
         // handles before minting a replacement. Publish also prunes, but an
         // app can close subscriptions without ever publishing again; leaving
         // those entries here would let an open/close loop grow the global
@@ -1418,7 +1418,7 @@ mod tests {
     }
 
     #[test]
-    fn b8b_read_set_narrowing_filters_irrelevant_events() {
+    fn read_set_narrowing_filters_irrelevant_events() {
         let mut b = Broker::new();
         let s = b.subscribe(&route("a"), "messages");
         s.set_read_set(vec![rs_entry(
@@ -1454,7 +1454,7 @@ mod tests {
     }
 
     #[test]
-    fn b8b_read_set_update_old_or_new_matches() {
+    fn read_set_update_old_or_new_matches() {
         // Row updates userId from 42 to 99. Subscriber on {userId: 42}
         // should still see the event — the row "left the view".
         let mut b = Broker::new();
@@ -1487,7 +1487,7 @@ mod tests {
     }
 
     #[test]
-    fn b8b_read_set_range_query() {
+    fn read_set_range_query() {
         let mut b = Broker::new();
         let s = b.subscribe(&route("a"), "events");
         s.set_read_set(vec![rs_entry(
@@ -1519,7 +1519,7 @@ mod tests {
     }
 
     #[test]
-    fn b8b_read_set_complex_falls_back_to_coarse() {
+    fn read_set_complex_falls_back_to_coarse() {
         // $or normalises to None ⇒ coarse-grained ⇒ every collection event fires.
         let mut b = Broker::new();
         let s = b.subscribe(&route("a"), "messages");
@@ -1539,7 +1539,7 @@ mod tests {
     }
 
     #[test]
-    fn b8b_empty_read_set_filters_everything_on_collection() {
+    fn empty_read_set_filters_everything_on_collection() {
         // A read-set that is `Some(empty_vec)` — explicitly attached
         // but with zero entries on the matching collection — should
         // accept nothing. (Distinct from `None` which means coarse.)
@@ -1558,7 +1558,7 @@ mod tests {
     }
 
     #[test]
-    fn b8b_read_set_skips_different_collection_entries() {
+    fn read_set_skips_different_collection_entries() {
         // Subscription bucket is keyed by collection so this case
         // is mostly redundant with the bucket index, but we exercise
         // the entry.collection != event.collection branch explicitly.
@@ -1580,7 +1580,7 @@ mod tests {
     }
 
     #[test]
-    fn b8b_no_read_set_accepts_every_event() {
+    fn no_read_set_accepts_every_event() {
         // Subscriptions that don't set a read-set fall back to a
         // coarse-grained collection match.
         let mut b = Broker::new();
@@ -1599,7 +1599,7 @@ mod tests {
     // ---------- WS push frames ----------
 
     #[test]
-    fn b8b_ws_frame_change_shape() {
+    fn ws_frame_change_shape() {
         let mut tuple = HashMap::new();
         tuple.insert("userId".into(), "42".into());
         tuple.insert("body".into(), "hi".into());
@@ -1636,7 +1636,7 @@ mod tests {
     }
 
     #[test]
-    fn b8b_ws_frame_resync_and_closed() {
+    fn ws_frame_resync_and_closed() {
         let r = ws_frame("h", &SubscriptionMessage::Resync);
         let c = ws_frame("h", &SubscriptionMessage::Closed);
         let rv: serde_json::Value = serde_json::from_str(&r).unwrap();
@@ -1646,7 +1646,7 @@ mod tests {
     }
 
     #[test]
-    fn b8b_ws_pushes_event_to_correct_connection() {
+    fn ws_pushes_event_to_correct_connection() {
         // Two "WS clients" represented as broker subscriptions with
         // distinct read-sets. We simulate WS routing by stringifying
         // each event into its frame ONLY IF the subscription delivered

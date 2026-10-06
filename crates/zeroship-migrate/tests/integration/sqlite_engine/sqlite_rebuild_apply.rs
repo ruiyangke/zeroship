@@ -1660,7 +1660,7 @@ async fn dependent_referencing_dropped_column_fails_closed() {
         // column gets the FAIL-CLOSED safety net (the captured index over `drop_me`
         // cannot replay and aborts). The declarative path, by contrast, populates
         // `dropped_columns` so the dependent is skipped — see the
-        // `h1_drop_column_in_index_routes_to_rebuild` faithful test.
+        // `drop_column_in_index_routes_to_rebuild` faithful test.
         dropped_columns: vec![],
         sequence_policy: SequenceHighWaterPolicy::Preserve,
         reason: "drop column drop_me".into(),
@@ -1942,7 +1942,7 @@ async fn pre_created_temp_table_does_not_pollute_rebuild() {
 // column is gone, its index is gone, a SURVIVING column's index is intact, and
 // the other column's data is preserved.
 #[compio::test]
-async fn h1_drop_column_in_index_routes_to_rebuild() {
+async fn drop_column_in_index_routes_to_rebuild() {
     // v1: events(n number [indexed], extra string [indexed]).
     let v1 = vec![CollectionDescriptor {
         name: "events".into(),
@@ -2064,7 +2064,7 @@ async fn h1_drop_column_in_index_routes_to_rebuild() {
 // detector's source (3) (stored CREATE text scan) catches it. The drop must apply
 // via REBUILD: the column is gone and the other column's data is preserved.
 #[compio::test]
-async fn h1_drop_column_in_check_routes_to_rebuild() {
+async fn drop_column_in_check_routes_to_rebuild() {
     // v1: scores(label string, points number [min:0 → inline CHECK (points >= 0)]).
     let v1 = vec![CollectionDescriptor {
         name: "scores".into(),

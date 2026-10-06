@@ -650,7 +650,7 @@ fn fixture_meta_parses_consistently() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn non_uint8_typed_array_rejected_phase1() {
+fn non_uint8_typed_array_rejected() {
     with_v8(|scope, _| {
         // Int32Array is a typed array but not Uint8Array. The current
         // ABI only supports Uint8Array, so reject explicitly.

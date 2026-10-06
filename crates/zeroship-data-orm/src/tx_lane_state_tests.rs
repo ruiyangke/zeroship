@@ -224,7 +224,7 @@ async fn sqlite_tx_conn(dir: &tempfile::TempDir) -> Session {
 }
 
 #[test]
-fn sec1_tx_parked_by_app_a_is_invisible_and_untakable_for_app_b() {
+fn tx_parked_by_app_a_is_invisible_and_untakable_for_app_b() {
     run_async(async {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut lanes = TxLanes::new();
@@ -257,7 +257,7 @@ fn sec1_tx_parked_by_app_a_is_invisible_and_untakable_for_app_b() {
 }
 
 #[test]
-fn sec1_frame_watermarks_are_scoped_per_app() {
+fn frame_watermarks_are_scoped_per_app() {
     run_async(async {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut lanes = TxLanes::new();
@@ -286,7 +286,7 @@ fn sec1_frame_watermarks_are_scoped_per_app() {
 }
 
 #[test]
-fn sec1_pending_emits_drain_is_scoped_per_app() {
+fn pending_emits_drain_is_scoped_per_app() {
     let mut lanes = TxLanes::new();
     let mut ev_a = dummy_event("orders");
     ev_a.route = crate::tests::fixtures::harness_route("app_a");

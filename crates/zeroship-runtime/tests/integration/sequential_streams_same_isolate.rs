@@ -1,4 +1,4 @@
-//! ISS-71b regression: sequential `stream()` RPCs on the SAME isolate.
+//! Sequential stream reuse on one isolate: sequential `stream()` RPCs on the SAME isolate.
 //!
 //! The browser E2E surfaced that the 2nd+ streamed response on an isolate (and
 //! any stream issued after a prior one was aborted) stalls after its first

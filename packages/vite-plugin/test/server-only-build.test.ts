@@ -1,5 +1,5 @@
 /**
- * ISS-59 regression — a SERVER-ONLY app (no client `index.html`, just
+ * A SERVER-ONLY app (no client `index.html`, just
  * `default = { fetch?, rpc? }` plus RPC procedures) MUST build
  * to a valid `.zship`.
  *
@@ -83,12 +83,12 @@ async function makeServerOnlyApp(): Promise<string> {
       return Object.assign((input) => handler(input), metadata);
     }`,
   );
-  // Deliberately NO index.html and NO rollupOptions.input — this is the
-  // exact shape that broke ISS-59.
+  // Deliberately NO index.html and NO rollupOptions.input - the shape a
+  // server-only app has.
   return root;
 }
 
-describe("ISS-59 — server-only app (no index.html) builds to a valid .zship", () => {
+describe("server-only app (no index.html) builds to a valid .zship", () => {
   test("vite build succeeds and emits a worker + SSR catch-all", async () => {
     const root = await makeServerOnlyApp();
     try {

@@ -208,7 +208,7 @@ fn count_notes(url: &str, app: &str) -> i64 {
 ///
 /// For tests that need a constraint `reset_schema` does not create, because the
 /// constraint IS the fixture. See
-/// [`commit_that_postgres_rolled_back_must_not_report_success_l8`], which has to
+/// [`commit_that_postgres_rolled_back_must_not_report_success`], which has to
 /// poison a transaction with a server-side error the platform cannot absorb.
 fn exec_owner_sql(url: &str, sql: &str) {
     let url = url.to_string();
@@ -1991,7 +1991,7 @@ const _procedures = { probeBegin };
     assert_eq!(
         inner.get("beginType").and_then(|v| v.as_str()),
         Some("undefined"),
-        "env.db.beginTransaction must be undefined (deleted in P9 PR 3); body={body}"
+        "env.db.beginTransaction must be undefined; body={body}"
     );
 }
 
@@ -2158,7 +2158,7 @@ const _procedures = { seed, failBulk };
 /// absorb. The index is created here rather than in `reset_schema` because
 /// every other test in this file inserts duplicate titles freely.
 #[test]
-fn commit_that_postgres_rolled_back_must_not_report_success_l8() {
+fn commit_that_postgres_rolled_back_must_not_report_success() {
     let (_postgres, url) = require_pg();
     let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();

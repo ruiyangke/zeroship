@@ -124,7 +124,7 @@ fn s3_blob_store_roundtrip_and_parity() {
                 // Regression: an error mid-multipart-upload must abort the
                 // upload explicitly, not leak orphaned parts or abort the
                 // process.
-                run_c1_mid_upload_abort(&s3, &server).await;
+                run_mid_upload_abort(&s3, &server).await;
                 // Local-disk leg — identical assertions for parity.
                 let (local, root) = local_store();
                 run_contract(&local, "local").await;
@@ -145,7 +145,7 @@ fn s3_blob_store_roundtrip_and_parity() {
 /// exist on the server before the failure; only an explicit awaited abort can
 /// reclaim them. (Pre-fix, the abort was a detached `spawn` in `Drop`, which
 /// could panic off-runtime / never be polled, leaking the upload.)
-async fn run_c1_mid_upload_abort(store: &S3BlobStore, server: &S3Server) {
+async fn run_mid_upload_abort(store: &S3BlobStore, server: &S3Server) {
     // Declare a size big enough to force multipart (≥ 1 full part + more), but
     // make the reader die partway. The hash is arbitrary (we never complete).
     let declared = (PART_SIZE * 2) as u64;
@@ -182,7 +182,7 @@ async fn run_c1_mid_upload_abort(store: &S3BlobStore, server: &S3Server) {
     let result = store
         .put_blob_stream(&fake_hash, declared, &mut reader)
         .await;
-    assert!(result.is_err(), "C1: mid-upload error must propagate (no panic/abort)");
+    assert!(result.is_err(), "mid-upload error must propagate (no panic/abort)");
 
     // The fix's guarantee: the multipart upload created mid-stream was aborted
     // explicitly, so no orphaned (billed) upload remains.
@@ -190,10 +190,10 @@ async fn run_c1_mid_upload_abort(store: &S3BlobStore, server: &S3Server) {
     let uploads = raw
         .list_multipart_uploads(&key_prefix)
         .await
-        .expect("C1: list multipart uploads");
+        .expect("list multipart uploads");
     assert!(
         uploads.is_empty(),
-        "C1: mid-upload error left an orphaned multipart upload: {uploads:?}"
+        "mid-upload error left an orphaned multipart upload: {uploads:?}"
     );
 }
 

@@ -1406,7 +1406,7 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[test]
-    fn b2_add_fk_to_existing_column_is_compatible() {
+    fn add_fk_to_existing_column_is_compatible() {
         // Existing table with a bare INTEGER column - now declared with
         // t.ref("users"). The FK must be added as a separate op.
         let mut live = LiveSchema::default();
@@ -1453,7 +1453,7 @@ mod tests {
     }
 
     #[test]
-    fn b2_existing_fk_no_change_is_no_op() {
+    fn existing_fk_no_change_is_no_op() {
         // Live FK matches declared: no op emitted.
         let mut live = LiveSchema::default();
         let mut cols = std::collections::HashMap::new();
@@ -1514,7 +1514,7 @@ mod tests {
     }
 
     #[test]
-    fn b2_policy_change_emits_drop_then_add() {
+    fn policy_change_emits_drop_then_add() {
         let mut live = LiveSchema::default();
         let mut cols = std::collections::HashMap::new();
         cols.insert(
@@ -1589,7 +1589,7 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[test]
-    fn c2_new_variant_field_classifies_as_additive() {
+    fn new_variant_field_classifies_as_additive() {
         // Live: table with the original 2-variant union flat schema
         // (kind, userId, ip, message). New deploy adds a third variant
         // with a `value` column.
@@ -1659,7 +1659,7 @@ mod tests {
     }
 
     #[test]
-    fn c2_removed_variant_field_classifies_as_destructive() {
+    fn removed_variant_field_classifies_as_destructive() {
         // Live includes a `legacy_metric_value` from a now-removed
         // variant. After removal the declared schema no longer
         // includes that column -> DropColumn (destructive).

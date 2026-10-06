@@ -150,9 +150,9 @@ mod tests {
         assert_eq!(aad, expected);
     }
 
-    /// DB-14: the wire version is bound into the AAD (first segment).
+    /// The wire version is bound into the AAD (first segment).
     #[test]
-    fn aad_binds_wire_version_db14() {
+    fn aad_binds_wire_version() {
         let aad = canonical_aad(&database(), "users", "ssn", b"row_a");
         // First length-prefixed segment is the 1-byte wire version.
         assert_eq!(

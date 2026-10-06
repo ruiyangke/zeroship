@@ -81,7 +81,7 @@ async function flush(): Promise<void> {
 }
 
 describe("useSuspenseQuery", () => {
-  test("b8b4_useSuspenseQuery_throws_promise_keyed_by_suspenseKey", () => {
+  test("useSuspenseQuery_throws_promise_keyed_by_suspenseKey", () => {
     // Direct invocation outside React to test the throw-promise
     // contract — bypassing React's renderer keeps the assertion
     // tight (no concurrent-mode surprises) and verifies that
@@ -131,7 +131,7 @@ describe("useSuspenseQuery", () => {
     TestRenderer.act(() => { renderer?.unmount(); });
   });
 
-  test("b8b4_useSuspenseQuery_resumes_after_resolve", async () => {
+  test("useSuspenseQuery_resumes_after_resolve", async () => {
     const client = makeClient();
     const rows = [{ id: 42 }];
     let observed: unknown = "not-set";

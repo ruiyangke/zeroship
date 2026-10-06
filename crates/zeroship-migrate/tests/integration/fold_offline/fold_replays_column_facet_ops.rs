@@ -188,7 +188,7 @@ fn set_column_default_is_replayed() {
 // BOTH AUTHORING ROUTES ARE PINNED. The policy can arrive inline on createTable
 // or from a later addConstraint, and the fold records the constraint name at
 // both push sites. A fixture testing one route would pass with the other half
-// missing - the same inline-vs-standalone split that `f721_unguarded_index_shape`
+// missing - the same inline-vs-standalone split that `unguarded_index_shape_is_refused`
 // exists for.
 // ---------------------------------------------------------------------------
 

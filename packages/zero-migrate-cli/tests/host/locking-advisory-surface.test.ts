@@ -203,7 +203,7 @@ test("plan control: a plain addColumn surfaces no locking advisory", async (t) =
   assertNoLockAdvisory(result, "plan");
 });
 
-test("F657: a dialect the analyzer cannot read says so instead of reporting clean", () => {
+test("a dialect the analyzer cannot read says so instead of reporting clean", () => {
   // The analyzer parses PostgreSQL. MySQL renders identifiers with backticks, so
   // every statement fails to parse and the rule set returns nothing -- for SQL
   // this engine emits and is about to run. The report then read exactly like a
@@ -237,7 +237,7 @@ test("CONTROL: PostgreSQL still evaluates rules rather than announcing it cannot
   assert.match(result.text, /ACCESS\s+EXCLUSIVE/i);
 });
 
-test("F659: --json carries the advisories too, not only the human rendering", () => {
+test("--json carries the advisories too, not only the human rendering", () => {
   // The advisory surface was added to the human output of `lint --explain` and
   // `plan`. Both verbs also have a `--json` shape, and that is what a CI gate
   // reads - which is precisely where a warning about a table-wide lock has to

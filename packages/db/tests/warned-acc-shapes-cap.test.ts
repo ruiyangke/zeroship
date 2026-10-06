@@ -1,5 +1,5 @@
 /**
- * R3 MINOR-12 — `_warnedAccShapes` is bounded.
+ * `_warnedAccShapes` is bounded.
  *
  * Sibling of the `_warnedShapes` cap in `collection.ts`: the accumulator-warning
  * dedup set in `utils.ts` must be BOUNDED. Unbounded, an AI-generated pipeline
@@ -23,7 +23,7 @@ import {
 
 const MAX_WARNED_ACC_SHAPES = 1024;
 
-describe("R3 MINOR-12 — _warnedAccShapes is bounded at MAX_WARNED_ACC_SHAPES", () => {
+describe("_warnedAccShapes is bounded at MAX_WARNED_ACC_SHAPES", () => {
   let warnings: string[];
   let origWarn: typeof console.warn;
 

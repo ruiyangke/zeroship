@@ -1,4 +1,4 @@
-//! B3 runtime capability enforcement — DB write refusal.
+//! Runtime capability enforcement: DB write refusal.
 //!
 //! When a `query()` handler tries to call `zeroship.db.insert` /
 //! `updateOne` / `deleteOne` / `insertMany` / `updateMany` /
@@ -117,7 +117,7 @@ export default { rpc: _procedures };
 /// refused with `capability_violation` — and the rejection MUST fire
 /// synchronously inside the V8 callback (no PG roundtrip).
 #[test]
-fn b3_runtime_query_refuses_db_write_insert() {
+fn runtime_query_refuses_db_write_insert() {
     let user_code = r#"
 import { env } from "zeroship";
 function getStuff(_input, _ctx) {
@@ -146,7 +146,7 @@ const _procedures = { getStuff };
 /// `deleteMany` / `upsert` all hit the same gate. One test parameter-
 /// ised over each entry point — keeps the assertion shape simple.
 #[test]
-fn b3_runtime_query_refuses_every_db_write_op() {
+fn runtime_query_refuses_every_db_write_op() {
     // The native `updateOne`/`deleteOne` methods are named `update`/`delete`
     // (singular-default convention); the capability-gate violation labels
     // follow those method names.
@@ -206,7 +206,7 @@ const _procedures = {{ ["t_{label}"]: listThings_{label} }};
 /// error is NOT capability_violation — whatever the actual rejection
 /// looks like is fine for this purpose.
 #[test]
-fn b3_runtime_action_allows_db_write_through_gate() {
+fn runtime_action_allows_db_write_through_gate() {
     // The handler calls insert() but does NOT await — it inspects the
     // Promise synchronously. The capability gate (if it fired) would
     // produce an already-rejected promise with `.code === "capability_violation"`

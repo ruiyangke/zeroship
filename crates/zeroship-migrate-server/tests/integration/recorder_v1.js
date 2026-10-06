@@ -26,7 +26,7 @@ function resolveSchema(mod) {
   }
   if (!schema) {
     throw new Error(
-      "stage2 recorder: the migration module exports no `schema()` function " +
+      "recorder: the migration module exports no `schema()` function " +
         "(named export `schema` or `default.schema`)",
     );
   }
@@ -63,9 +63,9 @@ try {
     name: resolveName(userMod),
     ops,
   };
-  globalThis.__zsStage2IR = JSON.stringify({ ok: true, ir: envelope });
+  globalThis.__zsRecorderV1IR = JSON.stringify({ ok: true, ir: envelope });
 } catch (e) {
-  globalThis.__zsStage2IR = JSON.stringify({
+  globalThis.__zsRecorderV1IR = JSON.stringify({
     ok: false,
     error: e && e.message ? e.message : String(e),
   });

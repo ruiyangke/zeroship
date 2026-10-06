@@ -26,7 +26,7 @@
 //! read nothing from their own process environment (`clippy.toml`'s `disallowed-methods`
 //! on `std::env::var`), and `#[ignore]` + `cargo test -- --ignored <name>` is the
 //! existing idiom this crate already uses for an explicitly-invoked, not-run-by-default
-//! test (see `tests/integration/authoring_surface/f664_scaling.rs`).
+//! test (see `tests/integration/authoring_surface/load_gate_op_count_scaling.rs`).
 
 
 use zeroship_migrate::render::lower::{IrAuthor, LiveSchema};

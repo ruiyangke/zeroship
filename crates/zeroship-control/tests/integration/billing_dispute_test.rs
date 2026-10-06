@@ -28,7 +28,7 @@
 //!   (f) the PR-8 schema objects exist on the migrated DB.
 //!   (g) LIFECYCLE (CRITICAL-3): a won→(late/replayed)lost reorder is rejected — the row
 //!       stays `won` and cash stays restored (no over-refund window).
-//!   (h) ORDER-INDEPENDENCE (MAJOR-4): `.closed won` BEFORE `.created` ends with the dispute
+//!   (h) ORDER-INDEPENDENCE: `.closed won` BEFORE `.created` ends with the dispute
 //!       won, debit + reversal both present (net cash restored), and the late `.created`
 //!       does not resurrect it to `open`.
 //!
@@ -365,7 +365,7 @@ fn dispute_created_body(evt: &str, du: &str, payment_intent: &str, amount: i64) 
 }
 
 /// A `charge.dispute.closed` carrying the REAL settling `pi_…` so a close-before-create
-/// (MAJOR-4) can resolve the anchor invoice. `amount` lets a close-first seed a terminal row.
+/// can resolve the anchor invoice. `amount` lets a close-first seed a terminal row.
 fn dispute_closed_body(evt: &str, du: &str, status: &str, payment_intent: &str, amount: i64) -> String {
     json!({
         "id": evt,
@@ -862,7 +862,7 @@ async fn dispute_won_then_late_lost_is_rejected_cash_stays_restored() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// (h) ORDER-INDEPENDENCE (MAJOR-4): `.closed won` delivered BEFORE `.created` (legal
+// (h) ORDER-INDEPENDENCE: `.closed won` delivered BEFORE `.created` (legal
 //     at-least-once reordering) ends with the dispute won, debit + reversal both present
 //     (net cash restored), and the late `.created` does NOT resurrect it to `open`.
 // ───────────────────────────────────────────────────────────────────────────
@@ -1099,7 +1099,7 @@ async fn dispute_on_never_invoiced_charge_parks_without_poison() {
 // ───────────────────────────────────────────────────────────────────────────
 
 #[compio::test(crate = "crate::support::live")]
-async fn pr8_schema_objects_present() {
+async fn billing_dispute_schema_objects_present() {
     let url = db_url();
     let conn = side_conn(&url).await;
 
@@ -1207,7 +1207,7 @@ async fn dispute_created_takes_per_organization_advisory_lock() {
     assert!(
         blocked.is_err(),
         "record_dispute_created must BLOCK on the held per-organization advisory lock — it returned \
-         while the observer held the key, so the dispute rail took NO lock (the C1 bug)",
+         while the observer held the key, so the dispute rail took NO lock",
     );
     // While blocked, NOTHING was written (the txn is still waiting on the lock).
     assert_eq!(dispute_row_count(&conn, &du).await, 0, "no dispute row written while blocked");

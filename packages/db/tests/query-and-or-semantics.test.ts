@@ -1,5 +1,5 @@
 /**
- * Robustness — AND/OR composition semantics (Gap DD).
+ * Robustness - AND/OR composition semantics.
  *
  * Mongo's filter language: a flat object with mixed field equalities and
  * top-level `$or` composes as

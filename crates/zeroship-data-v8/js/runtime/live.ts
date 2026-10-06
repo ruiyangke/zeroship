@@ -181,9 +181,7 @@ export function createLive<R>(
     }
     // Once closed, additional items dropped on the floor — the `next()`
     // fast-path returns `{done: true}` directly when `closed && queue
-    // empty`, so a queued done sentinel here is dead weight. (R3
-    // IMPORTANT-2: a post-error `pump({kind:"done"})` in doClose used
-    // to land in the queue with no consumer, never delivered.)
+    // empty`, so a queued done sentinel here is dead weight.
     if (closed) return;
     if (queue.length >= MAX_QUEUE_DEPTH) {
       // Drop the oldest VALUE entry to make room. Preserve any errors
@@ -225,7 +223,7 @@ export function createLive<R>(
           "or pass actual table names.",
         );
       }
-      // R4 IMPORTANT-2 — install a throwaway tracker for the duration
+      // Install a throwaway tracker for the duration
       // of `queryFn()` so Collection reads inside the explicit-tables
       // queryFn don't leak into an enclosing `db.live`'s watched set.
       // Pre-fix, an inner `db.live(qfn, { tables })` nested inside an

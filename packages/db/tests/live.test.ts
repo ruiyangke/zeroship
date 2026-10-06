@@ -514,7 +514,7 @@ describe("db.live — reactive query layer", () => {
     }
   });
 
-  test("tables: [] subscribes to nothing (static one-shot) — R3 IMPORTANT-4", async () => {
+  test("tables: [] subscribes to nothing (static one-shot)", async () => {
     // `tables: []` subscribes to nothing: the guard treats an explicit
     // empty set as an empty set rather than falling back to auto-tracking.
     // The initial result yields, then the iterator stalls (no subscriptions

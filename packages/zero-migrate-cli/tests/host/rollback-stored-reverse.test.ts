@@ -1,4 +1,4 @@
-// F654: rollback replays the reverse captured when the forward migration ran.
+// Rollback replays the reverse captured when the forward migration ran.
 //
 // These are deliberately CLI + live-PostgreSQL tests. In particular, the first
 // two assertions read the journal column with SQL instead of trusting a host API
@@ -163,7 +163,7 @@ async function tableExists(
   return result.rows.length === 1;
 }
 
-test("F654 a: apply stores the exact reverse in the journal", async (t) => {
+test("apply stores the exact reverse in the journal", async (t) => {
   await withProject(t, "f654_store", async (client, schema) => {
     const work = scaffold(schema, "create_f654_notes", createTableBody());
     try {
@@ -181,7 +181,7 @@ test("F654 a: apply stores the exact reverse in the journal", async (t) => {
   });
 });
 
-test("F654 b: a stored reverse is replayed, and says nothing about reconstructing", async (t) => {
+test("a stored reverse is replayed, and says nothing about reconstructing", async (t) => {
   await withProject(t, "f654_replay", async (client, schema) => {
     // THE ARM THAT PROVES WHICH PATH RAN. Arms (a) and (c) show a reverse being
     // written and a legacy row being handled; this one shows that a row WITH a
@@ -235,7 +235,7 @@ test("F654 b: a stored reverse is replayed, and says nothing about reconstructin
   });
 });
 
-test("F654 c: a legacy NULL reverse is reconstructed with a visible advisory", async (t) => {
+test("a legacy NULL reverse is reconstructed with a visible advisory", async (t) => {
   await withProject(t, "f654_legacy", async (client, schema) => {
     const work = scaffold(schema, "create_f654_notes", createTableBody());
     const journal = `${ident(`${schema}_migrations`)}.__zeroship_schema_migrations`;
@@ -270,7 +270,7 @@ test("F654 c: a legacy NULL reverse is reconstructed with a visible advisory", a
   });
 });
 
-test("F654 d CONTROL: ordinary DDL rollback appends an event and remains re-applicable", async (t) => {
+test("ordinary DDL rollback appends an event and remains re-applicable", async (t) => {
   await withProject(t, "f654_control", async (client, schema) => {
     const work = scaffold(schema, "create_f654_notes", createTableBody());
     try {
@@ -302,7 +302,7 @@ test("F654 d CONTROL: ordinary DDL rollback appends an event and remains re-appl
   });
 });
 
-test("F658: MySQL stores the reverse too, read back from the journal itself", async (t) => {
+test("MySQL stores the reverse too, read back from the journal itself", async (t) => {
   // The MySQL write was landed on the strength of the suite and the bind-shape
   // assertions rather than a row read, which is a weaker claim than the one made
   // for PostgreSQL and SQLite. This arm closes that: it reads the column MySQL
@@ -329,7 +329,7 @@ test("F658: MySQL stores the reverse too, read back from the journal itself", as
       "string",
       "MySQL must journal the reverse it applied; a NULL here means every MySQL " +
         "rollback still re-derives its inverse with whatever engine is installed " +
-        "at rollback time, which is the hole F654 exists to close",
+        "at rollback time instead of replaying the stored reverse",
     );
     assert.match(String(stored), /DROP TABLE/i, "and it is the reverse of what ran");
   } finally {

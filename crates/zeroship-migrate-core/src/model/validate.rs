@@ -645,7 +645,7 @@ fn schemas_may_name_same_table(left: Option<&str>, right: Option<&str>) -> bool 
 /// makes each of those groups one CONTIGUOUS range, so they can be found with
 /// `range` instead of a scan of the whole map. Ordering schema-first scatters
 /// the members of a group across the map and forces a full traversal per
-/// declared column, which is quadratic in total column count (F665).
+/// declared column, which is quadratic in total column count.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LogicalColumnKey {
     pub table: String,
@@ -878,7 +878,7 @@ fn declare_logical_column(
     // sharing this exact table and column can match, and the key orders
     // table-first, so they are one contiguous run: walk that run rather than the
     // whole map. Scanning every entry here costs a full traversal per declared
-    // column, which is quadratic in TOTAL COLUMNS, not in op count (F665).
+    // column, which is quadratic in TOTAL COLUMNS, not in op count.
     let group_start = LogicalColumnKey {
         table: table.to_string(),
         column: column.to_string(),
@@ -1243,7 +1243,7 @@ fn alter_primary_key_candidate_key(
 /// `LogicalColumnKey` orders table-first, so those declarations are one
 /// contiguous run and this is a `range` rather than a scan of the whole map.
 /// Every caller is reached once per op, from each of three passes, so scanning
-/// here is quadratic in op count -- see f664_scaling.rs for the guard.
+/// here is quadratic in op count -- see load_gate_op_count_scaling.rs for the guard.
 fn declared_table_group_keys(
     declared: &LogicalColumnContracts,
     schema_mode: LogicalSchemaMode<'_>,
@@ -3260,7 +3260,7 @@ fn validate_no_name_is_claimed_twice(
     // COLUMNS ARE KEYED BY TABLE, not held in one flat set, and that is a cost
     // decision rather than a style one. A flat set makes dropping or renaming a
     // table a scan of every column in the migration, which is O(ops^2) over an
-    // envelope of drops - the `f664_scaling` guard caught exactly that in the
+    // envelope of drops - the `load_gate_op_count_scaling` guard caught exactly that in the
     // first version of this check. Nested, every operation here is logarithmic.
     type Key<'a> = (Option<&'a str>, &'a str);
     // ONE RELATION NAMESPACE, not three per-kind sets. PostgreSQL keeps tables,
@@ -5496,8 +5496,8 @@ fn validate_online_rename_isolation_op<'a>(
             //
             // The flat Vec made this pass quadratic: a linear scan per op over an
             // accumulator that grew once per op, paid even by envelopes containing
-            // no rename at all. It was the entire cost of the load gate at scale
-            // (F664): 3.5s of a 3.6s validate over 50k ops.
+            // no rename at all. It was the entire cost of the load gate at scale:
+            // 3.5s of a 3.6s validate over 50k ops.
             let previous_for_table = seen.get(table).map_or(&[][..], Vec::as_slice);
             if let Some(previous) = previous_for_table.iter().find(|previous| {
                 schemas_may_name_same_table(previous.schema, schema)
@@ -13261,7 +13261,7 @@ mod tests {
     // structural-only (the name is accepted, mirroring tsc accepting the string),
     // and the resolved apply seam is the SOLE place a bad name is caught.
     #[test]
-    fn pr5_nonexistent_column_name_fails_at_apply_not_at_load_with_structured_error() {
+    fn nonexistent_column_name_fails_at_apply_not_at_load_with_structured_error() {
         use std::collections::BTreeMap;
 
         // A migration whose `where` and `set` reference `column_that_was_dropped`
@@ -13468,7 +13468,7 @@ mod tests {
     }
 
     #[test]
-    fn p2a_create_table_accepts_a_valid_id_prefix() {
+    fn create_table_accepts_a_valid_id_prefix() {
         let ir = ir_with(vec![create_with_id_prefix("post")]);
         assert!(
             validate_ir_platform(&ir, &POSTGRES).is_ok(),
@@ -13722,7 +13722,7 @@ mod tests {
     }
 
     #[test]
-    fn p2a_create_table_rejects_a_reserved_id_prefix() {
+    fn create_table_rejects_a_reserved_id_prefix() {
         // `usr` is the platform user-id prefix (RESERVED_ID_PREFIXES); a creator
         // prefix that collides with it would mint ids colliding with platform users.
         let ir = ir_with(vec![create_with_id_prefix("usr")]);
@@ -13733,7 +13733,7 @@ mod tests {
     }
 
     #[test]
-    fn p2a_create_table_rejects_a_malformed_id_prefix() {
+    fn create_table_rejects_a_malformed_id_prefix() {
         // An upper-case / non-`[a-z0-9_]` prefix is not a valid typed-id segment.
         let ir = ir_with(vec![create_with_id_prefix("Po-st")]);
         let err = validate_ir_platform(&ir, &POSTGRES)
@@ -13742,7 +13742,7 @@ mod tests {
     }
 
     #[test]
-    fn p2a_create_table_rejects_an_over_long_id_prefix() {
+    fn create_table_rejects_an_over_long_id_prefix() {
         // Charset-valid but longer than MAX_ID_PREFIX_LEN.
         let ir = ir_with(vec![create_with_id_prefix("toolong")]);
         let err = validate_ir_platform(&ir, &POSTGRES)
@@ -13755,7 +13755,7 @@ mod tests {
     }
 
     #[test]
-    fn p2a_create_table_rejects_vector_metric_on_non_vector_column() {
+    fn create_table_rejects_vector_metric_on_non_vector_column() {
         // A metric on a non-Vector column is the co-occurrence violation - the
         // closed enum already bounds the metric token at deserialize; this catches a
         // dead metric a hand-crafted artifact rides in on a text column.
@@ -13902,7 +13902,7 @@ mod tests {
     }
 
     #[test]
-    fn p2a_create_table_accepts_vector_metric_on_a_vector_column() {
+    fn create_table_accepts_vector_metric_on_a_vector_column() {
         let ir = ir_with(vec![Op::CreateTable {
             attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "docs".into(),

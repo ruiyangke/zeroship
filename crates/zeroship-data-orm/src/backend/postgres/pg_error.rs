@@ -161,7 +161,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scrub_constraint_detail_drops_value_line_db18() {
+    fn scrub_constraint_detail_drops_the_value_line() {
         // The DETAIL line (with the conflicting value) is removed; the primary
         // message is kept for conflict handling.
         let raw = "db: duplicate key value violates unique constraint \"users_email_key\"\n\

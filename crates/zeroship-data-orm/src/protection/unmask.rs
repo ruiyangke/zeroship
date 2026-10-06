@@ -182,7 +182,7 @@ fn lookup_encryption_meta(
 /// these broad access; app JS must never be able to claim one.
 pub const RESERVED_SYSTEM_ACTOR_KINDS: &[&str] = &["auto"];
 
-/// DB-3: sanitize an actor descriptor that originated from **app JS** (the
+/// Sanitize an actor descriptor that originated from **app JS** (the
 /// `{ actor }` field of an `unmask` / `find({unmask})` call). The unmask
 /// authorization read `actor.kind` straight off this app-supplied object, and
 /// `kind: "auto"` is the privileged system default that the default-deny stub
@@ -1174,11 +1174,11 @@ async fn write_audit_query_hint_row(
 }
 
 // ---------------------------------------------------------------------------
-// The DB-3 boundary
+// The app-actor boundary
 // ---------------------------------------------------------------------------
 //
 // `parse_args` and `parse_bulk_args` are the two places where an `actor`
-// supplied by APP JS meets `sanitize_app_actor`. That call IS the DB-3 fix, and
+// supplied by APP JS meets `sanitize_app_actor`. That call IS the fence, and
 // while both parsers were private `fn` no integration target could drive them:
 // every live-PG test in `crates/zeroship-data-orm/src/tests/postgres/protection.rs` built
 // `UnmaskFieldArgs` / `BulkUnmaskArgs` in Rust and so entered BELOW the fence,
@@ -1208,7 +1208,7 @@ pub fn parse_args(v: &Value) -> Result<UnmaskFieldArgs, DbError> {
             hint: Some("MaskedValue rows without an `id` cannot be unmasked".into()),
         });
     }
-    // DB-3: app JS cannot claim the reserved `auto` system actor.
+    // App JS cannot claim the reserved `auto` system actor.
     let sanitized = sanitize_app_actor(obj.get("actor").cloned().filter(|v| !v.is_null()));
     let reason = obj
         .get("reason")
@@ -1235,7 +1235,7 @@ fn require_string(obj: &crate::value::Map<String, Value>, key: &str) -> Result<S
         .map(str::to_string)
 }
 
-// The bulk half of the DB-3 boundary. Same reasoning as `parse_args` above.
+// The bulk half of the app-actor boundary. Same reasoning as `parse_args` above.
 
 /// Parse the JS-side `{ collection, items: [{ rowPk, columns }], actor?, reason? }`
 /// shape into [`BulkUnmaskArgs`]. Refuses non-object args, missing
@@ -1312,7 +1312,7 @@ pub fn parse_bulk_args(v: &Value) -> Result<BulkUnmaskArgs, DbError> {
         }
         items.push(BulkUnmaskItem { row_pk, columns });
     }
-    // DB-3: app JS cannot claim the reserved `auto` system actor. The refused
+    // App JS cannot claim the reserved `auto` system actor. The refused
     // claim rides along to the audit row so the attempt is recorded.
     let sanitized = sanitize_app_actor(obj.get("actor").cloned().filter(|v| !v.is_null()));
     let reason = obj
@@ -1363,7 +1363,7 @@ mod tests {
     use crate::tests::fixtures::{unit_backend, unit_route};
 
     #[test]
-    fn sanitize_app_actor_strips_reserved_auto_db3() {
+    fn sanitize_app_actor_strips_reserved_auto_claim() {
         // App JS claiming the privileged system actor is stripped to None, so
         // check_unmask_authorization's "unauthenticated → denied" arm applies —
         // an app handler can no longer unmask its PII via {actor:{kind:"auto"}}.
@@ -1389,7 +1389,7 @@ mod tests {
     }
 
     #[test]
-    fn stripped_auto_actor_is_denied_by_authorization_db3() {
+    fn stripped_auto_actor_is_denied_by_authorization() {
         // A sanitized app actor (the `auto` claim stripped to
         // None) must hit check_unmask_authorization's "unauthenticated → denied"
         // arm — which returns before consulting any policy. An unsanitized
@@ -1513,7 +1513,7 @@ mod tests {
     }
 
     #[test]
-    fn pr5_policy_grants_role_with_classification() {
+    fn policy_grants_role_with_classification() {
         use crate::protection::mask_policy::MaskPolicy;
         let app_id = "pr5_grants_role_classification";
         let policy = MaskPolicy::from_json(&value!({
@@ -1533,7 +1533,7 @@ mod tests {
     }
 
     #[test]
-    fn pr5_policy_unknown_role_denied() {
+    fn policy_unknown_role_denied() {
         use crate::protection::mask_policy::MaskPolicy;
         let app_id = "pr5_unknown_role_denied";
         let policy = MaskPolicy::from_json(&value!({
@@ -1549,7 +1549,7 @@ mod tests {
     }
 
     #[test]
-    fn pr5_auto_fallback_when_not_in_policy() {
+    fn auto_fallback_when_not_in_policy() {
         use crate::protection::mask_policy::MaskPolicy;
         let app_id = "pr5_auto_fallback";
         // Policy DOES list `user`, but NOT `auto` — the system actor
@@ -1569,7 +1569,7 @@ mod tests {
     }
 
     #[test]
-    fn pr5_auto_explicit_restriction_honoured() {
+    fn auto_explicit_restriction_honoured() {
         use crate::protection::mask_policy::MaskPolicy;
         let app_id = "pr5_auto_explicit_restriction";
         let policy = MaskPolicy::from_json(&value!({
