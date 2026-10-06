@@ -275,7 +275,7 @@ fn main() -> std::io::Result<()> {
     // material at all, and these locals are then empty by construction; the
     // report below asks `is_configured()` and the boot path is not reached.
     let control_key = settings.control_key.expose_str().to_owned();
-    // M7 — parse the worker URL list ONCE (rejecting empty/whitespace
+    // Parse the worker URL list ONCE (rejecting empty/whitespace
     // entries) and reuse it for both the check-config count and the
     // runtime hash ring, so the two can never disagree.
     let worker_urls = parse_worker_urls(settings.worker_urls.get());
@@ -407,7 +407,7 @@ fn main() -> std::io::Result<()> {
         // a credential, so there is nothing to withhold; and the count could
         // not answer the question an operator actually asks of this report -
         // which origins does this gateway trust, and did my overlay reach it.
-        // `crates/zeroship-gateway/tests/config_env_tier.rs` is the reader that needs
+        // `crates/zeroship-gateway/tests/e2e/config_env_tier.rs` is the reader that needs
         // the values: a count cannot tell a right-sized list from the wrong
         // configuration tier.
         report.field(
@@ -822,16 +822,16 @@ mod tests {
     use super::*;
     use zeroship_core::config::{GeneratedConfig, SourceKind, SERVICE_CREDENTIAL_SENTINEL};
 
-    // WHAT LEFT THIS MODULE. The two tests that drove the ENVIRONMENT tier of
-    // `GateSettings` moved to `crates/zeroship-gateway/tests/config_env_tier.rs`. That
-    // tier is clap's `env = "ZEROSHIP_..."` attribute, so the only way to
-    // exercise it in-process was `std::env::set_var`, which mutates the
-    // environment every other test in this binary parses in. They now run the
+    // The two tests that drive the ENVIRONMENT tier of `GateSettings` live in
+    // `crates/zeroship-gateway/tests/e2e/config_env_tier.rs`. That
+    // tier is clap's `env = "ZEROSHIP_..."` attribute, so exercising it
+    // in-process would need `std::env::set_var`, which mutates the
+    // environment every other test in this binary parses in. Those tests run the
     // real `zeroship-gate` under `--check-config` with `Command::env`, which
     // scopes the environment to the child and observes the shipped resolver
     // rather than a reconstruction of it.
     //
-    // What stayed here is everything that needs no environment at all.
+    // Everything here needs no environment at all.
 
     /// A temp file that removes itself even when an assertion panics.
     struct SecretFile(PathBuf);
@@ -892,8 +892,8 @@ mod tests {
         assert!(require_nonempty(CONTROL_KEY_LABEL, "key").is_ok());
     }
 
-    // M6: `--auth-secret` is a deleted legacy knob — clap must reject it
-    // as an unknown argument, not silently accept it.
+    // `--auth-secret` is a rejected knob: clap must reject it as an unknown
+    // argument, not silently accept it.
     #[test]
     fn auth_secret_flag_is_rejected() {
         let parsed =
@@ -905,7 +905,7 @@ mod tests {
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
-    // M7: the worker URL list is parsed ONCE; empty/whitespace entries are
+    // The worker URL list is parsed ONCE; empty/whitespace entries are
     // dropped so the check-config count and runtime hash ring agree.
     #[test]
     fn worker_urls_drops_empty_entries() {
@@ -1057,7 +1057,7 @@ mod tests {
         // tier is `resolve_secret_sources`'s, asserted in core. It also does not
         // prove `main` calls `gateway_credentials` - only that the function main
         // calls behaves this way. That link is covered by
-        // `crates/zeroship-gateway/tests/credential_boot.rs`, which drives the
+        // `crates/zeroship-gateway/tests/e2e/credential_boot.rs`, which drives the
         // real binary.
     }
 

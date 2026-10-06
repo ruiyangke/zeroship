@@ -5,7 +5,7 @@
 //! entry in `crates/zeroship-auth/Cargo.toml`. Each `#[derive(Debug, Template)]` struct
 //! is checked at compile time — a malformed template breaks the build.
 //!
-//! Handlers in P2-U4 / U5 / U6 render with `.render()` and stuff the
+//! Handlers render with `.render()` and stuff the
 //! resulting `String` into `ntex::web::HttpResponse::Ok().content_type(
 //! "text/html; charset=utf-8").body(rendered)`.
 
@@ -214,7 +214,7 @@ pub struct DeviceScopeView {
     pub label: String,
 }
 
-/// `/verify` GET page (P5-U5) — shown after a successful email-verification
+/// `/verify` GET page - shown after a successful email-verification
 /// token redeem. Pure confirmation; no follow-up action required.
 #[derive(Debug, Template)]
 #[template(path = "verify_ok.html")]
@@ -233,7 +233,7 @@ pub struct TokenRedeemInterstitial<'a> {
     /// the CSRF token is also a non-HttpOnly cookie and a plaintext form
     /// field, so reusing it as the script nonce conflates two secrets and
     /// any future reflection/logging of the CSRF token would silently
-    /// weaken the CSP nonce (L3). `render_token_interstitial` generates a
+    /// weaken the CSP nonce. `render_token_interstitial` generates a
     /// fresh value; the field is populated there, never by callers.
     pub script_nonce: &'a str,
     pub extra_fields: Vec<(&'a str, &'a str)>,
@@ -270,7 +270,7 @@ pub fn render_token_interstitial(
     resp.body(body)
 }
 
-/// `/forgot` GET + POST page (P5-U6).
+/// `/forgot` GET + POST page.
 ///
 /// The `sent` flag toggles the form off and renders the post-submit
 /// confirmation copy ("if an account exists, we sent a link…"). The
@@ -284,7 +284,7 @@ pub struct ForgotPage<'a> {
     pub sent: bool,
 }
 
-/// `/reset` GET + POST page (P5-U6).
+/// `/reset` GET + POST page.
 ///
 /// Surfaces the new-password form; the hidden `token` field carries the
 /// reset token between GET and POST so the user can re-submit on
@@ -294,7 +294,7 @@ pub struct ForgotPage<'a> {
 pub struct ResetPage<'a> {
     pub token: &'a str,
     pub csrf: &'a str,
-    /// Per-response CSP `script-src` nonce, independent of `csrf` (L3).
+    /// Per-response CSP `script-src` nonce, independent of `csrf`.
     /// See [`TokenRedeemInterstitial::script_nonce`].
     pub script_nonce: &'a str,
     pub error: Option<&'a str>,
@@ -314,7 +314,7 @@ pub struct ResetPage<'a> {
 pub struct DeletionCancelPage<'a> {
     pub token: &'a str,
     pub csrf: &'a str,
-    /// Per-response CSP `script-src` nonce, independent of `csrf` (L3).
+    /// Per-response CSP `script-src` nonce, independent of `csrf`.
     /// See [`TokenRedeemInterstitial::script_nonce`].
     pub script_nonce: &'a str,
     pub error: Option<&'a str>,
@@ -377,7 +377,7 @@ pub struct LogoutPage<'a> {
     pub error: Option<&'a str>,
 }
 
-/// `/me` profile page (P4-U6).
+/// `/me` profile page.
 ///
 /// Logged-in-user only; the handler resolves the user from the
 /// `__Host-zsidp_session` cookie before rendering. The `error`/`success`
@@ -413,7 +413,7 @@ mod tests {
         Some(rest[..end].to_string())
     }
 
-    /// L3 regression: the CSP `script-src` nonce on the token-redeem
+    /// The CSP `script-src` nonce on the token-redeem
     /// interstitial MUST be an independent per-response value, NOT the CSRF
     /// token (which is also a non-HttpOnly cookie + plaintext form field).
     /// Conflating the two means any change that logs/reflects/lengthens the

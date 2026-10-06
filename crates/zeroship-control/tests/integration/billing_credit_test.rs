@@ -1,4 +1,4 @@
-//! PR-2 tests for the `0048 credit_ledger`
+//! Tests for the `0048 credit_ledger`
 //! append-only ledger, per-grant FIFO consume-at-finalize, and the operator
 //! `POST /api/billing/credit` grant endpoint.
 //!
@@ -227,9 +227,8 @@ async fn make_plan(state: &AppState) -> String {
 
 /// An app the given ORGANIZATION bills.
 ///
-/// It used to seed an app in a fresh organization and then seat a human owner in
-/// it, because the reconciler found the subject by walking to that owner. The
-/// subject is now the app row's own `organization_id`, so an app seeded into
+/// It seeds the app directly into the given organization; the reconciler finds
+/// the subject on the app row's own `organization_id`, so an app seeded into
 /// one organization and asserted against another would simply never be billed -
 /// the test would go green on an empty sweep. Placing it in the caller's
 /// organization is what keeps the assertion attached to anything.

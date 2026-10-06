@@ -519,7 +519,7 @@ async fn exchange_refresh_token_inner(
     else {
         // The row exists but the validating read refused it: revoked, expired,
         // suspended, or the person's credential epoch moved. One
-        // indistinguishable refusal class, as C14 requires.
+        // indistinguishable refusal class.
         return Err(OAuthError::invalid_grant("refresh token is invalid"));
     };
 

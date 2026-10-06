@@ -1552,7 +1552,7 @@ async fn handle_subscription_dispatch(
     // dispatch, and one open for hours holds its concurrency slot for that
     // whole time — intentional, so the operator can size the ceiling to the
     // steady-state subscription count plus a margin for unary traffic. The
-    // guard now lives in the caller, so the slot is held for exactly as long.
+    // caller holds the guard, so the slot is held for exactly as long.
 
     // Affinity selection — exercised even when the proxy itself
     // returns 501, so tests against this path can verify that the

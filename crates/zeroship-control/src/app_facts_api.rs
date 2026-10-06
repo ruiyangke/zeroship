@@ -1,8 +1,8 @@
 //! Control's app and plan facts for the workflow service.
 //!
-//! The workflow service used to read `zeroship.apps` and `zeroship.plans`
-//! through its own database binding. It reads them here instead, so the policy
-//! columns and the whole plan catalog need no grant on a service login.
+//! The workflow service reads `zeroship.apps` and `zeroship.plans` here rather
+//! than through its own database binding, so the policy columns and the whole
+//! plan catalog need no grant on a service login.
 //!
 //! The answer carries a watermark, and the ONE thing this handler must get
 //! right is where that watermark comes from: it is selected in the SAME

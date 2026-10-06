@@ -83,7 +83,7 @@ fn describe(error: &compio_postgres::Error) -> String {
 /// remove any or all grants without a later bearer request recreating them.
 /// That is a REAL capability rather than an accident of the implementation, and
 /// `an_operator_deleting_a_grant_row_narrows_the_next_cli_request`
-/// (`crates/zeroship-control/tests/authz_guard_oauth_test.rs`) asserts exactly
+/// (`crates/zeroship-control/tests/integration/authz_guard_oauth_test.rs`) asserts exactly
 /// it, including that a request must not re-seed what an operator deleted.
 /// The writable CTE makes marker and grant creation one PostgreSQL statement:
 /// either all default rows and the marker commit, or none of them do.

@@ -1161,7 +1161,7 @@ async fn pr8_schema_objects_present() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// C1: the dispute money-write rail takes the SAME per-organization advisory lock every
+// The dispute money-write rail takes the SAME per-organization advisory lock every
 //     sibling money path (refund/credit/void/proration) takes — so a dispute's
 //     `dispute_debit` cannot interleave with a concurrent refund reading the cap
 //     anchor (`cash = Σ(invoice_payments)`) pre-debit. We prove the lock by holding
@@ -1545,8 +1545,8 @@ async fn billing_disputes_controlled_update_trigger_raises_on_illegal_mutations(
 
 // ───────────────────────────────────────────────────────────────────────────
 // `record_dispute_closed` (the close rail) takes the SAME per-organization advisory lock
-// the create rail does. C1 was proven only on the CREATED rail (the existing
-// `dispute_created_takes_per_organization_advisory_lock`); the close rail moves cash too — the won
+// the create rail does; `dispute_created_takes_per_organization_advisory_lock` proves the
+// create rail. The close rail moves cash too - the won
 // reversal (RAISES the cap) and the close-before-create debit (LOWERS it) must serialize
 // against a concurrent refund. We hold the organization's `pg_advisory_xact_lock` key on an
 // observer txn and assert `record_dispute_closed` BLOCKS until release, for BOTH the won path

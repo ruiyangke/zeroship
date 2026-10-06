@@ -1141,7 +1141,7 @@ async fn device_user_code_redirects_anonymous_browser_to_login() {
     .await;
 }
 
-/// M2: `POST /device` (RFC 8628 device confirmation — an
+/// `POST /device` (RFC 8628 device confirmation - an
 /// identity-conferring, state-changing grant) MUST enforce the same
 /// `__Host-zsidp_csrf` double-submit token as every sibling auth form handler.
 ///

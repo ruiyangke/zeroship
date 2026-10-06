@@ -13,24 +13,25 @@
 //!
 //! ## Re-drivable to completion
 //!
-//! The sequence is three phases — Phase 1 (void + `void_reversal`), Phase 2 (reissue),
-//! Phase 3 (true-up) — and each MONEY mutation is individually serialized per organization:
-//!   * Phase 1 takes the per-organization advisory lock and appends `void_reversal` + flips
-//!     the invoice to `void` in ONE txn.
-//!   * Phase 2's `bill_organization` re-acquires the SAME lock inside its own `consume_at_finalize`
-//!     txn (a separate session — it CANNOT share Phase 1's txn, so a single all-phases
-//!     transaction would self-deadlock; hence the phases stay separate but each is locked).
-//!   * Phase 3's true-up refund takes the SAME lock inside `claim_refund_locked`.
+//! The sequence has three stages - void + `void_reversal`, reissue, true-up - and
+//! each MONEY mutation is individually serialized per organization:
+//!   * The void stage takes the per-organization advisory lock and appends
+//!     `void_reversal` + flips the invoice to `void` in ONE txn.
+//!   * The reissue stage's `bill_organization` re-acquires the SAME lock inside
+//!     its own `consume_at_finalize` txn (a separate session - it CANNOT share
+//!     the void stage's txn, so a single all-stage transaction would
+//!     self-deadlock; hence the stages stay separate but each is locked).
+//!   * The true-up stage's refund takes the SAME lock inside `claim_refund_locked`.
 //!
 //! Crucially the WHOLE operation is RE-DRIVABLE: [`void_and_reissue`] accepts an
 //! ALREADY-VOID invoice and converges the reissue + true-up tail. A crash between the
-//! Phase-1 commit and Phase 3 therefore is NOT terminal — re-invoking the endpoint (or a
-//! sweep) on the voided invoice completes the reissue + true-up idempotently:
-//!   * Phase 1 is skipped when the invoice is already void (the `already_reversed` guard
-//!     also makes the `void_reversal` append a no-op on re-drive);
-//!   * Phase 2's `bill_organization` short-circuits on an already-finalized active invoice for
-//!     the period (it never double-reissues);
-//!   * Phase 3's true-up is idempotency-keyed on `trueup:{invoice_id}` (it never
+//! void-stage commit and the true-up stage therefore is NOT terminal - re-invoking the
+//! endpoint (or a sweep) on the voided invoice completes the reissue + true-up idempotently:
+//!   * The void stage is skipped when the invoice is already void (the `already_reversed`
+//!     guard also makes the `void_reversal` append a no-op on re-drive);
+//!   * The reissue stage's `bill_organization` short-circuits on an already-finalized active
+//!     invoice for the period (it never double-reissues);
+//!   * The true-up stage is idempotency-keyed on `trueup:{invoice_id}` (it never
 //!     double-refunds).
 //!
 //! So a re-invocation observes the same `VoidReissueOutcome` and the balance is conserved.
@@ -65,9 +66,10 @@
 //! `cash_refunds_already_issued + over = cash_paid(old) − total(new) ≤ cash_paid(old)`.
 //!
 //! That `over` is recomputed INSIDE `refund::issue_true_up_refund`'s
-//! per-organization-locked claim transaction from the live cash anchor — Phase 3 passes
-//! only the immutable `reissued_total` and never pre-reads the cash. A concurrent
-//! refund/dispute landing between Phase 2 and the claim therefore cannot make the
+//! per-organization-locked claim transaction from the live cash anchor - the
+//! true-up stage passes only the immutable `reissued_total` and never pre-reads
+//! the cash. A concurrent refund/dispute landing between the reissue stage and
+//! the claim therefore cannot make the
 //! claimed amount stale, trip the over-refund trigger, or under-refund.
 
 use compio_postgres::GenericClient;
@@ -143,8 +145,10 @@ pub async fn void_and_reissue<S: StripeApi>(
     let period: chrono::NaiveDate = row.get("period");
     let status: String = row.get("status");
     // A `finalized` invoice is voided then reissued. An ALREADY-`void` invoice
-    // is a RE-DRIVE of a crash between the Phase-1 commit and Phase 3 — we skip Phase 1
-    // (it is already void + reversed) and converge the reissue + true-up tail. A `draft`
+    // is a RE-DRIVE of a crash between the void-stage commit and the true-up
+    // stage - we skip the void stage (it is already void and its `void_reversal`
+    // is appended) and
+    // converge the reissue + true-up tail. A `draft`
     // invoice is never voidable.
     if status != "finalized" && status != "void" {
         return Err(RegistryError::InvalidInput(format!(
@@ -153,9 +157,9 @@ pub async fn void_and_reissue<S: StripeApi>(
     }
     let needs_void = status == "finalized";
 
-    // ── Phase 1: void + void_reversal, in ONE txn, under the per-organization lock ──
+    // -- Void stage: void + void_reversal, in ONE txn, under the per-organization lock --
     // Skipped on a re-drive (already void): the `void_reversal` is already appended and
-    // the invoice is already flipped — Phase 1 has nothing left to do.
+    // the invoice is already flipped - the void stage has nothing left to do.
     if needs_void {
         let tx = conn.transaction().await?;
         take_per_organization_lock(&tx, &organization_id).await?;
@@ -220,7 +224,7 @@ pub async fn void_and_reissue<S: StripeApi>(
         tx.commit().await?;
     }
 
-    // ── Phase 2: reissue via the REAL reconciler path for the same (organization, period) ──
+    // -- Reissue stage: reissue via the REAL reconciler path for the same (organization, period) --
     // The void released the period claim (the partial unique index `WHERE status <>
     // 'void'`), so bill_organization can claim + re-price + re-consume + finalize a fresh
     // invoice. It takes the per-organization advisory lock again (inside consume), so it
@@ -248,12 +252,12 @@ pub async fn void_and_reissue<S: StripeApi>(
     let reissued_invoice_id: Option<String> = reissued.first().map(|r| r.get::<_, String>("id"));
     let reissued_total: i64 = reissued.first().map_or(0, |r| r.get::<_, i64>("total_cents"));
 
-    // ── Phase 3: the true-up bridge ──
+    // -- True-up stage: the true-up bridge --
     // over = cash_paid(old) − cash_refunds_already_issued(old) − total(new), floored at 0.
     //
     // The over-collection is recomputed INSIDE `issue_true_up_refund`'s per-organization-locked
     // claim txn from the live cash anchor — NOT pre-read here — so a concurrent refund/dispute
-    // landing between Phase 2 and Phase 3 cannot make the claimed amount stale. We pass only the
+    // landing between the reissue and true-up stages cannot make the claimed amount stale. We pass only the
     // immutable `reissued_total`; the bridge returns the actual cents refunded (0 if the
     // over-collection vanished under the lock). The idempotency key (old_invoice_id, 'true_up')
     // makes a re-drive of the same void+reissue not double-refund. The cap holds by construction:

@@ -1,11 +1,10 @@
 //! Shared, breaker-guarded outbound HTTP client for the gateway → OP path.
 //!
-//! Every gateway→OP call used to construct a fresh `cyper::Client::new()`
-//! with no bounded timeout and no shared failure state. An OP brownout
-//! could then exhaust the gateway's outbound connections — the mint path's
-//! exact risk (`/oauth2/token` slow or 5xx-ing while every request opens a
-//! new connection pool). This module fixes that with three pieces wired
-//! together:
+//! Every gateway-to-OP call goes through one breaker-guarded client with a
+//! bounded timeout and shared failure state, so an OP brownout cannot exhaust
+//! the gateway's outbound connections - the mint path's exact risk
+//! (`/oauth2/token` slow or 5xx-ing while every request opens a new connection
+//! pool). This module wires that with three pieces together:
 //!
 //! 1. **One reused `cyper::Client` per worker thread, retired at an idle
 //!    bound.** `cyper::Client`'s connector wraps its connect future in

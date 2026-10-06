@@ -128,7 +128,7 @@ pub async fn issue(db: &Client, email: &str) -> Result<IssuedToken> {
         .map_err(|e| AuthError::Db(format!("password_reset supersede previous: {e}")))?;
 
         // 3. Insert the new row, binding it to the user's IMMUTABLE id
-        //    resolved from the email NOW (security finding L4). `complete`
+        //    resolved from the email NOW. `complete`
         //    filters on this id, never re-resolving the target by email — so
         //    a later email reassignment cannot retarget the reset to a
         //    different account. The id is captured via a sub-SELECT in the
@@ -284,9 +284,9 @@ pub async fn is_live(db: &Client, raw_token: &str) -> Result<bool> {
 /// Revoking the anchor means the gateway never touches that refresh family
 /// again, and the family marker rejects any token it could yield.
 ///
-/// **F4 TOCTOU (gateway-side, closed).** A `?mint=1` rotation that read the
-/// anchor BEFORE this reset commits used to re-sign a fresh cookie even though
-/// the family was being torn down. The gateway now fails that rotation CLOSED:
+/// **TOCTOU (gateway-side, closed).** A `?mint=1` rotation that reads the
+/// anchor BEFORE this reset commits must not re-sign a fresh cookie once the
+/// family is torn down. The gateway fails that rotation CLOSED:
 /// `anchors::update_rotated_family` reports 0 rows when the anchor was revoked
 /// mid-rotation, and `do_refresh` re-reads the `(client_id, pws_)` family
 /// marker inside the persist tx and rejects when a marker landed at/after the
@@ -294,7 +294,7 @@ pub async fn is_live(db: &Client, raw_token: &str) -> Result<bool> {
 /// family marker) now also stop an in-flight rotation, not just future ones.
 ///
 /// **F2 lockout recovery.** The same UPDATE also zeroes `failed_login_count`
-/// and clears `locked_until`. The L5 account-lockout was cleared ONLY by a
+/// and clears `locked_until`. The account lockout is cleared ONLY by a
 /// successful PASSWORD login (`credentials::reset_login_failures`), which is
 /// unreachable while locked — so an attacker who knew the victim's email could
 /// lock the account out of EVERY method permanently (~1 wrong POST/hr sustains
@@ -315,7 +315,7 @@ pub async fn complete(
     let rows = db
         .query(
             // Candidate is resolved by the IMMUTABLE `ml.user_id` captured at
-            // issue time (security finding L4), NOT by re-joining on email —
+            // issue time, NOT by re-joining on email -
             // so an email reassignment between issue and complete cannot
             // retarget the reset. Email is JOINed only as a display value and
             // plays no role in selecting the account. `ml.user_id IS NOT NULL`

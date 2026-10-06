@@ -1,4 +1,4 @@
-//! P5a-2 gateway-brokered login OP tests.
+//! Gateway-brokered login OP tests.
 
 use crate::support;
 use support::{auth_server::AuthServer, database::Database};

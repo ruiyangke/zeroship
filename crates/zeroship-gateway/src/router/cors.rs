@@ -351,8 +351,8 @@ mod tests {
     /// `static_serve::apply_encoding_headers` sets `Vary: Accept-Encoding`
     /// when it serves a negotiated pre-compressed variant, and step 10 of
     /// `execute_resource_tree` runs the CORS injection on EVERY arm including
-    /// `Static`. `HeaderMap::insert` replaces, so injecting `Origin` used to
-    /// drop `Accept-Encoding` and let a shared cache serve brotli bytes to a
+    /// `Static`. `HeaderMap::insert` replaces, so injecting `Origin` must
+    /// preserve `Accept-Encoding`, or a shared cache serves brotli bytes to a
     /// client that never asked for them.
     ///
     /// What this does NOT cover: it does not drive `execute_resource_tree`, so

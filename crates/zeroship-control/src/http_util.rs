@@ -1,8 +1,7 @@
 //! Shared HTTP helpers (source-IP extraction, rate-limit gating).
 //!
-//! Lives in one place so a fix doesn't have to be applied in two
-//! handlers — env_handlers and stripe_handlers used to duplicate this
-//! code 1:1, which a critic flagged as a drift hazard.
+//! Lives in one place so a fix lands once: env_handlers and stripe_handlers
+//! share this code, so the two cannot drift.
 
 use ntex::web::{self, HttpRequest};
 use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
@@ -26,8 +25,7 @@ const UNRESOLVED_CLIENT_IDENTITY: &str = "unresolved";
 /// A last entry that is not a valid IP is ignored in favor of `peer_addr`.
 ///
 /// The resolution itself is [`zeroship_core::client_ip`], shared with the
-/// gateway and the auth service. It used to be a private copy here, which is
-/// how the gateway came to read the opposite end of the same header.
+/// gateway and the auth service, so both read the same end of the same header.
 pub fn source_ip(req: &HttpRequest, trust_proxy: bool) -> Option<String> {
     let xff = req
         .headers()
@@ -95,7 +93,7 @@ mod tests {
 
     fn source_ip_of(xff: &str, trust_proxy: bool) -> Option<String> {
         // `TestRequest::peer_addr` is not plumbed into `to_http_request`
-        // (ntex 3.7.2 web/test.rs:1038-1042 asserts exactly that), so these
+        // (ntex's `web::test` asserts exactly that), so these
         // exercise the header arm; the peer arm is covered in
         // `zeroship_core::client_ip`.
         source_ip(

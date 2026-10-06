@@ -76,7 +76,7 @@ pub async fn invoice_id_for_provider_invoice<C: GenericClient + Sync>(
 /// `UNIQUE(provider, ref_kind, external_id)` makes the later dispute resolution
 /// deterministic (no ambiguity).
 ///
-/// IDEMPOTENT + POISON-SAFE (C2). The table has TWO uniques: the PK
+/// IDEMPOTENT + POISON-SAFE. The table has TWO uniques: the PK
 /// `(invoice_id, provider, ref_kind)` AND the global `(provider, ref_kind, external_id)`.
 /// A bare `ON CONFLICT (invoice_id, provider, ref_kind) DO NOTHING` covers only the PK —
 /// so a settling `pi_`/`ch_` that is ALREADY linked to invoice A and is then seen for a

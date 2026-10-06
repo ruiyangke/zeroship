@@ -218,7 +218,7 @@ fn the_flag_outranks_both_the_environment_and_the_overlay() {
 
 #[test]
 fn the_obsolete_security_relaxation_variable_reaches_no_carrier() {
-    // `--dev-insecure` was deleted. The flag half of that is asserted in
+    // `--dev-insecure` is rejected. The flag half of that is asserted in
     // `crates/zeroship-gateway/src/main.rs` (clap rejects an unknown argument without
     // consulting the environment at all); this is the tier the flag test
     // cannot see, because an env-only carrier would leave the flag surface

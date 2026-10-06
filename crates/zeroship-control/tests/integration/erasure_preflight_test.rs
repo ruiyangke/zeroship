@@ -6,10 +6,10 @@
 //! every blocker it returns has to carry enough for the person to act on it.
 //!
 //! Its second rule, whether an organization still OWES, has its own file
-//! (`crates/zeroship-control/tests/deletion_owes_test.rs`) because it shares one
+//! (`crates/zeroship-control/tests/integration/deletion_owes_test.rs`) because it shares one
 //! predicate with the dissolve path and the two are worth ruling on together.
 //! The reaper's half of that rule is in
-//! `crates/zeroship-auth/tests/account_deletion_test.rs`, where the reaper is.
+//! `crates/zeroship-auth/tests/integration/account_deletion`, where the reaper is.
 //!
 //! The auth suite exercises the WIRE (`mock_control`); this exercises the SQL,
 //! because that is where the tables are and `zeroship_auth` cannot read them.
@@ -39,11 +39,11 @@ impl Fx {
     /// IT RETURNS `Self` AND NOT `Option<Self>` ON PURPOSE. There is no
     /// database state this can decline for: `crate::support::require_control_db` ENDS
     /// the process when the DSN is absent or the schema is not there, so the
-    /// only value an `Option` could carry is `Some`. It carried one anyway
-    /// until 2026-09-08, and every caller spelled `let Some(fx) = ... else {
-    /// return }` - the exact shape that used to mean "pass silently", left
-    /// standing as a template for the next test to copy. Returning the value
-    /// makes that shape unwritable rather than merely unreachable.
+    /// only value an `Option` could carry is `Some`. Every caller spelled
+    /// `let Some(fx) = ... else { return }` - the shape that means "pass
+    /// silently", left standing as a template for the next test to copy.
+    /// Returning the value makes that shape unwritable rather than merely
+    /// unreachable.
     async fn new() -> Self {
         let url = crate::support::require_control_db();
         let (pg, conn) = connect(&url, NoTls).await.expect("control-pg connect");

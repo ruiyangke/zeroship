@@ -276,8 +276,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // auth service that booted without it would answer every liveness probe
     // while every account deletion failed its precondition check.
     //
-    // It is NOT the shared control key, which is what this hop used to present.
-    // That key is one identity four other processes hold, so it cannot say WHICH
+    // It is NOT the shared control key. That key is one identity four other
+    // processes hold, so it cannot say WHICH
     // caller is asking - and control would have had to admit the holder of it
     // everywhere, not just here.
     let service_keyring = Arc::new(
@@ -488,9 +488,9 @@ mod tests {
     }
 
     // The stash key signs the federation stash cookie; a forgeable one bypasses
-    // the OAuth state/PKCE check. The guard used to read a plain `String` and is
-    // now bridged through `validate_secret_material`, so this pins that the
-    // bridge did not turn "absent" or "too short" into a clean boot.
+    // the OAuth state/PKCE check. The guard reads through
+    // `validate_secret_material`, so this pins that path does not turn "absent"
+    // or "too short" into a clean boot.
     #[test]
     fn a_weak_or_absent_stash_key_still_fails_the_startup_guard() {
         let mut cfg = healthy();

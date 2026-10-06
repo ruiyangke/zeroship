@@ -213,7 +213,7 @@ pub async fn verify_password_credentials(
         // the lock into the opaque `InvalidCredentials` so a locked real account
         // is indistinguishable from an absent one to an unauthenticated probe.
         // The lock still HOLDS — no `VerifiedUser` is minted, the correct
-        // password is still rejected (L5/F2 lockout). Only the public
+        // password is still rejected by the account lockout. Only the public
         // status/message is equalized; the locked user still sees a generic
         // "invalid email or password" failure, not a lock disclosure.
         //
@@ -263,7 +263,7 @@ pub async fn verify_password_credentials(
     // 6b. Wrong password — fail (`invalid_credentials`). This is the ONLY arm
     // reachable past here, and only when `valid == true`.
     if !valid {
-        // Account-lockout escalation (finding L5): count this consecutive
+        // Account-lockout escalation: count this consecutive
         // failure against the real user and, past the threshold, set
         // `locked_until` so the NEXT attempt is rejected as locked even with
         // the right password. Best-effort — a counter-store fault must not

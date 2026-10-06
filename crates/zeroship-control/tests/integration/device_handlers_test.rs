@@ -1,10 +1,8 @@
 //! Coverage for control's RFC 9728 protected-resource metadata.
 //!
-//! This file used to cover control's own RFC 8628 device flow end to end. That
-//! flow is gone: `zeroship login` drives the OP's device grant, and control's
-//! `/api/device/{auth,approve,token}` had no caller left. What survives is the
-//! one thing control still serves an unauthenticated CLI - the document naming
-//! the authorization server whose tokens control accepts.
+//! This file covers control's RFC 9728 protected-resource metadata: the one
+//! thing control serves an unauthenticated CLI - the document naming the
+//! authorization server whose tokens control accepts.
 //!
 //! This test intentionally hard-fails without a test database: `AppState`
 //! owns a live `Registry`, and a fixture that silently skipped would report

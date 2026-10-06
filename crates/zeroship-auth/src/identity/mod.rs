@@ -1,5 +1,5 @@
-//! User identity flows. Phase 2 = password. Phase 4 adds federation
-//! (Google/GitHub OAuth). Phase 5 adds magic-link + email verification.
+//! User identity flows: password, federation (Google/GitHub OAuth),
+//! magic-link + email verification.
 
 pub mod credentials;
 pub mod deletion_cancel;

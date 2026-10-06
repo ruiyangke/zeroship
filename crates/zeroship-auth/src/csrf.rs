@@ -7,14 +7,11 @@
 //! cookie is `HttpOnly` - double-submit needs the cookie to be sent, not to be
 //! readable.
 //!
-//! This doc used to say the opposite: that the cookie was deliberately NOT
-//! `HttpOnly` because "the inline `<script nonce>` reads it for the hidden form
-//! field". No such script has ever existed here - the three templates that
-//! carry an inline script (`reset`, `token_redeem_interstitial`,
-//! `device_supabase`) scrub history and submit a form, and none touches
-//! `document.cookie`. The claim read as a justified trade-off, so it stopped
-//! anyone asking. The Vite development provider uses the same server-rendered
-//! double-submit shape.
+//! No inline `<script nonce>` reads the cookie for the hidden form field: the
+//! three templates that carry an inline script (`reset`,
+//! `token_redeem_interstitial`, `deletion_cancel`) scrub history and submit a
+//! form, and none touches `document.cookie`. The Vite development provider uses
+//! the same server-rendered double-submit shape.
 //!
 //! The cookie always uses the `__Host-` prefix and `Secure`. The local browser
 //! topology uses `.localhost`, which browsers treat as potentially trustworthy;

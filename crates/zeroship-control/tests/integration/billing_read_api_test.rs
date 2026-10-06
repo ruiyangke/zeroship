@@ -168,8 +168,8 @@ async fn issue_bearer(state: &AppState, user_id: &UserId, scope: &str) -> Caller
 }
 
 // The scope vocabulary is resource-blind: a scope always lowers to
-// `Resource::Any`, so per-app narrowing now comes from Cedar app membership
-// rather than from the caller-supplied wrapper policy a PAT used to carry.
+// `Resource::Any`, so per-app narrowing comes from Cedar app membership rather
+// than from a caller-supplied wrapper policy.
 
 // --------------------------------------------------------------------------
 // Seeding helpers (faithful: real schema, real pricing inputs)
@@ -660,10 +660,9 @@ async fn invoice_history_is_creator_scoped_with_no_operator_exception() {
         "organization A must NOT read organization B's app invoices",
     );
 
-    // There is no operator arm left to read across creators. A third organization
-    // holding the same billing scopes, but no membership of either app, is
-    // refused on BOTH - which is the property the operator arm used to be the
-    // documented exception to.
+    // A third organization holding the same billing scopes, but no membership of
+    // either app, is refused on BOTH: there is no operator arm reading across
+    // creators.
     for app in [&app_a, &app_b] {
         let status = test::call_service(
             &svc,
@@ -1281,9 +1280,9 @@ async fn invoice_detail_denies_a_different_creator() {
         "a different organization must NOT read A's invoice line detail",
     );
 
-    // A third organization is refused exactly like B. The operator arm that used to
-    // read any invoice detail is deleted, so "a different organization" is now the
-    // only case there is.
+    // A third organization is refused exactly like B. There is no operator arm
+    // reading any invoice detail, so "a different organization" is the only case
+    // there is.
     let status = test::call_service(
         &svc,
         get(pat_outsider.bearer(), format!("/api/invoices/{inv_a}")),
@@ -1389,13 +1388,12 @@ async fn invoice_read_denied_via_shared_membership() {
 // The invoice HISTORY of an organization is read by money authority at that
 // organization, and by nothing else.
 //
-// THIS TEST'S PREMISE INVERTED, AND THE INVERSION IS THE POINT. It used to
-// assert that a bookkeeper V - the `billing` seat, rank 10 / billing_rank 20 -
-// was REFUSED O's cross-app history, because an invoice was keyed on one human
-// and only that human could read it. The invoice is keyed on the ORGANIZATION
-// now, and `billing` is the seat the ladder defines as money authority over it,
-// so refusing V would be refusing the exact person the seat exists for. The
-// policy file says so in as many words: "a bookkeeper reads the invoice".
+// THE PREMISE THIS ASSERTS: MONEY AUTHORITY, NOT APP AUTHORITY, READS THE
+// HISTORY. A bookkeeper V - the `billing` seat, rank 10 / billing_rank 20 -
+// READS O's cross-app history, because an invoice is keyed on the ORGANIZATION
+// and `billing` is the seat the ladder defines as money authority over it, so
+// refusing V would be refusing the exact person the seat exists for. The policy
+// file says so in as many words: "a bookkeeper reads the invoice".
 //
 // What still has to hold, and is what this asserts in three directions:
 //   * the `billing` seat READS the history (billing_rank 20),

@@ -1,7 +1,7 @@
 //! `/verify` handlers — GET renders a POST interstitial, then POST redeems
 //! an email-verification token and marks `zeroship.users.email_verified_at = NOW()`.
 //!
-//! Per proposal §8.3 (Phase 5). The token is issued by [`crate::ui::signup`]
+//! The token is issued by [`crate::ui::signup`]
 //! on a successful signup and emailed to the user. Clicking the link in
 //! the email lands here; we atomically stamp the user's
 //! `email_verified_at` and consume the row via

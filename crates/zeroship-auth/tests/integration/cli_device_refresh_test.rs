@@ -582,14 +582,14 @@ async fn the_refresh_family_and_its_replay_window_are_bounded() {
 ///
 /// * here, the OP caps the scope to the registration without consulting
 ///   `zeroship.principal_grants`. It cannot do otherwise:
-///   `db/migrations-ts/20260702000900_grants.ts:55` gives `zeroship_auth`
+///   `db/migrations-ts/20260702000900_grants.ts` gives `zeroship_auth`
 ///   SELECT only on that table, and nothing in `crates/auth` may write it.
 /// * control then intersects that scope with the principal's LIVE grants on
 ///   every bearer request (`crates/zeroship-authn/src/lib.rs`,
 ///   `platform_cli_entitlement`), which is where an operator's narrowing takes
 ///   effect. Pinned by
 ///   `an_operator_deleting_a_grant_row_narrows_the_next_cli_request` in
-///   `crates/zeroship-control/tests/authz_guard_oauth_test.rs`.
+///   `crates/zeroship-control/tests/integration/authz_guard_oauth_test.rs`.
 ///
 /// So a wide scope HERE is not authority. Asserting it stays wide is what
 /// stops someone "fixing" the gap in this function, which would mint

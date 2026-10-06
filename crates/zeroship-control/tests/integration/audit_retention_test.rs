@@ -1,4 +1,4 @@
-//! Test (review P12): `zeroship.app_audit` / `authz_decisions` are
+//! Test: `zeroship.app_audit` / `authz_decisions` are
 //! append-only — an un-flagged `DELETE` is rejected by the tamper trigger — but
 //! the sanctioned `control::cron::audit_retention` sweep (which sets
 //! `zeroship.audit_retention = 'on'`) deletes rows past the retention window.

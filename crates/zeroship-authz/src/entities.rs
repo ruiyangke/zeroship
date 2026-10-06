@@ -9,7 +9,7 @@ use crate::{AuthzError, Resource};
 
 /// Assemble the Cedar entity store for one authorization request.
 ///
-/// **The store no longer carries membership, and there is no cache in front of
+/// **The store does not carry membership, and there is no cache in front of
 /// it.** It holds exactly two entities: the principal `User`, whose attributes
 /// come from `zeroship.users` alone, and the request's own resource, which
 /// exists so `resource is App` / `is Database` / `is Project` /
@@ -126,8 +126,8 @@ mod tests {
     }
 
     /// The store is exactly two entities regardless of how much authority the
-    /// principal holds. This is the property the membership sets used to break:
-    /// it grew with the number of apps a principal could reach.
+    /// principal holds, so it does not grow with the number of apps a principal
+    /// can reach.
     #[test]
     fn the_store_is_bounded_at_two_entities() {
         for resource in [

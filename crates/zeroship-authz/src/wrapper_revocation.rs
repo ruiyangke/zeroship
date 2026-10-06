@@ -7,10 +7,9 @@
 //! client id plus the principal `UserId`. Every reader rejects a token when the
 //! exact pair has `revoked_after > token.iat`.
 //!
-//! There is no global subject-only denylist. The previous
-//! `wrapper_revoked_subjects` table was write-only dead code and was removed;
-//! CLI user revocation remains namespaced by `zeroship-cli` in this
-//! shared table. Account deletion writes that platform-family cutoff.
+//! There is no global subject-only denylist. CLI user revocation is namespaced
+//! by `zeroship-cli` in this shared table; account deletion writes that
+//! platform-family cutoff.
 
 use std::collections::HashMap;
 use std::sync::Mutex;

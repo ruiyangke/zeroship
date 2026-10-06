@@ -215,7 +215,7 @@ fn try_parse(buf: &[u8]) -> Option<(String, String, bool, usize)> {
 }
 
 fn handle(method: &str, path: &str, version_pinned: bool, state: &Arc<Mutex<MockState>>) -> Vec<u8> {
-    // C1: a faithful Stripe requires the pinned Stripe-Version header on EVERY call.
+    // A faithful Stripe requires the pinned Stripe-Version header on EVERY call.
     if !version_pinned {
         state.lock().unwrap().saw_unpinned = true;
         return http_json(400, r#"{"error":{"code":"version_unpinned","message":"missing Stripe-Version"}}"#);
@@ -595,7 +595,7 @@ async fn stripe_dispute_with_no_internal_row_is_flagged() {
     assert_eq!(parked, 0, "default is FLAG-only — no auto-heal park");
 }
 
-// C2: a missed `charge.dispute.created` on an ALREADY-LINKED, already-paid invoice must be
+// A missed `charge.dispute.created` on an ALREADY-LINKED, already-paid invoice must be
 // APPLIED by the backstop (billing_disputes row + dispute_debit + cash tightened), NOT parked.
 // The ONLY promotion site (`resolve_pending_disputes_for_linkage`) fires when the linkage is
 // FRESHLY written at invoice.paid — which already ran here, before the dispute existed. So a
@@ -619,7 +619,7 @@ async fn missing_dispute_backstop_applies_when_enabled_and_linkage_exists() {
     let pi = format!("pi_heal_{}", short());
     append_charge(&fx.state, &inv, 8000, &pi).await;
     // The settling pi_ ALREADY links to OUR invoice (what invoice.paid records) — so the
-    // linkage exists NOW, before the dispute is seen. This is the C2 case.
+    // linkage exists NOW, before the dispute is seen.
     fx.state.control_pg
         .execute(
             "INSERT INTO zeroship.billing_provider_refs (invoice_id, provider, ref_kind, external_id) \
@@ -689,7 +689,7 @@ async fn missing_dispute_backstop_applies_when_enabled_and_linkage_exists() {
 // `auto_heal_disputes=true` and a du_… whose pi_/ch_ resolves to NO invoice (no linkage
 // exists, and none will ever come — e.g. a Connect end-user charge we never invoiced),
 // `try_backstop_dispute` must return false: the finding STANDS, NOTHING is healed, and
-// `pending_disputes` stays EMPTY. Parking here would silently re-break C2 — the only
+// `pending_disputes` stays EMPTY. Parking here would silently re-break the reconciliation - the only
 // promotion site fires at invoice.paid, which already ran (or never will), so a parked row
 // would never promote and the cap would stay permanently under-tightened.
 // ===========================================================================
@@ -719,7 +719,7 @@ async fn missing_dispute_backstop_does_not_park_when_unresolved() {
     assert_eq!(finding_count(&fx.state, "missing_dispute", &du).await, 1, "flagged for the operator");
     assert_eq!(summary.disputes_healed, 0, "an unresolved dispute is NOT healed");
 
-    // CRITICAL: NOTHING parked (a park here would silently re-break C2).
+    // CRITICAL: NOTHING parked (a park here would silently re-break the reconciliation).
     let parked: i64 = fx.state.control_pg
         .query("SELECT COUNT(*)::bigint AS n FROM zeroship.pending_disputes WHERE provider_dispute_id=$1", &[&du])
         .await.expect("count parked")[0].get("n");

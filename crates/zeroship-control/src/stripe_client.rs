@@ -271,7 +271,7 @@ pub trait StripeApi {
     /// (`GET /v1/billing/meters/{meter_id}/event_summaries?customer=…&
     /// start_time=…&end_time=…`, `value_grouping_window=day`, summed).
     ///
-    /// This is the C2 re-drive guard: the export cron pushes
+    /// This is the re-drive guard: the export cron pushes
     /// `current_local − stripe_aggregate`, so a re-drive PAST Stripe's ~24h
     /// `identifier` dedup window (where a blind re-push would be SUMMED twice)
     /// instead pushes only the still-missing remainder. The guarantee rests on
@@ -348,8 +348,8 @@ pub trait StripeApi {
     /// `provider_invoice_id` is the refund TARGET the caller recorded: the settling
     /// `pi_…`/`ch_…` (preferred — captured at `invoice.paid` from the expanded fetch) or
     /// the Stripe invoice `in_…`. A `pi_…`/`ch_…` is refunded DIRECTLY; an `in_…` is first
-    /// resolved to its settling PaymentIntent via an EXPANDED fetch (D2 — the bare
-    /// `invoice.payment_intent` field was removed on API 2025-09-30.clover), then refunded.
+    /// resolved to its settling PaymentIntent via an EXPANDED fetch (the bare
+    /// `invoice.payment_intent` field is absent on API 2025-09-30.clover), then refunded.
     /// Issues `POST /v1/refunds {payment_intent|charge, amount, reason}` (verified at
     /// docs.stripe.com/api/refunds/create: a `Refund` "Funds will be refunded to the
     /// credit or debit card that was originally charged" — a credit note alone does NOT
@@ -487,7 +487,7 @@ impl StripeClient {
                 &format!("Bearer {}", self.secret_key.expose_secret()),
             )
             .map_err(|e| StripeError::Db(format!("stripe: set auth header: {e}")))?
-            // C1: PIN the API version on every request so a dashboard/forced
+            // PIN the API version on every request so a dashboard/forced
             // bump cannot silently re-shape the wire under our parsers.
             .header("stripe-version", STRIPE_API_VERSION)
             .map_err(|e| StripeError::Db(format!("stripe: set version header: {e}")))?;
@@ -537,7 +537,7 @@ impl StripeClient {
                 &format!("Bearer {}", self.secret_key.expose_secret()),
             )
             .map_err(|e| StripeError::Db(format!("stripe: set auth header: {e}")))?
-            // C1: pin the API version on the GET too.
+            // Pin the API version on the GET too.
             .header("stripe-version", STRIPE_API_VERSION)
             .map_err(|e| StripeError::Db(format!("stripe: set version header: {e}")))?;
         let response = compio::time::timeout(STRIPE_HTTP_TIMEOUT, builder.send())
@@ -579,7 +579,7 @@ impl StripeClient {
                 &format!("Bearer {}", self.secret_key.expose_secret()),
             )
             .map_err(|e| StripeError::Db(format!("stripe: set auth header: {e}")))?
-            // C1: pin the API version on the DELETE too.
+            // Pin the API version on the DELETE too.
             .header("stripe-version", STRIPE_API_VERSION)
             .map_err(|e| StripeError::Db(format!("stripe: set version header: {e}")))?;
         let response = compio::time::timeout(STRIPE_HTTP_TIMEOUT, builder.send())
@@ -793,7 +793,7 @@ impl StripeApi for StripeClient {
             ("description".to_string(), description.to_string()),
             ("period[start]".to_string(), period.start.to_string()),
             ("period[end]".to_string(), period.end.to_string()),
-            // Deterministic lookup key (C1): lets a >24h re-drive FIND this item
+            // Deterministic lookup key: lets a >24h re-drive FIND this item
             // by metadata (the Idempotency-Key dedupe window having expired)
             // instead of POSTing a duplicate.
             ("metadata[zs_item_key]".to_string(), lookup_key.to_string()),
@@ -1139,8 +1139,8 @@ impl StripeApi for StripeClient {
         //   * `in_…`          → resolve the invoice's settling PaymentIntent via an
         //                        EXPANDED fetch, then refund THAT.
         //
-        // D2 (real-Stripe): the bare `invoice.payment_intent` field was REMOVED on API
-        // 2025-09-30.clover (Basil 2025-03-31+) — reading it returns NULL and the cash
+        // On real Stripe the bare `invoice.payment_intent` field is absent on API
+        // 2025-09-30.clover (Basil 2025-03-31+): reading it returns NULL and the cash
         // refund 500s. For an `in_…` we therefore go via the EXPANDED
         // `payments.data.payment.payment_intent` path (`invoice_settlement_ids`), never
         // the bare field.

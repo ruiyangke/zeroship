@@ -1,6 +1,6 @@
 //! Email-verification token primitive.
 //!
-//! Per proposal §8.3 (Phase 5):
+//! Email verification:
 //!
 //! - **Issue**: generate a 32-byte CSPRNG random token, store its SHA-256
 //!   in `zeroship.email_verifications` keyed to `(user_id, email)`. Return

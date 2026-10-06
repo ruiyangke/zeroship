@@ -257,10 +257,9 @@ pub trait OrganizationResolver: Send + Sync {
 
 /// Postgres-backed [`OrganizationResolver`], reading `apps.organization_id`.
 ///
-/// This used to walk `apps -> projects -> organization_members` and return the
-/// longest-standing OWNER, because the subject was a human. It is now one
-/// column on the row we already have: the copy is consumed by the composite key
-/// `(project_id, organization_id) -> projects(id, organization_id)`, so it
+/// This reads one column on the row already at hand: the subject is the app
+/// row's own organization, not a human. The copy is consumed by the composite
+/// key `(project_id, organization_id) -> projects(id, organization_id)`, so it
 /// cannot name an organization the project does not belong to.
 pub struct PgOrganizationResolver {
     conn: Arc<compio_postgres::Client>,

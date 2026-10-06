@@ -17,7 +17,7 @@
 //! The reaper's own decision - it asks control over HTTP, refuses on the money
 //! rule, and leaves the user pending with a `billing` stage rather than
 //! half-erased - is bound where the reaper lives, in
-//! `crates/zeroship-auth/tests/account_deletion_test.rs`. It cannot be bound
+//! `crates/zeroship-auth/tests/integration/account_deletion`. It cannot be bound
 //! here: `zeroship_auth` holds no privilege on these tables, which is the whole
 //! reason the question crosses the boundary as a call.
 //!
@@ -853,11 +853,10 @@ async fn the_unbilled_arm_belongs_to_the_local_invoicer_and_the_invoice_arm_to_b
 
 /// A VOID over a period that carries usage answers the same as a plain void.
 ///
-/// The two arms used to contradict each other over one act. Voiding releases
-/// the claim, so the invoice arm falls silent - and the unbilled arm, which
-/// looked for a NON-VOID invoice, then saw a closed period with usage and no
-/// invoice it would count, and refused. The organization moved from owing on an
-/// invoice to owing on unbilled usage, and no act of anyone's could clear it.
+/// The two arms agree over one act. Voiding releases the claim, so the invoice
+/// arm falls silent; the unbilled arm treats a voided invoice as deliberate
+/// evidence that the period is done rather than that it was never billed, so
+/// the organization does not owe on unbilled usage it cannot clear.
 ///
 /// A void is a deliberate statement that the period is done, not evidence that
 /// it was never billed. The pair below differs in the void alone: the same

@@ -883,7 +883,7 @@ async fn op_cli_device_token_authorizes_control_endpoint() {
     assert_eq!(claims["aud"], "control.zeroship.ai");
     assert_eq!(claims["client_id"], PLATFORM_CLI_CLIENT_ID);
     assert_eq!(claims["scope"], "apps:deploy apps:read");
-    // Minutes, not the 12-hour ceiling this assertion used to pin at 43_200.
+    // Minutes, not a 12-hour ceiling.
     //
     // The bound is a LITERAL on purpose. Comparing to
     // `zeroship_auth::oidc::ACCESS_TOKEN_TTL_SECS` - which is what stood here
@@ -1038,9 +1038,8 @@ async fn bearer_verifier_directly_accepts_oauth_and_rejects_revoked_platform_tok
     assert_eq!(oauth.principal_id, user_id);
     assert!(oauth.token_policy.is_some());
 
-    // A bearer that is not a platform OAuth token is refused outright. There is
-    // no second local verifier behind the OAuth arm any more: the PAT branch
-    // that used to run first is gone with the token type.
+    // A bearer that is not a platform OAuth token is refused outright. The
+    // OAuth arm has no second local verifier behind it.
     assert!(
         fx.state
             .bearer_verifier()

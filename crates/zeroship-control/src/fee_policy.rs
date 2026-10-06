@@ -1,10 +1,10 @@
-//! Server-held, per-organization application-fee policy (billing G1, Stream-2).
+//! Server-held, per-organization application-fee policy.
 //!
 //! Stream-2 is the ORGANIZATION-REVENUE rail: an organization charges THEIR end-users via
 //! their own Stripe **Connect** account; the platform takes a fee, stamped on
-//! the Connect charge SERVER-SIDE. Previously the fee was chosen CLIENT-SIDE by
-//! the SDK (`applicationFeePercent ?? 15`) — any organization could set it to 0
-//! (ISS-29). This module makes the fee SERVER-AUTHORITATIVE:
+//! the Connect charge SERVER-SIDE. The fee is not client-chosen: the SDK cannot
+//! set `applicationFeePercent`, so an organization cannot zero the platform's
+//! cut. This module makes the fee SERVER-AUTHORITATIVE:
 //!
 //! * [`FeePolicy`] is a pure value with [`FeePolicy::fee_cents`] — integer cents,
 //!   round-once, with optional cap/floor clamping. Unit-tested exhaustively.

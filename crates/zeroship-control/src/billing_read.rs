@@ -1243,7 +1243,7 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // The deletion predicate's derived fields (no DB; the SQL is bound by
-    // `crates/zeroship-control/tests/deletion_owes_test.rs`).
+    // `crates/zeroship-control/tests/integration/deletion_owes_test.rs`).
     // -----------------------------------------------------------------------
 
     fn invoice(owed: i64) -> UnpaidInvoice {

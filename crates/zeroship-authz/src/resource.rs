@@ -79,9 +79,9 @@ impl Resource {
     /// Keeping the alphabet closed prevents source-level ambiguity in wrapper
     /// policies and fails bad HTTP path/input values before authorization.
     ///
-    /// **This match is EXHAUSTIVE on purpose.** It used to end in `_ => Ok(())`,
-    /// which meant a new variant compiled silently and validated nothing -
-    /// while every other `Resource` match in the crate would have forced an arm.
+    /// **This match is EXHAUSTIVE on purpose.** A trailing `_ => Ok(())` would
+    /// let a new variant compile silently and validate nothing, while every
+    /// other `Resource` match in the crate would force an arm.
     /// Writing `Self::Any` out makes the NEXT variant a compile error here,
     /// which is the whole point.
     ///

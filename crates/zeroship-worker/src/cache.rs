@@ -1200,15 +1200,13 @@ mod tests {
         );
     }
 
-    /// SC-5: two runtimes built on one OS thread must SHARE plugin
-    /// instances, not each mint their own.
+    /// Two runtimes built on one OS thread must SHARE plugin instances, not
+    /// each mint their own.
     ///
-    /// `build_runtime` used to call `create_plugins` on every build, so a
-    /// current isolate and a deploy-pinned isolate on the same thread each
-    /// constructed their own `DbPlugin` - and would each resolve their own
-    /// backend and their own caches once the service lands. The design's arm
-    /// is that `build_runtime` performs no backend selection and clones an
-    /// `Arc` instead; this asserts the sharing half of it by pointer identity,
+    /// `build_runtime` performs no backend selection and clones plugin
+    /// instances, so a current isolate and a deploy-pinned isolate on the same
+    /// thread share one `DbPlugin` rather than each resolving a backend and its
+    /// own caches. This asserts the sharing half of it by pointer identity,
     /// which is the only thing that distinguishes one instance from two
     /// structurally identical ones.
     ///

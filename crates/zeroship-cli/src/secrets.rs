@@ -140,12 +140,10 @@ fn has_flag(args: &[String], flag: &str) -> bool {
 
 /// Known flags accepted by `secret` and `var` (bare names, no `=`).
 ///
-/// THESE TWO COMMANDS HAD NO GATE AT ALL until this change, and the gap became
-/// load-bearing the moment they started reading a config file: an unrecognised
-/// `--contrl=` was silently ignored, which used to mean "fall back to
-/// localhost" and would now mean "silently use whatever the file says". Adding
-/// a config layer to a command that swallows typos makes a wrong target MORE
-/// reachable, not less, so the gate lands with the layer.
+/// An unrecognised `--contrl=` is rejected, so it cannot silently mean "fall
+/// back to localhost" or "use whatever the file says". A config layer on a
+/// command that swallows typos makes a wrong target MORE reachable, not less,
+/// so the gate lands with the layer.
 const ENV_KNOWN_FLAGS: &[&str] = &[
     "--app", "--control", "--token", "--expose", "--config", "--env",
 ];

@@ -194,10 +194,10 @@ fn the_environment_tier_refuses_an_entry_that_is_not_one_exact_http_origin() {
 
 /// All three supply tiers reach the same fence. A setting that existed only in
 /// the environment would leave the flag and file surfaces looking untouched -
-/// which is the shape `crates/zeroship-auth/tests/config_env_tier.rs` exists to
+/// which is the shape `crates/zeroship-auth/tests/e2e/config_env_tier.rs` exists to
 /// catch - so the flag tier is driven here against the same origin, and the
 /// file tier is driven through the workflow manager's overlay in
-/// `crates/zeroship-workflow-server/tests/config.rs`. The worker itself has no
+/// `crates/zeroship-workflow-server/tests/e2e/config.rs`. The worker itself has no
 /// TOML overlay by design.
 #[test]
 fn the_flag_tier_carries_the_same_named_peer_to_the_same_fence() {

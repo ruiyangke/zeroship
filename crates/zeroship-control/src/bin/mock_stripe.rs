@@ -1,7 +1,7 @@
 //! Standalone mock-Stripe server for the billing & metering multi-node E2E.
 //!
 //! This is the SHELL-harness peer of the in-process mock-Stripe used by
-//! `crates/zeroship-control/tests/billing_reconcile_test.rs`. It reuses the SAME
+//! `crates/zeroship-control/tests/integration/billing_reconcile_test.rs`. It reuses the SAME
 //! Stripe-wire idiom — a real `compio::net::TcpListener` speaking HTTP/1.1
 //! that parses Stripe's form/JSON create endpoints, RECORDS every request
 //! (method, path, Idempotency-Key, Authorization, body) and replays the
@@ -36,7 +36,7 @@ zeroship_core::declare_env_consumer!(
     scope = "mock_stripe"
 );
 
-/// The pinned Stripe API version every call must carry (C1). Sourced from the
+/// The pinned Stripe API version every call must carry. Sourced from the
 /// production constant so the mock's expectation can never drift from the client.
 const PINNED_STRIPE_VERSION: &str = zeroship_control::stripe_client::STRIPE_API_VERSION;
 
@@ -47,7 +47,7 @@ struct RecordedRequest {
     path: String,
     idempotency_key: Option<String>,
     authorization: Option<String>,
-    /// The pinned `Stripe-Version` header (C1) — recorded so a harness can assert
+    /// The pinned `Stripe-Version` header - recorded so a harness can assert
     /// every Stripe call pinned the API version.
     stripe_version: Option<String>,
     body: String,
@@ -192,7 +192,7 @@ fn handle_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> Vec<u
         return http_200_json(r#"{"reset":true}"#);
     }
 
-    // C1: a faithful Stripe REQUIRES the pinned `Stripe-Version` header on every
+    // A faithful Stripe REQUIRES the pinned `Stripe-Version` header on every
     // API call. Reject (record then 400) when it is ABSENT so a missing pin is
     // a loud, mechanical failure rather than a silent render against the account
     // default. The pinned value mirrors `STRIPE_API_VERSION` in stripe_client.rs.

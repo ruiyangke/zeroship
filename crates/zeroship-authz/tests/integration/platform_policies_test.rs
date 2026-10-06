@@ -612,10 +612,10 @@ fn the_self_service_baseline_grants_only_self_scoped_actions() {
         assert_allow(&policies, action, "Resource", "*", 0, 0);
     }
 
-    // `apps:write` was REMOVED: creating an app names the project that owns it,
-    // so it is gated at Project scope in the developer band. Leaving it here
-    // would have let any authenticated principal create an app with no
-    // organization behind it.
+    // `apps:write` is not granted at Organization scope: creating an app names
+    // the project that owns it, so it is gated at Project scope in the
+    // developer band. Granted here, any authenticated principal could create an
+    // app with no organization behind it.
     assert_deny(&policies, "apps:write", "Resource", "*", 0, 0);
     // Nothing that acts on an EXISTING organization is reachable here, at any
     // rank - the rank is zero for Resource::Any by construction, but the point

@@ -127,9 +127,8 @@ async fn app_logs_route_proxies_worker_lines() {
     .await;
     crate::support::live::register_listener(worker.addr());
     let fixture = build_test_state(&db_url, vec![worker.url("/")]).await;
-    // A REAL app the caller owns. This used to be a bare `Uuid::new_v4()` with
-    // no app row and no membership, which reached the worker proxy only because
-    // the caller held the deleted universal-allow platform role.
+    // A REAL app the caller owns, with an app row and an owner membership
+    // through which the caller reaches the worker proxy.
     let pat = crate::support::authz_fixture::seeded_principal(&fixture.state).await;
     // `create_app` validates its plan against the catalog, which this database
     // only has once something seeds it.

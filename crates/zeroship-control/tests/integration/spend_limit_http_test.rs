@@ -112,8 +112,8 @@ async fn build_state(db_url: &str) -> (Arc<AppState>, PathBuf, PathBuf) {
 /// The owner SEAT is what authorizes `billing:read` on the app: an app reaches
 /// its authority root through `apps.project_id -> projects.organization_id`, so
 /// ownership is an `organization_members` row on the organization behind the
-/// app's project. This helper used to insert the app with no membership at all
-/// and rely on the caller holding the deleted universal-allow platform role.
+/// app's project. This helper inserts the app together with an owner membership
+/// through which the caller reaches it.
 async fn make_app_with_plan_default(
     state: &AppState,
     plan_default: i64,

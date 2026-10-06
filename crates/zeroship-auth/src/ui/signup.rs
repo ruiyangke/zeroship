@@ -9,12 +9,10 @@
 //! absent, over-long, or not a same-origin path becomes `SAFE_DEFAULT`; none
 //! of them is an error. This is not decoration: `/login` renders
 //! `href="/signup?return_to={{ return_to }}"` with its own already-sanitized
-//! value, which on a plain visit is `SAFE_DEFAULT` (`/me`). Signup used to
-//! demand that the continuation parse as an `/oauth2/authorize` request and
-//! that exactly one copy of it be present, so BOTH the link the login page
-//! renders and a bare `/signup` answered 400 "invalid request" on a page that
-//! still drew the form. Only an OIDC RP continuation could reach signup at
-//! all.
+//! value, which on a plain visit is `SAFE_DEFAULT` (`/me`). Signup accepts the
+//! same sanitized continuation, so the link the login page renders and a bare
+//! `/signup` visit both reach the form instead of answering 400 "invalid
+//! request" on a page that still drew it.
 //!
 //! Account-enumeration defense: a duplicate-email INSERT is treated the
 //! same as a fresh INSERT (same redirect, same status, same response). The
@@ -60,8 +58,8 @@ pub struct SignupForm {
 
 /// `/signup` GET — renders the empty form with a fresh CSRF token cookie.
 ///
-/// Marked `async` to satisfy ntex's `Handler` trait (route registration in
-/// P2-U6 expects the handler to return a future); the body itself is
+/// Marked `async` to satisfy ntex's `Handler` trait (route registration
+/// expects the handler to return a future); the body itself is
 /// non-blocking.
 //
 // ntex's per-thread service futures are intentionally `!Send`.
@@ -375,9 +373,8 @@ mod tests {
         assert_eq!(continuation(Some(return_to)), return_to);
     }
 
-    /// An absent continuation is the bare `/signup` visit. It used to be an
-    /// error too: `from_inputs` required exactly one target, and zero is not
-    /// one, so `return_to: Option<String>` was a lie.
+    /// An absent continuation is the bare `/signup` visit: `from_inputs`
+    /// accepts zero targets, so `return_to: Option<String>` is honest.
     #[test]
     fn continuation_falls_back_when_absent_or_empty() {
         assert_eq!(continuation(None), return_to::SAFE_DEFAULT);

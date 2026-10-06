@@ -238,15 +238,13 @@ pub enum DeviceApproval {
 
 /// A pending grant the `/device` page found for a typed user code.
 ///
-/// The `provider` column used to select which service redeems the approved
-/// row: an [`OP_DEVICE_PROVIDER`] row at this service's `/oauth2/token`, a
-/// [`PLATFORM_PROVIDER`] row at control's `/api/device/token`. Control's flow
-/// is deleted and NOTHING writes a `PLATFORM_PROVIDER` row to
-/// `zeroship.device_grants` any more, so every row the page sees today is an
-/// OP row. The discriminator and [`Self::is_platform`] are left in place
-/// rather than removed with the flow, because dropping them reaches into the
-/// OP device grant and the `provider` column is schema; they are vestigial,
-/// not load-bearing.
+/// The `provider` column discriminates the OP device-grant rows this service
+/// redeems (an [`OP_DEVICE_PROVIDER`] row at this service's `/oauth2/token`)
+/// from the [`PLATFORM_PROVIDER`] spelling. Nothing writes a
+/// `PLATFORM_PROVIDER` row to `zeroship.device_grants`, so every row the page
+/// sees is an OP row. The discriminator and [`Self::is_platform`] stay in
+/// place, because dropping them reaches into the OP device grant and the
+/// `provider` column is schema; they are vestigial, not load-bearing.
 #[derive(Debug, Clone)]
 pub(crate) struct PendingDeviceGrant {
     pub client_id: String,
@@ -660,7 +658,7 @@ async fn exchange_device_code_locked(
             // Say what this does not do, because the difference is invisible
             // from the response: this does not intersect with
             // `zeroship.principal_grants`. It cannot -
-            // `db/migrations-ts/20260702000900_grants.ts:55` gives
+            // `db/migrations-ts/20260702000900_grants.ts` gives
             // `zeroship_auth` SELECT on that table and no write anywhere near
             // it, so intersecting HERE would mint `scope: ""` on every first
             // login: nothing in this service can provision a creator's grants.
@@ -673,10 +671,10 @@ async fn exchange_device_code_locked(
             // this function by adding the intersection; the privilege model is
             // what puts it in control, and the split is deliberate.
             //
-            // Pinned at both ends: `crates/zeroship-auth/tests/cli_device_refresh_test.rs`,
+            // Pinned at both ends: `crates/zeroship-auth/tests/integration/cli_device_refresh_test.rs`,
             // `the_cli_device_grant_caps_scope_to_the_client_registration_only`
             // for the ceiling, and
-            // `crates/zeroship-control/tests/authz_guard_oauth_test.rs`,
+            // `crates/zeroship-control/tests/integration/authz_guard_oauth_test.rs`,
             // `an_operator_deleting_a_grant_row_narrows_the_next_cli_request`
             // for the narrowing.
             if platform_cli && !scope_subset(&granted_scopes, &platform_cli_scopes()) {
@@ -691,11 +689,10 @@ async fn exchange_device_code_locked(
 
             delete_device_grant(db, device_code_hash).await?;
 
-            // One lifetime for every client on this grant. The CLI used to take
-            // the 12-hour ceiling BECAUSE it got no refresh token; now that it
-            // does, the trade runs the other way - a short self-contained
-            // bearer plus a long DB-backed session gives the same usable
-            // session AND a revocation that works.
+            // One lifetime for every client on this grant. The CLI receives a
+            // refresh token, so the trade is the other way - a short
+            // self-contained bearer plus a long DB-backed session gives the
+            // same usable session AND a revocation that works.
             //
             // THE SESSION IS CREATED FIRST, AND THAT ORDER IS THE STEP. The
             // access token is minted from the proof the creating statement

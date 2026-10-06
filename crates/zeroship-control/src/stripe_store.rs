@@ -54,7 +54,7 @@ pub struct OrganizationAccount {
     /// Stripe's verified onboarding signal (changeset 0044), written by the
     /// `callback` handler from a server-side `retrieve_account`. `false` until
     /// the organization finishes onboarding — the charge path MUST gate on this so a
-    /// half-onboarded account can't reach a PaymentIntent (M1).
+    /// half-onboarded account can't reach a PaymentIntent.
     pub charges_enabled: bool,
 }
 
@@ -216,7 +216,7 @@ impl StripeStore {
     }
 
     /// Update the cached Connect flags for the LIVE account row identified by its
-    /// `acct_…` id (M2 `account.updated` webhook). Unlike [`Self::set_account_flags`]
+    /// `acct_...` id (the `account.updated` webhook). Unlike [`Self::set_account_flags`]
     /// this keys on the globally-unique `stripe_account_id` alone — the
     /// `account.updated` event is delivered for the account object and does not carry
     /// an organization id on the wire reliably. Only the not-unlinked row is touched.
@@ -287,7 +287,7 @@ impl StripeStore {
     }
 
     /// `true` iff `stripe_account_id` is the LIVE (not-unlinked) Connect account of
-    /// `organization_id` (M4 payout attribution). The payout handler calls this with the
+    /// `organization_id` (payout attribution). The payout handler calls this with the
     /// connected account that actually settled the charge (`on_behalf_of` /
     /// `transfer_data.destination`) to confirm the claimed `metadata.organization_id`
     /// OWNS that account before crediting earnings — so a forged organization id cannot
@@ -708,7 +708,7 @@ impl StripeStore {
     // ------------------------------------------------------------------
 
     /// Acquire a SESSION-level advisory lock keyed on `event_id` on a dedicated
-    /// connection, returning that locked connection (M3). The webhook holds this for
+    /// connection, returning that locked connection. The webhook holds this for
     /// the whole `event_processed` → dispatch → `mark_event_processed` sequence so
     /// concurrent redeliveries of the SAME event serialize: the second waiter blocks
     /// until the first releases (on `unlock_event` / connection drop), by which point

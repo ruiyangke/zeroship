@@ -222,8 +222,8 @@ struct Fixture {
     worker_instance_id: String,
     signer: Signer,
     /// A keyring minting under the bare `svc/worker` ROLE, on the key the
-    /// operator's peer document publishes for it. The credential a shared role
-    /// key used to be, and one Control must now refuse outright.
+    /// operator's peer document publishes for it. This is the credential a
+    /// shared role key would be, and one Control refuses outright.
     stale_worker_role: ServiceKeyring,
     gateway: ServiceKeyring,
     /// A keyring minting under [`PLANTED_INSTANCE_ID`] on the key the peer

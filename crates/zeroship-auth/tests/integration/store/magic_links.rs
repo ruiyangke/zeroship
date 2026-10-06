@@ -354,8 +354,8 @@ async fn login_issue_does_not_supersede_reset_token() {
         let client = database.connect_as_auth().await;
 
         let email = email();
-        // A reset token binds to the issuing user's immutable id (security finding
-        // L4), so `issue` only writes a row when the email maps to a real user —
+        // A reset token binds to the issuing user's immutable id, so `issue`
+        // only writes a row when the email maps to a real user -
         // mirroring the production `/forgot` caller, which guards on `find_by_email`.
         zeroship_auth::store::users::create(&orm, &email, "Test", None)
             .await

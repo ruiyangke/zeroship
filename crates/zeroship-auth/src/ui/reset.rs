@@ -363,7 +363,7 @@ fn render_form(token: &str, error: Option<&str>) -> HttpResponse {
 fn render_form_with_status(token: &str, error: Option<&str>, status: StatusCode) -> HttpResponse {
     let csrf_token = csrf::generate_token();
     // Independent per-response CSP script nonce — must NOT be the CSRF token
-    // (which is also a non-HttpOnly cookie + plaintext form field). See L3.
+    // (which is also a non-HttpOnly cookie + plaintext form field).
     let script_nonce = csrf::generate_token();
     let page = ResetPage {
         token,

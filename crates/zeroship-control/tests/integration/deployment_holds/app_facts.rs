@@ -1,6 +1,5 @@
 //! Control's app-facts endpoint: the policy inputs and the deletion marker the
-//! workflow service used to read out of `zeroship.apps` and `zeroship.plans`
-//! through its own database binding.
+//! workflow service reads through this endpoint rather than a database binding.
 
 use super::*;
 use zeroship_core::workflow_app_facts::MAX_APPS_PER_REQUEST;

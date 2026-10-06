@@ -102,7 +102,7 @@ pub(super) struct OAuthClient {
     pub refresh_allowed: bool,
     pub token_endpoint_auth_method: String,
     pub backchannel_logout_uri: Option<String>,
-    /// P5a: gateway-brokered client — its id_token carries the global principal
+    /// A gateway-brokered client - its id_token carries the global principal
     /// subject, and the authorization_code grant enforces confidential broker
     /// auth (see `brokered ⇒ client_secret_basic`, a DB CHECK + the load_client
     /// refusal below).
@@ -309,7 +309,7 @@ async fn authorize_inner(
     db: &Client,
     issuer: &Issuer,
 ) -> Result<HttpResponse, OAuthError> {
-    // C1: closed-world code flow only.
+    // Closed-world code flow only.
     require_eq(params.response_type.as_deref(), "code", || {
         OAuthError::unsupported_response_type("response_type must be code")
     })?;
@@ -318,7 +318,7 @@ async fn authorize_inner(
     let redirect_uri = required_param(params.redirect_uri.as_deref(), "redirect_uri")?;
     let client = load_client(db, client_id).await?;
 
-    // C2: exact string match, no wildcard/prefix/suffix/normalization.
+    // Exact string match, no wildcard/prefix/suffix/normalization.
     if !client
         .redirect_uris
         .iter()
@@ -355,7 +355,7 @@ async fn authorize_inner(
         return authorization_error_see_other(&auth_request, issuer, "invalid_scope");
     }
 
-    // C1: PKCE is mandatory for every client and S256 is the only method.
+    // PKCE is mandatory for every client and S256 is the only method.
     let code_challenge = match required_param(params.code_challenge.as_deref(), "code_challenge") {
         Ok(code_challenge) => code_challenge,
         Err(err) => {
@@ -516,7 +516,7 @@ async fn issue_authorization_code(
         OAuthError::server_error("authorization code store unavailable")
     })?;
 
-    // C13: use 303, never 307. C5/C12: include the exact issuer parameter.
+    // Use 303, never 307; include the exact issuer parameter.
     let redirect = authorization_success_redirect(
         &auth_request.redirect_uri,
         &code,
@@ -699,7 +699,7 @@ async fn exchange_authorization_code(
                 );
             }
         }
-        // C14: not-found, expired, and already-consumed are intentionally one
+        // Not-found, expired, and already-consumed are intentionally one
         // indistinguishable invalid_grant class.
         return Err(OAuthError::invalid_grant("authorization code is invalid"));
     };

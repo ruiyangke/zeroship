@@ -139,7 +139,7 @@ where
 /// Acquire the refresh hierarchy's per-user xact advisory lock.
 ///
 /// The SQL deliberately hashes in Postgres as `hashtext(user_id::text)`, matching
-/// the P5b lock contract and all companion writers.
+/// the lock contract and all companion writers.
 pub async fn lock_refresh_user_xact<C>(conn: &C, user_id: &UserId) -> Result<()>
 where
     C: GenericClient + ?Sized,

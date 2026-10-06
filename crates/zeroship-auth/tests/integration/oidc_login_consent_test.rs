@@ -1,4 +1,4 @@
-//! P4 native login + consent front door for the platform OP `/authorize` flow.
+//! Native login + consent front door for the platform OP `/authorize` flow.
 
 use crate::support;
 use support::{auth_server::AuthServer, database::Database};
@@ -1396,7 +1396,7 @@ async fn seed_user_client(
     .expect("seed app scope def");
     // The pairwise subject is IMMUTABLE once stored: the token endpoint
     // recomputes it and refuses to mint when the row disagrees
-    // (`crates/zeroship-auth/src/oidc/authorization_code.rs:1431-1464`). Seeding an
+    // (`crates/zeroship-auth/src/oidc/authorization_code.rs`, the token-exchange handler). Seeding an
     // invented `pws_` therefore makes the whole flow 500 rather than skipping
     // a step, so this row must carry the value production would derive.
     db.execute(

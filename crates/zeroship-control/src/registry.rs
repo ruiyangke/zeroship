@@ -1311,7 +1311,7 @@ fn net_policy_limits_from_catalog(
 ///
 /// Extracted from [`Registry::create_app`] so the rules can be ruled on without
 /// a database. `create_app` calls it as its first statement and is the only
-/// caller; `crates/zeroship-control/tests/reserved_app_names_test.rs` is what
+/// caller; `crates/zeroship-control/tests/integration/reserved_app_names_test.rs` is what
 /// binds the two together against the real route.
 ///
 /// # Errors

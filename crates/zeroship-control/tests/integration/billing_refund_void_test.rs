@@ -1,4 +1,4 @@
-//! PR-3 tests for the `0049 refunds` table +
+//! Tests for the `0049 refunds` table +
 //! over-refund trigger, the `RefundProvider` seam (Stripe `Refund` for cash / native
 //! `refund_to_credit` grant for credit), the operator `POST /invoices/{id}/refunds`
 //! endpoint, and the void+reissue + `void_reversal` + negative-invoice true-up bridge.
@@ -382,9 +382,8 @@ async fn make_plan(state: &AppState) -> String {
 
 /// An app the given ORGANIZATION bills.
 ///
-/// It used to seed an app in a fresh organization and then seat a human owner in
-/// it, because the reconciler found the subject by walking to that owner. The
-/// subject is now the app row's own `organization_id`, so an app seeded into
+/// It seeds the app directly into the given organization; the reconciler finds
+/// the subject on the app row's own `organization_id`, so an app seeded into
 /// one organization and asserted against another would simply never be billed -
 /// the test would go green on an empty sweep. Placing it in the caller's
 /// organization is what keeps the assertion attached to anything.
@@ -1880,9 +1879,10 @@ async fn void_reissue_is_redrivable_after_phase1_crash() {
         "balance after consume = $4",
     );
 
-    // ── Simulate a crash AFTER Phase 1 (void + void_reversal committed) but BEFORE the
-    //    reissue: do exactly Phase 1 by hand under the per-organization lock, mirroring the
-    //    helper, then leave the invoice void with NO reissue. ──
+    // -- Simulate a crash AFTER the void stage (void + void_reversal committed) but
+    //    BEFORE the reissue: do exactly the void stage by hand under the
+    //    per-organization lock, mirroring the helper, then leave the invoice void
+    //    with NO reissue. --
     {
         let mut c = new_conn(&url).await;
         let tx = c.transaction().await.expect("tx");
@@ -1932,8 +1932,9 @@ async fn void_reissue_is_redrivable_after_phase1_crash() {
         "balance restored to $10 after the void_reversal (no reissue yet)",
     );
 
-    // ── RE-DRIVE: invoke void_and_reissue on the ALREADY-VOID invoice. It must skip
-    //    Phase 1 (no second void_reversal), reissue, and true-up — converging. ──
+    // -- RE-DRIVE: invoke void_and_reissue on the ALREADY-VOID invoice. It must
+    //    skip the void stage (no second void_reversal), reissue, and true-up -
+    //    converging. --
     let outcome = zeroship_control::void_reissue::void_and_reissue(&fx.state, &stripe, &inv_a)
         .await
         .expect("re-drive void+reissue");

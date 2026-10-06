@@ -110,8 +110,7 @@ impl GateState {
     /// binding to the dispatch request id and its issuance window.
     ///
     /// `None` when no service key material is configured. The worker then sees
-    /// no credential and refuses, which is the whole difference from the shared
-    /// secret this replaces: absence used to mean "skip the check".
+    /// no credential and refuses, so absence never means "skip the check".
     #[must_use]
     pub fn worker_authorization(&self) -> Option<String> {
         let worker = zeroship_core::service_peers::service_issuer(

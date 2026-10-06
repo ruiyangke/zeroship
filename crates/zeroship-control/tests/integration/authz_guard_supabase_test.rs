@@ -89,9 +89,9 @@ impl Fixture {
     /// `db_url()` has already preflighted the DSN, so a failure here is the
     /// server declining THIS connection - most often the `max_connections`
     /// ceiling, with something in the process holding connections open across
-    /// tests. Both arms used to announce a skip, which cargo counts as a pass,
-    /// so a connection ceiling reached mid-run turned every remaining test in
-    /// this module green without executing one of them.
+    /// tests. Both arms fail loudly rather than announcing a skip, which cargo
+    /// counts as a pass, so a connection ceiling reached mid-run cannot turn
+    /// every remaining test in this module green without executing one.
     async fn new(label: &str) -> Self {
         let db_url = db_url();
 

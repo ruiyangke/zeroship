@@ -119,7 +119,7 @@ pub struct GateSettings {
     /// REFUSES THE BOOT: a gateway that came up without it could neither mint
     /// an assertion nor sign a `ZeroShip-User` envelope, and would look healthy
     /// to an orchestrator while every dispatch failed at the worker's door.
-    /// Absence never admits, and no longer defers either.
+    /// Absence never admits and never defers: it refuses the boot.
     #[config(name = "gateway.service_key_file", default = PathBuf::new())]
     pub service_key_file: Operational<PathBuf>,
 

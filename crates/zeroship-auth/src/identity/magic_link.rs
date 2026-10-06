@@ -1,6 +1,6 @@
 //! Magic-link token primitive.
 //!
-//! Per proposal §8.3 (Phase 5):
+//! Magic-link login:
 //!
 //! - **Issue**: generate a 32-byte CSPRNG random token + a 16-byte CSRF
 //!   nonce. Store the SHA-256 of the token in `zeroship.magic_links`. Return

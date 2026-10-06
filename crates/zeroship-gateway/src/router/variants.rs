@@ -121,11 +121,10 @@ pub(super) fn pick_variant(
     }
 
     // Identity rejected explicitly AND no variant matched? RFC 7231
-    // says we MAY return 406 here; in practice 99% of Accept-Encoding
-    // headers list `identity;q=0` only as a hint, not a hard demand,
-    // and serving identity is universally accepted by the actual
-    // client even when the header would technically forbid it. Match
-    // browsers' permissive behaviour.
+    // says we MAY return 406 here. Clients list `identity;q=0` only as a
+    // hint, not a hard demand, and serving identity is accepted by the
+    // actual client even when the header would technically forbid it.
+    // Match browsers' permissive behaviour.
     let _ = identity_rejected;
     identity
 }

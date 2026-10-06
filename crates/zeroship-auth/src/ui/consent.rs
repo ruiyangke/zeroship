@@ -151,7 +151,7 @@ pub struct ConsentDecisionForm {
 }
 
 /// `/consent/accept` POST — validates CSRF, verifies the grantor can delegate
-/// every recognized Phase 10 scope, and persists the native OP grant.
+/// every recognized scope, and persists the native OP grant.
 #[allow(clippy::future_not_send)]
 pub async fn post_consent_accept(
     req: HttpRequest,
@@ -804,11 +804,12 @@ async fn classify_and_authorize(
 /// Control and the migration service build this at BOOT and hold it in their
 /// state, so a policy set that does not validate stops the service instead of
 /// serving requests. The auth service has no such slot on its own state, and
-/// this path used to re-read and re-parse all six `.cedar` files on every
-/// consent render. That was already wasteful; it became worse the day
-/// `load_platform_policies` also started parsing the schema and running a full
-/// strict validation, which is per-process work by nature - the inputs are
-/// `include_str!` constants and cannot change while the process lives.
+/// so this path caches the
+/// six parsed `.cedar` files rather than re-reading and re-parsing them on
+/// every consent render. `load_platform_policies` also parses the schema and
+/// runs a full strict validation, which is per-process work by nature - the
+/// inputs are `include_str!` constants and cannot change while the process
+/// lives.
 ///
 /// A failure is still returned rather than panicked: this is a request path,
 /// and a 500 on `/consent` is preferable to killing an auth worker that is
@@ -1063,8 +1064,7 @@ mod tests {
         assert_eq!(scopes[1].label, "Deploy code to your apps");
         assert!(!scopes[1].unrecognized);
         // App-declared — declared label + description from app_scope_defs,
-        // RECOGNIZED (the round-3 reconciliation: app scopes are no longer
-        // rendered unrecognized).
+        // RECOGNIZED (app scopes render as recognized).
         assert_eq!(scopes[2].label, "View billing");
         assert_eq!(
             scopes[2].description.as_deref(),

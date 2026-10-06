@@ -198,7 +198,7 @@ fn gen_token() -> String {
 /// re-consent's un-revoke. Because a revoke DELETEs the grant row, the
 /// `EXISTS` subquery makes a deleted grant **structurally** silence the alias
 /// regardless of which writer won the race on `revoked_at`: no grant ⇒ no
-/// forwarding, full stop. The two writers no longer need to share a lock; the
+/// forwarding, full stop. The two writers do not need to share a lock; the
 /// inbound read derives liveness from the grant ledger (the single source of
 /// truth, spec §5.2/§5.4). Cross-schema read on one PG instance is fine
 /// (one database, separate schemas) — the existing

@@ -1343,7 +1343,7 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
     let period = period_date(period_start);
 
     // `mut` so the finalize→provider-ref pair can run in ONE `conn.transaction()`
-    // (M1). Every read/UPSERT before that still borrows `&conn` immutably.
+    // Every read/UPSERT before that still borrows `&conn` immutably.
     let mut conn = registry.conn().await?;
 
     // MAJOR-6: short-circuit BEFORE any pricing. A `status='finalized'` invoice
@@ -1699,7 +1699,7 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
         .await?;
     }
 
-    // C2 (persist-draft-before-finalize): create the draft invoice (which sweeps
+    // Persist-draft-before-finalize: create the draft invoice (which sweeps
     // the customer's pending items), persist its id IMMEDIATELY (as a
     // `draft_invoice` provider-ref), THEN finalize. On a re-drive, if a draft id
     // is already persisted, finalize THAT existing draft (which carries the real
@@ -1743,7 +1743,7 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
         }
     };
 
-    // M2 (re-finalize converges): a crash AFTER Stripe finalized but BEFORE our
+    // Re-finalize converges: a crash AFTER Stripe finalized but BEFORE our
     // local finalize-UPDATE leaves Stripe-finalized + DB-draft. The re-drive
     // re-calls `finalize_invoice(&draft_id)`; Stripe rejects finalizing an
     // already-finalized invoice with a 4xx (`error.code = invoice_already_finalized`).
@@ -1765,7 +1765,7 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
         Err(e) => return Err(RegistryError::Database(format!("finalize_invoice: {e}"))),
     };
 
-    // M1 (atomic finalize→provider-ref): the local finalize-UPDATE (status →
+    // Atomic finalize-to-provider-ref: the local finalize-UPDATE (status ->
     // 'finalized') and the `billing_provider_refs(ref_kind='invoice')` INSERT must
     // commit TOGETHER. As two separate autocommits, a crash between them leaves a
     // finalized invoice with NO 'invoice' ref; the re-drive short-circuits on
@@ -1848,7 +1848,7 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
 /// True if a [`StripeError`] from `finalize_invoice` means the invoice was ALREADY
 /// finalized on Stripe (a re-drive of a crash-after-finalize window). Stripe
 /// returns a 4xx with `error.code = "invoice_already_finalized"` in that case;
-/// treating it as success lets the local finalize converge (M2). Matched on the
+/// treating it as success lets the local finalize converge. Matched on the
 /// machine-readable code, not the human message.
 fn is_already_finalized(e: &crate::stripe_store::StripeError) -> bool {
     matches!(
@@ -1865,10 +1865,11 @@ fn is_already_finalized(e: &crate::stripe_store::StripeError) -> bool {
 /// [`bill_organization_with_parts`] runs it to build the invoice it finalizes;
 /// [`crate::billing_read::outstanding_billing`] runs it to answer whether a
 /// closed period that carries no invoice actually OWED anything. That predicate
-/// used to key on raw metered units, which reads every quota-covered free-tier
-/// month as a debt and traps the account forever. A second pricing path spelled
-/// beside this one could answer a different number than the invoice would carry,
-/// which is a worse defect than the one it would be fixing - so there is one.
+/// keys on priced amounts, so a quota-covered free-tier month does not read as
+/// debt: keying on raw metered units would trap the account forever. A second
+/// pricing path spelled beside this one could answer a different number than
+/// the invoice would carry, which is a worse defect than the one it would be
+/// fixing - so there is one.
 ///
 /// Everything below is exactly what the reconciler always did:
 ///
@@ -1882,7 +1883,7 @@ fn is_already_finalized(e: &crate::stripe_store::StripeError) -> bool {
 /// no-change case degenerates to exactly one `segment_no = 0` line (full period,
 /// current plan).
 ///
-/// C1 (replay-faithful snapshot): freeze the FULL weights map that was ACTUALLY
+/// Replay-faithful snapshot: freeze the FULL weights map that was ACTUALLY
 /// PASSED to `charge_cents` - weights are GLOBAL (segment-agnostic). Each
 /// segment line's `usage_snapshot` is its own DELTA, so the segments' snapshots
 /// telescope back to the full-period total.

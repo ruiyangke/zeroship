@@ -155,9 +155,8 @@ pub async fn revoke_grant(
 ///
 /// This is the explicit single-grant revoke. The new app-delete FK cascades do
 /// NOT subsume it (those fire on app/oauth_clients deletion; here both still
-/// exist), so the alias revoke + family marker are written by hand. (This logic
-/// was previously its own module; it is now inlined here onto `registry.conn()`
-/// — same single `zeroship` DB.)
+/// exist), so the alias revoke + family marker are written by hand. This logic
+/// is inlined here onto `registry.conn()` - same single `zeroship` DB.
 async fn revoke_grant_cascade(
     state: &AppState,
     user_id: &UserId,

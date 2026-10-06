@@ -1,4 +1,4 @@
-//! P3 closed-world `/authorize` + `/token` auth-code + PKCE tests.
+//! Closed-world `/authorize` + `/token` auth-code + PKCE tests.
 
 use crate::support;
 use support::{auth_server::AuthServer, database::Database};

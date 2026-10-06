@@ -529,8 +529,8 @@ pub async fn upsert_rule(
 
 /// How many ACCEPT rules with a range destination the app holds, at ANY port.
 ///
-/// The input to the one-time notice, and NOT the runtime DNS gate predicate,
-/// which this comment used to claim it was. The gate asks whether a range
+/// The input to the one-time notice, and NOT the runtime DNS gate predicate.
+/// The gate asks whether a range
 /// ACCEPT exists AT THE PORT being connected to
 /// (`EgressRules::holds_range_accept_at`); this asks whether the app has ever
 /// written one. They cannot be one function: the notice is about the first time
@@ -696,12 +696,12 @@ pub(crate) fn parse_verdict(raw: &str) -> Verdict {
 ///
 /// Only reached if the re-read cannot see the row the write returned, which the
 /// primary key makes unreachable through the API - so it is exactly the kind of
-/// arm that rots unwatched. It used to hardcode `Verdict::Accept`, the
-/// fail-OPEN direction: a creator who wrote a REJECT would be told they had
+/// arm that rots unwatched. It must not hardcode `Verdict::Accept` (the
+/// fail-OPEN direction): a creator who wrote a REJECT would be told they had
 /// written an accept. It shapes what the creator is SHOWN and not what the
 /// runtime enforces - the worker reads the registry projection, not this
-/// response - so it was a display defect, and still the wrong default to leave
-/// in a file whose subject is verdicts.
+/// response - so the wrong default would be a display defect in a file whose
+/// subject is verdicts.
 fn written_record(
     rule: &EgressRule,
     app_id: &AppId,

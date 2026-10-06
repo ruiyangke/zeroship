@@ -1265,7 +1265,7 @@ supabase_anon_key = "anon-file-key"
         // reject them.
         //
         // The ENVIRONMENT half - `ZEROSHIP_DEV_INSECURE=1` reaching no tier -
-        // is in `crates/zeroship-auth/tests/config_env_tier.rs`, against the real binary
+        // is in `crates/zeroship-auth/tests/e2e/config_env_tier.rs`, against the real binary
         // with `Command::env`. It cannot live here: observing an environment
         // tier in-process means putting the variable in THIS process, where
         // every other test would then parse against it.

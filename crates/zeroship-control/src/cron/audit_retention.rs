@@ -12,7 +12,7 @@
 //! the two services use one identical escape hatch.
 //!
 //! Without this sweep both tables would grow unbounded with no deleter — the
-//! whole point of P12 is to give them the same sanctioned-retention escape
+//! whole point is to give them the same sanctioned-retention escape
 //! `audit_events` already has.
 //!
 //! Retention window: a single configurable horizon (default 12 months) applied

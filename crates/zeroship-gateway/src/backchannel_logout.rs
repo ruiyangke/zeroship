@@ -215,7 +215,7 @@ pub async fn handle(
             .finish();
     }
 
-    // M1 fix: the anchor refresh families deleted inside the DB block, to be
+    // The anchor refresh families are deleted inside the DB block, to be
     // revoked at OP AFTER the connection is released (no conn held across the
     // outbound HTTP). Each family is paired with its global user id so we can
     // rebuild the per-family AEAD AAD for the decrypt.

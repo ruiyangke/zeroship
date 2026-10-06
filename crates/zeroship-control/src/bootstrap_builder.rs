@@ -13,8 +13,8 @@ use zeroship_authz::Scope;
 /// Client ID of the first-party `zeroship-builder` OAuth client.
 ///
 /// Owned here (the builder client's only consumer), not in `zeroship-core`:
-/// core's trusted-client default is now empty (fail-closed) and references no
-/// hard-coded client id, so this constant no longer needs to live there. It is
+/// core's trusted-client default is empty (fail-closed) and references no
+/// hard-coded client id, so this constant lives here. It is
 /// NOT trusted-by-default — a deployment that still uses the builder client
 /// must name it explicitly in `[auth].trusted_oauth_clients`.
 pub const BUILDER_CLIENT_ID: &str = "zeroship-builder";

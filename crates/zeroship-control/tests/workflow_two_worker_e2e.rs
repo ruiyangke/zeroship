@@ -2,10 +2,11 @@
 //!
 //! One worker, W1, is enrolled and runs the app by pulling its claimable work
 //! from the zone queue. A second worker, W2, is reserved and NOT started;
-//! the gateway's route list names only W2. Phase 1 reaches W1 through the
-//! gateway's own dispatch frame and completes a run. Phase 2 stops W1 and
-//! asserts the queue holds NO claimable `advance` row for the app, so W2 has
-//! nothing of it to pull. Phase 3 starts W2 and reaches it through the gateway: the run
+//! the gateway's route list names only W2. The first stage reaches W1 through
+//! the gateway's own dispatch frame and completes a run. The second stage stops
+//! W1 and asserts the queue holds NO claimable `advance` row for the app, so W2
+//! has nothing of it to pull. The third stage starts W2 and reaches it through
+//! the gateway: the run
 //! W1 started is readable, a fresh start is admitted, and the fresh run
 //! completes. Only the worker's ZONE can admit that start, because W2 holds no
 //! job of the app and the queue has none to give it.
@@ -41,7 +42,7 @@ async fn ingress(fleet: &Fleet, path: &str) -> (u16, Value) {
 /// The gateway's own dispatch hop directly to W1, without its route table.
 ///
 /// With the gateway's route list naming only the not-yet-started W2, this is
-/// how phase 1 reaches W1: the same path, the same dispatch frame and the same
+/// how the first stage reaches W1: the same path, the same dispatch frame and the same
 /// per-call peer credential the gateway mints.
 async fn dispatch(fleet: &Fleet, plan: &str, path: &str) -> (u16, Value) {
     let frame = zeroship_core::dispatch_frame::encode_dispatch_frame(

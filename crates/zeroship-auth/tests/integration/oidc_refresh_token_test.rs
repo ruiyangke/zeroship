@@ -1,4 +1,4 @@
-//! P5b refresh-token family tests for the platform OP.
+//! Refresh-token family tests for the platform OP.
 
 use crate::support;
 use support::{auth_server::AuthServer, database::Database};

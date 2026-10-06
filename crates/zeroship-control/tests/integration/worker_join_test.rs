@@ -1632,7 +1632,7 @@ async fn rotate_leaves_the_fleet_running_and_purge_retires_it() {
 }
 
 /// The blocking chain rooted at `blocker_pid`, in the pattern
-/// `crates/zeroship-control/tests/organizations/concurrency.rs::wait_for_departures`
+/// `crates/zeroship-control/tests/integration/organizations_test/concurrency.rs::wait_for_departures`
 /// uses: follow `pg_blocking_pids` recursively, because `PostgreSQL` may queue a
 /// waiter behind another waiter rather than directly behind the row's holder.
 async fn count_blocked_on(observer: &compio_postgres::Client, blocker_pid: i32) -> i64 {

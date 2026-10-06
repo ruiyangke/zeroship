@@ -362,7 +362,7 @@ async fn resolve_auth_inner(
     .await;
     let session_user_header = match session_user_header {
         CookieOutcome::Allowed(header) => {
-            // BFF anti-CSRF gate (spec §1.2/§2.3, P3). The SameSite=Lax
+            // BFF anti-CSRF gate (spec 1.2/2.3). The SameSite=Lax
             // `__Host-zeroship_app_session` cookie is the SPA's LIVE credential, so a
             // state-changing same-site `POST /api/*` ridden by an XSS / a
             // cross-site top-level form-POST is the residual CSRF risk the BFF
@@ -404,7 +404,7 @@ async fn resolve_auth_inner(
 
 /// Whether a state-changing request authenticated PURELY by the SameSite=Lax
 /// `__Host-zeroship_app_session` cookie must be REJECTED on anti-CSRF grounds (BFF
-/// spec §1.2/§2.3, P3).
+/// spec 1.2/2.3).
 ///
 /// Returns `true` (reject the cookie credential) when the method is
 /// state-changing (`POST`/`PUT`/`PATCH`/`DELETE`) AND the same-origin posture
@@ -1494,7 +1494,7 @@ mod tests {
         p
     }
 
-    // ─── BFF P3 anti-CSRF gate on cookie-authenticated dispatch (DB-free) ──
+    // --- BFF anti-CSRF gate on cookie-authenticated dispatch (DB-free) --
 
     /// Build a request with an explicit method and optional origin metadata.
     fn csrf_req(
@@ -3353,7 +3353,7 @@ mod tests {
     }
 
     /// The LIVE per-request dispatch gate `resolve_auth` authenticates a signed
-    /// session cookie and yields a `pws_` `ZeroShip-User`; the BFF P3 anti-CSRF
+    /// session cookie and yields a `pws_` `ZeroShip-User`; the BFF anti-CSRF
     /// gate still drops a cross-origin state-changing POST riding the Lax cookie
     /// (→ 401 on a `User` route), while a same-origin POST authenticates. DB-free
     /// (the signed cookie verify is stateless; no marker means no revocation).

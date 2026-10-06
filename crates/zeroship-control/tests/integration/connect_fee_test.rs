@@ -730,7 +730,7 @@ async fn checkout_stamps_server_fee_not_client_value() {
     .await;
 
     // Onboard to mint a connected account, then complete onboarding (callback
-    // persists charges_enabled=true — the M1 gate requires a ready account).
+    // persists charges_enabled=true - the onboarding gate requires a ready account).
     let onboard = test::TestRequest::post()
         .uri(&format!("/api/organizations/{organization}/stripe/onboard"))
         .header("authorization", caller.bearer())
@@ -890,7 +890,7 @@ async fn checkout_stamps_the_stored_fee_policy_with_its_cap() {
     cleanup(&fx.state, &[organization], &[&creator_caller, &op_caller]).await;
 }
 
-/// M1 (RED→GREEN): a organization who ran `onboard` but whose Stripe account is NOT
+/// An organization who ran `onboard` but whose Stripe account is NOT
 /// yet `charges_enabled` MUST NOT reach the charge path. `connect_checkout`
 /// returns 400 and posts NO PaymentIntent.
 #[compio::test(crate = "crate::support::live")]

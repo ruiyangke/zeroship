@@ -96,9 +96,8 @@ pub async fn authorize(req: HttpRequest, state: State<Arc<GateState>>) -> HttpRe
 
     // `prompt` is a PASSTHROUGH (spec §1.2): omitted in the common case so
     // the OP's SSO skip fires; `login`/`consent` for explicit step-up. The
-    // silent-iframe `prompt=none` path was removed, but the gateway does NOT
-    // reject `none` here — it is simply forwarded (the OP decides). We only
-    // forward a non-empty prompt.
+    // gateway does not special-case `prompt=none`: it forwards it and the OP
+    // decides. We only forward a non-empty prompt.
     let prompt = q.prompt.as_deref().filter(|s| !s.is_empty());
 
     // `idp_hint` is the SDK's `SignInOptions.provider` (google/github/password)

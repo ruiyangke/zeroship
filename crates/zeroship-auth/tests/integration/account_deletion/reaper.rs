@@ -76,15 +76,6 @@ async fn reaper_erases_a_due_user_and_cascades() {
 /// A MONEY RECORD OUTLIVES THE HUMAN IT NAMES. GDPR Art. 17(3)(b): the erasure
 /// right yields to a legal obligation, and an invoice is one.
 ///
-/// THIS ASSERTION WAS DELETED AND NOTHING REPLACED IT. It used to ride on the
-/// anonymize branch, and when the organization work replaced the mechanism that
-/// enforced retention - `invoices` stopped naming a user at all and now reaches
-/// one only as `invoices -> organization_billing -> organizations` - the guard
-/// went out with the code it was attached to. The PROPERTY survived the change;
-/// only its witness did. A tree-wide search for Art. 17, `retained`, or
-/// `legal-obligation` found nothing, so this was the one legally-motivated
-/// property of the subsystem with no test standing behind it.
-///
 /// What makes it hold now is structural rather than intentional, which is
 /// exactly why it needs a witness: the erasure deletes the `users` row, and the
 /// only edge from an organization back to a human is
@@ -488,7 +479,7 @@ async fn reaper_refuses_and_records_when_the_preflight_names_a_blocker() {
 /// The MONEY rule, at the reaper.
 ///
 /// This is the third enforcement point of the rule whose SQL is bound in
-/// `crates/zeroship-control/tests/deletion_owes_test.rs`. It is a separate
+/// `crates/zeroship-control/tests/integration/deletion_owes_test.rs`. It is a separate
 /// point rather than a repeat of the ownership one: the blocker arrives with an
 /// EMPTY `blockers` list, because the organization is dissolved and the
 /// ownership rule deliberately says nothing about closed organizations. A

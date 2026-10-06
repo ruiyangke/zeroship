@@ -551,7 +551,7 @@ pub async fn list_apps(
     // surface, so the gate above passes for ordinary creators too. The DATA is
     // therefore scoped to membership, always: a caller sees the apps they are a
     // member of and nothing else. Without that scope the broadened gate would
-    // be a fleet-wide cross-tenant read (the exact C1 leak, at the list
+    // be a fleet-wide cross-tenant read (the exact cross-tenant leak, at the list
     // endpoint).
     //
     // There is no fleet-wide arm here: a vendor wanting a fleet-wide list builds

@@ -1,4 +1,4 @@
-//! Thin `cyper`-based OpenMeter REST client (M-OpenMeter, blueprint §M4/§M7).
+//! Thin `cyper`-based OpenMeter REST client.
 //!
 //! OpenMeter is an *export-only* aggregation sink: the platform PUSHES compute
 //! units as **CloudEvents** (`POST /api/v1/events`) and READS the per-subject
@@ -109,7 +109,7 @@ pub trait OpenMeterApi {
 
     /// Read the meter's AGGREGATED value for one `(subject, period)` window — the
     /// SUM OpenMeter has accepted (`GET /api/v1/meters/{slug}/query?subject=…
-    /// &from=…&to=…`). This is the C2 re-drive guard: the export cron pushes
+    /// &from=...&to=...`). This is the re-drive guard: the export cron pushes
     /// `current_local − aggregate`, so a re-drive PAST OpenMeter's dedup window
     /// (where a blind re-push would be SUMMED twice) instead pushes only the
     /// still-missing remainder. The guarantee rides on OpenMeter's own aggregate,

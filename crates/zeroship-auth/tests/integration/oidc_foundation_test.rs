@@ -1,4 +1,4 @@
-//! P1a platform OP token-issuance foundation tests.
+//! Platform OP token-issuance foundation tests.
 
 use crate::support;
 

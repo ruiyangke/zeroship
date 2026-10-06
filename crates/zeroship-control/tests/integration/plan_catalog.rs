@@ -130,7 +130,7 @@ async fn upsert_and_get_round_trips_pure_types() {
 
 #[compio::test(crate = "crate::support::live")]
 async fn create_app_with_unknown_plan_id_is_rejected() {
-    // CT-A1: an app can no longer pick a plan that is not in the catalog. The
+    // An app cannot pick a plan that is not in the catalog. The
     // server-side gate returns a clean InvalidInput (NOT a raw FK violation),
     // and NO app row is left behind.
     let url = db_url();

@@ -1082,7 +1082,7 @@ async fn do_refresh(
 
     // Stamp the rotation's START instant (epoch seconds) BEFORE the OP
     // refresh. A per-app family marker written at-or-after this instant means a
-    // teardown (H1 reset, M1 logout, signout) revoked the family DURING the
+    // teardown (password reset, logout, signout) revoked the family DURING the
     // rotation — the fresh cookie we are about to mint carries `iat=now()`
     // (strictly after the marker), so the plain `revoked_after > iat` gate would
     // (wrongly) read "not revoked". We instead reject if a marker landed at or
@@ -1229,7 +1229,7 @@ async fn do_refresh(
         };
 
         // F4 POST-REFRESH RE-CHECK (fail-closed). Between the handler's
-        // `read_live` and this persist, a concurrent H1 password reset (or M1
+        // `read_live` and this persist, a concurrent password reset (or a
         // logout / signout) may have revoked this family — and the OP
         // refresh SUCCEEDS regardless (H1 deliberately leaves the OP grant
         // alive). Two gates close that TOCTOU window:

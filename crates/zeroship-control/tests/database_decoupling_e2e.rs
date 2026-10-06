@@ -1807,7 +1807,7 @@ struct CoTenantDeploy<'a> {
 /// - **The artifact named no database**, which returns from `admit_bindings` on
 ///   an empty list before any row is read - the shape
 ///   `deploy_declaring_no_database_needs_no_binding_and_goes_live`
-///   (`crates/zeroship-control/tests/deploy_http_test.rs`) measures on purpose.
+///   (`crates/zeroship-control/tests/integration/deploy_http_test.rs`) measures on purpose.
 ///   Foreclosed on the VERIFIED deployment rather than on the manifest, because
 ///   `VerifiedDeployment::databases` is the slice `catalog::accept` hands to
 ///   `admit_bindings` and a manifest entry that did not survive verification
@@ -1825,7 +1825,7 @@ struct CoTenantDeploy<'a> {
 /// `CatalogError::DatabaseNotBound`. The HTTP-surface form of that control,
 /// with its status, body and remedy, is
 /// `deploy_naming_an_unbound_database_is_refused_and_names_the_binding_call`
-/// and its own control in `crates/zeroship-control/tests/deploy_http_test.rs`;
+/// and its own control in `crates/zeroship-control/tests/integration/deploy_http_test.rs`;
 /// neither is restated here.
 async fn a_migration_one_app_applies_to_a_shared_database_does_not_fail_the_other_apps_deploy(
     scene: CoTenantDeploy<'_>,

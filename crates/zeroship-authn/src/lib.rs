@@ -24,14 +24,11 @@ pub type HttpRejection = ntex::web::Error;
 
 /// What a verified bearer proves.
 ///
-/// **IT CARRIES NO MFA FIELDS, AND THE DELETION IS THE POINT.** `mfa_verified`
-/// and `mfa_age_seconds` used to be here, and every construction below set them
-/// to `false` / `None` unconditionally - the platform has no second-factor
-/// signal to report. They fed `Condition::RequireMfa` and `Condition::MfaWithin`
-/// in `zeroship-authz`, so those conditions compared against a value that was
-/// not unknown but wrong, and could only ever deny. The fields and both
-/// conditions were deleted together rather than left as a fence that reads as
-/// enforced and never fires.
+/// **IT CARRIES NO MFA FIELDS.** The platform has no second-factor signal to
+/// report, so no construction sets them. A condition over such a field
+/// (`Condition::RequireMfa` / `Condition::MfaWithin` in `zeroship-authz`) would
+/// compare against a value that is not unknown but wrong, and could only ever
+/// deny, so it would read as a fence that is enforced and never fires.
 #[derive(Debug)]
 pub struct VerifiedPrincipal {
     pub principal_id: UserId,
@@ -96,9 +93,9 @@ impl BearerVerifier {
         request_ip: Option<IpAddr>,
         request_id: String,
     ) -> Result<VerifiedPrincipal, HttpRejection> {
-        // The platform OP is the only issuer. A locally-signed personal access
-        // token used to be tried first, ahead of this call; that was a second
-        // issuance authority holding its own key, and it is gone.
+        // The platform OP is the only issuer. No locally-signed personal access
+        // token is tried ahead of this call; a second issuance authority holding
+        // its own key is not part of this path.
         let principal = self
             .oauth_guard_from_bearer(token, request_ip, request_id)
             .await?;
@@ -134,10 +131,8 @@ impl BearerVerifier {
     /// Refuse a platform bearer whose token family has been revoked.
     ///
     /// Public so that every path accepting a platform OAuth bearer runs THIS
-    /// check rather than a second copy of it. Control's device-approval handler
-    /// is the other caller; it used to accept `ProviderAuthz::OAuthScope`
-    /// unconditionally, which let a revoked bearer approve a fresh device grant
-    /// and mint a token with a new `iat` that outran the marker.
+    /// check rather than a second copy of it, so a revoked bearer cannot mint a
+    /// token with a new `iat` that outruns the family marker.
     ///
     /// Missing `client_id` or `iat` is a REFUSAL, not a pass: without them
     /// there is nothing to compare a marker against.
@@ -309,7 +304,7 @@ impl BearerVerifier {
     /// Resolve the live entitlement a platform CLI token is capped to.
     ///
     /// The OP caps a device-grant token to the client REGISTRATION and cannot
-    /// do more: `db/migrations-ts/20260702000900_grants.ts:55` gives
+    /// do more: `db/migrations-ts/20260702000900_grants.ts` gives
     /// `zeroship_auth` SELECT on `zeroship.principal_grants` and no write
     /// anywhere near it. So the token's `scope` claim is a coarse ceiling, and
     /// this is where an operator's narrowing takes effect - per request, which
@@ -317,7 +312,7 @@ impl BearerVerifier {
     /// merely the next login.
     ///
     /// This is a pure read and needs no privilege beyond what
-    /// `zeroship_control` already holds on both tables (`grants.ts:65`).
+    /// `zeroship_control` already holds on both tables.
     ///
     /// An UNSEEDED principal falls back to the default CLI set rather than to
     /// nothing. `zeroship login` is an OP-only conversation, so control's

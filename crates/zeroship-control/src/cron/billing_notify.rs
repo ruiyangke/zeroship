@@ -407,12 +407,9 @@ async fn scan_unsent(state: &AppState) -> Result<Vec<Candidate>, RegistryError> 
     // (The row stores both endpoints — 0041 DDL — so no prior-state derivation is needed.)
     //
     // Unlike the other (subject-keyed) kinds the spend source is PER-APP, so the
-    // subject comes off the app row: `apps.organization_id`. This used to resolve
-    // a HUMAN through `app_owner_map` - project, organization, longest-standing
-    // owner - and needed that map's DISTINCT ON so a multi-owner organization did
-    // not get notified twice about one app. There is one organization per app, so
-    // the collapse is gone with the fan-out, and the spend notice reaches exactly
-    // the subject that is billed because both read the same column.
+    // subject comes off the app row: `apps.organization_id`. No owner lookup is
+    // needed: there is one organization per app, so the spend notice reaches
+    // exactly the subject that is billed because both read the same column.
     //
     // An app whose organization has no `organization_billing` identity (the
     // `billing_notifications` FK target) is still skipped - the INNER JOIN drops

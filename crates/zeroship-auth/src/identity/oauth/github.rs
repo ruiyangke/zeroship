@@ -129,7 +129,7 @@ pub async fn complete_callback(
     // 1. POST /login/oauth/access_token (form-encoded). We set
     //    `Accept: application/json` so GitHub returns JSON instead of
     //    `application/x-www-form-urlencoded` — see "Things to be
-    //    careful about" in P4-U3 brief; the JSON path is well-supported
+    //    careful about"; the JSON path is well-supported
     //    and stable.
     let token_body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("grant_type", "authorization_code")

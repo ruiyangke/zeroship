@@ -52,7 +52,7 @@ pub fn spawn_all(
     })
     .detach();
 
-    // ISS-12: erase accounts whose deletion grace window has elapsed. The
+    // Erase accounts whose deletion grace window has elapsed. The
     // reaper re-asks the control plane whether each due human is still the last
     // owner of a live organization, so it carries the same control access the
     // `/me/delete` handler used to open the window.

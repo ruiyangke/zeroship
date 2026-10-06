@@ -1622,7 +1622,7 @@ mod tests {
     use zeroship_core::config::GeneratedConfig;
 
     // Tests that drive the ENVIRONMENT tier of `ControlSettings` live in
-    // `crates/zeroship-control/tests/config_env_tier.rs`. That tier is clap's
+    // `crates/zeroship-control/tests/integration/config_env_tier.rs`. That tier is clap's
     // `env = "ZEROSHIP_..."` attribute, so exercising it in-process means
     // `std::env::set_var` / `remove_var` - which mutates the environment every
     // other test in this binary parses in. They run the real `zeroship-control`
@@ -1652,7 +1652,7 @@ mod tests {
         // half is not: the environment tier outranks the overlay, so an
         // ambient `ZEROSHIP_AUTH_PROVIDER` makes the retired overlay value
         // never get parsed and the refusal never fire. It lives in
-        // `crates/zeroship-control/tests/config_env_tier.rs`, against a child process
+        // `crates/zeroship-control/tests/integration/config_env_tier.rs`, against a child process
         // whose environment is cleared.
         let err = ControlSettingsSources::try_parse_from([
             "zeroship-control",

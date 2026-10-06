@@ -3,8 +3,7 @@
 //! Authority is two integers on a closed ladder
 //! (`zeroship.organization_roles`), resolved from the database on EVERY
 //! request, narrowed per project, and carried into Cedar as request context.
-//! Nothing is cached: see [`authority`] for why the cache that used to sit here
-//! was deleted rather than fixed.
+//! Nothing is cached: see [`authority`] for why a cache in front of it is wrong.
 
 pub mod action;
 pub mod authority;

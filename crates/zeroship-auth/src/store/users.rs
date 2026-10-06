@@ -93,7 +93,7 @@ pub async fn create(
         .await
 }
 
-/// Account-lockout policy (security finding L5). Per-user, conservative on
+/// Account-lockout policy. Per-user, conservative on
 /// purpose so an attacker can't trivially lock out a victim — the per-email
 /// leaky bucket (cap 10/hr) is the broad throttle; this is the escalation arm
 /// that turns sustained guessing against ONE account into a hard stop with

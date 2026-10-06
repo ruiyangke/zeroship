@@ -891,8 +891,8 @@ mod live_db_tests {
             .expect("recompute with duplicate event_id");
         assert_eq!(cycle.polled, 3);
         assert_eq!(cycle.decoded, 3);
-        // evt_duplicate_replay: same event_id twice. This is the counter that
-        // used to be indistinguishable from a wrong-period event.
+        // evt_duplicate_replay: same event_id twice. This is the counter for a
+        // duplicate `event_id`, distinct from a wrong-period event.
         assert_eq!(cycle.skipped_duplicate, 1);
         assert_eq!(cycle.skipped_other_period, 0);
         assert_eq!(cycle.aggregates, 1);

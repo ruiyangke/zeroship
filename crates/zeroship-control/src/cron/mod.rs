@@ -6,12 +6,12 @@
 //!
 //! Tasks:
 //!   - [`audit_retention`] — the sanctioned deleter for the append-only
-//!     `zeroship.app_audit` / `zeroship.authz_decisions` tables (P12). Peer of
+//!     `zeroship.app_audit` / `zeroship.authz_decisions` tables. Peer of
 //!     `auth::cron::audit_retention` (which sweeps `zeroship.audit_events`);
 //!     shares the same `zeroship.audit_retention` GUC.
-//!   - [`orphaned_app_reaper`] — purges apps left owner-less by the ISS-12
-//!     account-erase reaper (auth), tearing down their DB rows + blobs. Excludes
-//!     `system = true` apps (the platform console). See ISS-12b.
+//!   - [`orphaned_app_reaper`] - purges apps left owner-less by the account-erase
+//!     reaper (auth), tearing down their DB rows + blobs. Excludes
+//!     `system = true` apps (the platform console).
 //!
 //! [`deploy_retention`] is not spawned here: `main` builds its collector from
 //! bounds it validated before serving, then runs it on the same runtime.
@@ -187,7 +187,7 @@ pub fn spawn_all(
 /// audit-retention, orphaned-app reaper, dunning, billing-notify — are not listed).
 ///
 /// This is the single source of truth the `$0-revenue guard` test asserts on
-/// (blueprint §M5 table / §M9 risk 3) WITHOUT having to spin up the compio
+/// WITHOUT having to spin up the compio
 /// runtime: it makes the "which crons run per provider" decision testable.
 #[must_use]
 pub fn provider_aware_cron_tasks(

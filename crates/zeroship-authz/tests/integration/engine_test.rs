@@ -85,16 +85,16 @@ fn condition_ip_range_lowers_correctly() {
 
 /// The deleted MFA conditions must not survive as parseable wrapper JSON.
 ///
-/// Deserializing `{"kind": "require_mfa"}` would rebuild a statement whose
-/// lowering no longer exists, and `Condition` is `#[serde(tag = "kind")]`, so a
+/// Deserializing `{"kind": "require_mfa"}` would rebuild a statement with no
+/// lowering, and `Condition` is `#[serde(tag = "kind")]`, so a
 /// wrapper carrying either kind has to be REFUSED rather than dropped: a
 /// silently ignored condition widens the statement it was meant to narrow.
 ///
 /// The app id in the fixture is a MINTED one, and the empty-conditions control
 /// below is what makes that load-bearing rather than tidy. `Resource::App`
-/// decodes through `AppId::parse`, so the placeholder this fixture used to carry
-/// would refuse the whole wrapper on the RESOURCE - and every assertion here
-/// would have gone on passing while proving nothing about the conditions.
+/// decodes through `AppId::parse`, so a non-minted placeholder would refuse the
+/// whole wrapper on the RESOURCE - and every assertion here would pass while
+/// proving nothing about the conditions.
 #[test]
 fn deleted_mfa_conditions_do_not_deserialize() {
     let app = AppId::mint();

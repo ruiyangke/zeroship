@@ -166,8 +166,8 @@ impl AccountCaller {
 }
 
 // "account self-service": AccountRead + AccountWrite. A scope always lowers to
-// `Resource::Any`, matching the wrapper policy this used to carry (it was
-// already unconstrained), so the translation is direct.
+// `Resource::Any`, matching the unconstrained wrapper policy, so the
+// translation is direct.
 async fn account_caller(state: &AppState, label: &str) -> AccountCaller {
     let user_id = insert_user(state, label).await;
     let token = crate::support::platform_token_for_client(
@@ -585,7 +585,7 @@ async fn revoke_does_not_affect_other_users() {
 
 /// The revocation cascade: revoking a grant sets
 /// `app_user_identities.revoked_at` AND a subsequent inbound to that alias
-/// bounces (the real 5b `resolve_active_alias` gate now returns `None`). The
+/// bounces (the real `resolve_active_alias` gate returns `None`). The
 /// DELETE + UPDATE commit atomically (BEGIN/COMMIT) on control's existing
 /// `control_pg` connection — no per-call connect. This is the full faithful loop:
 /// the relay alias was forwarding (active) → revoke → it bounces (inactive).
@@ -637,7 +637,7 @@ async fn revoke_cascade_revokes_relay_alias_so_inbound_bounces() {
         identity_revoked_at_is_set(&fx.state, &client_id, &caller.user_id).await,
         "revoke must set app_user_identities.revoked_at (the cascade UPDATE)"
     );
-    // The faithful seam: the 5b webhook's active-map resolution now returns
+    // The faithful seam: the webhook's active-map resolution returns
     // None ⇒ inbound to this alias BOUNCES (revoked/unknown-alias branch, §8).
     assert!(
         !alias_is_active(&fx.state, &relay_email).await,

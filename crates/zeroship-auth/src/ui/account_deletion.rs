@@ -363,9 +363,8 @@ async fn send_confirmation(
     db: &compio_postgres::Client,
     request: &users::DeletionRequest,
 ) {
-    // The undo link, carrying the single-use token. This used to point at
-    // `/me`, which the request had just made unreachable - so the email
-    // advertised a thirty-day window whose only door was locked.
+    // The undo link carries the single-use token and points at a route the
+    // request leaves reachable, so the advertised window has a working door.
     let link = format!(
         "{}/me/delete/cancel?token={}",
         cfg.public_url(),
@@ -428,7 +427,7 @@ fn render_cancel(
 ) -> HttpResponse {
     let csrf_token = csrf::generate_token();
     // Independent per-response CSP script nonce - must NOT be the CSRF token
-    // (which is also a non-HttpOnly cookie + plaintext form field). See L3.
+    // (which is also a non-HttpOnly cookie + plaintext form field).
     let script_nonce = csrf::generate_token();
     let page = DeletionCancelPage {
         token,

@@ -288,7 +288,7 @@ pub async fn provider_invoice_id_for_cash_refund<C: GenericClient + Sync>(
 
 /// The net cash collected on an invoice: `Σ(invoice_payments.amount_cents)` — the
 /// over-refund anchor (NOT `total_cents`). Re-exported from [`crate::invoice_payments`] so
-/// the cap anchor has EXACTLY ONE implementation (M1): the refund precheck, the true-up
+/// the cap anchor has EXACTLY ONE implementation: the refund precheck, the true-up
 /// bridge, and the `0049` over-refund trigger all read the identical `Σ`; there is no
 /// second copy to drift.
 pub use crate::invoice_payments::cash_collected;

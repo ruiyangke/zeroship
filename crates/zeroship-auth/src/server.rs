@@ -170,7 +170,7 @@ pub fn configure(
                 web::resource("/me/2fa/disable")
                     .route(web::post().to(ui::totp::disable)),
             )
-            // Magic-link login (P5-U4). Universal — always registered,
+            // Magic-link login. Universal - always registered,
             // no per-provider gating.
             .service(
                 web::resource("/magic/start").route(web::post().to(ui::magic::start)),
@@ -189,14 +189,14 @@ pub fn configure(
                 web::resource("/magic/complete")
                     .route(web::post().to(ui::magic::complete)),
             )
-            // Email verification (P5-U5). Token issued at /signup lands on
+            // Email verification. Token issued at /signup lands on
             // GET /verify, then POST /verify/redeem consumes it and sets
             // zeroship.users.email_verified_at = NOW().
             .service(web::resource("/verify").route(web::get().to(ui::verify::get)))
             .service(
                 web::resource("/verify/redeem").route(web::post().to(ui::verify::post_redeem)),
             )
-            // Password reset (P5-U6). /forgot issues a 1h reset token
+            // Password reset. /forgot issues a 1h reset token
             // (enumeration-resistant); /reset redeems it and updates
             // zeroship.users.password_hash.
             .service(
@@ -209,7 +209,7 @@ pub fn configure(
                     .route(web::get().to(ui::reset::get))
                     .route(web::post().to(ui::reset::post)),
             )
-            // Postmark bounce/complaint webhook (P5-U7). Always
+            // Postmark bounce/complaint webhook. Always
             // registered — the handler 401s when
             // `postmark_webhook_user`/`postmark_webhook_password`
             // aren't configured so misrouted traffic doesn't silently
@@ -218,7 +218,7 @@ pub fn configure(
                 web::resource("/webhooks/postmark")
                     .route(web::post().to(ui::webhooks::postmark)),
             )
-            // SES-SNS bounce/complaint webhook (P6-U3). Always
+            // SES-SNS bounce/complaint webhook. Always
             // registered — auth is by RSA-SHA1 signature against the
             // SigningCertURL cert (anti-SSRF allowlist enforced), so
             // there's no environment-level on/off switch.

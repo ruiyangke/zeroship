@@ -134,10 +134,10 @@ fn resource_cedar_uids_are_canonical() {
 /// The escaping is asserted on a `String`-typed id, which is the only kind that
 /// can still carry a Cedar break.
 ///
-/// It used to be asserted on `Resource::App`. That id is an `AppId` now and the
-/// hostile value cannot be built, so the case moved to `Project` rather than
-/// being dropped: `cedar_uid` escapes through one shared `cedar_string`, and the
-/// two `String` ids are the ones that still reach it with unvalidated text. The
+/// The case is asserted on `Resource::Project`: that id is an `AppId` and the
+/// hostile value cannot be built there. `cedar_uid` escapes through one shared
+/// `cedar_string`, and the two
+/// `String` ids are the ones that still reach it with unvalidated text. The
 /// second assertion is the App half of the same claim - the break is refused one
 /// step earlier, at construction, instead of being escaped on the way out.
 #[test]

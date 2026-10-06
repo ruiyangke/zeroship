@@ -818,7 +818,7 @@ pub async fn lock_and_read(
 ///
 /// The validating update enforces session liveness, expiry, grant status,
 /// person lifecycle and the credential epoch. The store integration tests in
-/// `crates/zeroship-auth/tests/store/sessions.rs` exercise successful rotation
+/// `crates/zeroship-auth/tests/integration/store/sessions.rs` exercise successful rotation
 /// and refusal after eligibility changes against the migrated schema.
 ///
 /// # Errors

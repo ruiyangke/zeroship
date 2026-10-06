@@ -1028,15 +1028,11 @@ async fn deploy_rejects_legacy_manifest_migrations_and_writes_no_blob() {
 ///
 /// The handler streams the body, mmaps it and calls `deploy::ingest` (which
 /// writes every blob into the blob store) and only afterwards looks the app up,
-/// so a bundle for a nonexistent app used to leave blobs behind with nothing to
-/// reference or bill them. That arm was reachable only by a caller holding a
-/// fleet-wide grant; an ordinary creator was already denied by authz on an app
-/// they do not own.
-///
-/// With the fleet-wide grant deleted, EVERY caller is that ordinary creator, so
-/// the refusal is now 403 at the gate and the ingest is never entered. The
-/// blob assertion is the part that still earns its keep - it is what would go
-/// red if the gate were ever moved after the stream again.
+/// so a bundle for a nonexistent app would leave blobs behind with nothing to
+/// reference or bill them if it reached here. Authz refuses every caller on an
+/// app they do not own, so the refusal is 403 at the gate and the ingest is
+/// never entered. The blob assertion is the part that still earns its keep -
+/// it goes red if the gate ever stops refusing before the stream.
 ///
 /// 403 rather than 404 is also the better answer on its own terms: the response
 /// is identical for an app that does not exist and one the caller does not own,
