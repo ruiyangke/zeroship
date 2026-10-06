@@ -17,9 +17,11 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use futures::channel::oneshot;
+use futures::stream::StreamExt;
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
 use zeroship_runtime::state::{SharedState, MAX_UPLOAD_BUFFER_BYTES};
+use zeroship_runtime::streams::stream_forwarder::UploadReader;
 use zeroship_runtime::{
     init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, Runtime, SettledFetch,
 };
@@ -563,11 +565,16 @@ fn start_upload_callback(scope: &mut v8::PinScope, args: v8::FunctionCallbackArg
     else {
         return;
     };
+    // The upload belongs to the request whose handler started it, the same
+    // as a `fetch` request body: the request ending must end the upload.
+    let owner_request = scope
+        .get_slot::<SharedState>()
+        .and_then(|state| state.borrow().executing_request_id);
     let options = zeroship_runtime::streams::stream_forwarder::UploadOptions {
         buffer_cap: zeroship_runtime::channel::DEFAULT_STREAM_BUFFER_CAP,
         chunk_policy: zeroship_runtime::streams::stream_forwarder::ChunkPolicy::Uint8Array,
         abort_signal: Some(signal),
-        owner_request: None,
+        owner_request,
     };
     match zeroship_runtime::streams::stream_forwarder::forward_upload(scope, stream, options) {
         Ok(reader) => UPLOADS.with(|uploads| uploads.borrow_mut().push(reader)),
@@ -1545,6 +1552,447 @@ async fn one_chunk_several_times_the_buffer_is_held_once_and_sent_in_order() {
     assert!(held_bytes > cap, "the parked rest of the chunk counts as held: {v}");
     assert_eq!(v["upload"]["bytes"], v["total"], "{v}");
     assert_eq!(v["upload"]["pattern_ok"], true, "the slices arrive in order: {v}");
+}
+
+// ---------------------------------------------------------------------------
+// The upload share drains when its uploads end
+// ---------------------------------------------------------------------------
+
+/// How many uploads the share-saturating tests start together. Their channels
+/// pause at half the channel cap, so together they want more than the
+/// runtime's upload share.
+const SHARE_UPLOADS: usize = 20;
+/// The chunks one share-saturating source enqueues. The channel pauses at half
+/// the channel cap, so the source must want more than that to stop short of
+/// its end at the hold; the slack above the pause mark absorbs the one chunk
+/// the stream buffers ahead of the read loop.
+const SHARE_CHUNK: usize = 64 * 1024;
+const SHARE_PER_UPLOAD: usize = 3 * 1024 * 1024;
+
+/// JS opening that starts `SHARE_UPLOADS` uploads through
+/// `env.probe.startUpload`, each from a source that wants `SHARE_PER_UPLOAD`
+/// bytes in `SHARE_CHUNK` chunks. Together the sources want more than the
+/// runtime's upload share and they start together, so the share runs out
+/// while every source is still short of its end. `signal` is the JS
+/// expression each upload follows; `end` is the statement run once a source
+/// has produced `SHARE_PER_UPLOAD`; `on_cancel` records that a source was
+/// cancelled. The block ends with `heldAtHold`, read through
+/// `env.probe.uploadBytes()` after two pump passes.
+fn saturating_uploads(signal: &str, end: &str, on_cancel: &str) -> String {
+    format!(
+        r#"
+        const CHUNK = {SHARE_CHUNK}, K = {SHARE_UPLOADS}, PER_UPLOAD = {SHARE_PER_UPLOAD};
+        const produced = new Array(K).fill(0);
+        const cancelled = new Array(K).fill(false);
+        for (let k = 0; k < K; k++) {{
+            const s = new ReadableStream({{
+                pull(c) {{
+                    if (produced[k] >= PER_UPLOAD) {{ {end} return; }}
+                    c.enqueue(new Uint8Array(CHUNK));
+                    produced[k] += CHUNK;
+                }},
+                cancel(r) {{ {on_cancel} }}
+            }});
+            const refusal = env.probe.startUpload(s, {signal});
+            if (refusal !== undefined) throw new Error(refusal);
+        }}
+        await (await fetch(BASE + "/ping")).text();
+        await (await fetch(BASE + "/ping")).text();
+        const atHold = produced.slice();
+        const heldAtHold = env.probe.uploadBytes();
+        "#
+    )
+}
+
+/// Read one held upload to its end the way a body consumer reads it: a source
+/// failure ends the upload. Returns the bytes it yielded and whether it
+/// failed.
+async fn drain_held_upload(mut reader: UploadReader) -> (usize, bool) {
+    let mut bytes = 0usize;
+    let mut failed = false;
+    while let Some(item) = reader.next_chunk().await {
+        if let Ok(chunk) = item {
+            bytes += chunk.len();
+        } else {
+            failed = true;
+            break;
+        }
+    }
+    (bytes, failed)
+}
+
+/// The bytes this runtime's uploads hold, read from its upload share: the
+/// value `env.probe.uploadBytes()` reports.
+fn held_upload_bytes(runtime: &Runtime) -> usize {
+    runtime.state().borrow().upload_share.used()
+}
+
+/// Assert the saturating fixture's control: every source was still short of
+/// its end while the share was held. Without it a fixture that let every
+/// source reach its end before the hold would still read as saturated.
+fn assert_sources_short_of_their_end(v: &serde_json::Value) {
+    let produced: Vec<u64> = v["atHold"].as_array().unwrap().iter().map(|p| p.as_u64().unwrap()).collect();
+    assert_eq!(
+        produced.len() as u64,
+        v["uploads"].as_u64().unwrap(),
+        "every source reported its production: {v}"
+    );
+    assert!(
+        produced.iter().all(|&p| p < v["perUpload"].as_u64().unwrap()),
+        "every source is still short of its end while the share is held: {v}"
+    );
+}
+
+/// Drain every held upload and collect what each yielded.
+async fn drain_all_held_uploads() -> Vec<(usize, bool)> {
+    let readers: Vec<UploadReader> = UPLOADS.with(|uploads| uploads.borrow_mut().drain(..).collect());
+    assert!(!readers.is_empty(), "the uploads are held outside the runtime");
+    let mut drains = futures::stream::FuturesUnordered::new();
+    for reader in readers {
+        drains.push(drain_held_upload(reader));
+    }
+    let mut results = Vec::new();
+    while let Some(result) = drains.next().await {
+        results.push(result);
+    }
+    results
+}
+
+#[compio::test]
+async fn fetch_streaming_upload_share_returns_to_zero_when_uploads_complete() {
+    // The share is filled with uploads nothing reads, then every upload is
+    // read to its source's end. The channel bytes and the parked bytes must
+    // all be released, not held until the runtime is dropped.
+    UPLOADS.with(|uploads| uploads.borrow_mut().clear());
+    let server = start_server();
+    let waiting = server.when(|o| o.waiting_release);
+    let (runtime, outcome) = launch(
+        &server,
+        &format!(
+            r#"{}
+        await (await fetch(BASE + "/wait-released")).text();
+        return {{ heldAtHold, atHold, heldAfterDrain: env.probe.uploadBytes(), uploads: K, perUpload: PER_UPLOAD }};
+        "#,
+            saturating_uploads("new AbortController().signal", "c.close();", "cancelled[k] = true;")
+        ),
+        None,
+        CancelFlag::new(),
+    );
+    let FetchOutcome::Pending { rx, .. } = outcome else {
+        panic!("the saturating handler must be waiting");
+    };
+    compio::time::timeout(SETTLE, waiting)
+        .await
+        .expect("the saturating handler never reached its hold")
+        .expect("the server stopped");
+
+    let share = MAX_UPLOAD_BUFFER_BYTES;
+    let held_at_hold = held_upload_bytes(&runtime);
+    assert!(held_at_hold >= share, "the uploads filled the share before draining: {held_at_hold} of {share}");
+
+    let drained = drain_all_held_uploads().await;
+    assert_eq!(drained.len(), SHARE_UPLOADS, "every upload is held outside the runtime");
+    let bytes: usize = drained.iter().map(|(bytes, _)| *bytes).sum();
+    let failures = drained.iter().filter(|(_, failed)| *failed).count();
+    assert_eq!(failures, 0, "a completed source does not fail");
+    assert_eq!(
+        bytes,
+        drained.len() * SHARE_PER_UPLOAD,
+        "every source delivers the bytes it produced"
+    );
+    assert_eq!(held_upload_bytes(&runtime), 0, "the share drains to zero when the uploads end");
+
+    server.shared.update(|o| o.released = true);
+    let v = settle(FetchOutcome::Pending { rx, cancel: CancelFlag::new() }).await;
+    assert!(v["heldAtHold"].as_u64().unwrap() >= share as u64, "the handler saw the share filled: {v}");
+    assert_sources_short_of_their_end(&v);
+    assert_eq!(v["heldAfterDrain"].as_u64().unwrap(), 0, "uploadBytes() is zero after the uploads end: {v}");
+    UPLOADS.with(|uploads| uploads.borrow_mut().clear());
+}
+
+#[compio::test]
+async fn fetch_streaming_upload_share_returns_to_zero_when_uploads_error() {
+    // The same, where every source throws at its end. A failed upload must
+    // release its channel and parked bytes just as a completed one does.
+    UPLOADS.with(|uploads| uploads.borrow_mut().clear());
+    let server = start_server();
+    let waiting = server.when(|o| o.waiting_release);
+    let (runtime, outcome) = launch(
+        &server,
+        &format!(
+            r#"{}
+        await (await fetch(BASE + "/wait-released")).text();
+        return {{ heldAtHold, atHold, heldAfterDrain: env.probe.uploadBytes(), uploads: K, perUpload: PER_UPLOAD }};
+        "#,
+            saturating_uploads(
+                "new AbortController().signal",
+                "c.error(new Error(\"source failed\"));",
+                "cancelled[k] = true;",
+            )
+        ),
+        None,
+        CancelFlag::new(),
+    );
+    let FetchOutcome::Pending { rx, .. } = outcome else {
+        panic!("the saturating handler must be waiting");
+    };
+    compio::time::timeout(SETTLE, waiting)
+        .await
+        .expect("the saturating handler never reached its hold")
+        .expect("the server stopped");
+
+    let share = MAX_UPLOAD_BUFFER_BYTES;
+    let held_at_hold = held_upload_bytes(&runtime);
+    assert!(held_at_hold >= share, "the uploads filled the share before failing: {held_at_hold} of {share}");
+
+    let drained = drain_all_held_uploads().await;
+    assert_eq!(drained.len(), SHARE_UPLOADS, "every upload is held outside the runtime");
+    let bytes: usize = drained.iter().map(|(bytes, _)| *bytes).sum();
+    let failures = drained.iter().filter(|(_, failed)| *failed).count();
+    assert_eq!(failures, drained.len(), "every failing source ends its upload as a failure");
+    assert_eq!(
+        bytes,
+        drained.len() * SHARE_PER_UPLOAD,
+        "every source delivers the bytes it produced before failing"
+    );
+    assert_eq!(held_upload_bytes(&runtime), 0, "the share drains to zero when the uploads fail");
+
+    server.shared.update(|o| o.released = true);
+    let v = settle(FetchOutcome::Pending { rx, cancel: CancelFlag::new() }).await;
+    assert!(v["heldAtHold"].as_u64().unwrap() >= share as u64, "the handler saw the share filled: {v}");
+    assert_sources_short_of_their_end(&v);
+    assert_eq!(v["heldAfterDrain"].as_u64().unwrap(), 0, "uploadBytes() is zero after the uploads fail: {v}");
+    UPLOADS.with(|uploads| uploads.borrow_mut().clear());
+}
+
+#[compio::test]
+async fn fetch_streaming_upload_share_returns_to_zero_when_an_aborted_signal_cancels_uploads() {
+    // The same, where every upload follows one signal and the signal aborts.
+    // Cancelling releases the parked bytes at once; the channel bytes go when
+    // the reader that holds them is dropped.
+    UPLOADS.with(|uploads| uploads.borrow_mut().clear());
+    let server = start_server();
+    let waiting = server.when(|o| o.waiting_release);
+    let (runtime, outcome) = launch(
+        &server,
+        &format!(
+            r#"
+        const reason = new Error("stop the uploads");
+        const ac = new AbortController();
+        {}
+        ac.abort(reason);
+        await (await fetch(BASE + "/ping")).text();
+        await (await fetch(BASE + "/ping")).text();
+        const heldAfterCancel = env.probe.uploadBytes();
+        await (await fetch(BASE + "/wait-released")).text();
+        return {{
+            heldAtHold, atHold, heldAfterCancel, heldAfterDrain: env.probe.uploadBytes(),
+            cancelled, uploads: K, perUpload: PER_UPLOAD,
+        }};
+        "#,
+            saturating_uploads(
+                "ac.signal",
+                "return new Promise(() => {});",
+                "cancelled[k] = (r === reason);",
+            )
+        ),
+        None,
+        CancelFlag::new(),
+    );
+    let FetchOutcome::Pending { rx, .. } = outcome else {
+        panic!("the saturating handler must be waiting");
+    };
+    compio::time::timeout(SETTLE, waiting)
+        .await
+        .expect("the saturating handler never reached its hold")
+        .expect("the server stopped");
+
+    let held_after_cancel = held_upload_bytes(&runtime);
+    assert!(held_after_cancel > 0, "the readers still hold the channel bytes");
+
+    let _ = drain_all_held_uploads().await;
+    server.shared.update(|o| o.released = true);
+    let v = settle(FetchOutcome::Pending { rx, cancel: CancelFlag::new() }).await;
+
+    let cancelled: Vec<bool> = v["cancelled"].as_array().unwrap().iter().map(|c| c.as_bool().unwrap()).collect();
+    assert!(cancelled.iter().all(|&c| c), "every source is cancelled with the signal's reason: {v}");
+    assert!(v["heldAtHold"].as_u64().unwrap() >= MAX_UPLOAD_BUFFER_BYTES as u64, "the uploads filled the share: {v}");
+    assert_sources_short_of_their_end(&v);
+    assert_eq!(
+        v["heldAfterCancel"].as_u64().unwrap(),
+        held_after_cancel as u64,
+        "the abort released the parked bytes while the readers held the channels: {v}"
+    );
+    assert!(
+        v["heldAfterCancel"].as_u64().unwrap() < v["heldAtHold"].as_u64().unwrap(),
+        "the abort released bytes the share held: {v}"
+    );
+    assert_eq!(v["heldAfterDrain"].as_u64().unwrap(), 0, "uploadBytes() is zero after the channels are released: {v}");
+    assert_eq!(held_upload_bytes(&runtime), 0, "the share drains to zero");
+}
+
+#[compio::test]
+async fn fetch_streaming_upload_share_returns_to_zero_when_the_owning_request_times_out() {
+    // An upload belongs to the request that started it. The worker's wall
+    // timeout cancels the request; the request's uploads must release their
+    // channel and parked bytes with it.
+    UPLOADS.with(|uploads| uploads.borrow_mut().clear());
+    let server = start_server();
+    let waiting = server.when(|o| o.waiting_release);
+    let cancel = CancelFlag::new();
+    let (runtime, outcome) = launch(
+        &server,
+        &format!(
+            r#"{}
+        await (await fetch(BASE + "/wait-released")).text();
+        return {{ heldAtHold, uploads: K, perUpload: PER_UPLOAD }};
+        "#,
+            saturating_uploads("new AbortController().signal", "c.close();", "cancelled[k] = true;")
+        ),
+        None,
+        cancel.clone(),
+    );
+    let FetchOutcome::Pending { rx, .. } = outcome else {
+        panic!("the saturating handler must be waiting");
+    };
+    compio::time::timeout(SETTLE, waiting)
+        .await
+        .expect("the saturating handler never reached its hold")
+        .expect("the server stopped");
+
+    let share = MAX_UPLOAD_BUFFER_BYTES;
+    let held_at_hold = held_upload_bytes(&runtime);
+    assert!(held_at_hold >= share, "the uploads filled the share before the timeout: {held_at_hold} of {share}");
+
+    // What the worker does when the wall timeout fires.
+    cancel.cancel();
+    runtime.notify_pump();
+
+    let reply = compio::time::timeout(SETTLE, rx.recv()).await.expect("no reply after the cancel");
+    let Err(error) = reply else {
+        panic!("a cancelled request must not settle with its handler's response");
+    };
+    assert_eq!(error.message, "Request timed out", "{error:?}");
+    assert!(
+        runtime.state().borrow().stream_forwarders.is_empty(),
+        "the timeout cancelled the request's uploads"
+    );
+
+    let _ = drain_all_held_uploads().await;
+    assert_eq!(held_upload_bytes(&runtime), 0, "the share drains to zero when the request ends");
+}
+
+#[compio::test]
+async fn an_upload_owned_by_a_timed_out_request_releases_its_share() {
+    // A real `fetch` stream body the gated server never reads: the platform
+    // holds the upload's channel and the parked rest of its first chunk, and
+    // the production `fetch` wiring gives the upload its owning request. The
+    // request is cancelled the way the worker's wall timeout cancels it, and
+    // the share must return to zero.
+    let server = start_server();
+    let waiting = server.when(|o| o.waiting_release);
+    let cancel = CancelFlag::new();
+    let (runtime, outcome) = launch(
+        &server,
+        r#"
+        const BIG = 40 * 1024 * 1024;
+        let pulls = 0;
+        const s = new ReadableStream({
+            pull(c) { if (pulls++ === 0) c.enqueue(new Uint8Array(BIG)); }
+        });
+        const upload = fetch(BASE + "/upload-gated", { method: "POST", body: s, duplex: "half" });
+        let held = 0;
+        for (let i = 0; i < 1000 && held === 0; i++) {
+            await (await fetch(BASE + "/ping")).text();
+            held = env.probe.uploadBytes();
+        }
+        if (held === 0) throw new Error("the upload never charged the share");
+        await (await fetch(BASE + "/wait-released")).text();
+        return { held };
+        "#,
+        None,
+        cancel.clone(),
+    );
+    let FetchOutcome::Pending { rx, .. } = outcome else {
+        panic!("the handler must be waiting on its gated upload");
+    };
+    compio::time::timeout(SETTLE, waiting)
+        .await
+        .expect("the handler never reached its hold")
+        .expect("the server stopped");
+    let held = held_upload_bytes(&runtime);
+    assert!(held > 0, "the timed-out request's upload charged the share: held {held}");
+
+    cancel.cancel();
+    runtime.notify_pump();
+    let reply = compio::time::timeout(SETTLE, rx.recv()).await.expect("no reply after the cancel");
+    let Err(error) = reply else {
+        panic!("a cancelled request must not settle with its handler's response");
+    };
+    assert_eq!(error.message, "Request timed out", "{error:?}");
+    // The timeout cancels the request's upload: the forwarder is removed, and
+    // the HTTP client drops the reader it held, releasing channel and parked
+    // bytes alike.
+    assert!(
+        runtime.state().borrow().stream_forwarders.is_empty(),
+        "the timed-out request cancelled its upload"
+    );
+    assert_eq!(
+        held_upload_bytes(&runtime),
+        0,
+        "the timed-out request's upload released its share"
+    );
+}
+
+#[compio::test]
+async fn fetch_streaming_upload_share_releases_a_parked_chunk_when_the_upload_is_cancelled() {
+    // One chunk larger than the channel is sliced: the channel's part and the
+    // parked rest are both charged. Cancelling the upload releases the parked
+    // part at once; the channel's part goes when the reader is dropped.
+    UPLOADS.with(|uploads| uploads.borrow_mut().clear());
+    let server = start_server();
+    let (runtime, outcome) = launch(
+        &server,
+        r#"
+        const CAP = 4 * 1024 * 1024, BIG = 5 * CAP + 1234;
+        const reason = new Error("stop the parked upload");
+        const ac = new AbortController();
+        let cancelled = false;
+        const s = new ReadableStream({
+            pull(c) { c.enqueue(new Uint8Array(BIG)); return new Promise(() => {}); },
+            cancel(r) { cancelled = (r === reason); }
+        });
+        const refusal = env.probe.startUpload(s, ac.signal);
+        if (refusal !== undefined) throw new Error(refusal);
+        await (await fetch(BASE + "/ping")).text();
+        await (await fetch(BASE + "/ping")).text();
+        const heldAtHold = env.probe.uploadBytes();
+        ac.abort(reason);
+        await (await fetch(BASE + "/ping")).text();
+        await (await fetch(BASE + "/ping")).text();
+        return { heldAtHold, heldAfterCancel: env.probe.uploadBytes(), cap: CAP, big: BIG, cancelled };
+        "#,
+        None,
+        CancelFlag::new(),
+    );
+    let v = settle(outcome).await;
+    let cap = zeroship_runtime::channel::DEFAULT_STREAM_BUFFER_CAP as u64;
+    assert_eq!(v["cap"].as_u64().unwrap(), cap, "the probe starts uploads at the channel cap: {v}");
+    assert!(v["big"].as_u64().unwrap() > cap, "the chunk is larger than its channel: {v}");
+    assert_eq!(
+        v["heldAtHold"].as_u64().unwrap(),
+        v["big"].as_u64().unwrap(),
+        "the whole sliced chunk counts against the share: {v}"
+    );
+    assert_eq!(
+        v["heldAfterCancel"].as_u64().unwrap(),
+        cap,
+        "cancelling releases the parked part and leaves the channel's part: {v}"
+    );
+    assert_eq!(v["cancelled"], true, "the source is cancelled with the signal's reason: {v}");
+    assert_eq!(held_upload_bytes(&runtime) as u64, cap, "the parked bytes are gone, the channel's remain");
+    UPLOADS.with(|uploads| uploads.borrow_mut().clear());
+    assert_eq!(held_upload_bytes(&runtime), 0, "dropping the reader releases the channel's part: {v}");
 }
 
 // ---------------------------------------------------------------------------
