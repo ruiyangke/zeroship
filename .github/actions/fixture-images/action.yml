@@ -29,7 +29,7 @@ runs:
       run: nix develop --command cargo xtask images check
     # The daemon's own registry traffic (`daemon.json` `proxies`) goes to a
     # closed port, so a fixture whose image is not in
-    # zeroship_shared_server::images fails naming the image instead of pulling
+    # zeroship_testkit_server::images fails naming the image instead of pulling
     # it. Builds of the testkit's derived images still work: BuildKit resolves
     # a base the daemon carries without asking a registry, and the proxy covers
     # the daemon, not the build containers' own network.

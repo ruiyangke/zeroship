@@ -1,8 +1,8 @@
-//! The servers this testkit runs on the shared-server protocol: the platform
+//! The servers this testkit runs on the testkit-server protocol: the platform
 //! and bare `PostgreSQL` servers, the Redpanda broker, the `MySQL` server and the
 //! Redis servers, each shared by every test process of a worktree. The protocol
 //! itself - election, leases, the watchdog, failure states - is contracted in
-//! `zeroship-shared-server`'s own tests.
+//! `zeroship-testkit-server`'s own tests.
 //!
 //! The child tests are spawned from this binary as separate processes, with the
 //! scope directory on standard input, never in the environment. They are
@@ -20,7 +20,7 @@ use futures::FutureExt;
 
 use zeroship_testkit::fingerprint;
 use zeroship_testkit::postgres::server_inputs;
-use zeroship_shared_server::{self as shared, Scope};
+use zeroship_testkit_server::{self as shared, Scope};
 
 /// The idle grace a throwaway scope is started with.
 const GRACE: Duration = Duration::from_secs(2);

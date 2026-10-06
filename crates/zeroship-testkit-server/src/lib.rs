@@ -38,6 +38,7 @@
 //! - `state.json`, written by atomic rename, naming the container, its port and
 //!   whether the boot is `booting`, `ready` or `failed`.
 
+pub mod compio_postgres;
 pub mod image;
 pub mod images;
 pub mod lifetime;
@@ -1418,7 +1419,7 @@ pub(crate) fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)
-        .expect("the shared-server crate lives under crates/")
+        .expect("the testkit-server crate lives under crates/")
         .to_owned()
 }
 
@@ -1560,7 +1561,7 @@ fn runtime() -> &'static tokio::runtime::Runtime {
             .worker_threads(2)
             .enable_all()
             .build()
-            .expect("a tokio runtime for the shared-server daemon calls")
+            .expect("a tokio runtime for the testkit-server daemon calls")
     })
 }
 

@@ -10,7 +10,7 @@ use zeroship_workflow_runner::{
     ExecutionGuard,
 };
 
-use zeroship_workflow_fixtures::deployment as deployment_fixture;
+use crate::workflow_fixtures::deployment as deployment_fixture;
 
 mod fixture;
 use fixture::{execute, Fixture};

@@ -7,8 +7,9 @@
 //! way, and the encryption claim is settled by the *server's* view of the
 //! session (`pg_stat_ssl`), never by `connect()` returning `Ok`.
 //!
-//! The servers are `compio_postgres_testkit::tls`'s: six PostgreSQL servers
-//! started in Docker and shared by every test process of the worktree, each
+//! The servers are `zeroship_testkit_server::compio_postgres::tls`'s: six
+//! PostgreSQL servers started in Docker and shared by every test process of
+//! the worktree, each
 //! checked with libpq when it boots. Docker is the one prerequisite. The
 //! module is compiled with the crate's `tls` feature, because the connector it
 //! drives exists only there; with the feature, servers that cannot start are a
@@ -28,10 +29,10 @@ use std::sync::Mutex;
 const FOREIGN_CA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/verifier_ca.pem");
 
 /// The six servers, the CA, the CRL and the client identity, from the fixture
-/// that started them; `compio_postgres_testkit::tls` says what each server is
-/// the control for.
-fn servers() -> &'static compio_postgres_testkit::tls::TlsServers {
-    compio_postgres_testkit::tls::servers()
+/// that started them; `zeroship_testkit_server::compio_postgres::tls` says what
+/// each server is the control for.
+fn servers() -> &'static zeroship_testkit_server::compio_postgres::tls::TlsServers {
+    zeroship_testkit_server::compio_postgres::tls::servers()
 }
 
 /// Ask the server - not the client - whether the session is encrypted.

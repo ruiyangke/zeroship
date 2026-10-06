@@ -60,9 +60,9 @@ pub(crate) async fn connect() -> TestDatabase {
 /// ended: after a normal exit, and after a `SIGKILL` while it is still
 /// starting. Both run [`server_lifetime::child_joins_the_unit_test_server`]
 /// alone in a child process with a throwaway scope; see
-/// `zeroship_shared_server::lifetime`.
+/// `zeroship_testkit_server::lifetime`.
 mod server_lifetime {
-    use zeroship_shared_server::lifetime;
+    use zeroship_testkit_server::lifetime;
     use zeroship_testkit::postgres::server::Postgres;
 
     /// The child test, by its full path in this binary.

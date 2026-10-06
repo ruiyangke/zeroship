@@ -175,7 +175,8 @@ pub(crate) fn endpoints(config: &Config) -> Result<Vec<Endpoint>, Error> {
     //
     // The reason is this crate's own rule -- a published library takes
     // resolved options from its caller and reads no process configuration
-    // (`libs/compio-postgres/testkit`, enforced by a workspace source gate). Half of
+    // (`libs/compio-postgres/tests/support/env.rs`, enforced by a workspace
+    // source gate). Half of
     // libpq's behaviour here IS process configuration, and implementing the
     // other half alone would mean silently dialling a platform-specific path
     // the caller never named. Refusing says so instead.

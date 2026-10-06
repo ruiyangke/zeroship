@@ -55,7 +55,7 @@ url = { workspace = true }
 # `tests/support/mysql.rs`) and the per-case PostgreSQL database
 # `declared_column_roles.rs` takes on the shared bare server.
 zeroship-testkit = { workspace = true }
-zeroship-shared-server = { workspace = true }
+zeroship-testkit-server = { workspace = true }
 # The wire contract, named DIRECTLY by the suites that build IR envelopes and dialect
 # ids rather than reading them off the engine's re-exports. It is not a `[dependencies]`
 # entry: `shipping_backends()` returns a `BackendRegistry`, but that name reaches this
@@ -85,11 +85,10 @@ pg_query = "6"
 # `diff_snapshots` / `fold_ops`. Those four are the engine's, so those tests cannot
 # live in the vendor crate (the edge back is a cycle Cargo refuses) - and a second
 # copy of a recorder over here would be worse: its canned `information_schema` rows
-# are the shared premise of both suites, and two copies drift silently. So each
-# recorder is ONE object in a crate of its own, which the vendor's unit tests and
-# these suites both name under `[dev-dependencies]`.
-zeroship-migrate-mysql-recording = { workspace = true }
-zeroship-migrate-postgres-recording = { workspace = true }
+# are the shared premise of both suites, and two copies drift silently. So the
+# recorders are ONE object each in a shared dev-only crate, which the vendor's unit
+# tests and these suites both name under `[dev-dependencies]`.
+zeroship-migrate-testkit = { workspace = true }
 # TEST-ONLY: the SEAM-generic async apply/backend surface is `async`, so the test
 # harness drives it on a runtime. `#[compio::test]` spins a throwaway compio run loop
 # per test (zero tokio) to `.await` the seam-generic apply/journal/drift/status paths

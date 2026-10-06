@@ -1,7 +1,7 @@
-//! The PostgreSQL server the Unix-socket suite connects to through a socket
+//! The `PostgreSQL` server the Unix-socket suite connects to through a socket
 //! file on this host.
 //!
-//! A shared server of the worktree like [`crate::server`], with one difference
+//! A shared server of the worktree like [`super::server`], with one difference
 //! that is the point: it listens on a Unix socket in a directory this host can
 //! reach. The lease directory is the one directory the container already shares
 //! with the host, so the server is told to put its socket in a `socket`
@@ -20,7 +20,7 @@ use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use zeroship_shared_server::{self as shared, Scope};
+use crate::{self as shared, Scope};
 
 /// The image the server runs.
 const IMAGE: shared::images::Image = shared::images::POSTGRES_16;
@@ -59,13 +59,13 @@ impl UnixServer {
 
     /// The database the suite connects to.
     #[must_use]
-    pub fn dbname(&self) -> &'static str {
+    pub const fn dbname(&self) -> &'static str {
         DATABASE
     }
 
     /// The role the suite connects as.
     #[must_use]
-    pub fn user(&self) -> &'static str {
+    pub const fn user(&self) -> &'static str {
         "postgres"
     }
 }
@@ -83,7 +83,7 @@ pub fn server() -> &'static UnixServer {
         Err(reason) => panic!(
             "compio-postgres's Unix-socket suite runs against a {IMAGE} server every test \
              process of the worktree shares, started in Docker by \
-             compio_postgres_testkit::unix, and it could not be joined: {reason}"
+             zeroship_testkit_server::compio_postgres::unix, and it could not be joined: {reason}"
         ),
     }
 }

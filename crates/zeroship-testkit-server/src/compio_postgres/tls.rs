@@ -1,4 +1,4 @@
-//! The PostgreSQL servers the TLS suites dial.
+//! The `PostgreSQL` servers the TLS suites dial.
 //!
 //! SIX servers, because each one is the control for a claim that would
 //! otherwise be unfalsifiable:
@@ -21,18 +21,18 @@
 //! - `clientcert`: `ssl=on` with `ssl_ca_file` and `cert` authentication, so the
 //!   client MUST present a certificate. The only way to tell "`sslcert` and
 //!   `sslkey` are parsed" from "they are sent and used".
-//! - `directtls`: PostgreSQL 18 with the same certificate as `tls`, the positive
+//! - `directtls`: `PostgreSQL` 18 with the same certificate as `tls`, the positive
 //!   server for direct SSL negotiation, with the suite's settings as well;
-//!   `tls` stays the PostgreSQL 16 discriminator.
+//!   `tls` stays the `PostgreSQL` 16 discriminator.
 //!
-//! Every server is a shared server of the worktree through
-//! `zeroship_shared_server`, like the plaintext one in [`crate::server`]: the
-//! first test process boots it, the rest join it, and its watchdog removes it
-//! once no process holds its lease.
+//! Every server is a shared server of the worktree through this crate's lease
+//! protocol, like the plaintext one in [`super::server`]: the first test
+//! process boots it, the rest join it, and its watchdog removes it once no
+//! process holds its lease.
 //!
 //! THE MATERIAL IS MADE WHEN THE IMAGE IS BUILT. `tls/certs.sh` runs in the
-//! PostgreSQL 16 image build and generates the CA, the certificates, the CRL and
-//! the client identity into `/certs`; the PostgreSQL 18 image copies that
+//! `PostgreSQL` 16 image build and generates the CA, the certificates, the CRL and
+//! the client identity into `/certs`; the `PostgreSQL` 18 image copies that
 //! directory from the build it was made from. No private key is committed, and
 //! a build is one CA: every server started from it presents certificates the
 //! same CA signed. The client-side files a test passes to the driver are copied
@@ -52,7 +52,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use zeroship_shared_server::{self as shared, Scope};
+use crate::{self as shared, Scope};
 
 /// The password of `postgres` on every server that takes one.
 const PASSWORD: &str = "compio-postgres-tls-test";
@@ -60,13 +60,13 @@ const PASSWORD: &str = "compio-postgres-tls-test";
 /// The passphrase `client-encrypted.key` is encrypted under.
 pub const CLIENT_KEY_PASSWORD: &str = "compio-postgres-encrypted-key-test";
 
-/// The port PostgreSQL listens on inside every container.
+/// The port `PostgreSQL` listens on inside every container.
 const POSTGRES_PORT: u16 = 5432;
 
-/// The material generator the PostgreSQL 16 image build runs.
+/// The material generator the `PostgreSQL` 16 image build runs.
 const CERTS_SCRIPT: &[u8] = include_bytes!("tls/certs.sh");
 
-/// The PostgreSQL 16 image on top of the stock server: the watchdog and the
+/// The `PostgreSQL` 16 image on top of the stock server: the watchdog and the
 /// material, built as a `Recipe`, which prepends the `FROM` line.
 const RECIPE_16: &str = "COPY watchdog.sh /usr/local/bin/zeroship-watchdog\n\
     COPY certs.sh /usr/local/bin/compio-postgres-certs\n\
@@ -74,7 +74,7 @@ const RECIPE_16: &str = "COPY watchdog.sh /usr/local/bin/zeroship-watchdog\n\
     \x20   && sh /usr/local/bin/compio-postgres-certs /certs compio-postgres-encrypted-key-test\n";
 
 /// The settings `suite-over-tls` needs on the server it runs the suite on;
-/// [`crate::server`] says why each is there.
+/// [`super::server`] says why each is there.
 const SUITE_SETTINGS: &[&str] = &[
     "-c",
     "wal_level=logical",
@@ -102,7 +102,7 @@ pub struct TlsServers {
     pub sslonly_url: String,
     /// `ssl=on` with `cert` authentication; carries no password.
     pub clientcert_url: String,
-    /// PostgreSQL 18 with `ssl=on` and the same certificate as `tls`.
+    /// `PostgreSQL` 18 with `ssl=on` and the same certificate as `tls`.
     pub directtls_url: String,
     /// The private CA that signed every certificate above. It is in no system
     /// trust store.
@@ -136,7 +136,8 @@ pub fn servers() -> &'static TlsServers {
         Ok(servers) => servers,
         Err(reason) => panic!(
             "compio-postgres's TLS suites run against six servers every test process of the \
-             worktree shares, started in Docker by compio_postgres_testkit::tls, and they could \
+             worktree shares, started in Docker by \
+             zeroship_testkit_server::compio_postgres::tls, and they could \
              not be joined: {reason}"
         ),
     }
@@ -269,31 +270,32 @@ fn join_all() -> Result<TlsServers, String> {
 
     let recipes = recipes();
     let joined: Vec<Result<shared::Lease, String>> = std::thread::scope(|scope| {
-        let handles: Vec<_> = recipes
-            .iter()
-            .map(|recipe| {
-                let image = match recipe.major {
-                    Major::Sixteen => sixteen.clone(),
-                    Major::Eighteen => eighteen.clone(),
-                };
-                scope.spawn(move || {
-                    shared::join(
-                        &Scope::worktree(recipe.kind),
-                        &spec(&image, &recipe.args),
-                        recipe.check,
-                    )
-                    .map_err(|error| format!("{}: {error}", recipe.kind))
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|handle| {
+        // Spawn every server before joining any: a join that ran as the
+        // iterator advanced would serialize the six boots.
+        let mut handles = Vec::with_capacity(recipes.len());
+        for recipe in &recipes {
+            let image = match recipe.major {
+                Major::Sixteen => sixteen.clone(),
+                Major::Eighteen => eighteen.clone(),
+            };
+            handles.push(scope.spawn(move || {
+                shared::join(
+                    &Scope::worktree(recipe.kind),
+                    &spec(&image, &recipe.args),
+                    recipe.check,
+                )
+                .map_err(|error| format!("{}: {error}", recipe.kind))
+            }));
+        }
+        let mut joined = Vec::with_capacity(handles.len());
+        for handle in handles {
+            joined.push(
                 handle
                     .join()
-                    .unwrap_or_else(|_| Err("a server join panicked".to_owned()))
-            })
-            .collect()
+                    .unwrap_or_else(|_| Err("a server join panicked".to_owned())),
+            );
+        }
+        joined
     });
     let leases: Vec<shared::Lease> = joined.into_iter().collect::<Result<_, _>>()?;
     let [tls, plain, mismatch, sslonly, clientcert, directtls] = &leases[..] else {
@@ -543,7 +545,7 @@ fn material(container_id: &str) -> Result<PathBuf, String> {
     if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(format!("the TLS image names its material {id:?}"));
     }
-    let leases = root().join("target/zeroship-testkit");
+    let leases = material_parent();
     let directory = leases.join(format!("compio-postgres-tls-material-{id}"));
     if directory.is_dir() {
         return Ok(directory);
@@ -620,11 +622,48 @@ fn write(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
         .map_err(|error| format!("could not set the mode of {}: {error}", path.display()))
 }
 
-/// The repository root, three directories above this crate.
-fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(3)
-        .expect("the testkit lives under libs/compio-postgres/")
-        .to_owned()
+/// The `target/zeroship-testkit` directory of the worktree, the parent of every
+/// build's client-side material directory.
+fn material_parent() -> PathBuf {
+    crate::root().join("target/zeroship-testkit")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The checkout this crate was compiled in: the nearest ancestor of the
+    /// crate directory that is a git worktree root. A linked worktree carries
+    /// a `.git` file where the primary checkout carries a directory, so either
+    /// one marks the root. Walking to it locates the checkout without sharing
+    /// the fixed-depth climb `crate::root` uses.
+    fn checkout() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .find(|directory| directory.join(".git").exists())
+            .expect("the testkit-server crate is compiled inside a git checkout")
+            .to_owned()
+    }
+
+    /// The client-side material is written under THIS checkout's `target`, not
+    /// beside it. `material_parent` resolves the root from the crate that owns
+    /// it; one directory too high keeps every suite green while dropping the
+    /// material next to the checkout. The expected location is found by
+    /// walking up to the checkout itself rather than by repeating the climb.
+    #[test]
+    fn tls_material_is_written_inside_the_worktree() {
+        let material = material_parent();
+        let checkout = checkout();
+        assert!(
+            material.starts_with(&checkout),
+            "the TLS material must be written inside the checkout at {}; got {}",
+            checkout.display(),
+            material.display()
+        );
+        assert_eq!(
+            material,
+            checkout.join("target/zeroship-testkit"),
+            "the TLS material must be written under the checkout's target/zeroship-testkit"
+        );
+    }
 }

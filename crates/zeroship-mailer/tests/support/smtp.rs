@@ -192,5 +192,5 @@ async fn assertion_failure_removes_the_owned_smtp_server() {
 /// The fixture proves the server it started is gone through the daemon API, the
 /// same client path the fixture starts it with.
 pub(super) fn container_is_gone(id: &str) -> bool {
-    zeroship_shared_server::container_status(id).is_none()
+    zeroship_testkit_server::container_status(id).is_none()
 }

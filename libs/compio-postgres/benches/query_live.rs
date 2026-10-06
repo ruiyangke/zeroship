@@ -29,7 +29,8 @@
 //! measure each in a separate process and leave the comparison to whoever read
 //! the numbers.
 //!
-//! The server is the one the suites dial, `compio_postgres_testkit::server`,
+//! The server is the one the suites dial,
+//! `zeroship_testkit_server::compio_postgres::server`,
 //! started in Docker and shared with every test process of the worktree.
 //! Nothing here creates or drops schemas: the statement `SELECT 1` needs none,
 //! and a benchmark that mutates the database measures the mutation.
@@ -41,7 +42,7 @@ use compio_postgres::{Client, Config, NoTls};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 fn test_url() -> String {
-    compio_postgres_testkit::server::server().url()
+    zeroship_testkit_server::compio_postgres::server::server().url()
 }
 
 /// What a case turns on. Each isolates one feature's per-operation cost

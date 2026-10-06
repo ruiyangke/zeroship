@@ -461,7 +461,7 @@ impl Drop for Postgres {
         if let Some(container_id) = container_id {
             // "postgres" is the shared server's own always-connectable
             // maintenance database, not this case's now-removed clone.
-            let _ = zeroship_shared_server::psql(
+            let _ = zeroship_testkit_server::psql(
                 &container_id,
                 "postgres",
                 &format!("DROP ROLE IF EXISTS \"{}\"", self.role),

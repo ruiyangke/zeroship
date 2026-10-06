@@ -253,7 +253,7 @@ KV and Redis driver tests provision their required servers with Testcontainers;
 they need Docker and do not read shared Redis URLs. See the
 [KV test commands](../../crates/zeroship-kv/README.md).
 The compio-postgres suites and live benches dial the PostgreSQL server
-`compio_postgres_testkit::server` starts, which every test process of the
+`zeroship_testkit_server::compio_postgres::server` starts, which every test process of the
 worktree shares the same way.
 
 The Playwright suites launch the browsers `nix develop` exports as

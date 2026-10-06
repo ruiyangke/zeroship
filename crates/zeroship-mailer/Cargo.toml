@@ -54,7 +54,7 @@ url = { workspace = true }
 # The migrated platform server every test process of the worktree shares, which
 # every database case runs on.
 zeroship-testkit = { workspace = true }
-zeroship-shared-server = { workspace = true }
+zeroship-testkit-server = { workspace = true }
 
 [lints]
 workspace = true

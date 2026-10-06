@@ -1178,7 +1178,7 @@ mod render_tests {
     use zeroship_migrate_backend::backend::ProjectLockHolder;
     use zeroship_migrate_backend::driver::{Bind, Row, Value};
     use zeroship_migrate_ir::probe::{GuardDir, GuardProbe};
-    use zeroship_migrate_mysql_recording::*;
+    use zeroship_migrate_testkit::mysql::*;
 
     /// The backend reports the MySQL dialect, the `?` placeholder style, and
     /// non-transactional DDL (auto-commit => two-phase path for every migration).

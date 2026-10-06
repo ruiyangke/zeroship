@@ -2,7 +2,7 @@
 //!
 //! Every DSN the suite connects with comes from `support::test_url()`. The
 //! property held here is about WHO SERVES that address: a container this
-//! checkout's fixture leased through `zeroship-shared-server`, owned by the user
+//! checkout's fixture leased through `zeroship-testkit-server`, owned by the user
 //! running the tests, and the very server the session lands in. A suite that
 //! dials an address something else provisioned - a compose service, a
 //! hand-started container, a server on another port - passes or fails on a
@@ -31,10 +31,10 @@ fn this_checkouts_leases() -> PathBuf {
 /// Why a listed container is not a server this checkout's fixture started, or
 /// `None` when it is one.
 fn not_ours(labels: &HashMap<String, String>, leases: &Path, uid: u32) -> Option<String> {
-    let Some(dir) = labels.get(zeroship_shared_server::DIR_LABEL) else {
+    let Some(dir) = labels.get(zeroship_testkit_server::DIR_LABEL) else {
         return Some(format!(
             "it carries no {} label, so no shared-server lease started it",
-            zeroship_shared_server::DIR_LABEL
+            zeroship_testkit_server::DIR_LABEL
         ));
     };
     if !Path::new(dir).starts_with(leases) {
@@ -43,7 +43,7 @@ fn not_ours(labels: &HashMap<String, String>, leases: &Path, uid: u32) -> Option
             leases.display()
         ));
     }
-    match labels.get(zeroship_shared_server::UID_LABEL) {
+    match labels.get(zeroship_testkit_server::UID_LABEL) {
         Some(owner) if *owner == uid.to_string() => None,
         other => Some(format!(
             "it was started by uid {other:?}, not by the uid {uid} running these tests"
@@ -68,7 +68,7 @@ async fn the_server_the_suite_dials_is_a_container_its_fixture_started() {
         .first()
         .expect("the suite DSN names the published port");
 
-    let listed = zeroship_shared_server::container_publishing(port)
+    let listed = zeroship_testkit_server::container_publishing(port)
         .expect("ask the daemon who publishes the suite's port")
         .unwrap_or_else(|| {
             panic!(
@@ -79,7 +79,7 @@ async fn the_server_the_suite_dials_is_a_container_its_fixture_started() {
     if let Some(reason) = not_ours(
         &listed.labels,
         &this_checkouts_leases(),
-        zeroship_shared_server::uid(),
+        zeroship_testkit_server::uid(),
     ) {
         panic!(
             "the suite dials port {port}, published by container {}, which is not a server \
@@ -108,7 +108,7 @@ async fn the_server_the_suite_dials_is_a_container_its_fixture_started() {
         !dialled.is_empty() && dialled.bytes().all(|byte| byte.is_ascii_digit()),
         "the dialled server reported no system identifier: {dialled:?}"
     );
-    let inside = zeroship_shared_server::exec_in_container(
+    let inside = zeroship_testkit_server::exec_in_container(
         &listed.id,
         &[
             "psql",
@@ -144,7 +144,7 @@ fn the_ownership_check_refuses_what_its_fixture_did_not_start() {
     let held = std::net::TcpListener::bind("127.0.0.1:0").expect("hold a loopback port");
     let unpublished = held.local_addr().expect("held port").port();
     assert!(
-        zeroship_shared_server::container_publishing(unpublished)
+        zeroship_testkit_server::container_publishing(unpublished)
             .expect("ask the daemon who publishes a port this process holds")
             .is_none(),
         "a port this process holds was attributed to a container"
@@ -153,11 +153,11 @@ fn the_ownership_check_refuses_what_its_fixture_did_not_start() {
     let leases = Path::new("/checkout/target/zeroship-testkit");
     let ours = HashMap::from([
         (
-            zeroship_shared_server::DIR_LABEL.to_owned(),
+            zeroship_testkit_server::DIR_LABEL.to_owned(),
             "/checkout/target/zeroship-testkit/compio-postgres-0123456789ab".to_owned(),
         ),
         (
-            zeroship_shared_server::UID_LABEL.to_owned(),
+            zeroship_testkit_server::UID_LABEL.to_owned(),
             "1000".to_owned(),
         ),
     ]);
@@ -168,14 +168,14 @@ fn the_ownership_check_refuses_what_its_fixture_did_not_start() {
     );
 
     let mut unlabelled = ours.clone();
-    unlabelled.remove(zeroship_shared_server::DIR_LABEL);
+    unlabelled.remove(zeroship_testkit_server::DIR_LABEL);
     let mut foreign = ours.clone();
     foreign.insert(
-        zeroship_shared_server::DIR_LABEL.to_owned(),
+        zeroship_testkit_server::DIR_LABEL.to_owned(),
         "/other-checkout/target/zeroship-testkit/compio-postgres-0123456789ab".to_owned(),
     );
     let mut stranger = ours;
-    stranger.insert(zeroship_shared_server::UID_LABEL.to_owned(), "0".to_owned());
+    stranger.insert(zeroship_testkit_server::UID_LABEL.to_owned(), "0".to_owned());
     for (case, labels, says) in [
         (
             "an unlabelled container",

@@ -7,7 +7,8 @@
 //! `fill` through the same code a production row does. This measures that
 //! operation against the configured server.
 //!
-//! The server is the one the suites dial, `compio_postgres_testkit::server`,
+//! The server is the one the suites dial,
+//! `zeroship_testkit_server::compio_postgres::server`,
 //! started in Docker and shared with every test process of the worktree.
 //! Nothing here creates or drops schemas.
 
@@ -21,7 +22,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 const SIZES: [usize; 2] = [1024 * 1024, 16 * 1024 * 1024];
 
 fn test_url() -> String {
-    compio_postgres_testkit::server::server().url()
+    zeroship_testkit_server::compio_postgres::server::server().url()
 }
 
 /// Open a client and drive its connection for the life of the bench.

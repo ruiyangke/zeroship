@@ -1,4 +1,4 @@
-# The fixture prepends the FROM line from zeroship_shared_server::images::DRAGONFLY_1_37,
+# The fixture prepends the FROM line from zeroship_testkit_server::images::DRAGONFLY_1_37,
 # the one list of fixture images CI restores from its cache.
 COPY watchdog.sh /usr/local/bin/zeroship-watchdog
 COPY cluster.sh /usr/local/bin/zeroship-dragonfly-cluster

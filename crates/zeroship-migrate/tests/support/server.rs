@@ -1,7 +1,7 @@
 //! The PostgreSQL server the live suites share.
 //!
 //! Every test process of a worktree that asks for the server joins one shared
-//! server through [`zeroship_shared_server`]: the first process elects itself
+//! server through [`zeroship_testkit_server`]: the first process elects itself
 //! and boots it, every other process joins the ready server. A container per
 //! test would put dozens of servers on the machine at once; one per worktree run
 //! is paid once. Isolation inside the server is the caller's:
@@ -22,7 +22,7 @@
 
 use std::sync::OnceLock;
 
-use zeroship_shared_server::{self as shared, Scope};
+use zeroship_testkit_server::{self as shared, Scope};
 
 /// The password of the superuser on the shared server. The server listens on a
 /// loopback-mapped port for the life of one worktree run, so this is a fixture
@@ -31,8 +31,8 @@ const PASSWORD: &str = "zeroship-migrate-fixture";
 
 /// The PostgreSQL image. The suites target PostgreSQL 18: database-generated UUIDv7
 /// exists from 18 on, and the catalog shapes the drift suites pin were read from it.
-const POSTGRES_IMAGE: zeroship_shared_server::images::Image =
-    zeroship_shared_server::images::POSTGRES_18;
+const POSTGRES_IMAGE: zeroship_testkit_server::images::Image =
+    zeroship_testkit_server::images::POSTGRES_18;
 const POSTGRES_PORT: u16 = 5432;
 /// The database the admin connection uses to create and drop per-test databases.
 const POSTGRES_ADMIN_DATABASE: &str = "postgres";
@@ -87,7 +87,7 @@ impl SharedServer {
 /// The recipe the shared server runs under, its identity keyed to every input
 /// that changes what a ready server holds.
 fn spec() -> Result<shared::Spec, String> {
-    let image = zeroship_shared_server::image::with_watchdog(&POSTGRES_IMAGE.reference())?;
+    let image = zeroship_testkit_server::image::with_watchdog(&POSTGRES_IMAGE.reference())?;
     let environment = vec![("POSTGRES_PASSWORD".to_owned(), PASSWORD.to_owned())];
     // Every test of a run reaches this one server, each with its own sessions, so
     // the stock connection ceiling is too low for a run on every core.
@@ -133,7 +133,7 @@ fn spec() -> Result<shared::Spec, String> {
             container: POSTGRES_PORT,
             host: shared::HostPort::Assigned,
         }],
-        watchdog: zeroship_shared_server::image::WATCHDOG.to_owned(),
+        watchdog: zeroship_testkit_server::image::WATCHDOG.to_owned(),
         entrypoint: shared::Entrypoint::Image,
         args,
         ready,

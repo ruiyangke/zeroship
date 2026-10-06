@@ -53,3 +53,14 @@ mod test_database;
 
 #[cfg(test)]
 mod worker_fixture;
+
+/// The workflow-typed fixture adapters this crate's unit tests share, expanded
+/// from `zeroship-workflow-testkit` against `zeroship-workflow`.
+#[cfg(test)]
+#[expect(
+    clippy::future_not_send,
+    reason = "the fixtures' journals and bindings stay on their owning compio thread"
+)]
+pub mod workflow_fixtures {
+    zeroship_workflow_testkit::workflow_fixtures!();
+}

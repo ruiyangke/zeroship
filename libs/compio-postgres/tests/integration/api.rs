@@ -4747,12 +4747,12 @@ fn fd_probe_test_filter() -> String {
 ///
 /// The spelling lives in the sealed key enum, not here. `clippy.toml` denies
 /// `std::env::var_os`, and the one place in this crate permitted to read the
-/// environment is `compio_postgres_testkit::env::get`, which takes the key
+/// environment is `crate::support::env::get`, which takes the key
 /// rather than a name - so the read below cannot use a local `&str` constant,
 /// and keeping one for the WRITE side alone would be the same literal in two
 /// files.
-const FD_PROBE_CHILD: compio_postgres_testkit::env::TestEnvKey =
-    compio_postgres_testkit::env::TestEnvKey::FdProbeChild;
+const FD_PROBE_CHILD: crate::support::env::TestEnvKey =
+    crate::support::env::TestEnvKey::FdProbeChild;
 
 /// Marks the child's machine-readable result lines: `<marker><arm> <csv>`.
 const FD_PROBE_MARKER: &str = "FD-PROBE-SERIES ";
@@ -4863,7 +4863,7 @@ const ONE_CONNECTION_ABRUPT_FDS: i64 = 2;
 /// that joined would count a descriptor it never opened closing under the loop.
 #[test]
 fn a_torn_down_runtime_leaks_two_descriptors_plus_one_per_live_connection() {
-    if compio_postgres_testkit::env::get(FD_PROBE_CHILD).is_some() {
+    if crate::support::env::get(FD_PROBE_CHILD).is_some() {
         let mut url = String::new();
         std::io::stdin()
             .read_line(&mut url)

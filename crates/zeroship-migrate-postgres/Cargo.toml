@@ -70,7 +70,7 @@ tracing = { workspace = true }
 #
 # It reaches the contract and the IR, never this crate, so the edge runs one way and
 # a shipping `zeroship-migrate-postgres` links none of it.
-zeroship-migrate-postgres-recording = { workspace = true }
+zeroship-migrate-testkit = { workspace = true }
 # TEST-ONLY: the `MigrationBackend` surface is `async`, so the unit tests that drive
 # it spin a throwaway compio run loop per test (zero tokio), exactly as the engine's
 # own async-apply harness does. NO shipped code in this crate links it.

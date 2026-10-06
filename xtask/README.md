@@ -65,7 +65,7 @@ URL is needed. `pg_dump` and `pg_restore` clients matching the fixture server
 major version must be on PATH; the development shell supplies them, so this
 applies to a shell built another way. The shard rejects a version mismatch
 before building the suite. The fixture server's base image is
-`zeroship_shared_server::images::PGVECTOR_16`, and the shell's client attribute
+`zeroship_testkit_server::images::PGVECTOR_16`, and the shell's client attribute
 in `flake.nix` is bumped with it.
 
 A case drops its database after success or panic; the shared server's
@@ -74,7 +74,7 @@ lease for the idle grace, however those processes ended.
 
 ## Fixture images
 
-`zeroship_shared_server::images` lists every container image a fixture starts
+`zeroship_testkit_server::images` lists every container image a fixture starts
 or builds on, and `zeroship_testkit::images::FETCHING` names the testkit recipes
 whose build installs packages from a distribution's mirrors. `cargo xtask
 images list` prints both, the recipes by their content-hashed reference;

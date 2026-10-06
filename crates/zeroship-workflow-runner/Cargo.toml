@@ -21,8 +21,6 @@ sha2 = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-# The workflow-typed fixture adapters over the plain workflow testkit.
-zeroship-workflow-fixtures = { workspace = true }
 zeroship-workflow-testkit = { workspace = true }
 zeroship-testkit = { workspace = true }
 zeroship-data-orm = { workspace = true }

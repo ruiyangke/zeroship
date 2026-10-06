@@ -33,14 +33,20 @@ pub use payloads::{
 mod outputs;
 pub use outputs::{PreparedExecution, TaskPayloadLimits};
 
+/// The workflow-typed fixture adapters this crate's unit tests share, expanded
+/// from `zeroship-workflow-testkit` against `zeroship-workflow`.
 #[cfg(test)]
-pub use zeroship_workflow_fixtures::deployment as deployment_fixture;
+#[expect(
+    clippy::future_not_send,
+    reason = "the fixtures' journals and bindings stay on their owning compio thread"
+)]
+pub mod workflow_fixtures {
+    zeroship_workflow_testkit::workflow_fixtures!();
+}
 #[cfg(test)]
-pub use zeroship_workflow_fixtures::journal as journal_fixture;
-#[cfg(test)]
-pub use zeroship_workflow_fixtures::manager_queue;
-#[cfg(test)]
-pub use zeroship_workflow_fixtures::service_binding;
+pub use workflow_fixtures::{
+    deployment as deployment_fixture, journal as journal_fixture, manager_queue, service_binding,
+};
 #[cfg(test)]
 use zeroship_testkit::s3 as s3_fixture;
 

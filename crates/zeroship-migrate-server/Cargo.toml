@@ -80,7 +80,7 @@ testcontainers = { version = "0.28", default-features = false, features = ["bloc
 # The shared servers the unit tests and the migrated control database join, the
 # tenant clusters a reconciler case owns, and the lifetime measurements.
 zeroship-testkit = { workspace = true }
-zeroship-shared-server = { workspace = true }
+zeroship-testkit-server = { workspace = true }
 # The reconciler target reaches one tenant cluster as three different logins -
 # the privileged provisioning role, the shared worker login, and a probe role
 # that may not read one control table - so it rewrites the fixture DSN's

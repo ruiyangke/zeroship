@@ -1719,7 +1719,7 @@ vocabulary to cover the closed operation set.
 
 ### 12.5 Live-DB suites and how they are selected
 
-- **PostgreSQL** - the live-PostgreSQL suites join the `postgres:18` server every test process of the worktree shares (`tests/support/server.rs`, leased through `zeroship_shared_server`), and each test takes a database of its own on it (`support::pg_database`); a case that writes cluster-global roles takes a server of its own (`support::private_pg_database`). Docker is the one prerequisite and no environment variable selects a database: a server that cannot start fails every test that asked for it, and nothing skips.
+- **PostgreSQL** - the live-PostgreSQL suites join the `postgres:18` server every test process of the worktree shares (`tests/support/server.rs`, leased through `zeroship_testkit_server`), and each test takes a database of its own on it (`support::pg_database`); a case that writes cluster-global roles takes a server of its own (`support::private_pg_database`). Docker is the one prerequisite and no environment variable selects a database: a server that cannot start fails every test that asked for it, and nothing skips.
 - **SQLite (in-process, temp-file)** — the `*_sqlite.rs` suites use `tempfile` per-test SQLite files against the hardened `rusqlite` backend. Always run.
 - **MySQL** - the live-MySQL suites dial the MySQL server `zeroship_testkit::mysql::server` shares across the worktree's test processes, through `support::mysql::mysql_url`; the DSN never comes from the environment, and an unavailable server fails the test. The `mysql2 3.14.1` driver bundle the TypeScript host drives is committed and regenerated (not fetched) via `scripts/vendor-mysql2.sh`.
 

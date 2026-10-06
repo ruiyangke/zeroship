@@ -2,7 +2,7 @@
 //! suites.
 //!
 //! [`redis()`] and [`cluster()`] each join one server a worktree boots through
-//! [`zeroship_shared_server`]: the first process elects itself, the image is built, the
+//! [`zeroship_testkit_server`]: the first process elects itself, the image is built, the
 //! container starts, and every other process of the run joins the ready
 //! server. A process holds its lease for as long as it runs; each container's
 //! watchdog removes its server once no process has held it for the idle
@@ -39,7 +39,7 @@ use testcontainers::{Container, GenericImage, ImageExt};
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::SyncRunner;
 
-use zeroship_shared_server::{self as shared, Boot, Entrypoint, HostPort, Port, Readiness, Scope, Spec};
+use zeroship_testkit_server::{self as shared, Boot, Entrypoint, HostPort, Port, Readiness, Scope, Spec};
 
 mod image;
 
@@ -49,7 +49,7 @@ pub use image::reference as cluster_image;
 const STANDALONE_PORT: u16 = 6379;
 
 /// The watchdog baked into both the standalone and cluster images.
-const WATCHDOG: &str = zeroship_shared_server::image::WATCHDOG;
+const WATCHDOG: &str = zeroship_testkit_server::image::WATCHDOG;
 
 /// The wrapper the cluster image runs as the watchdog's single tracked child.
 const CLUSTER_WRAPPER: &str = "/usr/local/bin/zeroship-dragonfly-cluster";
@@ -188,7 +188,7 @@ pub fn case_prefix() -> String {
 /// # Errors
 /// When the image cannot be built.
 pub fn standalone_spec() -> Result<Spec, String> {
-    let image = zeroship_shared_server::image::with_watchdog(&crate::images::REDIS_7.reference())?;
+    let image = zeroship_testkit_server::image::with_watchdog(&crate::images::REDIS_7.reference())?;
     let args = vec!["docker-entrypoint.sh".to_owned(), "redis-server".to_owned()];
     let ready = standalone_readiness();
     let inputs = standalone_inputs(&image, &args, &ready);

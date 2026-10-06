@@ -1,4 +1,4 @@
-# The fixture prepends the FROM line from zeroship_shared_server::images::PGVECTOR_16,
+# The fixture prepends the FROM line from zeroship_testkit_server::images::PGVECTOR_16,
 # the one list of fixture images CI restores from its cache.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends postgresql-16-postgis-3 \

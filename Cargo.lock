@@ -1235,7 +1235,6 @@ dependencies = [
  "chrono",
  "cidr",
  "compio",
- "compio-postgres-testkit",
  "compio-tls",
  "criterion",
  "eui48",
@@ -1271,14 +1270,7 @@ dependencies = [
  "whoami",
  "x509-parser",
  "zeroize",
- "zeroship-shared-server",
-]
-
-[[package]]
-name = "compio-postgres-testkit"
-version = "0.1.0"
-dependencies = [
- "zeroship-shared-server",
+ "zeroship-testkit-server",
 ]
 
 [[package]]
@@ -8036,10 +8028,10 @@ dependencies = [
  "zeroship-metering",
  "zeroship-migrate-server",
  "zeroship-runtime",
- "zeroship-shared-server",
  "zeroship-storage",
  "zeroship-stream",
  "zeroship-testkit",
+ "zeroship-testkit-server",
  "zeroship-workflow",
  "zeroship-workflow-client",
  "zeroship-workflow-manager",
@@ -8175,8 +8167,8 @@ dependencies = [
  "zeroship-migrate-postgres",
  "zeroship-migrate-server",
  "zeroship-migrate-sqlite",
- "zeroship-shared-server",
  "zeroship-testkit",
+ "zeroship-testkit-server",
 ]
 
 [[package]]
@@ -8342,8 +8334,8 @@ dependencies = [
  "url",
  "uuid",
  "x509-parser",
- "zeroship-shared-server",
  "zeroship-testkit",
+ "zeroship-testkit-server",
 ]
 
 [[package]]
@@ -8386,13 +8378,12 @@ dependencies = [
  "zeroship-migrate-core",
  "zeroship-migrate-ir",
  "zeroship-migrate-mysql",
- "zeroship-migrate-mysql-recording",
  "zeroship-migrate-policy",
  "zeroship-migrate-postgres",
- "zeroship-migrate-postgres-recording",
  "zeroship-migrate-sqlite",
- "zeroship-shared-server",
+ "zeroship-migrate-testkit",
  "zeroship-testkit",
+ "zeroship-testkit-server",
 ]
 
 [[package]]
@@ -8466,16 +8457,8 @@ dependencies = [
  "uuid",
  "zeroship-migrate-backend",
  "zeroship-migrate-ir",
- "zeroship-migrate-mysql-recording",
  "zeroship-migrate-policy",
-]
-
-[[package]]
-name = "zeroship-migrate-mysql-recording"
-version = "0.1.0"
-dependencies = [
- "zeroship-migrate-backend",
- "zeroship-migrate-ir",
+ "zeroship-migrate-testkit",
 ]
 
 [[package]]
@@ -8537,15 +8520,7 @@ dependencies = [
  "zeroship-migrate-backend",
  "zeroship-migrate-ir",
  "zeroship-migrate-policy",
- "zeroship-migrate-postgres-recording",
-]
-
-[[package]]
-name = "zeroship-migrate-postgres-recording"
-version = "0.1.0"
-dependencies = [
- "zeroship-migrate-backend",
- "zeroship-migrate-ir",
+ "zeroship-migrate-testkit",
 ]
 
 [[package]]
@@ -8581,8 +8556,8 @@ dependencies = [
  "zeroship-migrate-policy",
  "zeroship-migrate-postgres",
  "zeroship-runtime",
- "zeroship-shared-server",
  "zeroship-testkit",
+ "zeroship-testkit-server",
 ]
 
 [[package]]
@@ -8601,6 +8576,14 @@ dependencies = [
  "zeroship-migrate-backend",
  "zeroship-migrate-ir",
  "zeroship-migrate-policy",
+]
+
+[[package]]
+name = "zeroship-migrate-testkit"
+version = "0.1.0"
+dependencies = [
+ "zeroship-migrate-backend",
+ "zeroship-migrate-ir",
 ]
 
 [[package]]
@@ -8659,18 +8642,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zeroship-shared-server"
-version = "0.1.0"
-dependencies = [
- "futures",
- "libc",
- "serde_json",
- "sha2 0.10.9",
- "testcontainers",
- "tokio",
-]
-
-[[package]]
 name = "zeroship-storage"
 version = "0.1.0"
 dependencies = [
@@ -8719,8 +8690,8 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tracing",
- "zeroship-shared-server",
  "zeroship-testkit",
+ "zeroship-testkit-server",
 ]
 
 [[package]]
@@ -8738,7 +8709,19 @@ dependencies = [
  "toml 0.8.23",
  "url",
  "zeroship-id",
- "zeroship-shared-server",
+ "zeroship-testkit-server",
+]
+
+[[package]]
+name = "zeroship-testkit-server"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "libc",
+ "serde_json",
+ "sha2 0.10.9",
+ "testcontainers",
+ "tokio",
 ]
 
 [[package]]
@@ -8775,15 +8758,15 @@ dependencies = [
  "zeroship-kv-v8",
  "zeroship-metering",
  "zeroship-runtime",
- "zeroship-shared-server",
  "zeroship-storage",
  "zeroship-storage-v8",
  "zeroship-testkit",
+ "zeroship-testkit-server",
  "zeroship-workflow",
  "zeroship-workflow-client",
- "zeroship-workflow-fixtures",
  "zeroship-workflow-manager",
  "zeroship-workflow-runner",
+ "zeroship-workflow-testkit",
  "zeroship-workflow-v8",
 ]
 
@@ -8849,14 +8832,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zeroship-workflow-fixtures"
-version = "0.1.0"
-dependencies = [
- "zeroship-workflow",
- "zeroship-workflow-testkit",
-]
-
-[[package]]
 name = "zeroship-workflow-manager"
 version = "0.1.0"
 dependencies = [
@@ -8872,8 +8847,8 @@ dependencies = [
  "zeroship-bundle",
  "zeroship-core",
  "zeroship-data-orm",
- "zeroship-shared-server",
  "zeroship-testkit",
+ "zeroship-testkit-server",
  "zeroship-workflow-calendar",
 ]
 
@@ -8902,7 +8877,6 @@ dependencies = [
  "zeroship-testkit",
  "zeroship-workflow",
  "zeroship-workflow-client",
- "zeroship-workflow-fixtures",
  "zeroship-workflow-manager",
  "zeroship-workflow-testkit",
 ]
@@ -8984,9 +8958,9 @@ dependencies = [
  "zeroship-storage",
  "zeroship-workflow",
  "zeroship-workflow-client",
- "zeroship-workflow-fixtures",
  "zeroship-workflow-manager",
  "zeroship-workflow-runner",
+ "zeroship-workflow-testkit",
 ]
 
 [[package]]

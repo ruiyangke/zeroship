@@ -314,56 +314,6 @@ fn cargo_normal_closure(name: &str) -> BTreeSet<String> {
     packages
 }
 
-/// The classes a package's manifest gives its targets, keyed by target name.
-fn target_classes(package: &serde_json::Value) -> BTreeMap<String, String> {
-    package["metadata"]["zeroship-config"]["targets"]
-        .as_array()
-        .map(|targets| {
-            targets
-                .iter()
-                .filter_map(|target| {
-                    Some((
-                        target["target"].as_str()?.to_owned(),
-                        target["class"].as_str()?.to_owned(),
-                    ))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// The names of a package's binary targets.
-fn bin_targets(package: &serde_json::Value) -> Vec<String> {
-    package["targets"]
-        .as_array()
-        .expect("package targets")
-        .iter()
-        .filter(|target| {
-            target["kind"]
-                .as_array()
-                .is_some_and(|kinds| kinds.iter().any(|kind| kind == "bin"))
-        })
-        .filter_map(|target| target["name"].as_str().map(str::to_owned))
-        .collect()
-}
-
-/// Whether the package ships a binary: one its manifest does not classify
-/// `test-dev-tool`.
-fn ships_a_binary(package: &serde_json::Value) -> bool {
-    let classes = target_classes(package);
-    bin_targets(package)
-        .iter()
-        .any(|name| classes.get(name).map(String::as_str) != Some("test-dev-tool"))
-}
-
-/// Whether the package exists only for tests: its manifest classifies the
-/// package itself `test-dev-tool` and it ships no binary.
-fn dev_only(package: &serde_json::Value) -> bool {
-    let name = package["name"].as_str().expect("package name");
-    target_classes(package).get(name).map(String::as_str) == Some("test-dev-tool")
-        && !ships_a_binary(package)
-}
-
 /// The real package names `package` declares on `kind` edges (`None` for
 /// normal), whatever their alias or target table.
 fn declared(package: &serde_json::Value, kind: Option<&str>) -> BTreeSet<String> {
@@ -379,19 +329,20 @@ fn declared(package: &serde_json::Value, kind: Option<&str>) -> BTreeSet<String>
 /// No shipped binary may carry a dev-only package or the testcontainer client
 /// in its normal closure.
 ///
-/// The dev-only set is every workspace package its own manifest classifies
-/// `test-dev-tool`, so a new testkit is covered the day it is classified. They
-/// are workspace members, so a mistaken normal edge would put `testcontainers`
-/// and its tokio runtime into a deployed binary. `testcontainers` reaches tokio
-/// `rt`, which the tokio boundary also reports as a feature change; this
-/// states the package edge on its own so a future dev-only dependency that does
-/// not need `rt` still cannot ship.
+/// The dev-only set is every path package its own manifest classifies
+/// `test-dev-tool`, whether or not the root manifest lists it as a workspace
+/// member, so a new testkit is covered the day it is classified. A mistaken
+/// normal edge into one would put `testcontainers` and its tokio runtime into a
+/// deployed binary. `testcontainers` reaches tokio `rt`, which the tokio
+/// boundary also reports as a feature change; this states the package edge on
+/// its own so a future dev-only dependency that does not need `rt` still cannot
+/// ship.
 #[test]
 fn shipped_binaries_do_not_reach_the_dev_only_testkits() {
     let workspace = repo::workspace();
-    let mut forbidden: BTreeSet<String> = workspace
+    let mut forbidden: BTreeSet<String> = repo::path_packages()
         .iter()
-        .filter(|package| dev_only(package))
+        .filter(|package| repo::dev_only(package))
         .map(|package| package["name"].as_str().unwrap().to_owned())
         .collect();
     assert!(
@@ -403,7 +354,7 @@ fn shipped_binaries_do_not_reach_the_dev_only_testkits() {
     let mut examined = 0;
     let mut dev_edges = 0;
     for package in &workspace {
-        if !ships_a_binary(package) {
+        if !repo::ships_a_binary(package) {
             continue;
         }
         examined += 1;
@@ -458,7 +409,7 @@ fn the_dev_only_classification_reader_admits_only_library_only_test_dev_tools() 
             {"target": "zeroship-testkit", "class": "test-dev-tool"}
         ]}}
     });
-    assert!(dev_only(&testkit));
+    assert!(repo::dev_only(&testkit));
     let service_with_a_test_bin = serde_json::json!({
         "name": "zeroship-control",
         "targets": [
@@ -470,13 +421,13 @@ fn the_dev_only_classification_reader_admits_only_library_only_test_dev_tools() 
             {"target": "zeroship-mock-stripe", "class": "test-dev-tool"}
         ]}}
     });
-    assert!(!dev_only(&service_with_a_test_bin));
-    assert!(ships_a_binary(&service_with_a_test_bin));
+    assert!(!repo::dev_only(&service_with_a_test_bin));
+    assert!(repo::ships_a_binary(&service_with_a_test_bin));
     let unclassified = serde_json::json!({
         "name": "zeroship-id",
         "targets": [{"name": "zeroship-id", "kind": ["lib"]}]
     });
-    assert!(!dev_only(&unclassified));
+    assert!(!repo::dev_only(&unclassified));
 }
 
 fn vendor_tier(path: &std::path::Path) -> bool {

@@ -1,8 +1,8 @@
 [package]
-name = "zeroship-shared-server"
+name = "zeroship-testkit-server"
 version = "0.1.0"
 edition = "2021"
-description = "Dev-only: one container server shared by every test process of a worktree, leased by flock and removed by its watchdog"
+description = "Dev-only server layer: one container server shared by every test process of a worktree, leased by flock and removed by its watchdog"
 publish = false
 
 # A leaf of the test fixtures: it drives the Docker daemon and the lease
@@ -14,7 +14,7 @@ publish = false
 # boundary checks prove that.
 
 [[package.metadata.zeroship-config.targets]]
-target = "zeroship-shared-server"
+target = "zeroship-testkit-server"
 class = "test-dev-tool"
 reason = "Dev-only test fixture; reached only through dev-dependencies and other test fixtures."
 

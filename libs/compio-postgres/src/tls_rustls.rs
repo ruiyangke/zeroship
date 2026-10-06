@@ -1279,7 +1279,7 @@ impl MakeRustlsConnect {
         // Leaving resumption ENABLED for every other configuration is safe for
         // a reason that lives on the SERVER, not here, so it is worth writing
         // down: PostgreSQL hands out no resumable session at all. Probing the
-        // TLS fixture servers (`compio_postgres_testkit::tls`) with
+        // TLS fixture servers (`zeroship_testkit_server::compio_postgres::tls`) with
         // `openssl s_client -starttls postgres -sess_out`, on both a TLS 1.2
         // and a TLS 1.3 server, shows the Session-ID coming back empty, no
         // session ticket arriving, and `-sess_out` writing NO file - so there is

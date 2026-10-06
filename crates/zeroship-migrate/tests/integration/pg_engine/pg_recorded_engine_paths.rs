@@ -8,9 +8,10 @@
 //! Cargo refuses.
 //!
 //! They drive the SAME recorder the vendor-internal ones do, reached through
-//! `zeroship-migrate-postgres-recording` - a dev-only crate both sides name. A copy of
-//! that canned catalog on each side is the hazard one shared crate avoids: its rows
-//! are the shared premise of both suites and two copies drift silently.
+//! the `postgres` module of `zeroship-migrate-testkit` - a dev-only crate both sides
+//! name. A copy of that canned catalog on each side is the hazard one shared crate
+//! avoids: its rows are the shared premise of both suites and two copies drift
+//! silently.
 
 
 use std::sync::atomic::Ordering;
@@ -26,7 +27,7 @@ use zeroship_migrate_backend::requirements::DatabaseFeature;
 use zeroship_migrate_backend::step::PlanStep;
 use zeroship_migrate_ir::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
 use zeroship_migrate_postgres::backend::{journal_sql, status_sql, PostgresBackend};
-use zeroship_migrate_postgres_recording::{
+use zeroship_migrate_testkit::postgres::{
     canned_journal_row, plan_backfill_step, plan_dml_step, RecordingSession,
 };
 

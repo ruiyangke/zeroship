@@ -1920,9 +1920,9 @@ mod migrated_server_isolation {
 /// ended - after a normal exit, and after a `SIGKILL` while it is still starting
 /// or migrating. Both run
 /// [`migrated_server_lifetime::child_joins_the_migrated_server`] alone in a
-/// child process with a throwaway scope; see `zeroship_shared_server::lifetime`.
+/// child process with a throwaway scope; see `zeroship_testkit_server::lifetime`.
 mod migrated_server_lifetime {
-    use zeroship_shared_server::lifetime;
+    use zeroship_testkit_server::lifetime;
 
     /// The child test, by its full path in this binary.
     const CHILD_TEST: &str =
@@ -1934,7 +1934,7 @@ mod migrated_server_lifetime {
         let server = crate::support::fixture::join_migrated(&lifetime::child_scope())
             .expect("join the suite's migrated server at the throwaway scope");
         let database = server.admin_url().path().trim_start_matches('/').to_owned();
-        zeroship_shared_server::psql(
+        zeroship_testkit_server::psql(
             server.container_id(),
             &database,
             "SELECT 1 FROM zeroship.plans WHERE id = 'free'",

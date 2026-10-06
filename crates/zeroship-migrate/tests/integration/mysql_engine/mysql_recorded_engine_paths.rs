@@ -16,7 +16,7 @@
 //!
 //! # The recorder is the SAME object, not a copy
 //!
-//! Both halves drive `zeroship_migrate_mysql_recording::RecordingSession` and its
+//! Both halves drive `zeroship_migrate_testkit::mysql::RecordingSession` and its
 //! canned `information_schema` rows. That shared premise is the whole reason the
 //! recorder sits in a dev-only crate both sides name instead of being copied over
 //! here: two copies of a canned catalog drift silently, and one suite would go on
@@ -37,7 +37,7 @@ use zeroship_migrate::model::ir::{
 use zeroship_migrate::model::snapshot::{IdDefaultSnapshot, SchemaSnapshot};
 use zeroship_migrate::render::plan::DatabaseFeature;
 use zeroship_migrate_mysql::MysqlBackend;
-use zeroship_migrate_mysql_recording::*;
+use zeroship_migrate_testkit::mysql::*;
 
 
 /// The dialect these snapshots are folded and diffed under.

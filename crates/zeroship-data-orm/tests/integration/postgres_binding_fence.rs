@@ -57,7 +57,7 @@ use zeroship_data_orm::schema::{CollectionSchema, ColumnSchema, LogicalType, Sch
 use zeroship_data_orm::value;
 use zeroship_migrate_server::apply::WORKER_ROLE;
 use zeroship_migrate_server::datastore::cluster;
-use zeroship_shared_server::Scope;
+use zeroship_testkit_server::Scope;
 
 /// The password the fixture gives the worker login on the private server the
 /// one ambient-authority arm (`build_isolated`) owns alone. Never used on the

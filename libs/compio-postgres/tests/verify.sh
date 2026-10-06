@@ -43,9 +43,9 @@ set -uo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$repo_root"
 
-# Every mode dials the servers compio_postgres_testkit starts in Docker for
-# it, so this script names no server and cannot point a mode at a different one
-# from the suites it runs.
+# Every mode dials the servers zeroship_testkit_server::compio_postgres starts
+# in Docker for it, so this script names no server and cannot point a mode at a
+# different one from the suites it runs.
 failures=0
 
 # Count the test binaries and tests cargo says a configuration HAS, without
@@ -109,7 +109,7 @@ run_mode() {
 }
 
 echo "compio-postgres verification matrix"
-echo "servers: compio_postgres_testkit::{server, tls, unix}, in Docker"
+echo "servers: zeroship_testkit_server::compio_postgres::{server, tls, unix}, in Docker"
 echo
 
 run_mode "default"          -p compio-postgres

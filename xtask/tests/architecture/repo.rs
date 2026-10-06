@@ -88,6 +88,73 @@ pub fn workspace() -> Vec<&'static Value> {
         })
         .collect()
 }
+
+/// Every local package `cargo metadata` resolves: no registry or git source,
+/// whether or not the root manifest lists it as a workspace member.
+pub fn path_packages() -> Vec<&'static Value> {
+    metadata()["packages"]
+        .as_array()
+        .expect("packages")
+        .iter()
+        .filter(|package| package["source"].is_null())
+        .collect()
+}
+
+/// The classes a package's manifest gives its targets, keyed by target name.
+pub fn target_classes(package: &Value) -> BTreeMap<String, String> {
+    package["metadata"]["zeroship-config"]["targets"]
+        .as_array()
+        .map(|targets| {
+            targets
+                .iter()
+                .filter_map(|target| {
+                    Some((
+                        target["target"].as_str()?.to_owned(),
+                        target["class"].as_str()?.to_owned(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The names of a package's binary targets.
+pub fn bin_targets(package: &Value) -> Vec<String> {
+    package["targets"]
+        .as_array()
+        .expect("package targets")
+        .iter()
+        .filter(|target| {
+            target["kind"]
+                .as_array()
+                .is_some_and(|kinds| kinds.iter().any(|kind| kind == "bin"))
+        })
+        .filter_map(|target| target["name"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// Whether the package ships a binary: one its manifest does not classify
+/// `test-dev-tool`.
+pub fn ships_a_binary(package: &Value) -> bool {
+    let classes = target_classes(package);
+    bin_targets(package)
+        .iter()
+        .any(|name| classes.get(name).map(String::as_str) != Some("test-dev-tool"))
+}
+
+/// Whether the package's manifest classifies the package itself
+/// `test-dev-tool`.
+pub fn self_classifies_test_dev_tool(package: &Value) -> bool {
+    let name = package["name"].as_str().expect("package name");
+    target_classes(package).get(name).map(String::as_str) == Some("test-dev-tool")
+}
+
+/// Whether the package exists only for tests: its manifest classifies the
+/// package itself `test-dev-tool` and it ships no binary.
+pub fn dev_only(package: &Value) -> bool {
+    self_classifies_test_dev_tool(package) && !ships_a_binary(package)
+}
+
 pub fn normal_closure(name: &str) -> BTreeSet<String> {
     let packages: BTreeMap<_, _> = metadata()["packages"]
         .as_array()

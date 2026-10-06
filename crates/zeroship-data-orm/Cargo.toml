@@ -51,7 +51,7 @@ zeroship-migrate-server = { workspace = true }
 tracing-subscriber = { workspace = true }
 zeroship-data-testkit = { workspace = true }
 zeroship-testkit = { workspace = true }
-zeroship-shared-server = { workspace = true }
+zeroship-testkit-server = { workspace = true }
 
 [lints]
 workspace = true

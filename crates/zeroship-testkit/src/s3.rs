@@ -1,7 +1,7 @@
 //! The S3 gateway every test process of a worktree shares.
 //!
 //! [`S3Server::start`] joins the one gateway a worktree boots through
-//! [`zeroship_shared_server`]: the first process elects itself, the image is
+//! [`zeroship_testkit_server`]: the first process elects itself, the image is
 //! built, the container starts, and every other process joins the ready gateway.
 //! A process holds its lease for as long as it runs; the container's watchdog
 //! removes the gateway once no process has held it for the idle grace.
@@ -23,7 +23,7 @@
 
 use std::time::Duration;
 
-use zeroship_shared_server::{self as shared, Scope};
+use zeroship_testkit_server::{self as shared, Scope};
 
 mod image;
 

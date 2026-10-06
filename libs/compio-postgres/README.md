@@ -94,7 +94,8 @@ The executor and socket lifecycle remain compio-native.
 Everything needs a live server; nothing skips. A missing database is a FAILED
 run, not a green one - see the header of `tests/support/mod.rs` for why.
 
-The servers are the suite's own. `compio_postgres_testkit::server` starts the
+The servers are the suite's own.
+`zeroship_testkit_server::compio_postgres::server` starts the
 PostgreSQL server every suite and live bench dials, in Docker, the first time a
 test process of the worktree asks for it; every other process joins it, and
 its watchdog removes it once no process has held it for its idle grace. Docker
@@ -138,7 +139,7 @@ claim.
 
 ### The fixtures
 
-`compio_postgres_testkit::tls` starts the six servers the TLS suites dial -
+`zeroship_testkit_server::compio_postgres::tls` starts the six servers the TLS suites dial -
 `tls`, `plain`, `mismatch`, `sslonly`, `clientcert` and the PostgreSQL 18
 `directtls` - each the control for one claim, and checks each with libpq as it
 boots. The CA, the server and client certificates, the CRL and the encrypted
@@ -146,7 +147,7 @@ client key are generated when the fixture's image is built and never leave it
 except as the client-side copies the fixture takes into this worktree's
 `target`; nothing is committed and no setup step runs by hand.
 
-`compio_postgres_testkit::unix` starts the server
+`zeroship_testkit_server::compio_postgres::unix` starts the server
 `tests/integration/unix_socket_live.rs` reaches through a socket file on this
 host. The socket path has to be SHORT: `sun_path` is 108 bytes and the server
 appends `/.s.PGSQL.<port>`, so the fixture hands out a short link to the

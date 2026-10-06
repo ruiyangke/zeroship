@@ -54,7 +54,7 @@ zeroship-migrate-policy = { workspace = true }
 # is a DEV edge in one direction only. Neither crate names the other in its
 # normal dependencies, so this crate's test targets link one copy of it, and a
 # shipping `zeroship-migrate-mysql` links none of the recorder.
-zeroship-migrate-mysql-recording = { workspace = true }
+zeroship-migrate-testkit = { workspace = true }
 # TEST-ONLY: the async apply/backend surface is `async`, so the unit tests that
 # drive it spin a throwaway compio run loop per test (zero tokio), exactly as the
 # engine's own async-apply harness does.

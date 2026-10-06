@@ -28,7 +28,7 @@ is the one that can surprise you.
 
 ## Prerequisites
 
-The TLS fixture's servers, which `compio_postgres_testkit::tls` boots on first
+The TLS fixture's servers, which `zeroship_testkit_server::compio_postgres::tls` boots on first
 use and removes once no test process has held them for their idle grace. Its
 containers carry the lease directory they serve as a label, so they are found
 by role rather than by name:

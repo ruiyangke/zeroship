@@ -7,8 +7,8 @@
 //! whose own unit tests use it. [`crate::workflow_fixtures!`] holds them once and
 //! expands them where they are invoked, against whichever `zeroship_workflow`
 //! that crate sees: `zeroship-workflow` expands them for its own unit tests,
-//! where `zeroship_workflow` names the crate under test, and the dev-only
-//! `zeroship-workflow-fixtures` expands them for every other workflow crate.
+//! where `zeroship_workflow` names the crate under test, and the runner, the
+//! worker and the V8 binding each expand them in a test module of their own.
 //! No shipped crate carries a test feature for them.
 
 /// The crates the expanded adapters name, so an expansion site needs no

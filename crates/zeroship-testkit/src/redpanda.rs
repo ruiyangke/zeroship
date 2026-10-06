@@ -1,6 +1,6 @@
 //! The Redpanda broker every stream test process of a worktree shares.
 //!
-//! [`broker()`] joins the one broker a worktree boots through [`zeroship_shared_server`]:
+//! [`broker()`] joins the one broker a worktree boots through [`zeroship_testkit_server`]:
 //! the first process elects itself, the image is built, the container starts,
 //! and every other process joins the ready broker. A process holds its lease for
 //! as long as it runs; the container's watchdog removes the broker once no
@@ -10,7 +10,7 @@
 
 use std::sync::OnceLock;
 
-use zeroship_shared_server::{self as shared, HostPort, Port, Readiness, Scope, Spec};
+use zeroship_testkit_server::{self as shared, HostPort, Port, Readiness, Scope, Spec};
 
 mod image;
 
@@ -20,7 +20,7 @@ use image::reference as image;
 const KAFKA_PORT: u16 = 19092;
 
 /// The watchdog baked into the broker image.
-const WATCHDOG: &str = zeroship_shared_server::image::WATCHDOG;
+const WATCHDOG: &str = zeroship_testkit_server::image::WATCHDOG;
 
 /// The line Redpanda logs once its Kafka API is up.
 const READY_MARKER: &str = "Successfully started Redpanda!";

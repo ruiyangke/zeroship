@@ -1,4 +1,4 @@
-//! A stock image with the shared-server watchdog on top.
+//! A stock image with the testkit-server watchdog on top.
 //!
 //! A server kind whose image no fixture otherwise customises - a stock
 //! `PostgreSQL` major, say - still needs the watchdog as its PID 1 to be a

@@ -7,7 +7,7 @@
 //! does while it runs.
 
 use super::*;
-use zeroship_workflow_fixtures::deployment::{Deployments, Sources};
+use crate::workflow_fixtures::deployment::{Deployments, Sources};
 use std::{cell::RefCell, sync::Mutex, time::Instant};
 use zeroship_core::{
     typed_id,

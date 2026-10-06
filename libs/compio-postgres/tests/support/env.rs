@@ -6,7 +6,8 @@
 //! variants map to literal names and whose raw access lives in one accessor.
 //!
 //! No key here names a server. A suite finds its database through
-//! [`crate::server`], never through a variable.
+//! `zeroship_testkit_server::compio_postgres::server`, never through a
+//! variable.
 
 /// Every environment name compio-postgres's targets are permitted to read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

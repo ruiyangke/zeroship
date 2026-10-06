@@ -9,6 +9,8 @@
 //! `compio-postgres` is a standalone, publishable driver with no zeroship
 //! dependency, so this helper is local rather than shared.
 
+pub mod env;
+
 /// Longest identifier `PostgreSQL` stores (`NAMEDATALEN - 1`).
 const MAX_POSTGRES_IDENTIFIER_LEN: usize = 63;
 
@@ -492,15 +494,17 @@ pub fn connection_failure_report(dsn: &str, error: &(dyn std::error::Error + 'st
 
 /// The fixture the DSN a failing test dialled came from.
 #[cfg(not(feature = "suite-over-tls"))]
-const SERVER_SOURCE: &str = "compio_postgres_testkit::server";
+const SERVER_SOURCE: &str = "zeroship_testkit_server::compio_postgres::server";
 #[cfg(feature = "suite-over-tls")]
-const SERVER_SOURCE: &str = "compio_postgres_testkit::tls";
+const SERVER_SOURCE: &str = "zeroship_testkit_server::compio_postgres::tls";
 
 /// Where the DSN a failing test dialled is built.
 #[cfg(not(feature = "suite-over-tls"))]
-const DSN_SOURCE: &str = "compio_postgres_testkit::server::Server::url";
+const DSN_SOURCE: &str =
+    "zeroship_testkit_server::compio_postgres::server::Server::url";
 #[cfg(feature = "suite-over-tls")]
-const DSN_SOURCE: &str = "`test_url` in tests/support, from compio_postgres_testkit::tls";
+const DSN_SOURCE: &str = "`test_url` in tests/support, from \
+                           zeroship_testkit_server::compio_postgres::tls";
 
 /// The URL of the server this process's fixture started.
 ///
@@ -512,9 +516,9 @@ const DSN_SOURCE: &str = "`test_url` in tests/support, from compio_postgres_test
 #[cfg(not(feature = "suite-over-tls"))]
 fn plaintext_test_url() -> String {
     #[cfg(not(feature = "suite-on-postgres-18"))]
-    let server = compio_postgres_testkit::server::server();
+    let server = zeroship_testkit_server::compio_postgres::server::server();
     #[cfg(feature = "suite-on-postgres-18")]
-    let server = compio_postgres_testkit::server::server_on_postgres_18();
+    let server = zeroship_testkit_server::compio_postgres::server::server_on_postgres_18();
     server.url()
 }
 
@@ -534,7 +538,7 @@ pub fn test_url() -> String {
 /// of them.
 #[cfg(feature = "suite-over-tls")]
 pub fn test_url() -> String {
-    let servers = compio_postgres_testkit::tls::servers();
+    let servers = zeroship_testkit_server::compio_postgres::tls::servers();
     let server = suite_tls_server();
     // URL form, NOT the fixture's key=value form. Callers append their own
     // parameters (`schema_scoped_url` adds `options=-c search_path=...`) and
@@ -841,7 +845,7 @@ pub fn plaintext_url() -> String {
 /// The TLS fixture server the suite runs on, in its `key=value` form.
 #[cfg(feature = "suite-over-tls")]
 fn suite_tls_server() -> &'static str {
-    let servers = compio_postgres_testkit::tls::servers();
+    let servers = zeroship_testkit_server::compio_postgres::tls::servers();
     if cfg!(feature = "suite-on-postgres-18") {
         &servers.directtls_url
     } else {
@@ -903,7 +907,7 @@ pub fn with_password(dsn: &str, password: &str) -> Option<String> {
 /// is SATISFIED and the test measures nothing.
 #[cfg(feature = "suite-over-tls")]
 pub fn tls_disabled_url() -> String {
-    let base = &compio_postgres_testkit::tls::servers().plain_url;
+    let base = &zeroship_testkit_server::compio_postgres::tls::servers().plain_url;
     format!(
         "postgres://{}:{}@{}:{}/{}",
         keyword(base, "user"),

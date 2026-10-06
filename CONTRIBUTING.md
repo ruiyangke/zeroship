@@ -198,8 +198,8 @@ cargo xtask test runtime
 ```
 
 A shard is a set of packages, not a feature area. `cargo xtask test workflow`
-runs the workflow crates (the engine, calendar, client, schema, fixtures,
-testkit, V8 binding, manager, server and runner) and their doctests. The CLI's
+runs the workflow crates (the engine, calendar, client, schema, testkit,
+V8 binding, manager, server and runner) and their doctests. The CLI's
 workflow tests run in `runtime`, Control's workflow process suites in `billing`,
 the workflow SDK packages' suites in `pnpm test`, the schema generators'
 `--check` runs in CI's `checks` job, and the example apps' suites in
@@ -214,6 +214,30 @@ codecs other members enable - then again against PostgreSQL 18:
 cargo nextest run -p compio-postgres
 cargo xtask test compio-postgres
 ```
+
+#### Testkit layers
+
+A testkit depends only on crates below every crate whose tests use it, because a
+crate whose own tests link a crate that links it compiles itself twice and its
+types stop unifying. The layers, from the bottom:
+
+- `zeroship-testkit-server` depends on no workspace crate, so any crate's tests
+  may use it, a `libs/` driver's included.
+- `zeroship-testkit` depends on the server layer, the `libs/` drivers and crates
+  with no workspace dependency of their own.
+- `zeroship-<area>-testkit` depends on the two layers below it and on production
+  crates below every crate whose tests use it. It never depends on another area
+  testkit.
+
+Fixtures are never a crate. Adapters typed by a crate whose own unit tests need
+them are a `macro_rules!` in its area testkit, and every crate that uses them
+expands it.
+
+`cargo xtask test repository`'s
+`test_support_crates_sit_in_the_layer_their_name_says` reads this rule from
+`cargo metadata`: every library-only package that classifies itself
+`test-dev-tool` must have a name in one of those layers and normal path edges
+below it.
 
 ### CI
 
@@ -240,7 +264,7 @@ cargo xtask test compio-postgres
   that cache fits the budget.
 
 No test pulls an image or installs a package at run time. The images every
-fixture starts or builds on are listed once, in `zeroship_shared_server::images`,
+fixture starts or builds on are listed once, in `zeroship_testkit_server::images`,
 and the testkit recipes whose build installs packages in
 `zeroship_testkit::images::FETCHING`; CI's plan job pulls and builds them once,
 the shards and the `sdk` job restore them from the cache, and the Docker daemon

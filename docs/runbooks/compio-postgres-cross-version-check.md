@@ -21,7 +21,7 @@ and a dead stream cannot print the same result.
 ## Prerequisites
 
 - Docker. The suite starts its PostgreSQL 18 server itself, through
-  `compio_postgres_testkit::server::server_on_postgres_18`, with the same
+  `zeroship_testkit_server::compio_postgres::server::server_on_postgres_18`, with the same
   settings as the PostgreSQL 16 server it runs against by default: logical
   decoding for replication, prepared transactions for the two-phase tests, and
   replication slot budgets the suite's parallelism cannot exhaust. Nothing is

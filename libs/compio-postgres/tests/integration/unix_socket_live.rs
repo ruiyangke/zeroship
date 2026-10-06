@@ -3,15 +3,16 @@
 //! `libs/compio-postgres/tests/integration/unix_socket_path_limit.rs` proves
 //! that a path past `sun_path` is REFUSED rather than truncated. That is the
 //! failure half. This is the success half: `Host::Unix` reaching a real server.
-//! The server is `compio_postgres_testkit::unix`'s, which puts its socket in a
-//! directory this host shares with its container and hands out a short path to
-//! it, so the socket address fits `sun_path` however deep the checkout is.
+//! The server is `zeroship_testkit_server::compio_postgres::unix`'s, which puts
+//! its socket in a directory this host shares with its container and hands out
+//! a short path to it, so the socket address fits `sun_path` however deep the
+//! checkout is.
 
 use compio_postgres::{Client, Config, NoTls};
-use compio_postgres_testkit::unix::UnixServer;
+use zeroship_testkit_server::compio_postgres::unix::UnixServer;
 
 fn fixture() -> &'static UnixServer {
-    compio_postgres_testkit::unix::server()
+    zeroship_testkit_server::compio_postgres::unix::server()
 }
 
 fn dsn(fixture: &UnixServer) -> String {

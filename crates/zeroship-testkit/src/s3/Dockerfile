@@ -1,4 +1,4 @@
-# The fixture prepends the FROM line from zeroship_shared_server::images::VERSITYGW,
+# The fixture prepends the FROM line from zeroship_testkit_server::images::VERSITYGW,
 # the one list of fixture images CI restores from its cache.
 # The shared watchdog and the lease-refusal probe both check for `flock -E`, and
 # the versitygw image is Alpine/BusyBox, whose flock has no `-E`.

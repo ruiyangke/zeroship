@@ -1,4 +1,4 @@
-//! The shared-server protocol: one server for every test process of a
+//! The testkit-server protocol: one server for every test process of a
 //! worktree, elected by `flock`, leased for the life of a process and removed by
 //! the container's watchdog once no lease is held.
 //!
@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use zeroship_shared_server::{self as shared, Scope};
+use zeroship_testkit_server::{self as shared, Scope};
 
 /// The idle grace a throwaway scope is started with.
 const GRACE: Duration = Duration::from_secs(2);
@@ -50,9 +50,9 @@ fn scratch(name: &str) -> PathBuf {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)
-        .expect("the shared-server crate lives under crates/");
+        .expect("the testkit-server crate lives under crates/");
     let dir = root
-        .join("target/zeroship-shared-server-tests")
+        .join("target/zeroship-testkit-server-tests")
         .join(format!("{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create a scratch lease directory");
@@ -248,7 +248,7 @@ fn containers_in(dir: &Path) -> Vec<String> {
 /// refusal directly.
 fn run_detached(image: &str, binds: &[String], label: &str) -> String {
     let name = format!(
-        "zeroship-shared-server-refuse-{label}-{}",
+        "zeroship-testkit-server-refuse-{label}-{}",
         std::process::id()
     );
     shared::run_detached(image, binds, &[], &name).expect("run a detached container")
@@ -1160,7 +1160,7 @@ fn child_lifetime_leak() {
         .to_str()
         .expect("a UTF-8 scope directory")
         .to_owned();
-    let name = format!("zeroship-shared-server-leak-{}", std::process::id());
+    let name = format!("zeroship-testkit-server-leak-{}", std::process::id());
     let id = shared::run_detached(&image(), &[], &[(shared::DIR_LABEL, &dir)], &name)
         .expect("start the unowned container");
     shared::lifetime::report_container(&id);
@@ -1266,7 +1266,7 @@ fn one_image_reference_is_built_once_across_threads() {
 #[test]
 fn a_failed_build_releases_the_build_lock() {
     let token = unique_token();
-    let name = "zeroship-shared-server-build-failure";
+    let name = "zeroship-testkit-server-build-failure";
     let dockerfile =
         format!("FROM {POSTGRES_IMAGE}\nLABEL zeroship.test.build=\"{token}\"\nRUN exit 1\n");
 

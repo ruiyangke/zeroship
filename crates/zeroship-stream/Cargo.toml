@@ -22,7 +22,7 @@ futures = { workspace = true }
 # The worktree's shared broker this binary runs against, and the lifetime
 # measurements of its recipe.
 zeroship-testkit = { workspace = true }
-zeroship-shared-server = { workspace = true }
+zeroship-testkit-server = { workspace = true }
 
 [[test]]
 name = "main"

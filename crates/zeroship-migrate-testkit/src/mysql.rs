@@ -1,11 +1,11 @@
-//! # `zeroship-migrate-mysql-recording` - the canned MySQL [`SqlSession`]
+//! # The canned MySQL [`SqlSession`]
 //!
 //! The non-compio, host-shaped [`SqlSession`] the MySQL apply path is driven over in
 //! tests, and the catalog rows fed to it.
 //!
-//! # Why this is a crate and not a `#[cfg(test)]` module
+//! # Why this recorder is a module of a shared crate
 //!
-//! Two suites drive this one double, and they cannot be in the same crate.
+//! Two suites drive this one double, and they cannot share a `#[cfg(test)]` module.
 //!
 //! What it proves about the vendor - which SQL `zeroship-migrate-mysql` emits, in
 //! which order, with which binds - belongs beside that code, as unit tests in that
@@ -31,8 +31,7 @@
 //! It returns canned rows for the reads the MySQL apply path issues: `GET_LOCK(...)`
 //! -> a single `got=1` row (lock acquired); the `information_schema.triggers`
 //! existence probe -> empty (so `ensure_journal` creates every trigger); the journal
-//! net-state reads -> empty. It is the MySQL analogue of
-//! `zeroship-migrate-postgres-recording`.
+//! net-state reads -> empty. It is the MySQL analogue of [`crate::postgres`].
 
 use std::cell::RefCell;
 
@@ -64,7 +63,7 @@ pub const HOLDER_CONNECTION_ID: i64 = 113_110;
 /// `GET_LOCK(...)` -> a single `got=1` row (lock acquired); the
 /// `information_schema.triggers` existence probe -> empty (so `ensure_journal`
 /// creates every trigger); the journal net-state reads -> empty. This is the
-/// MySQL analogue of `zeroship-migrate-postgres-recording`'s `RecordingSession`
+/// MySQL analogue of [`crate::postgres`]'s `RecordingSession`
 /// genericity proof.
 #[derive(Debug)]
 pub struct RecordingSession {

@@ -180,15 +180,12 @@ workspace = true
 optional = true
 
 [dev-dependencies]
-# The dev-only fixtures the integration tests and the live benchmarks share:
-# the PostgreSQL server they dial, started in Docker, and the sealed accessor
-# for the one environment key a target reads. It names no type of this crate,
-# so a bench links it without compiling any of the crate's private sources.
-compio-postgres-testkit = { path = "testkit" }
-# The lease protocol and Docker queries the fixture-ownership and lifetime
-# tests ask about the suite's server. It links no database driver, so this
-# edge cannot put a second copy of this crate into a test binary.
-zeroship-shared-server = { workspace = true }
+# The dev-only server layer the integration tests and the live benchmarks
+# share: the PostgreSQL servers they dial, started in Docker, and the lease
+# protocol and Docker queries the fixture-ownership and lifetime tests ask
+# about. It names no database driver, so this edge cannot put a second copy of
+# this crate into a test binary.
+zeroship-testkit-server = { workspace = true }
 # Differential oracle. tokio-postgres is the crate this one was ported from,
 # so running both against the same server and comparing answers is the
 # strongest check available for a port. Permitted here and ONLY here: the

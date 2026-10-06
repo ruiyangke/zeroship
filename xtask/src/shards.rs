@@ -251,7 +251,6 @@ pub const SHARDS: &[Shard] = &[
             "zeroship-workflow-calendar",
             "zeroship-workflow-client",
             "zeroship-workflow-schema",
-            "zeroship-workflow-fixtures",
             "zeroship-workflow-testkit",
             "zeroship-workflow-v8",
             "zeroship-workflow-manager",
@@ -273,9 +272,8 @@ pub const SHARDS: &[Shard] = &[
             "zeroship-migrate-ir",
             "zeroship-migrate-policy",
             "zeroship-migrate-postgres",
-            "zeroship-migrate-postgres-recording",
+            "zeroship-migrate-testkit",
             "zeroship-migrate-mysql",
-            "zeroship-migrate-mysql-recording",
             "zeroship-migrate-sqlite",
             "zeroship-migrate-node",
         ],
@@ -316,7 +314,7 @@ pub const SHARDS: &[Shard] = &[
     Shard {
         name: "foundation",
         packages: &[
-            "zeroship-shared-server",
+            "zeroship-testkit-server",
             "zeroship-testkit",
             "zeroship-core",
             "zeroship-id",

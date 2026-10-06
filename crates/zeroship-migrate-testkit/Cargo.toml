@@ -1,0 +1,28 @@
+[package]
+name = "zeroship-migrate-testkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The canned MySQL and PostgreSQL SqlSession doubles both halves of zeroship-migrate's coverage drive: the vendors' own unit tests in zeroship-migrate-mysql and zeroship-migrate-postgres, and the engine's integration tests in zeroship-migrate/tests/integration. A DEV-ONLY crate - every side names it under [dev-dependencies]."
+
+# The graph names this crate nowhere but a dev edge, and it ships no binary, so
+# it must carry the classification the arch checks read: a shipped binary may
+# not reach a dev-only package.
+[[package.metadata.zeroship-config.targets]]
+target = "zeroship-migrate-testkit"
+class = "test-dev-tool"
+reason = "Dev-only canned MySQL and PostgreSQL SqlSession doubles; reached only through dev-dependencies."
+
+[dependencies]
+# The CONTRACT the doubles implement and the vocabulary their canned rows are built
+# from: the `SqlSession` seam itself, `Bind`/`Row`/`Value`/`DbError`, the
+# `DatabaseRequirements`/`DatabaseFeature` answers, and the `BackfillSpec` and
+# `PlanStep`/`BindValue` shapes the plan-step builders return.
+zeroship-migrate-backend = { workspace = true }
+# The migration identity the canned rows and plan-step builders are keyed on:
+# `MigrationId`, `Checksum`/`ChecksumInput`, `MigrationFlags`, `Migration`, the
+# `GuardProbe` vocabulary, and `ir::CursorStability`.
+zeroship-migrate-ir = { workspace = true }
+
+[lints]
+workspace = true

@@ -35,7 +35,7 @@ without `tls` remains supported for plaintext-only use.
   scopes its own sessions, but competing work changes latency and RSS pressure
   and makes comparisons harder to interpret.
 
-A TLS soak can borrow the `tls` server `compio_postgres_testkit::tls` starts
+A TLS soak can borrow the `tls` server `zeroship_testkit_server::compio_postgres::tls` starts
 for the TLS suites while a run of those suites holds it: its published port is
 in `docker ps`, and the CA that signed its certificate is `ca.crt` under
 `target/zeroship-testkit/compio-postgres-tls-material-<id>/` in the worktree

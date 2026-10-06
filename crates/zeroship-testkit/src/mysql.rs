@@ -1,6 +1,6 @@
 //! The MySQL server every test process of a worktree shares.
 //!
-//! [`server()`] joins the one server a worktree boots through [`zeroship_shared_server`]:
+//! [`server()`] joins the one server a worktree boots through [`zeroship_testkit_server`]:
 //! the first process elects itself, the image is built, the container starts,
 //! and every other process joins the ready server. A process holds its lease for
 //! as long as it runs; the container's watchdog removes the server once no
@@ -12,7 +12,7 @@
 
 use std::sync::OnceLock;
 
-use zeroship_shared_server::{self as shared, HostPort, Port, Readiness, Scope, Spec};
+use zeroship_testkit_server::{self as shared, HostPort, Port, Readiness, Scope, Spec};
 
 mod image;
 pub use image::reference as image;
@@ -22,7 +22,7 @@ pub(crate) use image::RECIPE;
 const MYSQL_PORT: u16 = 3306;
 
 /// The watchdog baked into the image.
-const WATCHDOG: &str = zeroship_shared_server::image::WATCHDOG;
+const WATCHDOG: &str = zeroship_testkit_server::image::WATCHDOG;
 
 /// The password of the server's `root` superuser. The server listens on a
 /// loopback-mapped port for the life of one worktree, so this is a fixture

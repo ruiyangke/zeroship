@@ -965,7 +965,7 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
 }
 
 /// Genericity proof: the apply path monomorphizes over a
-/// **non-compio** [`SqlSession`] driver. The `zeroship-migrate-postgres-recording`
+/// **non-compio** [`SqlSession`] driver. The `zeroship_migrate_testkit::postgres`
 /// driver records the SQL of every WRITE verb, and - the read side being widened to
 /// the driver-neutral [`Row`]/[`DbError`] - RETURNS canned `Row`s from
 /// its read verbs. This proves `PostgresBackend<'a, D>` is genuinely generic AND
@@ -974,7 +974,7 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
 mod recording_session_genericity {
     use super::*;
     use std::sync::atomic::AtomicBool;
-    use zeroship_migrate_postgres_recording::{
+    use zeroship_migrate_testkit::postgres::{
         canned_journal_row, InFlightGuard, RecordingSession,
     };
 

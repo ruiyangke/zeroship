@@ -38,7 +38,7 @@ defaults:
 jobs:
   # Lists the shards and makes sure the fixture image cache exists before any
   # shard restores it. The images are pulled only here, only when the list in
-  # zeroship_shared_server::images changes, and only the references the
+  # zeroship_testkit_server::images changes, and only the references the
   # previous cache lacks.
   plan:
     runs-on: ubuntu-24.04

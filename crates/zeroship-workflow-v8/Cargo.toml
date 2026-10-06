@@ -26,8 +26,8 @@ serde_json = { workspace = true }
 v8 = { workspace = true }
 
 [dev-dependencies]
-# The workflow-typed fixture adapters over the plain workflow testkit.
-zeroship-workflow-fixtures = { workspace = true }
+# The workflow-typed fixture adapters, expanded from the plain workflow testkit.
+zeroship-workflow-testkit = { workspace = true }
 zeroship-workflow-manager = { workspace = true }
 zeroship-workflow-client = { workspace = true }
 zeroship-data-orm = { workspace = true }

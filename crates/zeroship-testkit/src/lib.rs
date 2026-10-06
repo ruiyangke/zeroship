@@ -7,7 +7,7 @@
 //! here touches a shipped binary.
 //!
 //! The lease protocol every server below is shared through, the watchdog image
-//! builder and the lifetime measurements live in `zeroship-shared-server`, which
+//! builder and the lifetime measurements live in `zeroship-testkit-server`, which
 //! names no database driver.
 //!
 //! - [`fingerprint`] hashes the platform migration corpus a working tree would

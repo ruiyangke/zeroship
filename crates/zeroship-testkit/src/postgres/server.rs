@@ -1,7 +1,7 @@
 //! The bare PostgreSQL server every data test process of a worktree shares.
 //!
 //! [`Postgres::start`] joins the one bare server a worktree boots through
-//! [`zeroship_shared_server`] and hands the caller a database cloned from the server's
+//! [`zeroship_testkit_server`] and hands the caller a database cloned from the server's
 //! pristine template. The first process elects itself, installs the template's
 //! extensions, seals the template and records the boot; every other process
 //! joins the ready server. Each case works in its own clone, so it may drop an
@@ -15,7 +15,7 @@ use std::sync::OnceLock;
 use zeroship_id::DatabaseId;
 
 use crate::postgres::image;
-use zeroship_shared_server::{self as shared, Scope};
+use zeroship_testkit_server::{self as shared, Scope};
 
 /// The pristine database every case database is cloned from.
 const TEMPLATE: &str = "zeroship_bare_template";

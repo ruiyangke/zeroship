@@ -1,19 +1,19 @@
 //! The PostgreSQL image the platform and the bare server share: pgvector and
-//! PostGIS on PostgreSQL 16, with the shared-server watchdog.
+//! PostGIS on PostgreSQL 16, with the testkit-server watchdog.
 //!
-//! Built from a [`zeroship_shared_server::image::Recipe`], which tags the image
+//! Built from a [`zeroship_testkit_server::image::Recipe`], which tags the image
 //! by the content of the Dockerfile and every file it copies, so a worktree whose
 //! recipe moved never overwrites another worktree's image and never runs a
 //! server built from the wrong recipe.
 
 use std::sync::OnceLock;
 
-use zeroship_shared_server::image::{Recipe, WATCHDOG_SCRIPT};
+use zeroship_testkit_server::image::{Recipe, WATCHDOG_SCRIPT};
 
 /// The recipe the image is built from.
 pub const RECIPE: Recipe = Recipe {
     name: "zeroship-testkit-postgres",
-    base: zeroship_shared_server::images::PGVECTOR_16,
+    base: zeroship_testkit_server::images::PGVECTOR_16,
     body: include_str!("Dockerfile"),
     files: &[("watchdog.sh", WATCHDOG_SCRIPT)],
 };

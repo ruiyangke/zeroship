@@ -1,4 +1,4 @@
-# The fixture prepends the FROM line from zeroship_shared_server::images::REDPANDA,
+# The fixture prepends the FROM line from zeroship_testkit_server::images::REDPANDA,
 # the one list of fixture images CI restores from its cache.
 # The image runs as `redpanda` by default, which cannot write the host's
 # bind-mounted lease state. The shared container runs as root so the watchdog can

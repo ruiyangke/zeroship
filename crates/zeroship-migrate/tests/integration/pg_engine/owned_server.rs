@@ -4,13 +4,13 @@
 //! guard.
 //!
 //! `crate::support::server` joins the worktree's shared server through
-//! `zeroship_shared_server`. Its lifetime is measured here through
-//! `zeroship_shared_server::lifetime` against real child processes and a real daemon:
+//! `zeroship_testkit_server`. Its lifetime is measured here through
+//! `zeroship_testkit_server::lifetime` against real child processes and a real daemon:
 //! a child that joins the suite's own recipe at a throwaway scope and exits
 //! normally, and one `SIGKILL`ed while that server is still starting.
 
 use crate::support::server::{self, SharedServer};
-use zeroship_shared_server::{self as shared, lifetime};
+use zeroship_testkit_server::{self as shared, lifetime};
 
 /// The child the lifetime measurements run, by its full path in this binary.
 const CHILD_TEST: &str =
@@ -83,8 +83,8 @@ fn a_server_container_that_cannot_see_the_lease_is_refused_and_removed() {
     // The suite's image with no lease directory mounted: its watchdog could never
     // see a host lease, so the boot must refuse it rather than serve from a
     // container nothing would remove.
-    let base = zeroship_shared_server::images::POSTGRES_18.reference();
-    let image = zeroship_shared_server::image::with_watchdog(&base).expect("build the suite's image");
+    let base = zeroship_testkit_server::images::POSTGRES_18.reference();
+    let image = zeroship_testkit_server::image::with_watchdog(&base).expect("build the suite's image");
     let name = format!("zeroship-migrate-blind-{}", std::process::id());
     let blind = shared::run_detached(&image, &[], &[], &name).expect("run the blind container");
     let refusal = shared::refuse_a_blind_container(&blind)

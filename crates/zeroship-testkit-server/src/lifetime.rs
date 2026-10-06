@@ -1,4 +1,4 @@
-//! The two lifetime measurements every shared-server fixture owes: its
+//! The two lifetime measurements every testkit-server fixture owes: its
 //! container is removed once the process holding its lease has exited, and once
 //! that process was killed by `SIGKILL` while the container was still starting.
 //!

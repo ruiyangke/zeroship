@@ -23,7 +23,7 @@ use futures::FutureExt;
 use std::cell::RefCell;
 use std::panic::AssertUnwindSafe;
 use std::time::Duration;
-use zeroship_shared_server::Scope;
+use zeroship_testkit_server::Scope;
 use zeroship_testkit::postgres::{FreshDatabase, Platform};
 
 type Driver = compio::runtime::JoinHandle<Result<(), compio_postgres::Error>>;

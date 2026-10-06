@@ -1,4 +1,4 @@
-# The fixture prepends the FROM line from zeroship_shared_server::images::MYSQL_8_4,
+# The fixture prepends the FROM line from zeroship_testkit_server::images::MYSQL_8_4,
 # the one list of fixture images CI restores from its cache.
 # The shared watchdog and the blind-container refusal both check for `flock`, and
 # the MySQL image does not carry util-linux.

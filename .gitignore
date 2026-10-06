@@ -64,7 +64,3 @@ nomad-driver-ch/bin/
 docs/pilot/
 
 __pycache__/
-
-# Excluded dev-only crates resolve on their own when a command names their
-# manifest; the workspace lock is the one that pins shipped dependencies.
-libs/compio-postgres/testkit/Cargo.lock

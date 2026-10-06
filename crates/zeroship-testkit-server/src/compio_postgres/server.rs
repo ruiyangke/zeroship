@@ -1,7 +1,7 @@
-//! The PostgreSQL server compio-postgres's suites and live benches dial.
+//! The `PostgreSQL` server compio-postgres's suites and live benches dial.
 //!
 //! Every test process of a worktree that asks for the server joins one shared
-//! server through `zeroship_shared_server`: the first process elects itself and
+//! server through this crate's lease protocol: the first process elects itself and
 //! boots it, every other process joins the ready server. A container per test
 //! would put a server per test process on the machine; one per worktree run is
 //! paid once. Isolation inside the server is the tests' own: each names the
@@ -22,8 +22,8 @@
 //! parameter, so it is on the command line rather than applied by a session:
 //!
 //! - `wal_level=logical`: the replication and pgoutput suites create logical
-//!   slots, which PostgreSQL refuses below `logical`.
-//! - `max_prepared_transactions`: PostgreSQL's default is zero, which makes
+//!   slots, which `PostgreSQL` refuses below `logical`.
+//! - `max_prepared_transactions`: `PostgreSQL`'s default is zero, which makes
 //!   `PREPARE TRANSACTION` unavailable and leaves pgoutput's `two_phase`
 //!   protocol untestable. The two-phase suite exercises the real
 //!   prepare/commit/rollback frames.
@@ -37,10 +37,10 @@
 
 use std::sync::OnceLock;
 
-use zeroship_shared_server::{self as shared, Scope};
+use crate::{self as shared, Scope};
 
-/// The PostgreSQL image the suite runs against. Its protocol claims were
-/// measured on PostgreSQL 16; a server of another major answers some of them
+/// The `PostgreSQL` image the suite runs against. Its protocol claims were
+/// measured on `PostgreSQL` 16; a server of another major answers some of them
 /// differently, which is what [`POSTGRES_18`] is for.
 pub const IMAGE: shared::images::Image = shared::images::POSTGRES_16;
 
@@ -54,7 +54,7 @@ const PASSWORD: &str = "compio-postgres-fixture";
 /// The database every suite connects to.
 const DATABASE: &str = "compio_postgres";
 
-/// The port PostgreSQL listens on inside the container.
+/// The port `PostgreSQL` listens on inside the container.
 const POSTGRES_PORT: u16 = 5432;
 
 /// The scope kind each shared server is filed under in the worktree's `target`.
@@ -90,9 +90,9 @@ impl Server {
         )
     }
 
-    /// The host port mapped to the server's PostgreSQL port.
+    /// The host port mapped to the server's `PostgreSQL` port.
     #[must_use]
-    pub fn port(&self) -> u16 {
+    pub const fn port(&self) -> u16 {
         self.lease.port
     }
 
@@ -103,7 +103,7 @@ impl Server {
     }
 }
 
-/// The worktree's shared PostgreSQL 16 server, joined on first use.
+/// The worktree's shared `PostgreSQL` 16 server, joined on first use.
 ///
 /// # Panics
 /// When the server could not be joined - most often because Docker is not
@@ -117,7 +117,7 @@ pub fn server() -> &'static Server {
     )
 }
 
-/// The worktree's shared PostgreSQL 18 server, with the same settings and
+/// The worktree's shared `PostgreSQL` 18 server, with the same settings and
 /// database as [`server`], joined on first use.
 ///
 /// # Panics
@@ -130,12 +130,13 @@ pub fn server_on_postgres_18() -> &'static Server {
     )
 }
 
-fn joined<'a>(outcome: &'a Result<Server, String>, image: shared::images::Image) -> &'a Server {
+fn joined(outcome: &Result<Server, String>, image: shared::images::Image) -> &Server {
     match outcome {
         Ok(server) => server,
         Err(reason) => panic!(
             "compio-postgres's live tests run against a {image} server every test process of \
-             the worktree shares, started in Docker by compio_postgres_testkit::server, and it \
+             the worktree shares, started in Docker by \
+             zeroship_testkit_server::compio_postgres::server, and it \
              could not be joined: {reason}"
         ),
     }

@@ -1,11 +1,11 @@
-//! # `zeroship-migrate-postgres-recording` - the canned PostgreSQL [`SqlSession`]
+//! # The canned PostgreSQL [`SqlSession`]
 //!
 //! The non-compio, host-shaped [`SqlSession`] the PostgreSQL apply path is driven
 //! over in tests, and the plan steps fed to it.
 //!
-//! # Why this is a crate and not a `#[cfg(test)]` module
+//! # Why this recorder is a module of a shared crate
 //!
-//! Two suites drive this one double, and they cannot be in the same crate.
+//! Two suites drive this one double, and they cannot share a `#[cfg(test)]` module.
 //!
 //! What it proves about the vendor - which SQL `zeroship-migrate-postgres` emits, in
 //! which order, with which binds, and that the generic apply path is genuinely
@@ -24,7 +24,7 @@
 //!
 //! This crate reaches the contract (`zeroship-migrate-backend`) and the IR
 //! (`zeroship-migrate-ir`) and neither the vendor nor the engine, so the dependency
-//! edges run one way from both of its users and nothing shipped can link it.
+//! edges run one way from every user and nothing shipped can link it.
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};

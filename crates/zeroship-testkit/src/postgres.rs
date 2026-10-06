@@ -1,7 +1,7 @@
 //! The platform database every test process of a worktree shares.
 //!
 //! [`platform()`] joins the one migrated server a worktree boots through
-//! [`zeroship_shared_server`]: the first process elects itself, runs the platform
+//! [`zeroship_testkit_server`]: the first process elects itself, runs the platform
 //! migration into a pristine template and clones the working database from it,
 //! and every other process joins the ready server. A process holds its lease for
 //! as long as it runs; the container's watchdog removes the server once no
@@ -21,7 +21,7 @@ use compio_postgres::{Client, NoTls};
 use zeroship_id::DatabaseId;
 
 use crate::fingerprint;
-use zeroship_shared_server::{self as shared, Scope};
+use zeroship_testkit_server::{self as shared, Scope};
 
 mod case;
 mod image;
@@ -35,7 +35,7 @@ pub(crate) use image::RECIPE;
 const DATABASE: &str = "zeroship_testkit";
 
 /// The watchdog baked into the PostgreSQL image.
-const WATCHDOG: &str = zeroship_shared_server::image::WATCHDOG;
+const WATCHDOG: &str = zeroship_testkit_server::image::WATCHDOG;
 
 /// The port PostgreSQL listens on in the image.
 const POSTGRES_PORT: u16 = 5432;
