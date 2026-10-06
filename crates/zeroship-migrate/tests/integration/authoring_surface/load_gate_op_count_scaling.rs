@@ -1,9 +1,9 @@
 //! The load gate's rename-isolation pass is linear in op count.
 //!
-//! `validate_online_rename_isolation_op` kept every operation it had seen in one
-//! flat `Vec` and scanned all of it per op, so an envelope of N operations paid
-//! N^2 comparisons even with no renames in it at all. The gate keeps the
-//! rename state in a map keyed by table, so the pass is linear in op count.
+//! `validate_online_rename_isolation_op` keeps the rename state in a map keyed
+//! by table, so an envelope of N operations pays O(N) comparisons. Scanning a
+//! flat `Vec` of every operation it had seen once per op would pay N^2 even with
+//! no renames in it at all -- the shape this guard fails on.
 //!
 //! THE ASSERTION IS THE SHAPE OF THE CURVE, not a wall-clock budget. A timing
 //! threshold turns into a flake on a loaded machine and says nothing about
@@ -29,23 +29,19 @@
 //! builds while nobody is looking. A `required-features` gate would hide it from
 //! both.
 //!
-//! # The threshold is NOT weakened, and CPU time was measured and rejected
+//! # Wall clock is the instrument; the threshold models the curve
 //!
-//! Raising the 3.0x ceiling would discard the signal these guards exist for - they
-//! caught regressions that sit above a "relaxed" ceiling too.
+//! The 3.0x ceiling sits between the ~2x a linear pass pays for a doubling and the
+//! ~4x a quadratic one pays, with room for noise. That is the model the guards
+//! check, not a measured budget: relaxing it would discard the signal these guards
+//! exist for.
 //!
-//! Switching the instrument from wall clock to CPU time is the obvious other idea,
-//! and the same fixtures timed simultaneously
-//! with `Instant` and with per-thread CPU nanoseconds (`/proc/thread-self/schedstat`)
-//! track each other on every arm:
-//!
-//! `best_of` already takes the MINIMUM of five runs, and a single CPU-bound thread on
-//! a 16-core box gets a whole core in at least one of five attempts even with a long
-//! run queue - so preemption is not what inflated those ratios. What inflates them is
-//! that the work itself gets more expensive under memory and I/O pressure (page
-//! faults, allocator behaviour, cache pressure), and a CPU clock counts that extra
-//! work just as faithfully as a wall clock does. Changing clocks would have added a
-//! platform-specific dependency and moved no number.
+//! Wall clock is the instrument. Switching to CPU time would not change the verdict:
+//! the work itself gets more expensive under memory and I/O pressure (page faults,
+//! allocator behaviour, cache pressure), and a CPU clock counts that extra work just
+//! as faithfully as a wall clock does. `best_of` takes the MINIMUM of five runs, so
+//! scheduler preemption is not what the ratio reflects; changing clocks would add a
+//! platform-specific dependency without moving the ratio.
 use std::time::Instant;
 
 /// The best of `REPEATS` timings of `run`.
@@ -53,9 +49,9 @@ use std::time::Instant;
 /// MINIMUM, not mean or a single shot, and the reason is what this file is for.
 /// Scheduler noise, page faults and a busy machine only ever ADD time, so the
 /// smallest observation is the closest one to the real cost. A single timing of a
-/// ~20ms body is noisy enough that a linear pass can measure 3x on a loaded
-/// machine, and this suite compares a RATIO of two such numbers - noise in the
-/// denominator inflates the result twice over.
+/// short body is noisy enough that a linear pass can measure several times its
+/// real cost on a loaded machine, and this suite compares a RATIO of two such
+/// numbers - noise in the denominator inflates the result twice over.
 ///
 /// That cuts BOTH ways and both matter: a spurious failure wastes a CI run and
 /// teaches people to re-run red builds, while a noise floor that wide can hide a
@@ -96,38 +92,36 @@ fn validate_ir_does_not_scale_quadratically_in_op_count() {
     let large = best_of(|| validate_n(20_000));
     let ratio = large / small;
 
-    // Quadratic would be ~4x for a doubling. Linear-ish is ~2x. The threshold sits
-    // between them with room for noise: this caught a 5x before the fix.
+    // Quadratic is ~4x for a doubling; linear-ish is ~2x. The threshold sits
+    // between them with room for noise.
     assert!(
         ratio < 3.0,
         "doubling the op count multiplied validate_ir cost by {ratio:.1}x \
          ({small:.3}s -> {large:.3}s), over the 3.0x ceiling this guard holds. \
          Quadratic is ~4x for a doubling and linear-ish is ~2x, so a ratio this \
-         high means the per-op cost is growing with N again - the quadratic scan \
-         the fix removed. Re-run on an IDLE machine before believing it: these are \
-         wall-clock ratios, and heavy background load inflates them"
+         high means a pass scans the whole declaration map once per op and the \
+         per-op cost grows with N. Re-run on an IDLE machine before believing it: \
+         these are wall-clock ratios, and heavy background load inflates them"
     );
 }
 
-/// F666: the same property, but for `createTable`.
+/// The same property for `createTable`.
 ///
 /// The test above asserts a general-sounding claim -- "validate_ir does not scale
 /// quadratically in op count" -- while building its envelope entirely from
-/// `dropTable`. `createTable` takes a different path through the declaration
-/// map, and that path stayed quadratic long after the pass above was fixed: 4000 -> 8000
-/// ops cost 0.68s -> 3.10s (4.5x). A guard whose name is broader than its
-/// fixture reads as covering ground it never touched.
+/// `dropTable`. `createTable` takes a different path through the declaration map,
+/// so a guard whose name is broader than its fixture would read as covering ground
+/// it never touched.
 ///
-/// Three passes each walked every op, and two helpers reached from those walks
-/// scanned the whole declaration map per op: `remove_declared_per_row_table`
-/// (superseding a table's prior declarations) and `mutate_table_candidate_keys`
-/// (re-deriving candidate keys). Under the table-first key order both groups are
-/// contiguous and are now taken with `range`.
+/// Three passes each walk every op, and two helpers reached from those walks read
+/// the declaration map per op: `remove_declared_per_row_table` (superseding a
+/// table's prior declarations) and `mutate_table_candidate_keys` (re-deriving
+/// candidate keys). Under the table-first key order each group is contiguous and
+/// is taken with `range`, so the pass is linear in op count.
 ///
-/// NEITHER FIX ALONE CHANGED THE CLASS. Fixing only the candidate-key helper
-/// halved the wall clock and left the ratio at ~4.4x, because the other helper
-/// still dominated -- which is why the two landed together and why this asserts
-/// the ratio rather than a duration.
+/// Both helpers have to stay linear together: either one scanning the whole map
+/// per op makes the pass quadratic, and it is the ratio, not a duration, that
+/// detects the class.
 #[test]
 #[ignore = "wall-clock complexity guard: needs an idle machine. Runs in the `scaling` CI job via `cargo test -- --ignored`; see this file's header"]
 fn validate_ir_does_not_scale_quadratically_in_create_table_count() {
@@ -157,30 +151,26 @@ fn validate_ir_does_not_scale_quadratically_in_create_table_count() {
     let large = best_of(|| validate_creates(16_000));
     let ratio = large / small;
 
-    // Measured ~4.5x before the fix and ~2.2x after, on the same machine.
+    // Quadratic is ~4x for a doubling; linear-ish is ~2x. The threshold sits
+    // between them with room for noise.
     assert!(
         ratio < 3.0,
         "doubling the createTable count multiplied validate_ir cost by {ratio:.1}x \
          ({small:.3}s -> {large:.3}s), over the 3.0x ceiling this guard holds. A \
-         ratio this high means a pass is scanning the whole declaration map once \
-         per op again - the quadratic F666 removed. Re-run on an IDLE machine \
-         before believing it: these are wall-clock ratios, and heavy background \
-         load inflates them"
+         ratio this high means a pass scans the whole declaration map once per op \
+         and the per-op cost grows with N. Re-run on an IDLE machine before \
+         believing it: these are wall-clock ratios, and heavy background load \
+         inflates them"
     );
 }
 
-/// F667: the same property again, across EVERY op kind that mutates the
-/// declaration map -- because the two tests above each pinned exactly one.
+/// The same property again, across EVERY op kind that mutates the
+/// declaration map -- because the two tests above each pin exactly one.
 ///
-/// `dropColumn` and `renameTable` were still quadratic (4.53x each) after F666
-/// was fixed, and nothing failed: the `dropTable` guard was green, the
-/// `createTable` guard was green, and the defect sat in the ops neither one
-/// exercised. Adding a third single-kind test would have repeated the mistake,
-/// so this sweeps the kinds instead and reports EVERY offender in one run rather
-/// than stopping at the first.
-///
-/// Measured before the fix: dropColumn 0.604s -> 2.739s, renameTable 0.933s ->
-/// 4.224s. After: 0.037s -> 0.083s and 0.045s -> 0.097s.
+/// A single-kind guard leaves the defect in the ops it does not exercise: a green
+/// `dropTable` guard and a green `createTable` guard say nothing about
+/// `dropColumn` or `renameTable`. This sweeps the kinds instead and reports EVERY
+/// offender in one run rather than stopping at the first.
 ///
 /// `renameColumn` builds its envelope differently on purpose. The rename
 /// isolation rule refuses a `renameColumn` beside any other operation on the same
@@ -264,26 +254,23 @@ fn validate_ir_does_not_scale_quadratically_in_any_op_kind() {
     assert!(
         quadratic.is_empty(),
         "doubling the op count exceeded the 3.0x ceiling for: {}. That means a pass \
-         is scanning the whole declaration map once per op again - the quadratic \
-         F667 removed. Re-run on an IDLE machine before believing it: these are \
-         wall-clock ratios, and heavy background load inflates them",
+         scans the whole declaration map once per op and the per-op cost grows with \
+         N. Re-run on an IDLE machine before believing it: these are wall-clock \
+         ratios, and heavy background load inflates them",
         quadratic.join("; ")
     );
 }
 
-/// F668: the op-kind sweep above still measured only ONE envelope SHAPE.
+/// The op-kind sweep above still exercises only ONE envelope SHAPE.
 ///
-/// Every fixture in this file builds plain tables with no foreign keys, one
-/// schema, and no rows. Foreign-key-bearing envelopes took a different path and
-/// were still quadratic (4.48x) after F667: `logical_table_is_declared` and
-/// `logical_column_matches` scanned the whole declaration map once per foreign
-/// key. Measured 0.362s -> 1.623s before, 0.031s -> 0.065s after.
+/// Every fixture in that sweep builds plain tables with no foreign keys, one
+/// schema, and no rows. Foreign-key-bearing envelopes take a different path:
+/// `logical_table_is_declared` and `logical_column_matches` resolve a qualified
+/// name against the declaration map, and a per-foreign-key scan of that map is the
+/// quadratic shape this guard holds flat.
 ///
-/// The op-kind sweep could not have caught this. Both helpers were converted
-/// SPECULATIVELY during F666 and the timings did not move by a microsecond,
-/// because that envelope had no foreign keys to reach them with -- a change that
-/// measured as worthless against the wrong fixture and was correctly reverted.
-/// The fixture, not the code, was what changed here.
+/// The op-kind sweep cannot catch this, because its envelope has no foreign keys
+/// to reach those helpers with. This fixture, not the code, is what varies.
 #[test]
 #[ignore = "wall-clock complexity guard: needs an idle machine. Runs in the `scaling` CI job via `cargo test -- --ignored`; see this file's header"]
 fn validate_ir_does_not_scale_quadratically_in_any_envelope_shape() {
@@ -326,7 +313,7 @@ fn validate_ir_does_not_scale_quadratically_in_any_envelope_shape() {
                     ));
                 }
             }
-            // F669. Tables are created WITHOUT a primary key so the lifecycle op
+            // Tables are created WITHOUT a primary key so the lifecycle op
             // has something to add.
             "alterPrimaryKey" => {
                 for i in 0..half {
@@ -340,7 +327,7 @@ fn validate_ir_does_not_scale_quadratically_in_any_envelope_shape() {
                     ));
                 }
             }
-            // F669. The set value MUST be `perRow`; a literal never reaches
+            // The set value MUST be `perRow`; a literal never reaches
             // `validate_per_row_destination` and measures nothing about it.
             "perRowGen" => {
                 for i in 0..half {
@@ -354,7 +341,7 @@ fn validate_ir_does_not_scale_quadratically_in_any_envelope_shape() {
                     ));
                 }
             }
-            // F669. An INLINE column reference, which is a different type from
+            // An INLINE column reference, which is a different type from
             // the table-level foreign key above and takes a different path.
             "inlineRef" => {
                 for i in 0..half {
@@ -406,10 +393,9 @@ fn validate_ir_does_not_scale_quadratically_in_any_envelope_shape() {
     assert!(
         quadratic.is_empty(),
         "doubling the op count exceeded the 3.0x ceiling for: {}. That means a pass \
-         is scanning the whole declaration map once per op again. F668 covered \
-         foreign keys; F669 added alterPrimaryKey, per-row generation and inline \
-         column references. Re-run on an IDLE machine before believing it: these \
-         are wall-clock ratios, and heavy background load inflates them",
+         scans the whole declaration map once per op and the per-op cost grows with \
+         N. Re-run on an IDLE machine before believing it: these are wall-clock \
+         ratios, and heavy background load inflates them",
         quadratic.join("; ")
     );
 }

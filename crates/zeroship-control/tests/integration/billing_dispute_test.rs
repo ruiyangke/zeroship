@@ -1,16 +1,16 @@
-//! PR-8 regression tests for disputes / chargebacks.
+//! Regression tests for disputes / chargebacks.
 //!
-//! FAITHFUL by construction (PR-8 review, CRITICAL-2): a REAL Stripe Dispute object
-//! carries NO `invoice` field — only `charge` (`ch_…`) and `payment_intent` (`pi_…`). No
-//! `in_…` ever appears on a dispute object here: one that did would resolve nothing at
-//! Stripe and let the suite pass while the production resolution path stayed dead. Every
-//! test FIRST drives the REAL `invoice.paid` webhook (carrying the settling `pi_…`) so the
-//! handler records the `pi_…`→invoice `billing_provider_refs` linkage EXACTLY as production
-//! does, and the dispute object then names that REAL `pi_…`. The whole chain runs end to
+//! FAITHFUL by construction: a REAL Stripe Dispute object carries NO `invoice` field --
+//! only `charge` (`ch_...`) and `payment_intent` (`pi_...`). No `in_...` ever appears on
+//! a dispute object here: a dispute naming one would resolve nothing at Stripe, so the
+//! test would exercise a resolution path that cannot run in production. Every test FIRST
+//! drives the REAL `invoice.paid` webhook (carrying the settling `pi_...`) so the handler
+//! records the `pi_...` to invoice `billing_provider_refs` linkage EXACTLY as production
+//! does, and the dispute object then names that REAL `pi_...`. The whole chain runs end to
 //! end against a live, migrated Postgres: `stripe_handlers::webhook` (signature path,
-//! JSON parse, dispatch) →
-//! `record_infra_payment` (charge row + pi_/ch_ linkage) → `charge.dispute.*` →
-//! `disputes::record_dispute_*` → `invoice_payments::append_dispute_row`. The over-refund
+//! JSON parse, dispatch) ->
+//! `record_infra_payment` (charge row + pi_/ch_ linkage) -> `charge.dispute.*` ->
+//! `disputes::record_dispute_*` -> `invoice_payments::append_dispute_row`. The over-refund
 //! interaction runs the REAL `refund::issue_refund` against the REAL trigger. Gated on
 //! the migrated database `crate::support::require_control_db` hands this case.
 //!
@@ -25,8 +25,8 @@
 //!   (d) the dispute produces exactly ONE `disputed` notification (asserted off the DB
 //!       ledger, per-organization, via the REAL notify cron tick).
 //!   (e) a dispute on a credited/refunded invoice doesn't corrupt credit/refund balances.
-//!   (f) the PR-8 schema objects exist on the migrated DB.
-//!   (g) LIFECYCLE (CRITICAL-3): a won→(late/replayed)lost reorder is rejected — the row
+//!   (f) the dispute schema objects exist on the migrated DB.
+//!   (g) LIFECYCLE: a won -> (late/replayed) lost reorder is rejected -- the row
 //!       stays `won` and cash stays restored (no over-refund window).
 //!   (h) ORDER-INDEPENDENCE: `.closed won` BEFORE `.created` ends with the dispute
 //!       won, debit + reversal both present (net cash restored), and the late `.created`
@@ -215,7 +215,7 @@ async fn make_organization(conn: &compio_postgres::Client) -> String {
     // A `cus_…` ↔ organization mapping so the REAL infra `invoice.paid` path resolves the
     // organization via CUSTOMER reverse-resolve (the genuine infra-invoice shape: Stripe's
     // auto-generated subscription invoices carry no organization metadata). This keeps the seed
-    // off the Stream-2 Connect payout fall-through entirely.
+    // off the Connect payout fall-through entirely.
     let cus = format!("cus_dsp_{}", Uuid::new_v4().simple());
     conn.execute(
         "INSERT INTO zeroship.billing_customer_refs (organization_id, provider, external_id) \
@@ -256,7 +256,7 @@ fn period_offset(months: i64) -> chrono::NaiveDate {
     chrono::NaiveDate::from_ymd_opt(year, month0 + 1, 1).unwrap()
 }
 
-/// FAITHFUL seed (CRITICAL-2): seed a FINALIZED infra invoice + its `ref_kind='invoice'`
+/// FAITHFUL seed: seed a FINALIZED infra invoice + its `ref_kind='invoice'`
 /// linkage, then drive the REAL `invoice.paid` webhook (via `$app`) so the production
 /// handler (`record_infra_payment`) records BOTH the `charge` `invoice_payments` row AND
 /// the settling `payment_intent` (`pi_…`)→invoice `billing_provider_refs` linkage that
@@ -291,7 +291,7 @@ macro_rules! seed_paid_invoice_period {
 
         // Drive the REAL invoice.paid webhook — the genuine infra shape: invoice_kind=infra
         // marker + a `customer` (cus_…) the handler reverse-resolves to the organization (NO
-        // organization metadata, so no Stream-2 payout fall-through), naming the settling
+        // organization metadata, so no Connect payout fall-through), naming the settling
         // payment_intent (pi_…) which the handler persists as the resolution linkage.
         let cus = creator_customer(&$conn, $organization).await;
         let pi = format!("pi_dsp_{}", Uuid::new_v4().simple());
@@ -812,7 +812,7 @@ async fn refund_count(conn: &compio_postgres::Client, inv: &str) -> i64 {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// (g) LIFECYCLE (CRITICAL-3): a won → (late/replayed) lost reorder is REJECTED — the row
+// (g) LIFECYCLE: a won -> (late/replayed) lost reorder is REJECTED -- the row
 //     stays `won`, the reversal stands, and the over-refund cap reflects the terminal
 //     (won) outcome (no stranded restored cash on a lost dispute). The close UPDATE is
 //     gated on the open state, so a late `lost` can never flip a won dispute while its
@@ -993,8 +993,9 @@ async fn dispute_created_before_invoice_paid_resolves_on_linkage() {
     let organization = organization.as_str();
     let (inv, provider_invoice, pi) = seed_finalized_unpaid_invoice!(conn, organization, 6000);
 
-    // (1) The dispute arrives FIRST — its pi_… has NO linkage yet. Pre-fix this dropped the
-    // dispute; post-fix it PARKS it: no billing_disputes row, no debit, but a pending row.
+    // (1) The dispute arrives FIRST -- its pi_... has NO linkage yet. With no linkage the
+    // handler PARKS it rather than dropping it: no billing_disputes row, no debit, but a
+    // pending row.
     let du = format!("du_cbp_{}", Uuid::new_v4().simple());
     let r1 = post_webhook!(
         app,
@@ -1095,7 +1096,7 @@ async fn dispute_on_never_invoiced_charge_parks_without_poison() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// (f) schema guard: the PR-8 objects exist on the migrated DB.
+// (f) schema guard: the dispute objects exist on the migrated DB.
 // ───────────────────────────────────────────────────────────────────────────
 
 #[compio::test(crate = "crate::support::live")]
@@ -1251,7 +1252,7 @@ async fn dispute_created_takes_per_organization_advisory_lock() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// BUG-4: a `charge.dispute.created` with amount>0 but NEITHER `payment_intent` NOR `charge`
+// A `charge.dispute.created` with amount>0 but NEITHER `payment_intent` NOR `charge`
 // has NO settling object to resolve OR park against. `resolve_invoice_for_dispute` returns
 // None and `park_pending_dispute` REJECTS (it requires a candidate) — so the handler must
 // ACK 200 with a warn (matching every other unrecognized-input ignore path) and write
@@ -1259,8 +1260,8 @@ async fn dispute_created_takes_per_organization_advisory_lock() {
 // storm).
 // ───────────────────────────────────────────────────────────────────────────
 
-/// A `charge.dispute.created` with amount>0 but NO `payment_intent`/`charge` (the BUG-4
-/// malformed shape). Stripe never actually sends this — purely defensive.
+/// A `charge.dispute.created` with amount>0 but NO `payment_intent`/`charge` (the
+/// malformed shape). Stripe never actually sends this -- purely defensive.
 fn dispute_created_body_no_settling_object(evt: &str, du: &str, amount: i64) -> String {
     json!({
         "id": evt,
@@ -1552,9 +1553,9 @@ async fn billing_disputes_controlled_update_trigger_raises_on_illegal_mutations(
 // observer txn and assert `record_dispute_closed` BLOCKS until release, for BOTH the won path
 // (existing-open-row) and the close-before-create path. A different organization's key is free.
 //
-// RED-if-removed: drop `lock_dispute_organization(&tx, inv)` from `record_dispute_closed` and the
-// timeout would NOT elapse (the close commits while the observer holds the key) — `is_err()`
-// flips false.
+// If `lock_dispute_organization(&tx, inv)` were dropped from `record_dispute_closed`, the
+// timeout would NOT elapse (the close commits while the observer holds the key) and
+// `is_err()` flips false.
 // ───────────────────────────────────────────────────────────────────────────
 
 #[compio::test(crate = "crate::support::live")]

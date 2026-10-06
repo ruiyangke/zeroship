@@ -6,9 +6,9 @@
 //! second). Every vector below MUST be denied; the positive controls MUST pass;
 //! destructive ops MUST pass but be *flagged* (the gate decides on data loss).
 //!
-//! The matrix is deliberately exhaustive and goes beyond the plan's list:
+//! The matrix is deliberately exhaustive:
 //! every RCE / priv-esc / cross-tenant / file-access / SSRF vector we could
-//! think of, plus the same vectors nested inside `DO $$…$$` and function
+//! think of, plus the same vectors nested inside `DO $$...$$` and function
 //! bodies (which the guard must inspect, not just top-level statements).
 
 
@@ -175,10 +175,10 @@ fn create_allowlisted_extension_is_allowed() {
 
 #[test]
 fn create_extension_with_foreign_schema_is_cross_schema_denied() {
-    // SA-20: the `WITH SCHEMA <target>` schema is confined by gate 2 (the
-    // rendered-SQL walk), restoring gate-1/gate-2 parity with CREATE SCHEMA. An
-    // allowlisted extension planted into a FOREIGN schema is now cross-schema
-    // denied; the in-scope project schema still passes.
+    // The `WITH SCHEMA <target>` schema is confined by gate 2 (the rendered-SQL
+    // walk), matching CREATE SCHEMA's gate-1/gate-2 treatment. An allowlisted
+    // extension planted into a FOREIGN schema is cross-schema denied; the in-scope
+    // project schema still passes.
     assert_cross_schema("CREATE EXTENSION pgcrypto WITH SCHEMA control");
     assert_cross_schema("CREATE EXTENSION pgcrypto SCHEMA other_tenant");
     assert_ok("CREATE EXTENSION pgcrypto WITH SCHEMA project_acme");
@@ -454,13 +454,14 @@ fn unparseable_sql_is_denied_not_panicked() {
 }
 
 // ===========================================================================
-// ADVERSARIAL BYPASS REGRESSION MATRIX (31 confirmed bypasses + class coverage)
+// ADVERSARIAL BYPASS REGRESSION MATRIX
 //
-// Each test below reproduces a bypass the adversarial critic proved against the
-// allow-by-default guard. They were RED (passed-through) before the
-// deny-by-default + full-tree-walk + non-RangeVar-schema rework; they MUST now
-// be denied. Grouped by root cause / class so a reviewer can see the *classes*
-// are closed, not just the named strings.
+// Each test below pins a bypass class the deny-by-default guard must reject: an
+// unenumerated statement kind, a schema-bearing slot the structural walk does not
+// read, or a name hidden in a literal. The full-tree walk and the non-RangeVar
+// schema handling close the slots those bypasses used, and the tests are grouped
+// by root cause / class so a reviewer can see the *classes* are closed, not just
+// the named strings.
 // ===========================================================================
 
 /// Assert the SQL is denied. The deny-by-default catch-all rule is
@@ -799,7 +800,7 @@ fn alter_function_security_definer_denied() {
     assert_denied("ALTER FUNCTION project_acme.f() SECURITY DEFINER");
 }
 
-// --- Positive controls for the NEWLY-ADMITTED safe-list statement kinds ----
+// --- Positive controls for the safe-list statement kinds -------------------
 // (deny-by-default must still let legitimate migration DDL through)
 
 #[test]
@@ -1125,7 +1126,7 @@ fn flags_for_non_transactional_sets_transactional_false() {
 // ===========================================================================
 
 // ---------------------------------------------------------------------------
-// BYPASS-1 — TypeName.names schema qualifier (own `names` array slot)
+// TypeName.names schema qualifier (own `names` array slot)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1179,7 +1180,7 @@ fn builtin_type_casts_still_pass() {
 }
 
 // ---------------------------------------------------------------------------
-// BYPASS-2 — system-catalog TABLE reads must NOT be exempt
+// system-catalog TABLE reads must NOT be exempt
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1220,7 +1221,7 @@ fn own_tables_with_pg_substring_names_pass() {
 }
 
 // ---------------------------------------------------------------------------
-// BYPASS-3 — function creation INTO a shared / system schema
+// function creation INTO a shared / system schema
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1272,7 +1273,7 @@ fn create_unqualified_function_passes() {
 }
 
 // ---------------------------------------------------------------------------
-// OVER-DENIAL-1 — own-schema partition attach/detach must PASS
+// own-schema partition attach/detach must PASS
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1295,7 +1296,7 @@ fn cross_schema_attach_partition_still_denied() {
 }
 
 // ---------------------------------------------------------------------------
-// BYPASS-4 — regprocedure / regproc casts naming a dangerous function
+// regprocedure / regproc casts naming a dangerous function
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1642,7 +1643,7 @@ fn legit_own_schema_batch_has_no_new_over_denials() {
 }
 
 // ---------------------------------------------------------------------------
-// SEC round-4 — schema-as-string-literal-argument to a name-resolving function
+// schema-as-string-literal-argument to a name-resolving function
 // or a reg* cast. The schema-qualified object hides inside an `A_Const` string
 // literal, invisible to the structural schema walker. These are cross-tenant
 // reads AND writes (setval/nextval mutate a foreign sequence).
@@ -1898,7 +1899,7 @@ fn crate_root_reexports_compose_an_end_to_end_check() {
 }
 
 // ---------------------------------------------------------------------------
-// RESIDUAL-1 — query_to_xml family: SQL passed as a string-literal first arg
+// query_to_xml family: SQL passed as a string-literal first arg
 // is never re-parsed, so the func-walk + cross-schema walk are blind to it.
 // The literal must be re-parsed and run through the SAME guard recursively.
 // ---------------------------------------------------------------------------
@@ -1963,7 +1964,7 @@ fn query_to_xml_unqualified_select_passes() {
 }
 
 // ---------------------------------------------------------------------------
-// RESIDUAL-2 — bare-text relation-name args to stat/predicate builtins. A
+// bare-text relation-name args to stat/predicate builtins. A
 // schema-qualified relation in a plain `text` arg (not a regclass cast) to
 // size/privilege builtins must be confined the same way as the name-resolver
 // family.
@@ -2001,12 +2002,11 @@ fn pg_relation_size_regclass_cast_unaffected() {
 }
 
 // ---------------------------------------------------------------------------
-// AUDIT EXTENSION — table_to_xml / schema_to_xml export family. Found during
-// the RESIDUAL audit: these exfiltrate a FOREIGN relation (table_to_*, a
-// regclass-coercible relation-name literal) or an entire FOREIGN schema
-// (schema_to_*, a schema-name literal) as XML. Same name-arg leak class as
-// RESIDUAL-2 (table → relation-name) and the regnamespace resolver (schema →
-// namespace-name).
+// table_to_xml / schema_to_xml export family. These
+// exfiltrate a FOREIGN relation (table_to_*, a regclass-coercible relation-name
+// literal) or an entire FOREIGN schema (schema_to_*, a schema-name literal) as
+// XML. Same name-arg leak class as the stat/predicate builtins (table ->
+// relation-name) and the regnamespace resolver (schema -> namespace-name).
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -2043,15 +2043,15 @@ fn xpath_over_xml_value_passes() {
 // The WHOLE existing fixture set above already re-runs under
 // the explicit confined policy in `guard()`, so a
 // green file IS the byte-identical proof for the statement-kind + body gates.
-// These add the read sites the earlier proof omitted — func-def-target (site 2)
-// and literal-schema-ref (site 3) under `SchemaScope::Single` — plus: the
-// privileged constructs Platform now allows are STILL denied under Confined.
+// These add the read sites that set does not reach: func-def-target and
+// literal-schema-ref under `SchemaScope::Single`, plus the privileged constructs
+// Platform allows that must STILL be denied under Confined.
 // ===========================================================================
 
 #[test]
 fn single_scope_func_def_target_is_cross_schema() {
-    // site 2 (check_func_def_target): a CREATE/ALTER FUNCTION defining into a
-    // schema other than the single project schema is CrossSchema.
+    // check_func_def_target: a CREATE/ALTER FUNCTION defining into a schema other
+    // than the single project schema is CrossSchema.
     assert_cross_schema("CREATE FUNCTION public.f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$");
     assert_cross_schema("ALTER FUNCTION control.f() IMMUTABLE");
     // own-schema definition is fine.
@@ -2060,7 +2060,7 @@ fn single_scope_func_def_target_is_cross_schema() {
 
 #[test]
 fn single_scope_literal_schema_refs_are_cross_schema() {
-    // site 3 (check_literal_schema_refs): a schema named inside a reg* cast /
+    // check_literal_schema_refs: a schema named inside a reg* cast /
     // name-resolving builtin literal is held to the single-schema policy.
     assert_cross_schema("SELECT 'control.t'::regclass");
     assert_cross_schema("SELECT nextval('control.s')");

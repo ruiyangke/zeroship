@@ -1,18 +1,18 @@
 //! The load gate must stay linear in TOTAL COLUMN COUNT, not just op count.
 //!
-//! `declare_logical_column` ran a full-map `retain` once per column declared, to
-//! supersede any prior declaration of that same logical column. Only entries
-//! sharing the exact table and column can ever match, but `LogicalColumnKey`
-//! ordered `schema` first, so those siblings were scattered across the map and
-//! every declaration paid a traversal of all of it. For N tables of C columns
-//! that is (N*C) calls over an (N*C) map.
+//! `declare_logical_column` supersedes any prior declaration of the same logical
+//! column by walking the contiguous run of that table and column: `LogicalColumnKey`
+//! orders table-first, so entries sharing the exact table and column are one run
+//! taken with `range`. Scanning every entry of the map instead costs a full
+//! traversal per declared column, which for N tables of C columns is quadratic in
+//! the total column count.
 //!
 //! WHY THIS TEST HOLDS THE OP COUNT FIXED. Three sibling passes also scan the
-//! whole map, but once per OP -- N*(N*C), which is linear in C. The per-column
-//! pass was N^2*C^2, quadratic in C. Varying C with N pinned is therefore the
-//! only measurement that tells the two apart: it isolates the axis this fix
-//! changed. An op-count sweep (load_gate_op_count_scaling.rs) moves both together and would
-//! have reported the fix as a modest constant-factor win.
+//! whole map, but once per OP -- N*(N*C), which is linear in C. A per-column pass
+//! that scanned the whole map is quadratic in C. Varying C with N pinned is
+//! therefore the only measurement that tells the two apart: it isolates the axis.
+//! An op-count sweep (load_gate_op_count_scaling.rs) moves both together and
+//! reports a combination of the two.
 //!
 //! The per-column pass is linear in C, so doubling C does not quadruple the work.
 //!
@@ -20,15 +20,15 @@
 //! reason spelled out in load_gate_op_count_scaling.rs: a timing threshold flakes on a loaded
 //! machine and says nothing about complexity.
 //!
-//! `#[ignore]`d and run in the `scaling` CI job, for the reasons load_gate_op_count_scaling.rs
-//! sets out in full, including why the 3.0x ceiling is not relaxed and why CPU time
-//! was measured and rejected as an instrument.
+//! `#[ignore]`d for the reasons load_gate_op_count_scaling.rs sets out in full,
+//! including why the 3.0x ceiling is not relaxed and why wall clock is the
+//! instrument.
 //!
-//! # Why this file now takes the best of five, like its sibling
+//! # Why this file takes the best of five, like its sibling
 //!
 //! It takes the best of five timings of each shape, like its sibling. The minimum
 //! of five cuts BOTH failure modes: a false red, and a real sub-threshold regression
-//! hidden inside a wide noise floor. The 3.0x ceiling is untouched.
+//! hidden inside a wide noise floor. The 3.0x ceiling is not relaxed.
 use std::time::Instant;
 
 /// The best of `REPEATS` timings of `run` - the same instrument, and the same
@@ -85,14 +85,13 @@ fn validate_ir_does_not_scale_quadratically_in_column_count() {
     let wide = best_of(|| validate_shape(OPS, 8));
     let ratio = wide / narrow;
 
-    // The op count is IDENTICAL in both runs, so a well-behaved gate does at most
-    // ~2x the work for 2x the columns. Quadratic-in-columns is ~4x; this measured
-    // 3.4x before the fix and ~2.0x after. The threshold sits between them.
+    // Quadratic-in-columns is ~4x; linear is ~2x. The threshold sits between
+    // them with room for noise.
     assert!(
         ratio < 3.0,
         "doubling the columns per table at a FIXED op count multiplied validate_ir \
-         cost by {ratio:.1}x ({narrow:.3}s -> {wide:.3}s). Above ~4x means a pass is \
-         scanning the whole declaration map once per column again, which is the \
-         quadratic scan the fix removed"
+         cost by {ratio:.1}x ({narrow:.3}s -> {wide:.3}s). Above ~4x means a pass \
+         scans the whole declaration map once per column and the per-column cost \
+         grows with the total column count"
     );
 }
