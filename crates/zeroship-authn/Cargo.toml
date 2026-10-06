@@ -21,7 +21,7 @@ zeroship-core = { workspace = true }
 [dev-dependencies]
 # Database cases run in compio; fixtures own their PostgreSQL containers.
 base64 = { workspace = true }
-compio = { workspace = true, features = ["polling"] }
+compio = { workspace = true }
 futures = { workspace = true }
 # The platform database every test process of the worktree shares, joined
 # through the testkit; its watchdog removes it once no process holds its lease.

@@ -85,8 +85,6 @@ compio-postgres = { workspace = true, features = ["with-chrono-0_4", "with-serde
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 
 [dev-dependencies]
-# Database cases share the worktree's migrated server and run on compio.
-compio = { workspace = true, features = ["polling"] }
 zeroship-testkit = { workspace = true }
 # The generated-controls test parses an overlay fixture to prove the
 # observability tier is read from the canonical TOML path.
