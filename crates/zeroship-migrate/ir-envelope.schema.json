@@ -5165,7 +5165,7 @@
       ]
     },
     "CreateIndexAttributes": {
-      "description": "Attributes on `Op::CreateIndex`.\n\nAttributes on `Op::CreateIndex` -- an index's storage parameters.\n\nThis carrier RETIRED `IndexStorageParams`, which held PostgreSQL's `fillfactor`\nand `pages_per_range` as named fields in this neutral crate and in the neutral\ncontract crate's `IndexSnapshot`. Both are now ordinary declarations in the\nPostgreSQL crate, and core's drift pass no longer spells either name.",
+      "description": "Attributes on `Op::CreateIndex`.\n\nAttributes on `Op::CreateIndex` -- an index's storage parameters.\n\nThis carrier RETIRED `IndexStorageParams`, which held PostgreSQL's `fillfactor`\nand `pages_per_range` as named fields in this neutral crate and in the neutral\ncontract crate's `IndexSnapshot`. Both are ordinary declarations in the\nPostgreSQL crate, and core's drift pass does not spell either name.",
       "$ref": "#/$defs/Attributes"
     },
     "Attributes": {
