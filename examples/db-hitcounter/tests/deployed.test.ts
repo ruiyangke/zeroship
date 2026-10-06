@@ -1,7 +1,7 @@
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { launchChromium } from "@zeroship/example-fixtures";
+import { launchChromium } from "@zeroship/example-testkit";
 import { afterAll, beforeAll, expect, test } from "vitest";
 import { assertUsage, type Usage } from "./billing";
 import { Platform } from "./fixture/settings";

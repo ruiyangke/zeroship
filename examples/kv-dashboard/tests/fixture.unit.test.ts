@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "vitest";
-import { Processes } from "@zeroship/example-fixtures";
+import { Processes } from "@zeroship/example-testkit";
 
 async function fixture(run: (processes: Processes, directory: string) => Promise<void>) {
   const directory = await mkdtemp(join(tmpdir(), "kv-process-test-"));

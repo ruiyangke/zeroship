@@ -1,5 +1,5 @@
 import { defineConfig } from "@playwright/test";
-import { chromiumExecutable } from "@zeroship/example-fixtures";
+import { chromiumExecutable } from "@zeroship/example-testkit";
 import { readyOrigin, testOrigin } from "./tests/fixture/settings";
 const executablePath = chromiumExecutable();
 export default defineConfig({

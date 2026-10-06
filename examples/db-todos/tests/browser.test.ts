@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { launchChromium, pageFixtures, type PageWatch } from "@zeroship/example-fixtures";
+import { launchChromium, pageFixtures, type PageWatch } from "@zeroship/example-testkit";
 import type { Browser, BrowserContext, Page } from "playwright";
 import { afterAll, beforeAll, describe, inject, test as base } from "vitest";
 import { targets } from "./targets";

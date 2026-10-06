@@ -1,5 +1,5 @@
 import { fileURLToPath } from "node:url";
-import { DatabasePlatform, prepare, type DatabaseSettings } from "@zeroship/example-fixtures";
+import { DatabasePlatform, prepare, type DatabaseSettings } from "@zeroship/example-testkit";
 
 const exampleDir = fileURLToPath(new URL("../../", import.meta.url));
 

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ServicesPlatform, prepare, type ServicesSettings } from "@zeroship/example-fixtures";
+import { ServicesPlatform, prepare, type ServicesSettings } from "@zeroship/example-testkit";
 import { typedIdFromStableSeed } from "@zeroship/server/typed-id";
 
 const exampleDir = fileURLToPath(new URL("../../", import.meta.url));

@@ -1,6 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { launchChromium } from "@zeroship/example-fixtures";
+import { launchChromium } from "@zeroship/example-testkit";
 import { expect, inject, test } from "vitest";
 import { targets } from "./targets";
 

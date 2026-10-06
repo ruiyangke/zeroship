@@ -17,7 +17,7 @@
   "devDependencies": {
     "@playwright/test": "catalog:",
     "@types/node": "catalog:",
-    "@zeroship/example-fixtures": "workspace:*",
+    "@zeroship/example-testkit": "workspace:*",
     "@zeroship/server": "workspace:*",
     "playwright": "catalog:",
     "typescript": "catalog:",

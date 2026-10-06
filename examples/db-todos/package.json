@@ -24,7 +24,7 @@
     "react-dom": "catalog:react18"
   },
   "devDependencies": {
-    "@zeroship/example-fixtures": "workspace:*",
+    "@zeroship/example-testkit": "workspace:*",
     "@types/node": "catalog:",
     "@playwright/test": "catalog:",
     "@testing-library/dom": "^10.4.1",

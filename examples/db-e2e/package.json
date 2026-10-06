@@ -22,6 +22,6 @@
     "typescript": "catalog:",
     "vite": "catalog:",
     "zeroship": "workspace:*",
-    "@zeroship/example-fixtures": "workspace:*"
+    "@zeroship/example-testkit": "workspace:*"
   }
 }

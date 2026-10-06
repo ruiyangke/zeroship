@@ -13,7 +13,7 @@
     "@zeroship/workflows": "workspace:*"
   },
   "devDependencies": {
-    "@zeroship/example-fixtures": "workspace:*",
+    "@zeroship/example-testkit": "workspace:*",
     "@zeroship/server": "workspace:*",
     "@zeroship/types": "workspace:*",
     "@zeroship/vite-plugin": "workspace:*",

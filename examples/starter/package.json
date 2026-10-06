@@ -24,7 +24,7 @@
     "@types/node": "catalog:",
     "@types/react": "catalog:react18",
     "@types/react-dom": "catalog:react18",
-    "@zeroship/example-fixtures": "workspace:*",
+    "@zeroship/example-testkit": "workspace:*",
     "playwright": "catalog:",
     "typescript": "catalog:",
     "vite": "catalog:",

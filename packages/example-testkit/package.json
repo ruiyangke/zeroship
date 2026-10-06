@@ -1,5 +1,5 @@
 {
-  "name": "@zeroship/example-fixtures",
+  "name": "@zeroship/example-testkit",
   "version": "0.0.0",
   "private": true,
   "description": "Shared end-to-end platform, process, issuer and browser fixtures for the example suites",

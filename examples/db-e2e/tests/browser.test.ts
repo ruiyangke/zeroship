@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { launchChromium } from "@zeroship/example-fixtures";
+import { launchChromium } from "@zeroship/example-testkit";
 import { expect, test } from "vitest";
 import { target } from "./target";
 

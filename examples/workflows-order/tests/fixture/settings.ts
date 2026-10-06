@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { WorkflowPlatform, prepare, type WorkflowSettings } from "@zeroship/example-fixtures";
+import { WorkflowPlatform, prepare, type WorkflowSettings } from "@zeroship/example-testkit";
 import { typedIdFromStableSeed } from "@zeroship/server/typed-id";
 
 const exampleDir = fileURLToPath(new URL("../../", import.meta.url));

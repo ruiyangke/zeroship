@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { PlatformBase, WorkflowPlatform, prepare, type WorkflowSettings } from "@zeroship/example-fixtures";
+import { PlatformBase, WorkflowPlatform, prepare, type WorkflowSettings } from "@zeroship/example-testkit";
 import { typedIdFromStableSeed } from "@zeroship/server/typed-id";
 
 const exampleDir = fileURLToPath(new URL("../../", import.meta.url));

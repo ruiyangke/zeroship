@@ -17,7 +17,7 @@
     "@zeroship/vite-plugin": "workspace:*"
   },
   "devDependencies": {
-    "@zeroship/example-fixtures": "workspace:*",
+    "@zeroship/example-testkit": "workspace:*",
     "@zeroship/migrate": "workspace:*",
     "@zeroship/types": "workspace:*",
     "typescript": "catalog:",
