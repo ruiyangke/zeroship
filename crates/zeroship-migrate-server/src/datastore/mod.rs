@@ -227,7 +227,7 @@ impl Reconciler {
             return Ok((datastore, report));
         }
 
-        cluster::apply_bootstrap_corpus(&admin).await?;
+        cluster::apply_bootstrap_corpus(&mut admin).await?;
         if registration.status == DATASTORE_STATUS_PENDING {
             report.datastore_activated = self.control.activate_datastore(&datastore).await?;
         }

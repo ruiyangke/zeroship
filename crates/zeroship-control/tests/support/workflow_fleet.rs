@@ -513,7 +513,7 @@ impl Fleet {
         // reaches it through ITS binding role.
         declare_creator_database(&pg, &fleet.app_id, &fleet.creator_database, &fleet.binding)
             .await;
-        zeroship_migrate_server::datastore::cluster::apply_bootstrap_corpus(&creator_pg)
+        zeroship_migrate_server::datastore::cluster::apply_bootstrap_corpus(&mut creator_pg)
             .await
             .expect("bootstrap the creator cluster");
         zeroship_migrate_server::datastore::cluster::converge_database(

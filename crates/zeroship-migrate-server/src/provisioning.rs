@@ -86,23 +86,41 @@ pub(crate) fn migrator_executor_config_for_role(schema: &str, role: &str) -> Exe
     config
 }
 
+/// How many attempts a statement, or a whole converged pass, gets against the
+/// catalog contention below before the error is the caller's.
+pub(crate) const CONTENTION_ATTEMPTS: u32 = 8;
+
+/// Whether `error` is the brief `tuple concurrently updated` catalog contention
+/// that concurrent role/grant DDL produces.
+///
+/// One spelling of the question, because the answer decides whether the work is
+/// re-run: [`exec_retry`] re-runs a statement, and
+/// [`crate::datastore::cluster::apply_bootstrap_corpus`] re-runs the
+/// transaction that statement sits in.
+pub(crate) fn is_catalog_contention(error: &compio_postgres::Error) -> bool {
+    error
+        .as_db_error()
+        .is_some_and(|db| db.message().contains("tuple concurrently updated"))
+}
+
+/// The pause before the attempt after `attempt` contended.
+pub(crate) async fn after_catalog_contention(attempt: u32) {
+    compio::time::sleep(std::time::Duration::from_millis(u64::from(attempt) * 10)).await;
+}
+
 /// Retry a batch statement over the brief `tuple concurrently updated` catalog
 /// contention that concurrent role/grant DDL can produce (matches the in-tree
 /// `exec_retry`).
 pub(crate) async fn exec_retry(admin: &Client, sql: &str) -> Result<(), compio_postgres::Error> {
-    const MAX_ATTEMPTS: u32 = 8;
     let mut attempt = 0;
     loop {
         match admin.batch_execute(sql).await {
             Ok(()) => return Ok(()),
             Err(e) => {
-                let transient = e
-                    .as_db_error()
-                    .is_some_and(|db| db.message().contains("tuple concurrently updated"));
+                let transient = is_catalog_contention(&e);
                 attempt += 1;
-                if transient && attempt < MAX_ATTEMPTS {
-                    compio::time::sleep(std::time::Duration::from_millis(u64::from(attempt) * 10))
-                        .await;
+                if transient && attempt < CONTENTION_ATTEMPTS {
+                    after_catalog_contention(attempt).await;
                     continue;
                 }
                 return Err(e);

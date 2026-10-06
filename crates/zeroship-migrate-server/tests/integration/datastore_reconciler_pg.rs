@@ -38,7 +38,7 @@ use uuid::Uuid;
 use zeroship_core::database_role::DatabaseCapability;
 use zeroship_core::{database_derivation, BindingId, DatabaseId};
 use zeroship_migrate_server::apply::WORKER_ROLE;
-use zeroship_migrate_server::datastore::cluster::{ADMIN_SCHEMA, RELAY_ROLE};
+use zeroship_migrate_server::datastore::cluster::{self, ClusterError, ADMIN_SCHEMA, RELAY_ROLE};
 use zeroship_migrate_server::datastore::control::{ControlStore, SoleZone};
 use zeroship_migrate_server::datastore::{PassReport, ReconcileError, Reconciler};
 
@@ -590,6 +590,364 @@ async fn a_pass_registers_bootstraps_and_converges_then_a_second_pass_changes_no
         !before.roles.is_empty() && !before.memberships.is_empty(),
         "the control for the comparison above: it must not be comparing two empty sets"
     );
+}
+
+/// Two concurrent bootstraps of one fresh cluster serialize and both succeed.
+///
+/// A bootstrap is a check-then-act: the guarded `CREATE ROLE` and
+/// `CREATE SCHEMA IF NOT EXISTS` both read the catalog and then insert. Two
+/// replicas of this service converge one cluster through one provisioning DSN,
+/// so without a lock both can read an object absent and both insert it, and the
+/// loser is refused `23505` on `pg_authid_rolname_index` or
+/// `pg_namespace_nspname_index`.
+///
+/// THE OVERLAP IS FORCED, NOT RACED. A control transaction holds the bootstrap
+/// lock AND an uncommitted `zeroship_worker` role: every bootstrap is made to
+/// wait on the control transaction before it can finish, on the lock the corpus
+/// takes or on the role's unique index, and the control commits only after the
+/// server reports both waiting. Whichever refusal then surfaces comes from a
+/// forced overlap rather than a race.
+///
+/// The advisory wait is captured while both are parked and asserted after the
+/// join, so a failing join reports the server's own refusal rather than this
+/// check.
+///
+/// The cluster is this case's own, so both runs install the logins and the
+/// schema rather than finding them there, and the state asserted at the end is
+/// the work of the two of them.
+#[ntex::test]
+async fn two_concurrent_bootstraps_of_one_cluster_both_succeed() {
+    // Must equal `zeroship_migrate_server::datastore::cluster::BOOTSTRAP_LOCK`.
+    // A literal rather than the constant, so this case does not depend on the
+    // constant being exported: the two have to agree, or the advisory wait
+    // below goes unsatisfied and this case fails rather than silently
+    // measuring nothing.
+    const BOOTSTRAP_LOCK_KEY: &str = "__zeroship_bootstrap_corpus";
+
+    let cluster_fixture = crate::support::fixture::tenant::Cluster::start();
+    let observer = connect(cluster_fixture.url()).await;
+    let mut first = connect(cluster_fixture.url()).await;
+    let mut second = connect(cluster_fixture.url()).await;
+    let first_pid = backend_pid(&first).await;
+    let second_pid = backend_pid(&second).await;
+
+    // THE CONTROL. One transaction holding the bootstrap lock AND a conflicting
+    // half-built cluster: the uncommitted role carries each bootstrap past the
+    // existence check, and the lock is where a serialized bootstrap queues.
+    let control = connect(cluster_fixture.url()).await;
+    control
+        .batch_execute(&format!(
+            "BEGIN;
+             SELECT pg_advisory_xact_lock(hashtextextended('{BOOTSTRAP_LOCK_KEY}', 0));
+             CREATE ROLE \"{WORKER_ROLE}\" LOGIN;"
+        ))
+        .await
+        .expect("hold the bootstrap lock and a conflicting half-built cluster");
+
+    let runs = [
+        compio::runtime::spawn(async move { cluster::apply_bootstrap_corpus(&mut first).await }),
+        compio::runtime::spawn(async move { cluster::apply_bootstrap_corpus(&mut second).await }),
+    ];
+
+    // BOTH backends must be parked on the control transaction. The server
+    // reports the waiters; nothing here selects a winner.
+    assert!(
+        every_backend_blocked(&observer, &[first_pid, second_pid]).await,
+        "both bootstraps must wait on the control transaction before it is released"
+    );
+    // THE MECHANISM, read while both are parked: each queues on the corpus's
+    // advisory lock, not on whatever catalog row it reached first. Captured
+    // here and asserted after the join, so the server's own refusal is what a
+    // failing join reports.
+    let advisory: Vec<(i32, bool)> = vec![
+        (first_pid, waiting_on_advisory_lock(&observer, first_pid).await),
+        (
+            second_pid,
+            waiting_on_advisory_lock(&observer, second_pid).await,
+        ),
+    ];
+
+    control
+        .batch_execute("COMMIT")
+        .await
+        .expect("release the bootstrap lock and publish the held role");
+
+    let [first_run, second_run] = runs;
+    for (name, outcome) in [
+        ("first", first_run.await),
+        ("second", second_run.await),
+    ] {
+        outcome
+            .unwrap_or_else(|_| panic!("the {name} bootstrap task panicked"))
+            .unwrap_or_else(|error| panic!("the {name} bootstrap of one cluster failed: {error:?}"));
+    }
+
+    assert!(
+        advisory.iter().all(|(_, waiting)| *waiting),
+        "each parked bootstrap must queue on the corpus's advisory lock rather than on \
+         whatever else it reached first: {advisory:?}"
+    );
+
+    // The state BOTH runs converged. The two logins and nothing else is the
+    // whole cluster-global surface; the schema is what recognises a
+    // bootstrapped cluster, and its PUBLIC grant is the one thing the corpus
+    // revokes in the same breath it creates it.
+    assert_eq!(
+        platform_roles(&observer).await,
+        vec![RELAY_ROLE.to_owned(), WORKER_ROLE.to_owned()],
+        "the corpus installs the two platform logins and nothing else"
+    );
+    assert!(
+        schemas(&observer).await.contains(&ADMIN_SCHEMA.to_owned()),
+        "the corpus installs the platform's own schema"
+    );
+    assert!(
+        !granted_to_public(&observer, ADMIN_SCHEMA).await,
+        "{ADMIN_SCHEMA} carries no PUBLIC grant, so the corpus's revoke landed"
+    );
+    assert!(
+        extension_installed(&observer, "citext").await,
+        "citext is what a creator's case-insensitive column lowers to"
+    );
+    // The control for the attributes: the corpus asserts them on every pass,
+    // and the relay's REPLICATION beside the worker's absence of it is the
+    // whole reason the two logins are not one.
+    let attributes: Vec<(String, bool, bool, bool)> = observer
+        .query(
+            "SELECT rolname, rolreplication, rolsuper, rolinherit FROM pg_roles \
+              WHERE rolname = $1 OR rolname = $2 ORDER BY rolname",
+            &[&RELAY_ROLE, &WORKER_ROLE],
+        )
+        .await
+        .expect("read the platform logins' attributes")
+        .iter()
+        .map(|row| {
+            (
+                row.get("rolname"),
+                row.get("rolreplication"),
+                row.get("rolsuper"),
+                row.get("rolinherit"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        attributes,
+        vec![
+            (RELAY_ROLE.to_owned(), true, false, false),
+            (WORKER_ROLE.to_owned(), false, false, true),
+        ],
+        "(name, REPLICATION, SUPERUSER, INHERIT): the relay decodes logical WAL and the \
+         worker executes creator code, so neither may be superuser and only the worker may \
+         inherit"
+    );
+}
+
+/// A pass that fails leaves the cluster as it found it, because the corpus is
+/// ONE transaction.
+///
+/// `datastores.status` is the convergence signal, and the reconciler only
+/// activates a datastore once this call returns, so a half-installed corpus
+/// would sit on a cluster nothing is willing to use - carrying the logins a
+/// failed pass minted, without the schema that recognises a bootstrapped
+/// cluster. Rolling the pass back leaves one state to reason about: a cluster
+/// that failed, which the next pass retries from the beginning.
+///
+/// The failure is forced rather than provoked. `public` is where the corpus
+/// installs `citext`, and dropping the schema makes that LAST step the one that
+/// fails - so the error naming it is the control that this pass got that far
+/// rather than stopping at its first.
+#[ntex::test]
+async fn a_bootstrap_that_fails_mid_pass_leaves_the_cluster_unchanged() {
+    let cluster_fixture = crate::support::fixture::tenant::Cluster::start();
+    let observer = connect(cluster_fixture.url()).await;
+    let mut admin = connect(cluster_fixture.url()).await;
+    admin
+        .batch_execute("DROP SCHEMA public CASCADE")
+        .await
+        .expect("the case's cluster loses the schema the corpus installs citext into");
+
+    let failed = cluster::apply_bootstrap_corpus(&mut admin)
+        .await
+        .expect_err("citext cannot be installed into a schema that is not there");
+    let ClusterError::Query(cause) = &failed else {
+        panic!("a corpus that cannot install citext reports the statement that refused: {failed:?}");
+    };
+    let refusal = cause
+        .as_db_error()
+        .unwrap_or_else(|| panic!("the refusal carries the server's own error: {cause:?}"));
+    assert_eq!(
+        refusal.code().code(),
+        "3F000",
+        "the refusal must be `undefined_schema` on the extension's target: {refusal:?}"
+    );
+    assert!(
+        refusal.message().contains("public"),
+        "the refusal must name the schema the corpus installs citext into, so this pass reached \
+         its last step rather than stopping early: {refusal:?}"
+    );
+
+    assert!(
+        platform_roles(&observer).await.is_empty(),
+        "a failed pass must leave no login behind: {failed:?}"
+    );
+    assert!(
+        !schemas(&observer).await.contains(&ADMIN_SCHEMA.to_owned()),
+        "and no platform schema: {failed:?}"
+    );
+}
+
+/// A pass that meets catalog contention re-runs ITSELF, and re-runs all of it.
+///
+/// `ALTER ROLE` over a row another writer has updated since this transaction
+/// read it is the `tuple concurrently updated` this rides over, and the
+/// statement that reports it is early in the pass - so a retry that resumed at
+/// the statement would leave the schema and the extension behind. The unit that
+/// can be re-run is the transaction, and the control is what the re-run reached:
+/// the schema is created AFTER the statement that contended.
+///
+/// The contention is forced rather than raced: a second session holds the
+/// worker login's catalog row open, the corpus is observed waiting on it, and
+/// only then is the holder committed.
+#[ntex::test]
+async fn catalog_contention_mid_pass_retries_the_whole_bootstrap() {
+    let cluster_fixture = crate::support::fixture::tenant::Cluster::start();
+    let observer = connect(cluster_fixture.url()).await;
+
+    // The login the corpus will converge, already standing - which is what puts
+    // its `ALTER ROLE` in contention rather than a `CREATE ROLE`.
+    let seeder = connect(cluster_fixture.url()).await;
+    seeder
+        .batch_execute(&format!("CREATE ROLE \"{WORKER_ROLE}\" LOGIN"))
+        .await
+        .expect("the login under contention stands before the pass converges it");
+
+    let mut holder = connect(cluster_fixture.url()).await;
+    let contending = holder.transaction().await.expect("begin the contending writer");
+    contending
+        .batch_execute(&format!(
+            "UPDATE pg_catalog.pg_authid SET rolconnlimit = rolconnlimit \
+              WHERE rolname = '{WORKER_ROLE}'"
+        ))
+        .await
+        .expect("hold the worker login's catalog row open");
+
+    let mut admin = connect(cluster_fixture.url()).await;
+    let pid = backend_pid(&admin).await;
+    let pass =
+        compio::runtime::spawn(async move { cluster::apply_bootstrap_corpus(&mut admin).await });
+    assert!(
+        every_backend_blocked(&observer, &[pid]).await,
+        "the pass must reach the worker login's ALTER ROLE while the catalog row is held"
+    );
+
+    contending
+        .commit()
+        .await
+        .expect("release the catalog row the pass is waiting on");
+
+    pass.await
+        .unwrap_or_else(|_| panic!("the bootstrap task panicked"))
+        .expect("a pass that meets catalog contention re-runs rather than failing the cluster");
+
+    // The control for the re-run: the schema is created after the contending
+    // statement, so its presence says the pass restarted rather than resumed.
+    assert!(
+        schemas(&observer).await.contains(&ADMIN_SCHEMA.to_owned()),
+        "the re-run must reach the steps after the one that contended"
+    );
+    assert!(
+        extension_installed(&observer, "citext").await,
+        "and the last step of all"
+    );
+}
+
+/// The backend id of `client`, which is how a wait is attributed to a session.
+async fn backend_pid(client: &Client) -> i32 {
+    client
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .expect("read this connection's backend id")
+        .get(0)
+}
+
+/// Whether every one of `pids` is waiting on a lock, asked of the server.
+///
+/// A bounded wait on an OBSERVABLE, not a pause long enough to hope: the release
+/// this guards happens only once both backends are seen parked, so the overlap
+/// is the one the caller forced rather than one it slept into.
+async fn every_backend_blocked(observer: &Client, pids: &[i32]) -> bool {
+    assert!(
+        !pids.is_empty(),
+        "a wait needs at least one backend to be waiting, or it is vacuously satisfied"
+    );
+    compio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let blocked: bool = observer
+                .query_one(
+                    "SELECT bool_and(cardinality(pg_blocking_pids(pid)) > 0) \
+                       FROM unnest($1::int[]) AS requested(pid)",
+                    &[&pids],
+                )
+                .await
+                .expect("observe the waiting bootstraps")
+                .get(0);
+            if blocked {
+                return;
+            }
+            compio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+/// Whether `pid` is waiting on PostgreSQL's `advisory` wait event.
+///
+/// Named rather than inlined because the corpus's lock is the one thing the
+/// bootstrap's serialization claim rests on, and `wait_event = 'advisory'` is
+/// the server's own answer to "which lock is this backend queued behind" -
+/// asked of the server, not inferred from the timing of a sleep.
+async fn waiting_on_advisory_lock(observer: &Client, pid: i32) -> bool {
+    let advisory: bool = observer
+        .query_one(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM pg_stat_activity
+                 WHERE pid = $1
+                   AND wait_event_type = 'Lock'
+                   AND wait_event = 'advisory'
+             )",
+            &[&pid],
+        )
+        .await
+        .expect("observe the wait event of the waiting bootstrap")
+        .get(0);
+    advisory
+}
+
+/// Whether `PUBLIC` holds any privilege at all on the named schema.
+async fn granted_to_public(cluster: &Client, schema: &str) -> bool {
+    cluster
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM pg_namespace n, lateral aclexplode(n.nspacl) entry \
+              WHERE n.nspname = $1 AND entry.grantee = 0) AS public_grant",
+            &[&schema],
+        )
+        .await
+        .expect("read the schema's ACL")
+        .get::<_, bool>("public_grant")
+}
+
+/// Whether `name` is installed in this database.
+async fn extension_installed(cluster: &Client, name: &str) -> bool {
+    cluster
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = $1) AS installed",
+            &[&name],
+        )
+        .await
+        .expect("read the extension catalog")
+        .get::<_, bool>("installed")
 }
 
 /// A converged binding reaches its own database and is refused another's, and

@@ -57,7 +57,9 @@ use zeroship_core::database_role::{self, DatabaseCapability, RoleNameTooLong};
 use zeroship_core::{BindingId, DatabaseId};
 
 use crate::apply::{quote_ident, quote_lit, WORKER_ROLE};
-use crate::provisioning::exec_retry;
+use crate::provisioning::{
+    after_catalog_contention, exec_retry, is_catalog_contention, CONTENTION_ATTEMPTS,
+};
 
 /// The login the CDC relay opens logical decoding with.
 ///
@@ -96,6 +98,22 @@ pub enum ClusterError {
     WorkerHoldsDatabaseRoles { roles: String },
 }
 
+/// The advisory-lock key the corpus serializes on.
+///
+/// Keyed on the installer itself, the object being converged, rather than on a
+/// role, a schema or a database, following the `hashtextextended` form
+/// `crate::publication` uses for the datastore publication mutex: the string is
+/// what a second bootstrap of the same cluster has to hash to, or the two
+/// serialize against nothing.
+///
+/// The key is taken in the database the bootstrap connects through, so it
+/// serializes bootstraps that reach the cluster through the same database,
+/// while the worker and relay roles it guards are cluster-global.
+///
+/// Named rather than inlined because a contract has to hold the very key the
+/// corpus takes, to hold the overlap open and observe what queues behind it.
+pub const BOOTSTRAP_LOCK: &str = "__zeroship_bootstrap_corpus";
+
 /// Apply the datastore bootstrap corpus.
 ///
 /// # Why there is no cluster-side journal
@@ -112,6 +130,31 @@ pub enum ClusterError {
 /// said `pending` could never reach a cluster that was bootstrapped before the
 /// corpus grew a step.
 ///
+/// # Two bootstraps of one cluster are serialized, not raced
+///
+/// Every step is a check followed by a create, and `PostgreSQL` resolves the
+/// two separately. One session may read "this login is absent" and create it.
+/// Two overlapping ones both read absent, both create, and the second insert
+/// reports `duplicate key value violates unique constraint
+/// "pg_namespace_nspname_index"` over a schema the first one already made -
+/// with the corpus half installed and no statement saying which half. The same
+/// race over `pg_authid` loses the worker or the relay login instead.
+///
+/// So the whole corpus is ONE transaction whose FIRST statement takes the
+/// corpus lock, ahead of every existence check, and the lock is held to the
+/// commit. `xact` scope is the whole point: a session that dies or rolls back
+/// mid-pass releases the lock with its transaction, so a crashed bootstrap
+/// cannot wedge the next one, and the pass is atomic, so a failure leaves the
+/// cluster exactly as it was rather than carrying the logins without the schema
+/// that recognises a bootstrapped cluster.
+///
+/// Advisory locks are scoped to the database that takes them, and a bootstrap
+/// enters through exactly one cluster DSN - [`crate::datastore::Reconciler`]
+/// holds one `cluster_dsn` and runs one pass at a time - so the key is one per
+/// cluster in the product's own topology: a second replica of the reconcile
+/// loop, an overlapping restart during a deploy and every test process sharing
+/// a server all converge through the same database and queue behind it.
+///
 /// # The logins carry no password, and that is the fail-closed direction
 ///
 /// A cluster's authentication material is deployment, not product. The
@@ -124,12 +167,48 @@ pub enum ClusterError {
 /// # Errors
 ///
 /// [`ClusterError::Query`] on any DDL failure.
-pub async fn apply_bootstrap_corpus(admin: &Client) -> Result<(), ClusterError> {
+pub async fn apply_bootstrap_corpus(admin: &mut Client) -> Result<(), ClusterError> {
+    let mut attempt = 0;
+    loop {
+        match bootstrap_once(admin).await {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                // THE RETRY IS THE PASS'S, not a statement's. Inside the
+                // transaction a failed statement has already aborted it, so
+                // `exec_retry` over `transaction.batch_execute` would replay
+                // into an aborted block and report `25P02` in place of the
+                // contention it was riding over. The transaction is the unit
+                // that can be re-run, and re-running it re-reads every
+                // existence check against the state the contending writer
+                // committed.
+                let contention =
+                    matches!(&error, ClusterError::Query(cause) if is_catalog_contention(cause));
+                attempt += 1;
+                if contention && attempt < CONTENTION_ATTEMPTS {
+                    after_catalog_contention(attempt).await;
+                    continue;
+                }
+                return Err(error);
+            }
+        }
+    }
+}
+
+/// ONE transaction, and its first statement is the lock.
+async fn bootstrap_once(admin: &mut Client) -> Result<(), ClusterError> {
     let worker_q = quote_ident(WORKER_ROLE);
     let worker_lit = quote_lit(WORKER_ROLE);
     let relay_q = quote_ident(RELAY_ROLE);
     let relay_lit = quote_lit(RELAY_ROLE);
     let admin_schema_q = quote_ident(ADMIN_SCHEMA);
+
+    let transaction = admin.transaction().await?;
+    transaction
+        .query_text_params(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            &[BOOTSTRAP_LOCK],
+        )
+        .await?;
 
     // The worker login. NOSUPERUSER / NOCREATEDB / NOCREATEROLE keep schema
     // change out of the process that runs creator code; NOREPLICATION keeps
@@ -137,65 +216,58 @@ pub async fn apply_bootstrap_corpus(admin: &Client) -> Result<(), ClusterError> 
     // policies a creator declares. `ALTER ROLE` after the guarded create is
     // what converges a role an operator made by hand with a wider attribute
     // set, and it deliberately names no PASSWORD.
-    exec_retry(
-        admin,
-        &format!(
+    transaction
+        .batch_execute(&format!(
             "DO $bootstrap_worker$ BEGIN
                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{worker_lit}') THEN
                     EXECUTE 'CREATE ROLE {worker_q} LOGIN';
                 END IF;
              END $bootstrap_worker$"
-        ),
-    )
-    .await?;
-    exec_retry(
-        admin,
-        &format!(
+        ))
+        .await?;
+    transaction
+        .batch_execute(&format!(
             "ALTER ROLE {worker_q} WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE \
              NOREPLICATION NOBYPASSRLS INHERIT"
-        ),
-    )
-    .await?;
+        ))
+        .await?;
 
     // The relay login. REPLICATION is the one attribute it has and the worker
     // must not: logical decoding consults no column ACL, so the process that
     // holds it is the one that must not execute creator code.
-    exec_retry(
-        admin,
-        &format!(
+    transaction
+        .batch_execute(&format!(
             "DO $bootstrap_relay$ BEGIN
                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{relay_lit}') THEN
                     EXECUTE 'CREATE ROLE {relay_q} LOGIN';
                 END IF;
              END $bootstrap_relay$"
-        ),
-    )
-    .await?;
-    exec_retry(
-        admin,
-        &format!(
+        ))
+        .await?;
+    transaction
+        .batch_execute(&format!(
             "ALTER ROLE {relay_q} WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE \
              NOINHERIT REPLICATION NOBYPASSRLS"
-        ),
-    )
-    .await?;
+        ))
+        .await?;
 
     // The platform's own schema, empty and revoked from PUBLIC.
-    exec_retry(
-        admin,
-        &format!(
+    transaction
+        .batch_execute(&format!(
             "CREATE SCHEMA IF NOT EXISTS {admin_schema_q};
              REVOKE ALL ON SCHEMA {admin_schema_q} FROM PUBLIC;"
-        ),
-    )
-    .await?;
+        ))
+        .await?;
 
     // `citext` is what the platform's own case-insensitive text columns lower
     // to, so a creator declaring one on a tenant cluster needs it resolvable.
     // It is contrib, shipped with every standard distribution, and a cluster
     // without it fails here loudly rather than at a creator's first apply.
-    exec_retry(admin, "CREATE EXTENSION IF NOT EXISTS citext WITH SCHEMA public").await?;
+    transaction
+        .batch_execute("CREATE EXTENSION IF NOT EXISTS citext WITH SCHEMA public")
+        .await?;
 
+    transaction.commit().await?;
     Ok(())
 }
 

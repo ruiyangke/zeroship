@@ -228,7 +228,7 @@ impl Cluster {
         let mut admin = connect(&url).await;
         require_pinned_major(&admin).await;
         let lock = lock_role_provisioning(&url).await;
-        cluster::apply_bootstrap_corpus(&admin)
+        cluster::apply_bootstrap_corpus(&mut admin)
             .await
             .expect("the datastore bootstrap corpus applies");
 

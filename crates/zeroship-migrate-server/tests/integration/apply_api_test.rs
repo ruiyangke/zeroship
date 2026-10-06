@@ -384,7 +384,7 @@ async fn converge_database_schema(database: &DatabaseId) {
         let _ = conn.run().await;
     })
     .detach();
-    cluster::apply_bootstrap_corpus(&client)
+    cluster::apply_bootstrap_corpus(&mut client)
         .await
         .expect("bootstrap this cluster's platform roles and admin schema");
     cluster::converge_database(&mut client, database)

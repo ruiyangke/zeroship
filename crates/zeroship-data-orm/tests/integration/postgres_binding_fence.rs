@@ -907,7 +907,7 @@ impl MaskedFence {
         let mut admin = connect(&url).await;
         require_pinned_major(&admin).await;
         let lock = lock_role_provisioning(&url).await;
-        cluster::apply_bootstrap_corpus(&admin)
+        cluster::apply_bootstrap_corpus(&mut admin)
             .await
             .expect("the datastore bootstrap corpus applies");
 
@@ -1413,8 +1413,8 @@ async fn a_binding_fence_does_not_decide_a_sibling_suites_worker_password() {
     // A sibling suite's own convention on the cluster-global login. No advisory
     // lock: this case is the private server's only lease, and no other suite's
     // role DDL runs against it.
-    let probe = connect(&postgres.url()).await;
-    cluster::apply_bootstrap_corpus(&probe)
+    let mut probe = connect(&postgres.url()).await;
+    cluster::apply_bootstrap_corpus(&mut probe)
         .await
         .expect("the datastore bootstrap corpus applies");
     probe
