@@ -61,7 +61,7 @@ type FixtureSchemas<T> = {
 /**
  * Build the projection the host would emit for `schemas`: the decoded
  * `FieldDef` map plus the declared named indexes, with no per-collection
- * options (the installer no longer reads them).
+ * options (the installer ignores them).
  *
  * A declaration is either a `SchemaBuilder` — which carries named indexes
  * alongside its fields — or a bare field record, which carries only fields.

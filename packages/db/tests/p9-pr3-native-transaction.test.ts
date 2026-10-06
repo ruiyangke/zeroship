@@ -1,5 +1,5 @@
 /**
- * P9 PR 3 — `env.db.transaction(fn)` rides the native orchestrator.
+ * `env.db.transaction(fn)` rides the native orchestrator.
  *
  * Transaction begin/commit/rollback/nested-savepoint moved into Rust
  * (`crates/zeroship-data-orm/src/transaction/mod.rs`). The
@@ -223,8 +223,7 @@ describe("P9 PR 3 — native env.db.transaction(fn)", () => {
       { posts: { title: t.string().required() } },
       { native },
     );
-    // The native primitive was deleted in P9 PR 3 — neither the mock nor
-    // the installed surface exposes `beginTransaction`.
+    // Neither the mock nor the installed surface exposes `beginTransaction`.
     assert.equal(
       (db as unknown as Record<string, unknown>).beginTransaction,
       undefined,

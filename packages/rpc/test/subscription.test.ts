@@ -235,8 +235,7 @@ describe("subscribeCall — happy path", () => {
   });
 
   test("the bearer token is never put on the wire as a subprotocol", async () => {
-    // The client used to append `auth.zsbearer.<jwt>` to the protocol
-    // list, on the stated rationale that "the gateway adapts". No server
+    // The client puts no bearer token on the wire as a subprotocol. No server
     // in this repo reads it: the gateway resolves identity from
     // `Authorization: Bearer`, the session cookie, then the IP
     // (`crates/zeroship-gateway/src/router/dispatch.rs`), and the subscription

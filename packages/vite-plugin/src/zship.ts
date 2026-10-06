@@ -166,8 +166,8 @@ interface RuntimeDescriptorEntry {
 /**
  * Pre-compression toggles. Default: brotli on, gzip off.
  *
- * Brotli at quality 11 is slow (1–3 sec per MB) but the payoff is
- * 15–25% smaller bytes on the wire vs. gzip at level 9. Gzip is kept
+ * Brotli at quality 11 costs build time but compresses smaller than
+ * gzip at level 9. Gzip is kept
  * around for ancient HTTP intermediaries that still don't speak `br`.
  *
  * Skip emission entirely on assets where compression doesn't reduce
@@ -925,7 +925,7 @@ function validateManifest(
   }
   // The runtime schema descriptor blob — hash must be valid sha256 hex AND have
   // a staged blob. Mirrors the Rust
-  // `crates/bundle/src/{manifest,unpack}.rs` descriptor checks.
+  // `crates/zeroship-bundle/src/{manifest,unpack}.rs` descriptor checks.
   if (m.runtime_descriptor != null) {
     const seenLabels = new Set<string>();
     const seenIds = new Set<string>();

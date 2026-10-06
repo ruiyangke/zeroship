@@ -65,8 +65,8 @@ describe("D1 — no-unindexed-query rule", () => {
   });
 
   test("does NOT flag findOne (deleted in P9 PR 1)", () => {
-    // The native `Collection.findOne` v8_method was removed in P9 PR 1;
-    // cardinality is now expressed via Query terminals (`first()` /
+    // The native `Collection.findOne` v8_method is absent;
+    // cardinality is expressed via Query terminals (`first()` /
     // `unique()` / `last()`), which apply LIMIT on the existing `.find`
     // call so the linter already catches the underlying filter via the
     // `find` flag.

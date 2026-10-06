@@ -182,8 +182,8 @@ describe("dev-auth provider — config", () => {
     // Built-in default user.
     assert.equal(parseDevAuthConfig("1")?.passwords[DEFAULT_DEV_USER_ID], "dev-dev00000");
     // Distinct ids get distinct passwords, with no per-user knob. A stray
-    // `password` key in the JSON is inert: the field was deleted from
-    // DevUserConfig, so it must NOT come back through the untyped env JSON.
+    // `password` key in the JSON is inert: DevUserConfig has no `password`
+    // field, so it must NOT come back through the untyped env JSON.
     const cfg = parseDevAuthConfig(
       JSON.stringify({
         users: [

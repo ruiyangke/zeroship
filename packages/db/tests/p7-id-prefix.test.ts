@@ -1,5 +1,5 @@
 /**
- * **P7** — `t.typedId(prefix)` typed-id prefix declaration.
+ * `t.typedId(prefix)` typed-id prefix declaration.
  *
  * Covers the SDK-builder fence on the declared prefix:
  * - `t.typedId("blog")` returns a builder carrying

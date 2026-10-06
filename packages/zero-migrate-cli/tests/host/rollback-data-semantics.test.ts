@@ -332,10 +332,10 @@ test("only a migration that lowers to ONE journaled step can be rolled back", as
               /lowers to more than one journaled step/,
               `${label}: the refusal must state the actual reason`,
             );
-            // The refusal used to open with "applied but absent from the supplied
+            // The refusal must not open with "applied but absent from the supplied
             // set" for this case, which is false - the migration IS supplied, and the
-            // same sentence went on to name it. That wording sent the reader looking
-            // for a missing file, so it must not come back.
+            // same sentence goes on to name it. That wording would send the reader
+            // looking for a missing file.
             assert.doesNotMatch(
               error.message,
               /absent from the supplied set/,

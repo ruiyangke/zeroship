@@ -186,7 +186,7 @@ class AuthClientImpl implements AuthClient {
     // `prompt` is an OIDC passthrough for step-up (login/consent); the gateway
     // forwards it to the native auth service verbatim. `provider`
     // (password/google/github) is threaded through as `idp_hint` so the login UI
-    // can route to / pre-select the named upstream IdP (Fix 5 — it is no longer dropped).
+    // can route to / pre-select the named upstream IdP.
     const prompt = opts.prompt;
     const provider = opts.provider;
 

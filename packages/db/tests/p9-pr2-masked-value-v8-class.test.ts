@@ -1,6 +1,6 @@
 import { generatedSchema } from "./_install-helper.js";
 /**
- * **P9 PR 2** - `MaskedValue` promoted to a native v8_class.
+ * `MaskedValue` is a native v8_class.
  *
  * Two SDK-observable consequences are pinned here:
  *

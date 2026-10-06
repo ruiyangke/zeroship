@@ -2,9 +2,9 @@
  * R7 regression — top-level `t.json()` validation + tightened
  * `isJsonSerializable` predicate.
  *
- *  M1. `checkField` had no `type === "json"` case, so a top-level
- *      `t.json()` field accepted any value (functions, symbols, cycles).
- *      Closed by adding the case, mirroring the array-item branch.
+ *  `checkField` has a `type === "json"` case, so a top-level
+ *      `t.json()` field rejects non-JSON-serializable values
+ *      (functions, symbols, cycles), mirroring the array-item branch.
  *
  *  m2. `isJsonSerializable` accepted `Map`/`Set`/typed-arrays because
  *      `Object.values(...)` is empty on those built-ins — they would

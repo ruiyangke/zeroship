@@ -19,8 +19,8 @@ function installEnv(native: unknown): void {
 }
 
 // ---------------------------------------------------------------------------
-// CRITICAL #2 — live.ts: pending consumers must be a FIFO queue, not a
-// single slot. Racing two `next()` calls used to drop the first promise.
+// live.ts: pending consumers are a FIFO queue, not a single slot. Racing
+// two `next()` calls settles both in order.
 // ---------------------------------------------------------------------------
 
 describe("CRITICAL #2 — db.live: FIFO pendingConsumers", () => {
@@ -58,8 +58,7 @@ describe("CRITICAL #2 — db.live: FIFO pendingConsumers", () => {
     const native = {
       collection: () => ({
         async find() { return [{ id: 1, title: "buy milk" }]; },
-        // **P9 PR 1** — Collection-scoped openSubscription replaces the
-        // deleted Db-level entry point.
+        // The entry point is Collection-scoped `openSubscription`.
         openSubscription: () => {
           const s = makeFakeSub();
           subs.push(s);
@@ -316,9 +315,8 @@ describe("transaction bookkeeping follows async continuations", () => {
       },
       collection: () => ({
         async find(filter: Record<string, unknown>, opts: Record<string, unknown>) {
-          // **P9 PR 1** — split batched (`$in`) vs single (`limit:1`)
-          // shapes so the same fixture covers both paths the SDK now
-          // exercises.
+          // Split batched (`$in`) vs single (`limit:1`) shapes so the same
+          // fixture covers both paths the SDK exercises.
           const idClause = filter.id as { $in?: number[] } | undefined;
           if (idClause && Array.isArray(idClause.$in)) {
             events.push(`findBatched:${JSON.stringify(filter)}`);
@@ -408,9 +406,8 @@ describe("IMPORTANT #12 — loader tx-race rejection carries error.code", () => 
   test("rejection from snapshot-vs-current mismatch has code === loader_tx_race", async () => {
     const { IdLoader } = await import("../../../crates/zeroship-data-v8/js/runtime/loader.js");
     let currentDepth = 0;
-    // typed_id (P7 PR 3) - `IdLoader<R extends { id: string }>` (src/loader.ts)
-    // requires a string id. This literal predates that cascade and used a
-    // bare number; never typechecked until now.
+    // typed_id - `IdLoader<R extends { id: string }>`
+    // (`crates/zeroship-data-v8/js/runtime/loader.ts`) requires a string id.
     const loader = new IdLoader<{ id: string; v: string }>(
       async (ids) => {
         const m = new Map<string, { id: string; v: string }>();

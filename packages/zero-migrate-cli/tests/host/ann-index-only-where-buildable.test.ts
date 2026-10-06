@@ -18,7 +18,7 @@
 // `geoPoint().required()` applied, because MySQL's SPATIAL requirement happens to be
 // satisfied by NOT NULL while the vector BLOB rule is not satisfiable at all.
 //
-// So the index is no longer emitted on MySQL. The COLUMN still is: dropping the
+// So the index is not emitted on MySQL; the COLUMN still is. Dropping the
 // index keeps the declaration usable, and what is lost is an index the author never
 // wrote and MySQL could never have had.
 //

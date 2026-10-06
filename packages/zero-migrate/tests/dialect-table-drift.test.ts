@@ -99,7 +99,7 @@ test("committed dialect-table.ts matches the sidecar rows", () => {
 // CENSUS FLOOR for the two scans below.
 //
 // Both now iterate a DISCOVERED set — `Object.keys(row.dispositions)` — rather
-// than the three named fields the row used to carry. A scan over a discovered set
+// than named fields on `DispositionRow`. A scan over a discovered set
 // FAILS OPEN: an empty `dispositions` object makes the token scan below iterate
 // nothing, find nothing, and report clean, and makes the sidecar comparison above
 // compare `{}` against `{}`. The three fields made that impossible by TYPE; this
@@ -127,9 +127,8 @@ test("every table row declares the same non-empty dialect census", () => {
 });
 
 // The sidecar's dialect KEYS are the canonical `DialectId` spellings, with no
-// aliases. This used to be false: the sidecar said `pg` while every artifact it
-// fed said `postgres`, so `pg → postgres` was an alias baked into the generator —
-// and `DialectId`'s stated rule is "no aliases and no display names in the id".
+// aliases, matching `DialectId`'s stated rule: "no aliases and no display names
+// in the id". The generator must not bake in a `pg` to `postgres` alias.
 test("sidecar dialect keys are canonical dialect ids, not aliases", () => {
   const census = [...new Set(rawSidecarRows.flatMap(dialectKeys))];
   assert.ok(census.length >= 3, `the sidecar dialect census collapsed to ${census.length}`);
@@ -160,9 +159,8 @@ test("lookupDisposition resolves rows and misses cleanly", () => {
 // THE OPEN-DIALECT GATE — the reason the row is keyed by id rather than by one
 // struct field per vendor.
 //
-// A fourth backend used to need: a new `DispositionRow` field, a new TS interface
-// field, 92 new cells, a new sidecar column, a generator change, and a regenerated
-// artifact. Everything but the cells was a change to CODE THE BACKEND DOES NOT OWN.
+// A new backend needs new cells and a sidecar column, not edits to code it does
+// not own.
 // This drives a sidecar naming a dialect the generator has never heard of through
 // the COMMITTED generator — no edit — and requires it to reach both artifacts.
 test("a dialect the generator has never heard of reaches both artifacts unedited", () => {

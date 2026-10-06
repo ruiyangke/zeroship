@@ -2,7 +2,7 @@
  * `@zeroship/db` type surface.
  *
  * The schema-builder foundation - `TypeBuilder`, `FieldDef`, the `t.*` factories,
- * and the inference chain they are read by - now lives in `@zeroship/schema` and
+ * and the inference chain they are read by - lives in `@zeroship/schema` and
  * is re-exported here, so every importer of `./types` and every consumer of
  * `@zeroship/db` keeps the same names and the same shapes.
  *

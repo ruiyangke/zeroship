@@ -342,8 +342,8 @@ test("non-2xx responses throw ControlError with parsed body", async () => {
 // `infrastructure_error_response` (crates/zeroship-control/src/api.rs) logs the
 // real cause and returns `{"error":"internal error","trace_id":<uuid>}`.
 // The cause is deliberately absent, so the id is the ONLY thing that
-// makes the response reportable. The client used to drop it: it survived
-// on `err.body` but had no field, so nothing surfaced it.
+// makes the response reportable. The client lifts it off `err.body` onto
+// the error.
 //
 // WHAT THESE DO NOT CATCH:
 //   - That the server sends it. That is `api.rs`'s own tests.

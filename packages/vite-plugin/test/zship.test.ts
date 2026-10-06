@@ -26,8 +26,7 @@ import {
 } from "../src/build.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-// Rust runtime's inline Node-globals shim. The dedicated Node-globals JS
-// file was deleted when the remaining polyfill moved into
+// Rust runtime's inline Node-globals shim, in
 // `crates/zeroship-runtime/src/core/init.rs`; this test guards
 // the inline source against reintroducing legacy vite-plugin globals.
 const NODE_GLOBALS_PATH = resolve(
@@ -988,8 +987,8 @@ describe("emitZship", () => {
 
 // ── stripUseServer: drop leading `"use server"` directive ────────────────
 //
-// Post-refactor: the vite-plugin no longer prepends a Node-globals
-// prelude — that's installed by the Rust runtime on every isolate
+// The vite-plugin prepends no Node-globals prelude: the Rust runtime
+// installs it on every isolate
 // before user modules evaluate (see
 // `crates/zeroship-runtime/src/core/init.rs`). The only post-rollup
 // transform left is dropping the leading `"use server"` directive,

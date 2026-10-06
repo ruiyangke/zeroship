@@ -309,7 +309,7 @@ test("poisoned global array parsers cannot collapse text[]/name[]/int8[] to raw 
 // ---------------------------------------------------------------------------
 test("apply survives a fully poisoned global pg.types map", async (t) => {
   // The gate's client doubles as the admin connection: it is opened before the
-  // poison lands, exactly as the arm's own admin client used to be.
+  // poison lands, exactly as the arm's own admin client is.
   const adm = await connectLivePg();
 
   const restore = await poisonEveryGlobalParser();
@@ -350,11 +350,11 @@ test("apply survives a fully poisoned global pg.types map", async (t) => {
 
     // Every applied step shares the one `Checksum::of_ir` anchor.
     //
-    // This read does NOT prove the oid-20 pin, though it used to claim it did, over a
-    // `event_seq::text` cast that had PostgreSQL format the value server-side. Two
-    // further reasons, both measured. The read goes through `adm`, the gate's client,
-    // constructed with no `types`, so the pin is not in this path with or without the
-    // cast. And the poison above leaks the RAW WIRE TEXT, which for an int8 is exactly
+    // This read does NOT prove the oid-20 pin. A `event_seq::text` cast would
+    // have PostgreSQL format the value server-side and prove nothing, and two
+    // further reasons, both measured, hold. The read goes through `adm`, the gate's
+    // client, constructed with no `types`, so the pin is not in this path. And the
+    // poison above leaks the RAW WIRE TEXT, which for an int8 is exactly
     // the digits the pin's verbatim-string parser returns: a borrowed oid-20 parser
     // and the pin both hand back the string "9007199254740993" under it, so no
     // assertion on the value can tell them apart here. The pin is proven where it is

@@ -1,6 +1,6 @@
 /**
  * `useQuery` — React hook bridging @zeroship/db reactive queries onto
- * the React render cycle (P8b stage 4).
+ * the React render cycle.
  *
  * Goals
  * -----
@@ -10,7 +10,7 @@
  *    commits it via `setState`. Subsequent renders see the snapshot.
  * 3. Opens a broker subscription against the queried collection. Every
  *    broker event fires the factory again and commits the new snapshot.
- *    Read-set narrowing happens server-side (P8b: see broker.rs); this
+ *    Read-set narrowing happens server-side (see broker.rs); this
  *    hook is a dumb consumer.
  * 4. Cleanup on unmount: closes the broker subscription (releases the
  *    handle synchronously) and marks the effect as cancelled so any
@@ -32,7 +32,7 @@
  * ---------
  *
  *  * Real WebSocket multiplexing (one broker subscription per useQuery
- *    today; multiplex is a follow-up, see proposal §P8b.5).
+ *    today; multiplex is a follow-up).
  *  * Caching across components (no global QueryClient yet — this is the
  *    minimal Convex-style "subscribe-then-rerender" pattern).
  *  * Error retry. Errors surface to the caller via the result tuple.

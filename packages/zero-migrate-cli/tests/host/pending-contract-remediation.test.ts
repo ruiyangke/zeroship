@@ -235,7 +235,7 @@ test("the verb the refusal used to name is still rejected, so the fix was not co
   const work = project(schema);
   try {
     // The control. If this verb were somehow accepted, the assertion above that
-    // the message no longer mentions it would prove nothing about whether the
+    // the message does not mention it would prove nothing about whether the
     // operator could have followed the old advice.
     //
     // The old suggestion is unrunnable twice over, and the CLI reports whichever

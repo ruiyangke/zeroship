@@ -1,6 +1,6 @@
 // op.* migration fixture — the DECLARED-ONLY column facets
 // the recorder captures on the wire `IrColumn`. Proves
-// `t.vector({ dimensions, metric })` records `vectorMetric` (previously dropped), and
+// `t.vector({ dimensions, metric })` records `vectorMetric`, and
 // that the JS↔Rust value-checksum round-trip agrees on the optional facet.
 //
 // This confined-platform fixture intentionally omits an authored `id`: policy

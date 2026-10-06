@@ -33,7 +33,7 @@
 //     corpus ⟷ table bijection and sidecar ⟷ table transcription.
 //   * `generated_cells_match_registered_backend_policies` in the generated Rust
 //     artifact — all generated cells ⟷ the registered backends' required policy
-//     answers. This is no longer tautological: production never reads the table.
+//     answers. Production never reads the table, so a cell that contradicts a backend's policy is a real failure.
 //   * `op_support_matrix.rs` — the behavioural gate (a decision matches what
 //     validate/lower actually do).
 //   * `dialect_conformance_live.rs` — the same, against real servers.

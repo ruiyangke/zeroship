@@ -175,10 +175,9 @@ describe("installSchema", () => {
   });
 
   test("beginTransaction is not a reserved env.db name", () => {
-    // The native `beginTransaction` primitive was deleted entirely, so a
-    // collection named `beginTransaction` no longer collides. (A creator
-    // would be unwise to name a collection this, but the platform no
-    // longer forbids it.)
+    // `beginTransaction` is not a reserved `env.db` name: a collection may
+    // use it. (A creator would be unwise to name a collection this, but the
+    // platform permits it.)
     const native = makeMockNative();
     assert.doesNotThrow(
       () => install({ beginTransaction: { name: t.string().required() } }, native),

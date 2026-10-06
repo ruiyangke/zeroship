@@ -147,12 +147,10 @@ export const listTodos = procedure(async () => []);
   });
 
   test("accepts fn.config.input/output as arbitrary expressions (Zod call)", () => {
-    // The literalize() helper used to bail out on call expressions
-    // anywhere in `fn.config = { ... }`, which made every other
-    // config field disappear too. After the Zod-direct switch, the
-    // top-level keys `input` and `output` are recognized as
-    // schema declarations; their values are stored as a sentinel
-    // marker so the rest of the literal still parses cleanly.
+    // The literalize() helper special-cases the top-level keys `input` and
+    // `output` in `fn.config = { ... }`: their arbitrary-expression values are
+    // stored as a sentinel marker so the rest of the literal still parses
+    // cleanly.
     const state = makeState();
     const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });

@@ -90,7 +90,7 @@ interface Visitor {
  * `update` / `updateMany` because the proposal scoped D1 to read-path
  * queries (`.find` family) and bulk deletes.
  *
- * **P9 PR 1** — `findOne` was deleted from the SDK; cardinality is now
+ * `findOne` is absent from the SDK; cardinality is
  * picked on the Query terminal (`first()` / `unique()` / `last()`).
  */
 const FLAGGED_METHODS = new Set(["find", "deleteMany"]);

@@ -1,5 +1,5 @@
 /**
- * **P9 PR 1** — `Query.unique()` + `Query.last()` terminals (and the
+ * `Query.unique()` + `Query.last()` terminals (and the
  * accompanying error classes `NotFoundError` / `NotUniqueError` /
  * `InvalidOperationError`).
  *

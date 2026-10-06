@@ -960,8 +960,8 @@ interface LintDialectResult {
 
 /** Resolve a refusal's `op_index` back to the op itself.
  *
- * Every `AuthoringError` is stamped with `op_index`, and the CLI used to print
- * that ordinal verbatim. It indexes the RENDERED IR envelope, which the author
+ * Every `AuthoringError` is stamped with `op_index`. It indexes the RENDERED
+ * IR envelope, which the author
  * does not have in front of them - one authored statement fans out into several
  * ops - so on its own it answers nothing. `envelopes` is the exact ordered list
  * the message's producer was given: a preview refusal also names `envelope[K]`,
@@ -1121,7 +1121,7 @@ export interface PlanMigrationPreviews {
   blocked: BlockedMigrationPreview[];
   /** Migrations whose source no longer matches what was applied. apply aborts on
    *  these, so plan must neither count them nor render their edited SQL as work
-   *  it would do (F663). */
+   *  it would do. */
   drifted: BlockedMigrationPreview[];
 }
 

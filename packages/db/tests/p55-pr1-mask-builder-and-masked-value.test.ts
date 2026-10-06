@@ -1,6 +1,6 @@
 import { generatedSchema } from "./_install-helper.js";
 /**
- * **P5.5 PR 1** — masking foundation: `t.string().mask(...)` /
+ * Masking foundation: `t.string().mask(...)` /
  * `t.string().encrypted().mask(...)` DSL modifier + default-mask rule for
  * encrypted columns + TypeScript `Row<S>` inference wrapping masked
  * fields.
@@ -12,7 +12,7 @@ import { generatedSchema } from "./_install-helper.js";
  *   2. `t.string().mask({ kind: "email" })` records the mask
  *      metadata on the FieldDef.
  *   3. Chaining `.mask({ kind: "none" })` on encrypted is the
- *      explicit opt-out — no sibling emission (PR 2/3), no wrap on
+ *      explicit opt-out - no sibling emission, no wrap on
  *      read.
  *   4. `.mask()` refuses non-primitive wrapped types (json, array,
  *      union, object) with `MASK_ON_UNSUPPORTED_TYPE`.
@@ -22,18 +22,16 @@ import { generatedSchema } from "./_install-helper.js";
  *   7. TypeScript `Row<S>` inference wraps masked fields in
  *      `MaskedValue<T>` (compile-time assertion).
  *
- * **P9 PR 2** — the `MaskedValue` coercion / `unmask` / `canUnmask`
- * runtime tests that used to live here were removed: `MaskedValue` is
- * now a native v8_class minted Rust-side (the SDK export is a type-only
- * `declare class`), so those invariants are pinned by the Rust unit
- * tests in `masked_value.rs` + the `p9-pr2-masked-value-v8-class`
+ * The `MaskedValue` coercion / `unmask` / `canUnmask` invariants are pinned
+ * by the Rust unit tests in `masked_value.rs` + the
+ * `p9-pr2-masked-value-v8-class`
  * suite, not by `new MaskedValue(...)` in JS.
  */
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { t } from "../src/index.js";
-// **P9 PR 2** — `MaskedValue` is now a native v8_class; the SDK export
+// `MaskedValue` is a native v8_class; the SDK export
 // is a type-only `declare class`. It can only be imported as a type
 // (no runtime constructor). Its runtime behaviour (coercion, unmask,
 // brand check) is covered by the Rust unit tests in
@@ -154,7 +152,7 @@ describe("P5.5 PR 1 — t.string().mask(...) DSL modifier", () => {
 });
 
 describe("P5.5 PR 1 — Row<S> type inference (compile-time)", () => {
-  // **P9 PR 2** — `MaskedValue` is a type-only `declare class`, so the
+  // `MaskedValue` is a type-only `declare class`, so the
   // masked-column slots below use `as unknown as MaskedValue<string>`
   // casts rather than `new MaskedValue(...)`. The load-bearing
   // assertion is that `tsc` accepts these assignments — i.e. `Row<S>`

@@ -186,8 +186,7 @@ policy = ["./config-root.toml", "./config-leaf.toml"]
 });
 
 test("ZERO_MIGRATE_POLICY carries multiple layers via the path delimiter", () => {
-  // A single-valued env var used to collapse a multi-layer policy to one layer;
-  // the env var now expresses an ordered layer list like PATH.
+  // The env var expresses an ordered layer list like PATH.
   const resolved = resolveCliConfig({
     processEnv: {
       ZERO_MIGRATE_POLICY: ["./root.toml", "./team.toml", "./svc.toml"].join(

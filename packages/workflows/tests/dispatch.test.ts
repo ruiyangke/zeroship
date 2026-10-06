@@ -7,7 +7,7 @@ import { test } from "node:test";
 // Node drives the same bytes V8 runs. There is no second implementation, and a
 // case here that passes describes the deployed replay bridge.
 //
-// `crates/zeroship-workflow-v8/tests/dispatch/` drives the same file through
+// `crates/zeroship-workflow-v8/tests/integration/dispatch/` drives the same file through
 // the real runtime and binding. That suite owns module registration, isolate
 // lifetime and native readers; this one owns replay semantics.
 import {

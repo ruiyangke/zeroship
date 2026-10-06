@@ -1,6 +1,6 @@
 //
 // `@zeroship/react` — React bindings on top of @zeroship/db reactive
-// queries (P8b stage 4 of the @zeroship/db proposal).
+// queries.
 //
 // Surface:
 //

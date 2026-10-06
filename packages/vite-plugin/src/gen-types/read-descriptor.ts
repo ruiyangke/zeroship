@@ -27,11 +27,9 @@ export function readGeneratedRuntimeDescriptorAt(outDir: string): string | undef
  * The collection names a descriptor declares.
  *
  * `collections` is an OBJECT KEYED BY NAME (`{ todos: { fields: … } }`), not an
- * array. Both call sites previously did `(d.collections ?? []).map(...)` inside a
- * `try`/`catch`, so the `TypeError` was swallowed and the apply's ownership
- * registry was silently ALWAYS EMPTY in dev — a degradation that looked exactly
- * like success. Parsing it in one place, and returning `[]` only when there
- * genuinely are none, is what keeps that from coming back.
+ * array. Parsing it in one place, and returning `[]` only when there genuinely
+ * are none, keeps the apply's ownership registry populated in dev, where a
+ * swallowed `TypeError` would otherwise leave it silently empty.
  */
 export function collectionNamesFrom(descriptorJson: string | undefined): string[] {
   if (!descriptorJson) return [];

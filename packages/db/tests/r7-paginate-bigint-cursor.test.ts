@@ -83,7 +83,7 @@ describe("R7 m4 — Query.paginate returns continueCursor === \"\" when isDone",
       numItems: 2,
     });
     assert.equal(r2.data!.isDone, true);
-    // Previously this returned r1.data!.continueCursor verbatim — now "".
+    // The final page reports an empty continuation cursor.
     assert.equal(r2.data!.continueCursor, "");
   });
 

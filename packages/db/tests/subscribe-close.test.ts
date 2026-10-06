@@ -122,7 +122,7 @@ describe("Subscription iterator — close semantics", () => {
       { kind: "change", op: "insert", collection: "m", pk: 1, columns: ["x"] },
       { kind: "change", op: "insert", collection: "m", pk: 2, columns: ["x"] },
     ]);
-    // **P9 PR 1** — subscriptions are minted via `env.db.<col>.openSubscription()`.
+    // Subscriptions are minted via `env.db.<col>.openSubscription()`.
     (env as { db?: unknown }).db = {
       collection: (_c: string) => ({ openSubscription: () => fake }),
     };
@@ -153,7 +153,7 @@ describe("Subscription iterator — close semantics", () => {
       { kind: "change", op: "insert", collection: "m", pk: 2, columns: ["x"] },
       { kind: "change", op: "insert", collection: "m", pk: 3, columns: ["x"] },
     ]);
-    // **P9 PR 1** — subscriptions are minted via `env.db.<col>.openSubscription()`.
+    // Subscriptions are minted via `env.db.<col>.openSubscription()`.
     (env as { db?: unknown }).db = {
       collection: (_c: string) => ({ openSubscription: () => fake }),
     };
@@ -173,7 +173,7 @@ describe("Subscription iterator — close semantics", () => {
       { kind: "change", op: "insert", collection: "m", pk: 1, columns: ["x"] },
       { kind: "change", op: "insert", collection: "m", pk: 2, columns: ["x"] },
     ]);
-    // **P9 PR 1** — subscriptions are minted via `env.db.<col>.openSubscription()`.
+    // Subscriptions are minted via `env.db.<col>.openSubscription()`.
     (env as { db?: unknown }).db = {
       collection: (_c: string) => ({ openSubscription: () => fake }),
     };
@@ -196,7 +196,7 @@ describe("Subscription iterator — close semantics", () => {
     // null from the native wrapper means "the native side closed itself";
     // the JS iterator must reflect that with {done: true}.
     const fake = makeFakeSub([]); // empty event list → next() returns null
-    // **P9 PR 1** — subscriptions are minted via `env.db.<col>.openSubscription()`.
+    // Subscriptions are minted via `env.db.<col>.openSubscription()`.
     (env as { db?: unknown }).db = {
       collection: (_c: string) => ({ openSubscription: () => fake }),
     };

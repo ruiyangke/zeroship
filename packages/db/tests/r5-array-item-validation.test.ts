@@ -1,7 +1,7 @@
 /**
- * R5 MINOR regression — `t.array(items)` used an unchecked
- * `as PrimitiveTypeName` cast (packages/db/src/types.ts:584-587 pre-fix)
- * that silently corrupted the schema when callers passed `t.ref(...)`
+ * `t.array(items)` validates its item type instead of casting it with
+ * `as PrimitiveTypeName` (packages/db/src/types.ts),
+ * which would silently corrupt the schema when callers passed `t.ref(...)`
  * or `t.object({...})` as items: the resulting `FieldDef` reported
  * `items: "ref"` / `items: "object"` (not a valid `PrimitiveTypeName`),
  * dropped `refTarget` and the nested object `shape`, and was skipped by

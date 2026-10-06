@@ -149,8 +149,8 @@ test("an empty schema is refused on SQLite, from the flag and the environment", 
   for (const via of ["flag", "env"] as const) {
     const work = project();
     try {
-      // SQLite is where this used to APPLY cleanly: schema is inert, so nothing
-      // downstream had any reason to object.
+      // On SQLite an empty schema would otherwise apply cleanly: schema is inert,
+      // so nothing downstream objects.
       assertRefused(
         await apply(work, `sqlite:${join(work, "app.db")}`, { via, value: "" }),
         `SQLite via ${via}`,

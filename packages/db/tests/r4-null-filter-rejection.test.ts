@@ -1,12 +1,12 @@
 /**
- * R4 IMPORTANT-1 regression — `mapFilterOutbound(null)` used to return
- * `null` (the `for...in null` loop is a zero-iteration no-op, not a
- * throw), which let `deleteMany(null)` / `updateMany(null)` reach the
- * native layer as "match every row" — a delete-all bug reachable via
- * a JSON-RPC input or an `as any` escape past the TS type. The fix is
- * a defensive null/non-object reject at the top of `mapFilterOutbound`,
- * with `code = "INVALID_FILTER"`. Inside `_run` the throw becomes a
- * `Result.error`; the destructive native call never fires.
+ * `mapFilterOutbound(null)` rejects a null / non-object filter rather than
+ * returning `null` (the `for...in null` loop is a zero-iteration no-op, not a
+ * throw), which would let `deleteMany(null)` / `updateMany(null)` reach the
+ * native layer as "match every row" - a delete-all bug reachable via
+ * a JSON-RPC input or an `as any` escape past the TS type. The reject sits
+ * at the top of `mapFilterOutbound`, with `code = "INVALID_FILTER"`. Inside
+ * `_run` the throw becomes a `Result.error`; the destructive native call
+ * never fires.
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
@@ -35,7 +35,7 @@ function installEnv(native: unknown): void {
 function makeRecordingNative() {
   const calls: { op: string; filter: unknown }[] = [];
   const native = {
-    // P9 PR 3: native `transaction(callback)` orchestrator — call the
+    // Native `transaction(callback)` orchestrator - call the
     // callback (begin already succeeded), resolve with its result
     // (commit), propagate a throw (rollback). The host facade
     // passes a callback that ignores the raw tx-view.

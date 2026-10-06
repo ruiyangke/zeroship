@@ -68,11 +68,6 @@ const DEV_SESSION_COOKIE = "__zeroship_dev_session";
  * `__Host-zsidp_csrf` (`crates/zeroship-auth/src/csrf.rs`): the GET renders the token
  * into BOTH the cookie and the field server-side, so no JS read is needed and
  * the cookie is `HttpOnly` on both tiers. The POST compares cookie vs field.
- *
- * This comment used to claim prod's cookie was non-HttpOnly "because its inline
- * script READS it", making dev "a stricter dev variant". No such prod script
- * existed; the asymmetry was a stale doc on both sides, and prod is now
- * `HttpOnly` too.
  */
 const DEV_CSRF_COOKIE = "__zeroship_dev_csrf";
 /**

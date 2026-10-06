@@ -22,7 +22,7 @@ const usersSchema = {
 };
 
 /**
- * **P9 PR 1** — the SDK's `get()` (and every other "first matching row"
+ * The SDK's `get()` (and every other "first matching row"
  * path) now routes through `find` with `{ limit: 1 }`. The mock log
  * splits `find` calls into two buckets:
  *   - `findBatched`: the `{id: {$in: [...]}}` shape coming from the
@@ -38,8 +38,8 @@ type CallLog = {
   /** Subset of `find` whose filter is `{id: {$in: [...]}}` — the IdLoader's
    *  batched flush. */
   findBatched: { filter: AnyRec; opts: AnyRec }[];
-  /** Subset of `find` whose opts include `limit: 1` — the post-P9 "first
-   *  matching row" shape (formerly the native `findOne` v8_method). */
+  /** Subset of `find` whose opts include `limit: 1` - the "first
+   *  matching row" shape. */
   findSingle: { filter: AnyRec; opts: AnyRec }[];
 };
 
@@ -53,12 +53,12 @@ function makeMockNative(rows: Record<string, AnyRec>, opts?: { findThrows?: Erro
   const calls: CallLog = { find: [], findBatched: [], findSingle: [] };
   let beginCount = 0;
   // String-keyed view onto the same row table — the loader sends string
-  // typed_id values on the wire post-PR 3, but the fixtures here key
+  // typed_id values on the wire, but the fixtures here key
   // by number for readability. Pre-build the string→row index once.
   const stringIndex: Record<string, AnyRec> = {};
   for (const [k, v] of Object.entries(rows)) stringIndex[k] = v;
   const native = {
-    // P9 PR 3: native `transaction(callback)` orchestrator stub. The
+    // Native `transaction(callback)` orchestrator stub. The
     // begin tick happens after the host facade drains pending loaders.
     // Transaction collection reads bypass batching explicitly.
     transaction: async (
@@ -136,7 +136,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
 
     assert.equal(calls.findBatched.length, 1, "expected exactly one batched find");
     assert.equal(calls.findSingle.length, 0, "no single-row find expected");
-    // **P7 PR 3** — the loader sends string ids on the wire.
+    // The loader sends string ids on the wire.
     const idClause = calls.findBatched[0].filter.id as { $in: string[] };
     assert.ok(idClause && Array.isArray(idClause.$in));
     assert.deepEqual([...idClause.$in].sort(), ["1", "2"]);
@@ -403,7 +403,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
       },
     };
     const native = {
-      // P9 PR 3: native `transaction(callback)` orchestrator. The "begin"
+      // Native `transaction(callback)` orchestrator. The "begin"
       // tick fires when the orchestrator is invoked — AFTER the host facade
       // wrapper drained the loaders. The callback resolving pushes
       // "commit"; throwing would push "rollback".
@@ -426,8 +426,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
             if (idClause && Array.isArray(idClause.$in)) {
               return idClause.$in.map((i) => rowsByTable[name]?.[i]).filter(Boolean);
             }
-            // **P9 PR 1** — single-row `find(filter, {limit:1})`
-            // replaces the old `findOne` path. Resolve to a 1-element
+            // Single-row `find(filter, {limit:1})` resolves to a 1-element
             // array (or empty) so the SDK's slice picks the row up.
             const id = filter.id;
             if (typeof id === "string" && o && (o as AnyRec).limit === 1) {
@@ -468,7 +467,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
       _idLoader: { load(id: string): Promise<unknown> } | null;
     };
     assert.ok(usersCol._idLoader !== null, "loader must be primed");
-    // **P7 PR 3** — loader API is keyed by string ids.
+    // The loader API is keyed by string ids.
     const preTxGet = usersCol._idLoader!.load("1");
 
     const txResult = db.transaction(async (tx) => {
@@ -485,7 +484,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
 
     // Critical: the batched find for the pre-tx get must precede
     // beginTransaction in the event log.
-    // **P7 PR 3** — wire shape is `$in:["1"]`.
+    // The wire shape is `$in:["1"]`.
     const batchedFindIdx = events.findIndex(
       (e) => e.startsWith("find(users,") && e.includes('"$in":["1"]'),
     );
@@ -505,7 +504,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     const { IdLoader } = await import("../../../crates/zeroship-data-v8/js/runtime/loader.js");
     let currentDepth = 0;
     let flushCalls = 0;
-    // **P7 PR 3** — IdLoader is generic over `R extends { id: string }`;
+    // IdLoader is generic over `R extends { id: string }`;
     // the test row uses a typed_id-shaped id string so the Map<string,_>
     // lookup matches.
     const loader = new IdLoader<{ id: string; v: string }>(
@@ -535,7 +534,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
   test("tx-race: snapshot==current (both 0 or both > 0) resolves normally", async () => {
     const { IdLoader } = await import("../../../crates/zeroship-data-v8/js/runtime/loader.js");
     let currentDepth = 0;
-    // **P7 PR 3** — typed_id string key (see sibling test).
+    // typed_id string key (see sibling test).
     const loader = new IdLoader<{ id: string; v: string }>(
       async (ids) => {
         const m = new Map<string, { id: string; v: string }>();
@@ -566,7 +565,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     const results = await Promise.all([Users.get("7"), Users.get("7"), Users.get("7")]);
     for (const r of results) assert.equal(r.data?.email, "x@y.com");
     assert.equal(calls.find.length, 1);
-    // **P7 PR 3** — typed_id string wire shape.
+    // typed_id string wire shape.
     const ids = (calls.find[0].filter.id as { $in: string[] }).$in;
     assert.deepEqual(ids, ["7"], "duplicate ids removed before dispatch");
   });

@@ -2,7 +2,7 @@
 //
 // The IR's contract is `IrScalar::Int(i64)`, exact while `|v| < 2^53`, and its own
 // error text for anything larger says so. But the envelope reaches the addon two
-// different ways, and only one of them used to preserve an integer:
+// different ways, and both must preserve an integer exactly:
 //
 //   lint / validate   `JSON.stringify(envelope)` -- the text carries 4294967296
 //   apply             the envelope crosses as a JS VALUE through napi, where a

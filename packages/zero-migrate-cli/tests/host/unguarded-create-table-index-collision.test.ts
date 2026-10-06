@@ -20,7 +20,7 @@
 // its table, which is what `Capability::SchemaWideIndexNames` names; MySQL scopes
 // index names per table, writes no `IF NOT EXISTS`, and evaluates no probe, so there
 // is nothing here to cover. SQLite shares the schema-wide scoping and is covered for
-// the `createIndex` shape in `crates/zeroship-migrate/tests/sqlite_engine/existence_guard_sqlite.rs`;
+// the `createIndex` shape in `crates/zeroship-migrate/tests/integration/sqlite_engine/existence_guard_sqlite.rs`;
 // the createTable shape on SQLite is NOT covered by this file and NOT covered there
 // either - a gap, not a handoff.
 //

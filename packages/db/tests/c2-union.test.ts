@@ -1,5 +1,5 @@
 /**
- * @zeroship/db — Phase 7 / C2: discriminated union document shapes.
+ * @zeroship/db - discriminated union document shapes.
  *
  * Exercises `t.literal()`, `t.union(...)`, the auto-detected
  * discriminator, and validator dispatch over the flat projection the Rust
@@ -128,7 +128,7 @@ describe("C2 — t.union() discriminator auto-detection", () => {
 /**
  * The flat projection Rust's migration fold emits for a top-level
  * `t.union(...)`: the discriminator column the runtime validator dispatches
- * on. The JS side no longer expands unions, so this fixture stands in for the
+ * on. The JS side does not expand unions, so this fixture stands in for the
  * Rust output and keeps validator dispatch covered.
  */
 function flatUnionSchema(union: { toFieldDef(): FieldDef }): Record<string, FieldDef> {
@@ -294,9 +294,9 @@ describe("C2 — partial update against a flat-expanded union", () => {
     assert.match(error.message, /kind.*login.*error/);
   });
 
-  // Gap J — patching a valid discriminator value without re-stating
-  // the new variant's required fields used to silently succeed and
-  // leave the row in an inconsistent state.
+  // Patching a valid discriminator value without re-stating the new
+  // variant's required fields must fail rather than leave the row in an
+  // inconsistent state.
   test("c2_union_gap_j_discriminator_only_patch_rejects_missing_variant_required", () => {
     const s = flatUnionSchema(
       t.union(

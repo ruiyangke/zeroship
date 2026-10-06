@@ -81,10 +81,8 @@ describe("server auth — env.auth absent", () => {
   // error".
   //
   // `code` is not a free-form label: it is the canonical RPC wire token the
-  // client branches on. This assertion previously read "unauthenticated" and
-  // so ENCODED the dev-vs-deployed divergence: it locked in a spelling no
-  // consumer in the tree compares against. The behavioural consequence is
-  // covered through native runtime dispatch in the auth-plugin tests; this
+  // client branches on, and this assertion pins it. The behavioural consequence
+  // is covered through native runtime dispatch in the auth-plugin tests; this
   // stays as the package-level shape check on the throw itself.
   test("requireUser throw carries status:401 + the canonical wire code", () => {
     let thrown: (Error & { status?: unknown; code?: unknown }) | undefined;

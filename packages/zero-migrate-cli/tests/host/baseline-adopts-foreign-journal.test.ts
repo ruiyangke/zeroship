@@ -4,9 +4,9 @@
 //
 // The situation this verb exists for is not "a database with no journal". It is a
 // database whose journal is FULL, under migration ids the CLI can never derive.
-// `MigrationId::derive` (crates/zeroship-migrate-ir/src/migration.rs:83) stamps the
+// `MigrationId::derive` (crates/zeroship-migrate-ir/src/migration.rs) stamps the
 // high 48 bits with `0xFF` x 6 so a derived id "never collides with a versioned
-// id"; `migration_id_for_version` (same file, :133-141) puts a numeric file version
+// id"; `migration_id_for_version` (same file) puts a numeric file version
 // in exactly those bits. The two families are disjoint BY CONSTRUCTION, so pointing
 // the CLI at a journal written under the versioned family reports every one of its
 // rows as `unexpectedJournal` drift and every authored migration as pending -- while
@@ -44,7 +44,7 @@ const BASE36 = "0123456789abcdefghijklmnopqrstuvwxyz";
 /**
  * The id family a VERSIONED migration runner journals under, reproduced exactly.
  *
- * `migration_id_for_version` (crates/zeroship-migrate-ir/src/migration.rs:133-141)
+ * `migration_id_for_version` (crates/zeroship-migrate-ir/src/migration.rs)
  * copies the low 48 bits of the file version into `bytes[0..6]` and leaves the
  * remaining bytes zero, then base36-encodes the UUID image. As a
  * big-endian integer that image is `version * 2^80`.
@@ -276,7 +276,7 @@ test("baseline adopts a live schema whose journal is in a foreign id family", as
  *   failed to project pending schema after envelope "m1_alpha":
  *   fold: table `alpha` already exists
  *
- * (crates/zeroship-migrate-node/src/lower.rs:735). The refusal is CAUSED by the
+ * (crates/zeroship-migrate-node/src/lower.rs). The refusal is CAUSED by the
  * pending-ness, so the verb that is supposed to report the problem cannot run
  * until the problem is gone -- there is no "34 orphans and 34 pending" report to
  * read on the real corpus, only a hard stop.
@@ -370,7 +370,7 @@ test("baseline repairs a database whose status verb cannot even reconcile", asyn
  * the value the later drift check reads.
  *
  * `BaselineRecord.checksum` is documented "so the drift check compares correctly
- * later" (crates/zeroship-migrate-backend/src/journal.rs:533). Two facts make that
+ * later" (crates/zeroship-migrate-backend/src/journal.rs). Two facts make that
  * true rather than asserted, and this arm measures both:
  *
  *   ORACLE   -- the same corpus applied for real to an empty schema journals the

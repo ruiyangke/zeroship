@@ -1,5 +1,5 @@
 /**
- * **P7 PR 5** — soft-delete semantic flip + new `purge()` / `restore()`
+ * Soft-delete semantics plus `purge()` / `restore()`
  * SDK surface + `find(filter, { include_deleted })` opt-out.
  *
  * Three SDK-side responsibilities exercised here:
@@ -28,7 +28,7 @@ import type { NativeDb } from "../src/native.js";
 
 type AnyRec = Record<string, unknown>;
 
-/** Native double that records every call across the four PR 5
+/** Native double that records every call across the four soft-delete
  *  surfaces (`purge`, `purgeMany`, `restore`, `restoreMany`) so the
  *  tests can verify the SDK reached the right entry point with the
  *  right shape. */

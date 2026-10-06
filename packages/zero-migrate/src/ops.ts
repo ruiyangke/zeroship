@@ -2991,7 +2991,7 @@ function validateImmutableExpr(expr: Node, position: string, opts: { allowPgImmu
         }
         // One node, so the vendor-position rule keys on the FIELD: the parts
         // every shipping backend renders are fine anywhere, the rest need the
-        // same vendor-only position the split node used to require.
+        // same vendor-only position the split node requires.
         if (!portableExtractFieldSet.has(n.field as string) && !opts.allowPgImmutable) {
           rejectPgNode(`extract(${JSON.stringify(n.field)})`);
         }
@@ -3457,12 +3457,12 @@ function commentTargetToIr(target: CommentTargetArg): Node {
 /**
  * Reject option keys this call does not know.
  *
- * The runtime used to accept any extra property and silently drop it, so
- * `create({ fk: [...] })` recorded no foreign key and `create({ ifNotExist: true })`
- * recorded no existence guard — both applying clean and leaving the authored
- * intent simply absent. `tsc` rejects the same source (TS2353), but `apply` loads
- * migrations through tsx WITHOUT typechecking, so nothing objected at the moment
- * it mattered.
+ * The runtime rejects unknown option keys rather than silently dropping them.
+ * Without that reject, `create({ fk: [...] })` would record no foreign key and
+ * `create({ ifNotExist: true })` would record no existence guard - both applying
+ * clean while leaving the authored intent simply absent. `tsc` rejects the same
+ * source (TS2353), but `apply` loads migrations through tsx WITHOUT typechecking,
+ * so nothing else objects at the moment it matters.
  *
  * Failing closed here matches what this file already does for
  * `cursorStability` ("accepts exactly mode and name") and what the engine does for
@@ -3490,8 +3490,8 @@ function rejectUnknownKeys(
  * Separate an authoring call's PORTABLE keys from its VENDOR NAMESPACES, rejecting
  * anything that is neither.
  *
- * `rejectUnknownKeys` cannot be used directly here because the accepted set is no longer
- * closed: a vendor namespace key IS a dialect id, contributed by whichever backend
+ * `rejectUnknownKeys` cannot be used directly here because the accepted set is
+ * open: a vendor namespace key IS a dialect id, contributed by whichever backend
  * packages are installed, and this file must never learn one of their names. What it can
  * check is SHAPE — a namespace is a plain object of leaf options — so a misspelled
  * portable key that is not an object (`ifNotExist: true`) is still caught right here with
@@ -4445,10 +4445,9 @@ function indexElementToIr(element: IndexElementArg): Node {
       }) as Node;
     }
     if ("expr" in element) {
-      // All four were previously accepted and thrown away: the `order` result
-      // below was computed and never used, and opclass/collation/nulls were
-      // never read at all, so `{ expr, order: "desc" }` produced an ASCENDING
-      // index. `dialects.md` says expression elements cannot carry any of them.
+      // `dialects.md` says expression elements cannot carry `order`, `opclass`,
+      // `collation` or `nulls`; each is rejected here so `{ expr, order: "desc" }`
+      // cannot silently produce an ASCENDING index.
       rejectUnsupportedIndexElementFacets(
         element,
         ["order", "opclass", "collation", "nulls"],
@@ -4656,7 +4655,7 @@ function resolveCursorStability(value: unknown): CursorStability {
 
 function recordBackfill(table: string, args: BackfillArgs): void {
   // The RENAMED-key check runs first, deliberately. `cursorColumn` is a key this
-  // API used to have, and its message tells the author what to write instead;
+  // API rejects, and its message tells the author what to write instead;
   // the generic unknown-key refusal below would preempt that with a strictly
   // less useful "does not accept". Specific diagnostics before generic ones.
   if (Object.prototype.hasOwnProperty.call(args, "cursorColumn")) {
@@ -5131,7 +5130,7 @@ export function __makeTableHandle(
         ifExists: args.ifExists,
         schema: pickSchema(args, dflt),
       });
-      // B7 (L10): rebind the returned handle to the NEW name so chained ops
+      // Rebind the returned handle to the NEW name so chained ops
       // after a rename target the new name, not the dead one. (A table rename
       // keeps the same schema, so `opts`/resolver carry over unchanged.)
       return __makeTableHandle(args.to, opts, checkExprResolver);

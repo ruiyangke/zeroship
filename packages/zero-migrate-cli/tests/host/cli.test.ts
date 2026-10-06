@@ -254,8 +254,8 @@ test("CLI valueless flags reject supplied values", () => {
 });
 
 test("CLI value-taking flags reject a following flag as their value", () => {
-  // A forgotten value used to be filled in by the next flag, so `new add_users
-  // --dir --json` wrote the migration to ./--json and exited 0.
+  // A value-taking flag rejects a following flag as its value, so `new add_users
+  // --dir --json` is refused rather than writing the migration to ./--json.
   for (const invocation of [
     ["new", "add_users", "--dir", "--json"],
     ["status", "--database-url", "--json"],
@@ -820,7 +820,7 @@ test("live plan bootstraps no journal into the database it opens", () => {
     assert.match(report.pending[0].sql, /CREATE TABLE/i);
     assert.match(report.pending[0].sql, /widgets/i);
     // Opening a SQLite path creates the file, so a read-only verb leaves an empty
-    // database behind. What it must not leave is a JOURNAL, which now lives inside
+    // database behind. What it must not leave is a JOURNAL, which lives inside
     // that same file - so the question is asked of the catalog rather than of the
     // filesystem.
     const db = new DatabaseSync(appPath, { readOnly: true });
@@ -1988,8 +1988,9 @@ test("MySQL: CLI status and plan answer while a peer holds the project lock", as
     assert.equal(status.status, 0, status.stderr);
     assert.match(status.stderr, /project lock/i);
     assert.match(status.stderr, new RegExp(`\\b${holderId}\\b`));
-    // The bounded ten-second GET_LOCK is what used to turn contention into an
-    // error, so its message must be gone rather than merely outranked.
+    // The read-only acquisition uses a zero-timeout GET_LOCK and names the
+    // current holder, so the "timed out after" message must be absent rather
+    // than merely outranked.
     assert.doesNotMatch(status.stderr, /timed out after/);
 
     const plan = spawnCli(["plan", ...common], options);

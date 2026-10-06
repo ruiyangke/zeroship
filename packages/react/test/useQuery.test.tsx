@@ -1,5 +1,5 @@
 /**
- * Tests for `useQuery` (P8b stage 4).
+ * Tests for `useQuery`.
  *
  * Strategy
  * --------
@@ -12,9 +12,6 @@
  * Both are stubbed in-test: we hand-roll a `MockSubscription` with a
  * push-driven AsyncIterable, and a `mockQuery(...)` helper that returns
  * a thenable with a `_collection` field. No native runtime required.
- *
- * Tests live under the `b8b4_` prefix to track Stage 4 of the P8b
- * milestone (b = phase 8, 8b = read-set narrowing, 4 = useQuery layer).
  */
 
 import { test, describe } from "node:test";

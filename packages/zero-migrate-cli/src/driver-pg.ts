@@ -244,11 +244,11 @@ export function connectionScopedTypes(pg: PgModule): { getTypeParser: (oid: numb
         // strings, so one parser covers all three.
         //
         // It deliberately does NOT reach into `pg.types` for the array framing or the
-        // element decode. Borrowing a parser from there, which is what this used to
-        // do (calling `defaults.getTypeParser(OID_TEXT_ARRAY)` for `name[]` and
-        // `defaults.getTypeParser(OID_INT8_ARRAY)` for `int8[]`), is a live read of
-        // the same global mutable map this object exists to be immune from: it pins
-        // nothing and only moves which OID has to be poisoned. `int8[]` in particular
+        // element decode. Borrowing a parser from there (calling
+        // `defaults.getTypeParser(OID_TEXT_ARRAY)` for `name[]` and
+        // `defaults.getTypeParser(OID_INT8_ARRAY)` for `int8[]`) would be a live read of
+        // the same global mutable map this object exists to be immune from: it would
+        // pin nothing and only move which OID has to be poisoned. `int8[]` in particular
         // must keep yielding exact strings, since `Number` truncates above 2^53.
         //
         // `name[]` is not even in node-pg's default array-parser set, so without this

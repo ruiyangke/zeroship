@@ -311,7 +311,7 @@ export function looksLikeLegacyServerPath(root: string, filePath: string): boole
  * the optional BOM/shebang, leading whitespace, and line/block
  * comments, then checks whether the very next token is a string
  * literal whose value is `use server`. This avoids the AST parse cost
- * on the >99% of source files that don't open with the directive —
+ * on the source files that do not open with the directive -
  * `detectFileLevelUseServer()` is the source of truth.
  *
  * False positives (returns true when the AST detector would say no)
@@ -1232,8 +1232,8 @@ export function transformPlugin(state: TransformState): Plugin {
         // 1. Cheap textual pre-filter — skip files that obviously can't
         //    be a server module without parsing. The directive must be
         //    the first non-trivial token after the BOM / whitespace /
-        //    comments. This avoids the AST parse cost on the >99% of
-        //    source files that don't open with `"use server"`.
+        //    comments. This avoids the AST parse cost on the source files
+        //    that do not open with `"use server"`.
         const mayHaveServerDirective = quickHasUseServerDirective(code);
         const mayHaveScheduleRegistration = quickMayHaveScheduleRegistration(code);
         // Workflow classes are discovered independently of the `"use server"`

@@ -1,6 +1,6 @@
 import { fieldsOf, generatedSchema } from "./_install-helper.js";
 /**
- * **P7 PR 3** — SDK-side cascade of the `id: string` (typed_id) shape.
+ * SDK-side cascade of the `id: string` (typed_id) shape.
  *
  * Covers:
  * - `IdLoader<R extends { id: string }>` accepts typed_id keys.
@@ -118,7 +118,7 @@ describe("P7 PR 3 — Row<S>['id'] type widened to string", () => {
   test("row_id_type_is_string", () => {
     type UserSchema = { name: TypeBuilder<string, true> };
     // Compile-time check via assignability — the literal succeeds iff
-    // `Row<UserSchema & typeof generatedSchema>['id']` accepts a string. A pre-PR 3 build of the
+    // `Row<UserSchema & typeof generatedSchema>['id']` accepts a string. A build of the
     // SDK would refuse this assignment (id was `number`).
     const row: Row<UserSchema & typeof generatedSchema> = {
       name: "alice",

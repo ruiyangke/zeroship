@@ -7,8 +7,8 @@ type PlainObject = Record<string, unknown>;
 
 function makeMockNative(rows: PlainObject[]) {
   const calls: { collection: string; filter: PlainObject; opts: ZeroshipDbFindOpts }[] = [];
-  // NativeFn now returns rows directly (Record<string, unknown>[]),
-  // not a JSON string — Query._exec consumes the array.
+  // NativeFn returns rows directly (Record<string, unknown>[]);
+  // Query._exec consumes the array.
   const fn = async (
     collection: string,
     filter: PlainObject,

@@ -61,7 +61,7 @@ scope = "all"
  * Shaped differently from {@link createSchemaPolicy}, and copying that one would not
  * load. `code.extension` is a GLOBAL knob: the loader accepts `scope = "all"` and
  * REJECTS a narrow `scope = { include = [...] }`, which is pinned by
- * `global_knob_narrow_scope_rejects` in crates/zeroship-migrate-policy/tests/loader.rs:288.
+ * `global_knob_narrow_scope_rejects` in crates/zeroship-migrate-policy/tests/integration/loader.rs.
  * An extension is a database-wide object, so there is no schema to confine it to.
  *
  * The value is the allowlist, not a toggle: the guard matches the extension a

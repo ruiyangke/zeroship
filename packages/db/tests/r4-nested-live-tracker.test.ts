@@ -71,8 +71,7 @@ function makeMockNative() {
           (rowsByTable[name] ??= []).push(row);
           return row;
         },
-        // **P9 PR 1** — Collection-scoped openSubscription replaces
-        // the deleted Db-level entry point.
+        // The entry point is Collection-scoped `openSubscription`.
         openSubscription(): FakeSub {
           const sub = makeFakeSub();
           (subs[name] ??= []).push(sub);

@@ -11,20 +11,20 @@
 // kept the right column name but lost the values would satisfy every
 // column-shape check here and still be the worst possible outcome.
 //
-// WHAT THE ERROR MESSAGES USED TO SAY. Every one of these settled states was
-// reported as `migration "x" is not pending`:
+// WHAT THE ERROR MESSAGES SAY. Each settled state is named for what it is:
 //
 //   resolved by --commit    -> state applied
 //   resolved by --rollback  -> state aborted
 //   applied, never had a rename
 //
-// True, and misleading in the one direction that costs something. Everywhere
+// A single `migration "x" is not pending` for all three would be true, and
+// misleading in the one direction that costs something. Everywhere
 // else in this CLI "pending" means NOT YET APPLIED, so an operator retrying a
 // resolve - a replayed pipeline step, a second pair of hands - reads "is not
 // pending" as "the rename never happened" and goes looking for a lost deploy.
 // The states that actually reach this branch are the opposite of that.
 //
-// So each is now named for what it is. The commit and no-rename cases share
+// Each is named for what it is. The commit and no-rename cases share
 // wording deliberately: a resolved contract leaves no trace in the status reply,
 // so from here they are indistinguishable, and the sentence has to be true of
 // both.

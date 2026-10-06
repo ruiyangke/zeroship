@@ -127,9 +127,7 @@ function makeMockNative(options?: { ready?: (name: string) => Promise<void> }) {
           (rowsByTable[name] ??= []).push(minted);
           return minted;
         },
-        // **P9 PR 1** — subscriptions are minted via Collection-level
-        // `openSubscription()` (the duplicate `Db.openSubscription(name)`
-        // entry was removed).
+        // Subscriptions are minted via Collection-level `openSubscription()`.
         openSubscription(): FakeSub {
           calls.openSubscription += 1;
           const sub = makeFakeSub(async () => {
@@ -158,8 +156,8 @@ function makeMockNative(options?: { ready?: (name: string) => Promise<void> }) {
 }
 
 /** Wire `env.db` to a mock so the `subscribe.ts` wrapper consumes our
- *  fake subs. **P9 PR 1** — the mock surfaces `openSubscription` on the
- *  Collection wrapper (the Db-level entry was removed). */
+ *  fake subs. The mock surfaces `openSubscription` on the Collection
+ *  wrapper. */
 function installEnv(native: { collection: (n: string) => { openSubscription: () => FakeSub } }): void {
   (env as { db?: unknown }).db = native;
 }
@@ -517,10 +515,9 @@ describe("db.live — reactive query layer", () => {
   });
 
   test("tables: [] subscribes to nothing (static one-shot) — R3 IMPORTANT-4", async () => {
-    // R3 IMPORTANT-4 regression. `tables: []` used to silently fall
-    // back to auto-tracking (because `length > 0` was the guard).
-    // The fix treats `tables: []` as "subscribe to nothing": the
-    // initial result yields, then the iterator stalls (no subscriptions
+    // `tables: []` subscribes to nothing: the guard treats an explicit
+    // empty set as an empty set rather than falling back to auto-tracking.
+    // The initial result yields, then the iterator stalls (no subscriptions
     // open), waiting for an explicit `close()`.
     const ctx = makeMockNative();
     installEnv(ctx.native as unknown as { collection: (n: string) => { openSubscription: () => FakeSub } });

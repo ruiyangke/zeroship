@@ -44,7 +44,7 @@ export interface DevAuthUser {
  * The plugin's option bag.
  *
  * IT IS SMALL ON PURPOSE. `rpcEndpoint`, `serverEntry`, `mode` and
- * `migrations.*` used to live here and are now in `zeroship.jsonc`, because
+ * `migrations.*` live in `zeroship.jsonc`, because
  * every one of them was a fact the Rust CLI also needed and could not read.
  * What remains varies per developer machine (`devServerPort`, `devAuth`) plus
  * three levers that point AT the file rather than duplicating it (`configPath`,

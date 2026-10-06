@@ -103,7 +103,7 @@ describe("Infer helpers", () => {
 
   test("InferId pulls the branded Id<N> type off a Collection", () => {
     type T = InferId<typeof Users>;
-    // `Id<N> = string & {...}` (typed_id, P7 PR 3) - the brand is a
+    // `Id<N> = string & {...}` (typed_id) - the brand is a
     // phantom at runtime, but the base representation is a string, not
     // a number. `42 as T` compiled before this file was ever
     // typechecked; it does not after, because `number` and `string &

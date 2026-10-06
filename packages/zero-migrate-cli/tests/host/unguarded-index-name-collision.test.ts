@@ -26,13 +26,13 @@
 // reads one catalog snapshot per unit (`zeroship-migrate-postgres/src/backend/session.rs`), so a
 // name an earlier statement in the same `up` created is invisible to it; and the
 // fold's `DuplicateIndex` check keys on the target table's own index list
-// (`render/fold.rs:1765`, `:2733`, `:2788`), so it never asks which OTHER table owns
+// (`crates/zeroship-migrate-core/src/render/fold.rs`), so it never asks which OTHER table owns
 // a name. The fold-level widening that would have closed it was rejected on purpose
 // (review-log F48).
 //
 // Does NOT cover an index name long enough for PostgreSQL to truncate it into a
 // collision: authoring validation refuses an over-long create-side identifier on
-// every dialect before lowering (`crates/zeroship-migrate/tests/
+// every dialect before lowering (`crates/zeroship-migrate/tests/integration/namespaces/
 // authored_identifier_lengths.rs`), so a name that could truncate never reaches this
 // path from the authoring API.
 

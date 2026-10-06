@@ -24,10 +24,9 @@
 //            the key. `zzUnknownKey` is used everywhere so a failure reads the
 //            same way whichever entry point produced it.
 //
-// The DSL suite already caught two things a hand probe missed while this was being
-// built: an index-drop test that pinned the OLD silent behaviour, and a generic
-// guard shadowing `backfill`'s specific "cursorColumn was removed" message. Both
-// are why the refusal is asserted by message content rather than by "it threw".
+// The refusal is asserted by message content rather than by "it threw": an
+// index-drop case and a generic guard can shadow `backfill`'s specific
+// "cursorColumn was removed" message.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";

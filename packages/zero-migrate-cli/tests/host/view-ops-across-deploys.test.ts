@@ -29,7 +29,7 @@
 // create and a drop in the same batch resolve against each other and the arm passes
 // without touching the catalog at all. The create has to be journaled complete before the
 // second migration is planned - `ops_without_completed_journal_evidence`
-// (`lower.rs:601`) then excludes it from `pending_ops`, leaving the catalog as the only
+// (`crates/zeroship-migrate-node/src/lower.rs`) then excludes it from `pending_ops`, leaving the catalog as the only
 // place the drop can find its target. The same-migration arm below pins that distinction
 // so it cannot quietly rot back.
 import assert from "node:assert/strict";
@@ -248,9 +248,9 @@ function replaceTheView(): NamedMigration {
 //
 // The VIEW entry is inert and kept only so the map reads as the whole authored surface.
 // View names are not ownership-tracked at all: `CreateView` and `DropView` return no
-// target at crates/zeroship-migrate-ir/src/load.rs:280, structured creation checks only the
-// SOURCE tables at :310, and the registry advance tracks tables and partitions rather
-// than views at crates/zeroship-migrate-node/src/lower.rs:1574. Whether one app should be
+// target at crates/zeroship-migrate-ir/src/load.rs, structured creation checks only the
+// SOURCE tables, and the registry advance tracks tables and partitions rather
+// than views at crates/zeroship-migrate-node/src/lower.rs. Whether one app should be
 // able to replace another app's view is an open question, not a settled permission.
 const OWNED = { [TABLE]: OWNER_APP, [VIEW]: OWNER_APP };
 
@@ -369,7 +369,7 @@ test("MySQL: an ifExists drop across two deploys removes the view, like the ungu
     // drop without consulting the guard at all. The guard itself is still not honoured
     // on this dialect: the fold's DropView arm destructures with `..`, which swallows
     // `existenceGuard`, and the absorbing path one layer up
-    // (crates/zeroship-migrate-node/src/lower.rs:638) hardcodes NotSatisfied for MySQL.
+    // (crates/zeroship-migrate-node/src/lower.rs) hardcodes NotSatisfied for MySQL.
     // The arm below measures the case that distinction governs.
     const outcome = await applyOne(dropTheViewIfExists(), database, driver, [created]).then(
       () => "ran",
@@ -494,8 +494,8 @@ test("MySQL: the same ifExists drop succeeds when no prior migration was applied
   }
 });
 
-// SQLite needs no server, so both arms run on it too. `dialect-table.ts:73` and `:96`
-// mark the base createView and dropView variants portable here too, so this is the
+// SQLite needs no server, so both arms run on it too. `dialect-table.ts`
+// marks the base createView and dropView variants portable here too, so this is the
 // third cell of each row rather than a dialect that opts out.
 test("SQLite: both view operations across two deploys", async () => {
   const { mkdtempSync, rmSync } = await import("node:fs");

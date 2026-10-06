@@ -1,5 +1,5 @@
 /**
- * **P5.5 PR 7** — per-query unmask hint shape pin.
+ * Per-query unmask hint shape pin.
  *
  * The runtime side (the `dispatch_find_one` / `dispatch_find` glue
  * in `crates/zeroship-data-orm/src/crud/mod.rs`) consumes `opts.unmask` /

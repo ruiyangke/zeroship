@@ -691,7 +691,7 @@ describe("devServerPlugin", () => {
       //
       // WHAT THIS DOES NOT PROVE: that anything actually dies. The child here
       // is a node stub that has never heard of PR_SET_PDEATHSIG. The kernel
-      // half is crates/zeroship-cli/tests/parent_death_test.rs.
+      // half is crates/zeroship-cli/tests/e2e/parent_death_test.rs.
       assert.equal(runtime.env.ZEROSHIP_DIE_WITH_PARENT, String(process.pid));
       assert.deepEqual(runtime.argv, [
         "serve",

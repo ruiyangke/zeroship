@@ -8,7 +8,7 @@
 // through `rollback()` from `zero-migrate-cli`, which is the napi `rollback` export
 // (`crates/zeroship-migrate-node/src/bridge.rs`) -> `rollback_with_locked_backend`
 // -> `lower_ordered_envelopes_to_plans_for_rollback`
-// (`crates/zeroship-migrate-node/src/lower.rs:368`). That function replays the executed
+// (`crates/zeroship-migrate-node/src/lower.rs`). That function replays the executed
 // history from an EMPTY snapshot and merges the recovered object definitions into a
 // catalog-sourced live schema (`merge_recovered_definitions`), because the catalog
 // cannot show a view that has already been dropped. `ViewSnapshot::authored_query`

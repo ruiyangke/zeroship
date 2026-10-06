@@ -3,7 +3,7 @@
 // to see whether the table actually went away.
 //
 // The addon verb is already proven against real SQLite
-// (`crates/zeroship-migrate-node/tests/rollback_sqlite.rs`), but SQLite runs in-process
+// (`crates/zeroship-migrate-node/tests/integration/rollback_sqlite.rs`), but SQLite runs in-process
 // and never crosses the host-driver seam. These arms are the only place the
 // host-driven rollback path executes at all: the `pg` and `mysql2` adapters, the
 // dialect-native journal SQL, and the blocking project-lock bracket a rollback takes
@@ -340,7 +340,7 @@ test("PostgreSQL: rolling back a dropSchema rebuilds the schema its create autho
  *  reverse. Sequence and schema are covered in this file against PostgreSQL.
  *
  *  A view rollback on PostgreSQL through the verb is NOT covered here: the SQLite
- *  suite (`crates/zeroship-migrate-node/tests/rollback_sqlite.rs`,
+ *  suite (`crates/zeroship-migrate-node/tests/integration/rollback_sqlite.rs`,
  *  `a_view_dropped_by_a_later_envelope_comes_back_through_the_verb`) drives the same
  *  re-lowering path, and `crates/zeroship-migrate/tests/integration/rollback/drop_view_rollback_pg.rs`
  *  calls the engine directly without reaching the addon's envelope loop.

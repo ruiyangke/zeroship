@@ -3,10 +3,9 @@
 // `t.vector({ dimensions, metric })`, standalone
 // `t.text().mask({ kind, classification })`, `.generated(...)`, and `.identity(...)`.
 //
-// The recorder twin was collapsed: there is no longer a hand-kept second
-// recorder. The SDK recorder (`src/ops.ts`) and the engine-embedded
+// The SDK recorder (`src/ops.ts`) and the engine-embedded
 // recorder (`dist/embedded-recorder.js`, the `tsup` build output this suite
-// imports) are now the SAME source,
+// imports) are the SAME source,
 // compiled two ways. This test is the artifact-identity assertion:
 // re-author the SAME migration through BOTH the
 // `ops.ts` SOURCE (`pub*`) and the COMPILED artifact (`eng*`), then assert the

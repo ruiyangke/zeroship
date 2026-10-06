@@ -19,13 +19,13 @@ import type { NativeDb } from "../src/native.js";
 
 type AnyRec = Record<string, unknown>;
 
-// P9 PR 3: commit failure is now owned by the native orchestrator. The
+// Commit failure is owned by the native orchestrator. The
 // mock's `transaction(callback)` runs the callback (begin succeeded),
 // then simulates a COMMIT that fails — rejecting with the
 // `COMMIT_FAILED_INDETERMINATE`-coded error the Rust orchestrator emits
-// (`crates/zeroship-data-orm/src/transaction/mod.rs::exec_settle_top_level`).
+// (`crates/zeroship-data-orm/src/transaction/mod.rs::exec_settle`).
 // The `.cause` is preserved on the rejection so the SDK's `result.error`
-// keeps the cause chain the pre-PR3 JS `transactionImpl` produced.
+// keeps the cause chain the JS `transactionImpl` produced.
 function makeCommitFailingNative(commitErr: Error) {
   let txCount = 0;
   const native = {
@@ -53,8 +53,7 @@ function makeCommitFailingNative(commitErr: Error) {
 
 describe("db.transaction — commit_failed_indeterminate", () => {
   test("COMMIT failure → result.error carries commit_failed_indeterminate + the cause chain", async () => {
-    // Migrated from the pre-PR3 double-failing-native shape. The native
-    // orchestrator now owns COMMIT and the best-effort ROLLBACK; the mock
+    // The native orchestrator owns COMMIT and the best-effort ROLLBACK; the mock
     // models a COMMIT that fails after the body resolved, rejecting with
     // the same coded error + cause the Rust path emits.
     const commitErr = Object.assign(new Error("network drop after COMMIT"), {

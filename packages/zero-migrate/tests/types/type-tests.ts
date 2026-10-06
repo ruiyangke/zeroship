@@ -14,7 +14,7 @@
 //     schema (a migration naming a non-existent table/column TYPE-CHECKS cleanly —
 //     existence is an apply-time check, the anti-rot guarantee).
 
-// @ts-expect-error — free boolean combinators are no longer exported from the public package.
+// @ts-expect-error - free boolean combinators are not exported from the public package.
 import { and as removedPkgAnd, or as removedPkgOr, not as removedPkgNot } from "@zeroship/migrate";
 // @ts-expect-error — free policy helpers were deleted; use table(...).policy(name).create/drop().
 import { createPolicy as removedPkgCreatePolicy, dropPolicy as removedPkgDropPolicy } from "@zeroship/migrate";
@@ -76,7 +76,7 @@ import {
   type DecimalValue,
   type BytesValue,
 } from "../../src/index.js";
-// @ts-expect-error — free boolean combinators are no longer exported; use chain `.and`/`.or`/`.not`.
+// @ts-expect-error - free boolean combinators are not exported; use chain `.and`/`.or`/`.not`.
 import { and as removedAnd, or as removedOr, not as removedNot } from "../../src/index.js";
 // The internal closed-set validation arrays (NOT part of the public `index.ts`
 // surface) — imported directly for the LOW-2 element-typing assertion below.
@@ -217,7 +217,7 @@ export function antiRotMigration(): void {
     where: (col) => col("yet_another_missing_column").isNull(),
   });
   table("nonexistent_table").delete({ where: (col) => col("phantom_col").eq(1) });
-  // L5 (M19): update/delete/backfill `where` accept a built ExprChain / Expr, not just a `(col) => …` callback.
+  // update/delete/backfill `where` accept a built ExprChain / Expr, not just a `(col) => ...` callback.
   table("nonexistent_table").update({ set: { legacy_col: 1 }, where: migrate.lit(1).eq(migrate.lit(1)) });
   table("nonexistent_table").delete({ where: migrate.lit(1).eq(migrate.lit(1)) });
   table("nonexistent_table").backfill({
@@ -305,10 +305,10 @@ export function tableVendorSurface(): void {
 
   table("bookings").exclusion("bookings_no_overlap");
 
-  // @ts-expect-error — direct constraint validation method was deleted; use `table(...).constraint(name).validate()`.
+  // @ts-expect-error - direct constraint validation method is absent; use `table(...).constraint(name).validate()`.
   table("line_items").validateConstraint("line_items_order_fkey");
 
-  // @ts-expect-error — direct partition detach method was deleted; use `table(...).partition(name).detach()`.
+  // @ts-expect-error - direct partition detach method is absent; use `table(...).partition(name).detach()`.
   table("events").detachPartition("events_2026_05");
 
   table("line_items").constraint("line_items_order_fkey").validate();
@@ -410,7 +410,7 @@ export function indexGrammar(): void {
     on: [
       "email",
       // `order`, `opclass` and `collation` DO render on a column element. `nulls`
-      // does not, and used to be accepted and discarded (F652), so it is gone.
+      // does not and is rejected rather than accepted and discarded.
       { column: "created_at", order: "desc", opclass: "timestamp_ops", collation: "C" },
       { expr: (col) => col("email").lower() },
     ],
@@ -466,7 +466,7 @@ export function indexGrammar(): void {
 
   table("users").index("collation_idx").add({ on: [{ column: "email", collation: "C" }] });
 
-  // @ts-expect-error — `.index().drop()` no longer accepts author-declared uniqueness.
+  // @ts-expect-error - `.index().drop()` does not accept author-declared uniqueness.
   table("users").index("bad_unique_drop").drop({ unique: true });
 }
 
@@ -489,8 +489,10 @@ export function immutableOnlyBuilderSlots(): void {
 
   table("users").index("bad_partial_agg").add({ on: ["email"], where: () => countStar() });
 
-  // F652: facets the renderer discards are now TYPE errors, not silent no-ops.
-  // A `{ expr, order }` element used to produce an ASCENDING index.
+  // Facets the renderer discards are not silent no-ops: `{ expr, order }` is
+  // refused at RUNTIME rather than producing an ASCENDING index (it type-checks;
+  // see `index-element-facets-not-silent.test.ts`), and per-element `nulls` is
+  // a TYPE error.
   table("users").index("bad_col_nulls").add({
     // @ts-expect-error — per-element `nulls` is unsupported (dialects.md).
     on: [{ column: "email", nulls: "last" }],
@@ -521,13 +523,13 @@ export function tableRuntimeOptionTerminals(): void {
   table("posts").setOptions({ strictness: "lenient" });
   table("posts").create({ columns: { title: t.text() }, options: { softDelete: true, versioning: true, strictness: "off" } });
 
-  // @ts-expect-error — `.softDelete()` is no longer a TableHandle method.
+  // @ts-expect-error - `.softDelete()` is not a TableHandle method.
   table("posts").softDelete();
 
-  // @ts-expect-error — `.withVersioning()` is no longer a TableHandle method.
+  // @ts-expect-error - `.withVersioning()` is not a TableHandle method.
   table("posts").withVersioning();
 
-  // @ts-expect-error — `.strictness()` is no longer a TableHandle method.
+  // @ts-expect-error - `.strictness()` is not a TableHandle method.
   table("posts").strictness("strict");
 
   // @ts-expect-error — create-time runtime options live under `options`.
@@ -542,8 +544,8 @@ export function badColTypes(): void {
   // @ts-expect-error — `t` has no `t.notARealType()` factory.
   t.notARealType();
 
-  // `t.string()` is now a first-class bounded `VARCHAR(N)` (default length 255),
-  // no longer a removed alias — it type-checks as a valid column factory.
+  // `t.string()` is a first-class bounded `VARCHAR(N)` (default length 255)
+  // and type-checks as a valid column factory.
   t.string();
   t.string({ length: 120 });
 
@@ -720,7 +722,7 @@ export function vendorExprSurfaceBoundaryTypechecks(): void {
 
   // `regex` is a first-class chain operator (PG-first). It typechecks.
   table("exprs").update({ set: { x: (col) => col("x").regex("^a$") } });
-  // @ts-expect-error — `matches` was renamed to `regex`; the old name is gone.
+  // @ts-expect-error - `matches` is absent; use `regex`.
   table("exprs").update({ set: { x: (col) => col("x")["matches"]("^a$") } });
 
   // `columnSize` is a first-class chain operator (PG-first). It typechecks.
@@ -806,13 +808,13 @@ export function insertValueShapes(): void {
   // identity guard rejects it. This line intentionally typechecks.
   table("users").insert({ rows: { count: () => 42 } });
 
-  // @ts-expect-error — native symbols are no longer valid in column default position.
+  // @ts-expect-error - native symbols are not valid in column default position.
   table("users").create({ columns: { created_at: t.timestamp().default(Date.now) } });
 
-  // @ts-expect-error — native symbols are no longer valid in column default position.
+  // @ts-expect-error - native symbols are not valid in column default position.
   table("users").create({ columns: { random_id: t.uuid().default(Math.random) } });
 
-  // @ts-expect-error — native symbols are no longer valid in column default position.
+  // @ts-expect-error - native symbols are not valid in column default position.
   table("users").create({ columns: { id: t.uuid().default(crypto.randomUUID) } });
 
   // @ts-expect-error — the removed `{ fn }` carrier is not a DefaultValue.

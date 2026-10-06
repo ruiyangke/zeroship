@@ -1,5 +1,5 @@
 /**
- * Tests for `useSuspenseQuery` (P8b stage 4 — Suspense variant).
+ * Tests for `useSuspenseQuery` (Suspense variant).
  *
  * The variant requires an explicit `suspenseKey` so the suspended
  * resource survives the suspend/resume cycle. On first render it

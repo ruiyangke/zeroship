@@ -268,7 +268,7 @@ export interface Query<
 /**
  * Schema definition — plain fields, schema() builder with options, or
  * a top-level `t.union(...)` whose row shape is a discriminated union
- * (proposal §C2). The TypeBuilder form is type-erased to
+ * The TypeBuilder form is type-erased to
  * type-erased builder forms here so the conditional in `UnwrapSchema`
  * can distribute over the union.
  */
@@ -423,7 +423,7 @@ export interface TransactionOptions {
 /**
  * Unwrap SchemaBuilder / TypeBuilder at the type level so the collection
  * receives the underlying field record (or, for a top-level
- * `t.union(...)`, the inferred union shape — see proposal §C2).
+ * `t.union(...)`, the inferred union shape).
  *
  * - `schema({...})` wraps a `Record<string, unknown>` and we strip it.
  * - `t.union(...)` produces `TypeBuilder<UnionShape>`; we extract

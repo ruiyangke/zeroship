@@ -40,15 +40,11 @@ describe("refreshSession — cookie/identity re-mint (GET /session?mint=1)", () 
       "BFF model: the Session carries no token",
     );
     assert.equal(session.user.id, "pws_alice");
-    // This asserts what the STUB returns, not what the platform returns. The
-    // comment here used to say "the gateway includes them in the user
-    // projection" -- it does not, and says so at the top of the module that
-    // serves the endpoint: `crates/zeroship-gateway/src/auth_token.rs:8`, "the browser
-    // receives only an identity projection + HttpOnly cookies - NO
-    // power/wrapper access token, NO scopes, NO JWT in any response body"
-    // (design slice 2026-05-30-auth-bff-session-redesign §2.2). Measured on a
-    // live deployed login 2026-08-10: the response body carries no `scopes`
-    // key at all.
+    // This asserts what the STUB returns, not what the platform returns: the
+    // module that serves the endpoint (`crates/zeroship-gateway/src/auth_token.rs`)
+    // documents that the browser receives only an identity projection + HttpOnly
+    // cookies - NO power/wrapper access token, NO scopes, NO JWT in any response
+    // body.
     //
     // The assertion is LEFT AS IS deliberately. `Session.scopes` is declared
     // REQUIRED in `packages/auth/src/types.ts`, so the stub is faithful to the

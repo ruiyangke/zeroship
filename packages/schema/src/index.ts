@@ -581,7 +581,7 @@ export interface FieldDef {
    */
   shape?: Record<string, FieldDef>;
   /**
-   * Literal value (C2). Present iff `type === "literal"`. The accepted
+   * Literal value. Present iff `type === "literal"`. The accepted
    * value is matched by strict `===`; literal fields are the building
    * block of `t.union()` discriminators (every variant declares its
    * own `kind: t.literal("...")` so the SDK can dispatch at validate
@@ -589,13 +589,13 @@ export interface FieldDef {
    */
   literalValue?: string | number | boolean;
   /**
-   * Union variants (C2). Present iff `type === "union"`. Each entry is
+   * Union variants. Present iff `type === "union"`. Each entry is
    * the normalised shape (`Record<string, FieldDef>`) of one variant of
    * a discriminated union. The discriminator key is captured separately
    * in `discriminator`; values for that key are `FieldDef.literalValue`
    * on each variant's discriminator field.
    *
-   * Storage strategy is **flat columns** (proposal §C2): every union-
+   * Storage strategy is **flat columns**: every union-
    * wide field becomes a top-level column on the table, plus the
    * discriminator column with a `CHECK (kind IN (...))` constraint.
    * Per-variant integrity is enforced by additional CHECK constraints
@@ -605,7 +605,7 @@ export interface FieldDef {
    */
   variants?: Record<string, FieldDef>[];
   /**
-   * Discriminator field name (C2). Present iff `type === "union"`, or
+   * Discriminator field name. Present iff `type === "union"`, or
    * set to `true` on a flat-expanded discriminator column so the DDL
    * emitter knows to attach per-variant CHECK constraints.
    *
@@ -1424,7 +1424,7 @@ export const t = {
     return new TypeBuilder<string, false, undefined, undefined, false, "equality">({ type: "domain", domainName: name });
   },
   /**
-   * C2 — literal-value field. Validation accepts only the exact value
+   * Literal-value field. Validation accepts only the exact value
    * `v` (strict `===`). The value's TS literal type is preserved so
    * `t.literal("login")` yields `TypeBuilder<"login">` and the
    * containing `t.object({ kind: t.literal("login"), ... })` produces
@@ -1463,7 +1463,7 @@ export const t = {
     return new TypeBuilder<L, true>({ type: "literal", literalValue: value, required: true });
   },
   /**
-   * C2 — discriminated union over object shapes. Each argument must be
+   * Discriminated union over object shapes. Each argument must be
    * a `t.object({...})` that declares at least one `t.literal(...)`
    * field; the SDK auto-detects the discriminator (the single key that
    * is a literal in every variant with mutually distinct values).
@@ -1476,7 +1476,7 @@ export const t = {
    * )
    * ```
    *
-   * **Storage** — flat columns (proposal §C2):
+   * **Storage** - flat columns:
    * - One column per union-wide field (each nullable, since it only
    *   applies to a subset of variants). Fields that appear in multiple
    *   variants with the same type are deduplicated.
@@ -1665,7 +1665,7 @@ function detectDiscriminator(variants: Record<string, FieldDef>[]): string {
 }
 
 // ---------------------------------------------------------------------------
-// C2 — Union type inference helpers
+// Union type inference helpers
 // ---------------------------------------------------------------------------
 
 /**

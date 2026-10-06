@@ -186,7 +186,7 @@ describe("op.* runtime schema descriptor bundling", () => {
           silent: true,
           builtAt: "2026-06-24T00:00:00Z",
           userHasDefaultFetch: false,
-          // Stated, not defaulted: the packer no longer guesses these, so a
+          // Stated, not defaulted: the packer does not guess these, so a
           // test that omitted them would exercise the "caller did not ask for
           // a descriptor" arm instead of this one.
           databases: [{
