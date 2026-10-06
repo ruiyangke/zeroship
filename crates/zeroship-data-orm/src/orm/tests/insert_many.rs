@@ -11,7 +11,7 @@ fn fields() -> Value {
 #[compio::test]
 async fn sqlite_insert_many_applies_defaults_across_row_shapes() {
     let fixture = CollectionFixture::sqlite("entries", fields()).await;
-    let Output::Rows { rows, .. } = fixture
+    let Output::Rows(rows) = fixture
         .database
         .collection("entries")
         .unwrap()
@@ -46,7 +46,7 @@ async fn sqlite_insert_many_rolls_back_all_row_shapes_on_failure() {
         .await
         .unwrap_err();
 
-    let Output::Rows { rows, .. } = collection.find(value!({}), value!({})).await.unwrap() else {
+    let Output::Rows(rows) = collection.find(value!({}), value!({})).await.unwrap() else {
         panic!("find must return rows")
     };
     assert!(rows.is_empty());

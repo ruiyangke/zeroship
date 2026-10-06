@@ -239,7 +239,7 @@ async fn rows(database: &Database, table: &str, filter: Value) -> Vec<Value> {
             || filter.clone(),
             |after| value!({"$and":[filter.clone(), {"id":{"$gt":after}}]}),
         );
-        let Output::Rows { rows, .. } = collection
+        let Output::Rows(rows) = collection
             .find(page_filter, value!({"orderBy":{"id":1},"limit":256}))
             .await
             .unwrap()

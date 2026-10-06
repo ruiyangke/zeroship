@@ -82,7 +82,7 @@ test("chained with merges references and preserves native nulls", async () => {
 
 test("relation mappings rename declared target fields without changing JSON or mask payloads", async () => {
   const payload = { nested_key: { display_name: "untouched" } };
-  const protectedName = { masked: "A***", classification: "pii", sentinel: "__zsmask__" };
+  const protectedName = { masked: "A***", classification: "pii" };
   const nativeRow = {
     id: "post_a", author_id: "author_a", author: {
       id: "person_a", account_key: "author_a", display_name: protectedName,

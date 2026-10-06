@@ -51,7 +51,7 @@ async fn exercise(postgres: bool, integer: bool) {
         assert_unique_conflict(error);
     }
 
-    let Output::Rows { rows, .. } = records.find(value!({}), value!({})).await.unwrap() else {
+    let Output::Rows(rows) = records.find(value!({}), value!({})).await.unwrap() else {
         panic!("expected rows");
     };
     assert_eq!(rows, vec![retained]);

@@ -127,7 +127,6 @@ async fn find_on(
         zeroship_data_orm::crud::plan_find(&binding, collection, &filter, &value!({})).unwrap();
     zeroship_data_orm::crud::run_find(binding, collection.to_string(), route, filter, plan)
         .await
-        .map(|r| r.rows)
 }
 
 /// Run the real `plan_search` + `run_search` pair on `route`.
@@ -142,7 +141,6 @@ async fn search_on(
     let plan = zeroship_data_orm::crud::plan_search(&binding, &registration, collection, &args)?;
     zeroship_data_orm::crud::run_search(&route, binding, collection.to_string(), plan)
         .await
-        .map(|r| r.rows)
 }
 
 /// Run the real `plan_near` + `run_near` pair on `route`.
@@ -157,7 +155,6 @@ async fn near_on(
     let plan = zeroship_data_orm::crud::plan_near(&binding, &registration, collection, &args)?;
     zeroship_data_orm::crud::run_near(&route, binding, collection.to_string(), plan)
         .await
-        .map(|r| r.rows)
 }
 
 fn code_of(err: &DbError) -> String {
@@ -212,7 +209,7 @@ fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inserted()
             )
             .await
             .expect("the write pipeline + insert builder must apply on the transaction lane");
-            let id = inserted.rows[0]["id"]
+            let id = inserted[0]["id"]
                 .as_str()
                 .expect("the write pipeline must mint an id")
                 .to_string();
@@ -228,7 +225,7 @@ fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inserted()
          subject arm below rules on nothing: {inside_plain:?}",
             );
 
-            assert_eq!(inserted.rows[0]["embedding"], value!([1.0, 0.0, 0.0, 0.0]));
+            assert_eq!(inserted[0]["embedding"], value!([1.0, 0.0, 0.0, 0.0]));
             assert_eq!(inside_plain[0]["embedding"], value!([1.0, 0.0, 0.0, 0.0]));
 
             let args = value!({ "vector": [1.0, 0.0, 0.0, 0.0], "k": 10 });
@@ -320,8 +317,8 @@ fn a_spatial_near_inside_a_transaction_sees_the_row_that_transaction_inserted() 
             )
             .await
             .expect("native geographic values must insert through the shared ORM");
-            let id = inserted.rows[0]["id"].as_str().unwrap().to_owned();
-            assert_eq!(inserted.rows[0]["location"], point);
+            let id = inserted[0]["id"].as_str().unwrap().to_owned();
+            assert_eq!(inserted[0]["location"], point);
 
             // ---- CONTROL 1: the transaction lane sees its own uncommitted row.
             let inside_plain = find_on(tx_route(host, app).await, app, coll, value!({ "id": &id }))

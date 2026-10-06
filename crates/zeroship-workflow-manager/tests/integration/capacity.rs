@@ -163,7 +163,7 @@ async fn seed(queue: &Queue, policies: &Rc<Policies>, zone: &ZoneId, app: &AppId
 }
 
 async fn target(fixture: &Fixture, zone: &ZoneId) -> Value {
-    let Output::Rows { rows, .. } = fixture
+    let Output::Rows(rows) = fixture
         .database()
         .await
         .collection("capacity_targets")

@@ -432,7 +432,7 @@ impl TaskExecution for Execution {
                 loop {
                     self.budget.check()?;
                     let tx = self.service.begin().await?;
-                    let Output::Rows { rows, .. } = tx
+                    let Output::Rows(rows) = tx
                         .database()
                         .collection("__zeroship_workflow_tasks")?
                         .find(value!({"id":self.task.clone()}), value!({}))
@@ -666,7 +666,7 @@ impl Fixture {
     }
     async fn task_state(&self) -> String {
         let tx = self.service.begin().await.unwrap();
-        let Output::Rows { rows, .. } = tx
+        let Output::Rows(rows) = tx
             .database()
             .collection("__zeroship_workflow_tasks")
             .unwrap()

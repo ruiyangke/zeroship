@@ -34,7 +34,7 @@ fn cases() -> Vec<(&'static str, Value, Value)> {
 }
 
 async fn rows(records: &Collection, filter: Value) -> Vec<Value> {
-    let Output::Rows { rows, .. } = records
+    let Output::Rows(rows) = records
         .find(filter, value!({"orderBy":{"key":1}}))
         .await
         .unwrap()
@@ -58,7 +58,7 @@ async fn labels_of(records: &Collection, key: &str) -> (Value, Value) {
 }
 
 async fn update(records: &Collection, key: &str, patch: Value) -> Result<Value, DbError> {
-    let Output::Rows { rows, .. } = records.update(value!({"key":key}), patch).await? else {
+    let Output::Rows(rows) = records.update(value!({"key":key}), patch).await? else {
         panic!("update must return rows")
     };
     Ok(rows[0].clone())
@@ -75,7 +75,7 @@ fn assert_code(error: &DbError, code: &str) {
 async fn insert_cases(records: &Collection) {
     let all = cases();
     let (batch, single) = all.split_at(2);
-    let Output::Rows { rows, .. } = records
+    let Output::Rows(rows) = records
         .execute(Operation::InsertMany {
             documents: Value::Array(
                 batch
@@ -96,7 +96,7 @@ async fn insert_cases(records: &Collection) {
         assert_eq!(&row["maybe"], maybe, "{key}");
     }
     for (key, labels, maybe) in single {
-        let Output::Rows { rows, .. } = records
+        let Output::Rows(rows) = records
             .insert(value!({"key":key, "labels":labels.clone(), "maybe":maybe.clone()}))
             .await
             .unwrap()
@@ -286,7 +286,7 @@ async fn exercise(owner: &CollectionFixture) {
         .unwrap();
     assert_eq!(cleared["maybe"], Value::Null);
 
-    let Output::Rows { rows: upserted, .. } = records
+    let Output::Rows(upserted) = records
         .execute(Operation::Upsert {
             document: value!({"key":"f_forward", "labels":["z"], "maybe":["y"]}),
             conflict_fields: value!(["key"]),
@@ -519,7 +519,7 @@ async fn round_trip_migrated(owner: &CollectionFixture) {
     assert!(fields["scopes"].required);
     assert!(!fields["amr"].required);
     let records = owner.database.collection("records").unwrap();
-    let Output::Rows { rows, .. } = records
+    let Output::Rows(rows) = records
         .insert(value!({"key":"k", "scopes":["b","a","a"], "amr":null}))
         .await
         .unwrap()

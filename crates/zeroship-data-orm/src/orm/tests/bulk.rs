@@ -52,7 +52,7 @@ async fn bulk_counts(mut fixture: CollectionFixture) {
         ),
         total
     );
-    let Output::Rows { rows, .. } = entries
+    let Output::Rows(rows) = entries
         .find(value!({"label":"entry-0"}), value!({}))
         .await
         .unwrap()

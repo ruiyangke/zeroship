@@ -264,51 +264,20 @@ export interface MaskOpts {
   classification?: Classification;
 }
 
-/**
- * wire shape the Rust read path emits for masked
- * columns (the `__zsmask__` sentinel object).
- *
- * this wire shape is now consumed entirely Rust-side:
- * the row serializer emits the sentinel into the JSON string, and the
- * runtime's rehydration pass (`masked_value::rehydrate_masked_values`)
- * replaces it with a native {@link MaskedValue} v8_class instance at
- * `JSON.parse` time. The SDK never observes the raw sentinel and never
- * constructs `MaskedValue`; this type is retained as documentation of
- * the wire contract (and is still used by the test harness to
- * synthesise sentinel payloads).
- *
- * Wire shape:
- * ```json
- * {
- *   "sentinel": "__zsmask__",
- *   "masked": "***-**-6789",
- *   "classification": "spi",
- *   "_meta": { "collection": "users", "row_pk": "usr_…", "column": "ssn" }
- * }
- * ```
- */
-export interface MaskedValueRepr {
-  /** The masked representation. Safe to log, serialize, render. */
-  masked: string;
-  /** Classification of the source field — see {@link Classification}. */
-  classification: Classification;
-  /** Wire-shape sentinel. Always the string literal `"__zsmask__"`. */
-  sentinel: "__zsmask__";
-}
-
 /** Actor descriptor passed to unmask authorization. */
 export type Actor = Record<string, unknown>;
 
 /**
- * masked-value wrapper, now a NATIVE v8_class.
+ * masked-value wrapper, a NATIVE v8_class.
  *
- * `MaskedValue` instances are minted Rust-side by the row serializer's
- * rehydration pass (`crates/zeroship-data-v8/src/v8_classes/masked_value.rs`)
- * when a masked column flows back across the V8 boundary. The SDK no
- * longer constructs them — this is a TYPE-ONLY `declare class` that
- * describes the native instance's shape. There is no JS runtime body;
- * `new MaskedValue(...)` from user code throws `Illegal constructor`
- * (the native constructor rejects).
+ * `MaskedValue` instances are minted natively from the typed masked cell
+ * the read path produces, when a masked column flows back across the V8
+ * boundary (`crates/zeroship-data-v8/src/v8_classes/masked_value.rs`). A
+ * masked column never crosses as a plain object, so no stored or
+ * user-built object can become one. The SDK never constructs them - this
+ * is a TYPE-ONLY `declare class` that describes the native instance's
+ * shape. There is no JS runtime body; `new MaskedValue(...)` from user
+ * code throws `Illegal constructor` (the native constructor rejects).
  *
  * Encapsulates the masked representation of a sensitive field along
  * with its classification + per-row `_meta`. Reads of a masked column

@@ -1030,7 +1030,7 @@ fn reference_from(row: &models::PayloadRecord) -> WorkflowOutputRef {
 }
 
 async fn payload_usage(tx: &Transaction, app: &AppId) -> Result<(i64, i64), WorkflowServiceError> {
-    let Output::Rows { rows, .. } = tx
+    let Output::Rows(rows) = tx
         .database()
         .collection(models::payloads::Entity::COLLECTION)?
         .execute(Operation::Aggregate {

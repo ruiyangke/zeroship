@@ -1,5 +1,6 @@
-//! `MaskedValue` — the V8 wrapper minted directly by the row
-//! serializer for every masked column on a row crossing back to JS.
+//! `MaskedValue` - the V8 wrapper `v8_values::encode` mints from each
+//! masked cell (`zeroship_data_orm::value::MaskedCell`) of a result
+//! crossing back to JS.
 //!
 //! ## JS surface (matches the §4.1 proposal mapping table)
 //!
@@ -15,18 +16,17 @@
 //!
 //! Methods:
 //! - `unmask(opts?)` — single-column round-trip; resolves with the
-//!   plaintext on success. Calls into `dispatch_unmask_field` with the
+//!   plaintext on success. Calls into `protection::unmask::dispatch_unmask` with the
 //!   collection / row_pk / column bound to this instance.
 //! - `unmask(cols, opts?)` — multi-column overload on the SAME method;
 //!   discriminated at the V8 boundary by whether arg 0 is an array.
 //!   Resolves with `Record<col, plaintext>`. Calls into
-//!   `dispatch_bulk_unmask_field` with a single-row `items` payload.
+//!   `protection::unmask::dispatch_bulk_unmask` with a single-row `items` payload.
 //! - `canUnmask(opts?)` — dry-run probe. Issues a real unmask with
 //!   reason `"permission probe"` and treats `unmask_not_permitted` as
 //!   `false`. The probe WRITES the audit row regardless of outcome.
-//! - `toString()` / `toJSON()` — both return the masked string.
-//!   `Symbol.toPrimitive` is installed manually after the class
-//!   template finishes minting (see `register_to_primitive`).
+//! - `toString()` / `toJSON()` - both return the masked string, so string
+//!   coercion, template literals and `JSON.stringify` yield it too.
 
 #![allow(unsafe_code)]
 
@@ -52,8 +52,8 @@ use zeroship_data_orm::protection::unmask::{
 /// are no native resources to release.
 ///
 /// The six fields below mirror the §4.1 internal-field list. They are
-/// captured at mint time (`mint_masked_value`) from the row payload's
-/// sibling metadata and never mutated.
+/// captured at mint time (`mint_masked_value`) from the read pipeline's
+/// masked cell and never mutated.
 #[derive(Debug)]
 pub struct MaskedValue {
     /// The app-at-deploy identity this MaskedValue was minted under.
@@ -336,7 +336,7 @@ impl MaskedValue {
                         // resolve with the declared plaintext type directly.
                         OpResult::JsValue {
                             resolver,
-                            value: crate::v8_values::resolve(result.plaintext),
+                            value: crate::v8_values::resolve(result.plaintext, binding),
                             request_id,
                         }
                     }
@@ -452,7 +452,7 @@ impl MaskedValue {
                     }
                     OpResult::JsValue {
                         resolver,
-                        value: crate::v8_values::resolve(Value::Object(payload)),
+                        value: crate::v8_values::resolve(Value::Object(payload), binding),
                         request_id,
                     }
                 }
@@ -473,8 +473,9 @@ impl MaskedValue {
 // ---------------------------------------------------------------------------
 
 /// Mint a `MaskedValue` v8_class instance with state stamped from the
-/// six row-metadata fields. Called from [`rehydrate_masked_values`] when
-/// a `__zsmask__` sentinel object is observed inside a parsed row.
+/// six row-metadata fields. Called from `v8_values::encode` for each
+/// masked cell of a database result, with the binding the result was read
+/// through; nothing here reads a JavaScript object, so no creator code runs.
 ///
 /// The minted object carries the full §4.1 internal-field set; no
 /// fallible work happens after the Box is published, so a stray `?`
@@ -493,9 +494,8 @@ pub(crate) fn mint_masked_value<'s>(
     let obj = inst_tmpl.new_instance(scope)?;
 
     let class_fn = class_tmpl.get_function(scope)?;
-    let proto_key = v8::String::new(scope, "prototype")?;
-    let proto_v = class_fn.get(scope, proto_key.into())?;
-    obj.set_prototype(scope, proto_v);
+    let prototype = original_prototype(scope, class_fn)?;
+    obj.set_prototype(scope, prototype);
 
     let state = MaskedValue {
         binding,
@@ -510,231 +510,46 @@ pub(crate) fn mint_masked_value<'s>(
     Some(obj)
 }
 
-// Masked-value rehydration after native V8 result materialization.
+/// The isolate's private key under which a context's `MaskedValue` function
+/// keeps the prototype it was created with.
+struct OriginalPrototypeKey(v8::Eternal<v8::Private>);
 
-/// Replace masked-field sentinels with native `MaskedValue` instances.
-/// The adapter invokes this after materializing native results. Wrappers capture
-/// the isolate's app and deploy binding to prevent reuse under another binding.
-/// Returns a replacement value when any sentinel was converted.
-pub fn rehydrate_masked_values<'s, 'a>(
-    scope: &mut v8::PinScope<'s, 'a>,
-    value: v8::Local<'s, v8::Value>,
-    binding: DbBinding,
+/// The prototype the context's `MaskedValue` function was created with.
+///
+/// Creator code can assign `MaskedValue.prototype` once it holds a minted value
+/// (`value.constructor`), and an ordinary read of `prototype` would then hand
+/// every later mint the creator's object. The class is not a global, so the
+/// function is unreachable until this context's first mint; that mint reads the
+/// pristine prototype and keeps it under a private key script cannot read or
+/// write, and every later mint uses the kept one.
+fn original_prototype<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    class_fn: v8::Local<'s, v8::Function>,
 ) -> Option<v8::Local<'s, v8::Value>> {
-    // THE BINDING THE ROWS CAME FROM, carried here from the dispatch that
-    // produced them. A pinned workflow isolate and a current isolate of one app
-    // hold different descriptor entries, and an app on two databases holds two
-    // schemas at once, so a `MaskedValue` must resolve its column metadata out
-    // of the database it was read from rather than out of whatever `env.db`
-    // happens to name.
-    let mut walker = RehydrateWalker {
-        binding,
-        depth: 0,
-        cap: 16,
+    let key = match scope.get_slot::<OriginalPrototypeKey>() {
+        Some(slot) => slot.0.get(scope),
+        None => None,
     };
-    walker.walk(scope, value)
-}
-
-struct RehydrateWalker {
-    binding: DbBinding,
-    depth: usize,
-    cap: usize,
-}
-
-impl RehydrateWalker {
-    /// Walk one V8 value; returns `Some(new_value)` if it (or anything
-    /// it transitively contains) was rewritten, `None` otherwise.
-    fn walk<'s, 'a>(
-        &mut self,
-        scope: &mut v8::PinScope<'s, 'a>,
-        value: v8::Local<'s, v8::Value>,
-    ) -> Option<v8::Local<'s, v8::Value>> {
-        if self.depth >= self.cap {
-            return None;
+    let key = match key {
+        Some(key) => key,
+        None => {
+            let key = v8::Private::new(scope, None);
+            let eternal = v8::Eternal::empty();
+            eternal.set(scope, key);
+            scope.set_slot(OriginalPrototypeKey(eternal));
+            key
         }
-        // Binary fields are leaves. Enumerating a typed array would turn
-        // mask rehydration into a property walk over every byte.
-        if value.is_array_buffer_view() || value.is_array_buffer() {
-            return None;
-        }
-        if value.is_array() {
-            // Walk array elements; replace in place when a child gets
-            // rewritten.
-            let arr = v8::Local::<v8::Array>::try_from(value).ok()?;
-            let n = arr.length();
-            let mut changed = false;
-            for i in 0..n {
-                if let Some(elem) = arr.get_index(scope, i) {
-                    self.depth += 1;
-                    let replaced = self.walk(scope, elem);
-                    self.depth -= 1;
-                    if let Some(new_elem) = replaced {
-                        arr.set_index(scope, i, new_elem);
-                        changed = true;
-                    }
-                }
-            }
-            return if changed { Some(value) } else { None };
-        }
-        if !value.is_object() {
-            return None;
-        }
-        let obj = v8::Local::<v8::Object>::try_from(value).ok()?;
-
-        // Sentinel check: a plain `{sentinel: "__zsmask__", ...}` object.
-        // Brand-checked v8_class instances will not have `sentinel` on
-        // their internal field 0 / their prototype chain doesn't match
-        // a plain Object's, but reading `.sentinel` on them is harmless
-        // — the check is the `==="__zsmask__"` discriminator.
-        let sentinel_key = str_key(scope, "sentinel")?;
-        if let Some(sentinel_v) = obj.get(scope, sentinel_key) {
-            if sentinel_v.is_string() && sentinel_v.to_rust_string_lossy(scope) == "__zsmask__" {
-                // DB-7: only mint from a sentinel carrying the unforgeable
-                // per-process signature the read pipeline stamps. A `__zsmask__`
-                // object fabricated by app JS (e.g. read back from a JSONB column
-                // it wrote) lacks it and is left untouched — it cannot be turned
-                // into a MaskedValue targeting an attacker-chosen cell.
-                let signed = str_key(scope, "_sig")
-                    .and_then(|k| obj.get(scope, k))
-                    .filter(|v| v.is_string())
-                    .map(|v| v.to_rust_string_lossy(scope))
-                    .is_some_and(|sig| {
-                        sig == zeroship_data_orm::protection::mask_pass::mask_sentinel_signature()
-                    });
-                if signed {
-                    return self.mint_replacement(scope, obj);
-                }
-                // Unsigned/forged sentinel: do not mint, do not descend further.
-                return None;
-            }
-        }
-
-        // Not a sentinel — descend into own enumerable properties. The
-        // typical row carries flat properties only; nested objects (e.g.
-        // a JSONB column) are extremely unlikely to contain sentinels,
-        // but we still walk for completeness.
-        let mut changed = false;
-        if let Some(names) = obj.get_own_property_names(scope, v8::GetPropertyNamesArgs::default())
-        {
-            for i in 0..names.length() {
-                let Some(key_v) = names.get_index(scope, i) else {
-                    continue;
-                };
-                let Some(val_v) = obj.get(scope, key_v) else {
-                    continue;
-                };
-                self.depth += 1;
-                let replaced = self.walk(scope, val_v);
-                self.depth -= 1;
-                if let Some(new_val) = replaced {
-                    obj.set(scope, key_v, new_val);
-                    changed = true;
-                }
-            }
-        }
-        if changed { Some(value) } else { None }
+    };
+    if let Some(kept) = class_fn
+        .get_private(scope, key)
+        .filter(|kept| kept.is_object())
+    {
+        return Some(kept);
     }
-
-    fn mint_replacement<'s, 'a>(
-        &self,
-        scope: &mut v8::PinScope<'s, 'a>,
-        obj: v8::Local<'s, v8::Object>,
-    ) -> Option<v8::Local<'s, v8::Value>> {
-        // Extract the sentinel payload + nested _meta. Missing fields
-        // produce a defensive empty-string fall-back so the wrapper
-        // still mints (the `unmask` round-trip will fail loudly later
-        // with `unmask_not_found` / `unmask_column_not_masked` rather
-        // than silently swallowing the row).
-        let masked_key = str_key(scope, "masked")?;
-        let masked = obj
-            .get(scope, masked_key)
-            .and_then(|v| {
-                if v.is_string() {
-                    Some(v.to_rust_string_lossy(scope))
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_default();
-        let classification_key = str_key(scope, "classification")?;
-        let classification = obj
-            .get(scope, classification_key)
-            .and_then(|v| {
-                if v.is_string() {
-                    Some(v.to_rust_string_lossy(scope))
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| "pii".to_string());
-
-        let meta_key = str_key(scope, "_meta")?;
-        let (collection, row_pk, column) = if let Some(meta_v) = obj.get(scope, meta_key) {
-            if meta_v.is_object() {
-                if let Ok(meta_obj) = v8::Local::<v8::Object>::try_from(meta_v) {
-                    let collection_key = str_key(scope, "collection")?;
-                    let c = meta_obj
-                        .get(scope, collection_key)
-                        .and_then(|v| {
-                            if v.is_string() {
-                                Some(v.to_rust_string_lossy(scope))
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or_default();
-                    let row_pk_key = str_key(scope, "row_pk")?;
-                    let r = meta_obj
-                        .get(scope, row_pk_key)
-                        .and_then(|v| {
-                            if v.is_string() {
-                                Some(v.to_rust_string_lossy(scope))
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or_default();
-                    let column_key = str_key(scope, "column")?;
-                    let col = meta_obj
-                        .get(scope, column_key)
-                        .and_then(|v| {
-                            if v.is_string() {
-                                Some(v.to_rust_string_lossy(scope))
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or_default();
-                    (c, r, col)
-                } else {
-                    (String::new(), String::new(), String::new())
-                }
-            } else {
-                (String::new(), String::new(), String::new())
-            }
-        } else {
-            (String::new(), String::new(), String::new())
-        };
-
-        let mv = mint_masked_value(
-            scope,
-            self.binding.clone(),
-            collection,
-            row_pk,
-            column,
-            classification,
-            masked,
-        )?;
-        Some(mv.into())
-    }
-}
-
-/// Helper — allocate a `v8::String` key as a `v8::Value`. The `?`
-/// propagation in `walk` / `mint_replacement` short-circuits gracefully
-/// on alloc failure (returns `None` for that subtree; the rest of the
-/// walk continues).
-fn str_key<'s, 'a>(scope: &mut v8::PinScope<'s, 'a>, s: &str) -> Option<v8::Local<'s, v8::Value>> {
-    v8::String::new(scope, s).map(Into::into)
+    let prototype_key = v8::String::new(scope, "prototype")?;
+    let prototype = class_fn.get(scope, prototype_key.into())?;
+    class_fn.set_private(scope, key, prototype)?;
+    Some(prototype)
 }
 
 #[cfg(test)]
@@ -747,77 +562,157 @@ mod tests {
 
     use zeroship_runtime::init_v8;
 
-    #[test]
-    fn rehydration_keeps_the_host_identity_after_metadata_changes() {
-        use std::{cell::RefCell, collections::HashMap, rc::Rc};
-        use zeroship_runtime::{RuntimeState, SharedState};
-
-        init_v8();
-        let app = zeroship_core::AppId::mint();
-        let other = zeroship_core::AppId::mint();
-        let state: SharedState = Rc::new(RefCell::new(RuntimeState::new(
-            HashMap::from([("APP_ID".into(), app.as_str().into())]),
-            None,
-            None,
-        )));
-        state
-            .borrow_mut()
-            .env_vars
-            .insert("APP_ID".into(), other.as_str().into());
-        let mut isolate = v8::Isolate::new(v8::CreateParams::default());
-        isolate.set_slot(state);
-        // `RuntimeState::new` snapshots APP_ID at construction, so the identity
-        // the rehydrator asks for is `app` and not the `other` written over the
-        // live map above. Keying the store on `other` would leave the binding
-        // unresolved while looking wired.
-        crate::tests::fixtures::supply_app_bindings([app.as_str()]);
-        v8::scope!(let handles, &mut isolate);
-        let context = v8::Context::new(handles, Default::default());
-        let scope = &mut v8::ContextScope::new(handles, context);
-        let signed = build_sentinel(
-            scope,
-            Some(zeroship_data_orm::protection::mask_pass::mask_sentinel_signature()),
-        );
-        let value = rehydrate_masked_values(
-            scope,
-            signed.into(),
-            crate::tests::fixtures::harness_binding(app.as_str()),
-        )
-        .unwrap();
+    /// The native state of a `MaskedValue` wrapper.
+    fn state_of<'a>(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> &'a MaskedValue {
         let object = v8::Local::<v8::Object>::try_from(value).unwrap();
         assert!(MaskedValue::is_instance(scope, object.into()));
         let field = object.get_internal_field(scope, 0).unwrap();
         let external = v8::Local::<v8::External>::try_from(field).unwrap();
-        // The live branded wrapper owns this allocation until V8 finalizes it.
-        let masked = unsafe { &*external.value().cast::<MaskedValue>() };
-        assert_eq!(masked.binding.app_id(), app.as_str());
+        // The live branded wrapper owns this allocation until V8 finalizes it,
+        // and the test isolate outlives every use of the reference.
+        unsafe { &*external.value().cast::<MaskedValue>() }
     }
 
+    /// One row of `people` read back through the ORM on a SQLite platform
+    /// binding, so its `ssn` is the masked cell a real read produces.
+    fn read_masked_row() -> Value {
+        use zeroship_data_orm::orm::{Database, Output};
+        const PLATFORM: &str = "platform";
+        let directory = tempfile::tempdir().unwrap();
+        crate::tests::fixtures::tables::create_sqlite_table(
+            directory.path(),
+            PLATFORM,
+            &format!(
+                r#"CREATE TABLE "{PLATFORM}".people (id TEXT PRIMARY KEY, ssn TEXT, __zs_raw__ssn TEXT);"#
+            ),
+        );
+        let url = format!("sqlite:{}", directory.path().join("platform.sqlite").display());
+        crate::tests::fixtures::parity::block_on(async move {
+            let database = Database::connect(
+                DbBinding::platform(
+                    PLATFORM,
+                    "platform-deploy",
+                    zeroship_data_orm::sql::SchemaName::new(PLATFORM).unwrap(),
+                ),
+                zeroship_data_orm::ConnectOptions::new(
+                    url,
+                    zeroship_data_orm::encryption::ProjectKeySource::unavailable(),
+                ),
+                zeroship_data_orm::schema::Schema::from_collections(vec![(
+                    "people".into(),
+                    zeroship_data_orm::value!({
+                        "id": {"type": "string", "primaryKey": true, "required": true},
+                        "ssn": {"type": "string",
+                            "mask": {"kind": "last4", "classification": "spi"},
+                            "storage": {"valueColumn": "ssn", "rawColumn": "__zs_raw__ssn"}}
+                    }),
+                )])
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+            let people = database.collection("people").unwrap();
+            people
+                .insert(zeroship_data_orm::value!({"id": "p1", "ssn": "123-45-6789"}))
+                .await
+                .unwrap();
+            let Output::Rows(mut rows) = people
+                .find(zeroship_data_orm::value!({}), zeroship_data_orm::value!({}))
+                .await
+                .unwrap()
+            else {
+                panic!("find returns rows");
+            };
+            assert_eq!(rows.len(), 1);
+            rows.remove(0)
+        })
+    }
+
+    /// A masked cell from a real read is minted against the binding the result
+    /// carries rather than one any part of the row names.
     #[test]
-    fn mask_rehydration_does_not_inspect_binary_fields() {
+    fn a_masked_cell_mints_against_the_binding_its_result_carries() {
         init_v8();
+        let row = read_masked_row();
+        assert!(row["ssn"].as_masked().is_some(), "{row:?}");
         let mut isolate = v8::Isolate::new(v8::CreateParams::default());
         v8::scope!(let handles, &mut isolate);
         let context = v8::Context::new(handles, Default::default());
         let scope = &mut v8::ContextScope::new(handles, context);
-        let source = v8::String::new(scope, "globalThis.inspected = false; const bytes = new Uint8Array([0, 255]); Object.defineProperty(bytes, 'sentinel', {get() { inspected = true; }}); bytes").unwrap();
-        let input = v8::Script::compile(scope, source, None)
-            .unwrap()
-            .run(scope)
-            .unwrap();
-        let mut walker = RehydrateWalker {
-            binding: crate::tests::fixtures::binding("app_a"),
-            depth: 0,
-            cap: 16,
-        };
-        assert!(walker.walk(scope, input).is_none());
-        let key = v8::String::new(scope, "inspected").unwrap();
-        assert!(
-            context
-                .global(scope)
-                .get(scope, key.into())
-                .unwrap()
-                .is_false()
+        let key = v8::String::new(scope, "ssn").unwrap();
+        for app in ["app_mint_first", "app_mint_second"] {
+            let binding = crate::tests::fixtures::binding(app);
+            let encoded = crate::v8_values::encode(scope, row.clone(), &binding).unwrap();
+            let object = v8::Local::<v8::Object>::try_from(encoded).unwrap();
+            let ssn = object.get(scope, key.into()).unwrap();
+            let state = state_of(scope, ssn);
+            assert_eq!(state.binding, binding);
+            assert_eq!(
+                (
+                    state.collection.as_str(),
+                    state.row_pk.as_str(),
+                    state.column.as_str(),
+                    state.classification.as_str(),
+                    state.masked_string.as_str(),
+                ),
+                ("people", "p1", "ssn", "spi", "***-**-6789")
+            );
+        }
+    }
+
+    fn run_script(scope: &mut v8::PinScope, source: &str) -> String {
+        let source = v8::String::new(scope, source).unwrap();
+        let script = v8::Script::compile(scope, source, None).unwrap();
+        script.run(scope).unwrap().to_rust_string_lossy(scope)
+    }
+
+    fn mint_global(scope: &mut v8::PinScope, name: &str, row_pk: &str) {
+        let minted = mint_masked_value(
+            scope,
+            crate::tests::fixtures::binding("app_a"),
+            "users".into(),
+            row_pk.into(),
+            "ssn".into(),
+            "spi".into(),
+            "***-**-6789".into(),
+        )
+        .expect("mint should succeed");
+        let global = scope.get_current_context().global(scope);
+        let key = v8::String::new(scope, name).unwrap();
+        global.set(scope, key.into(), minted.into());
+    }
+
+    /// Creator code reaches the constructor through a minted value and can
+    /// assign its `prototype`. Later mints keep the class's own prototype, so
+    /// they stay native masked values with the native surface.
+    #[test]
+    fn reassigning_the_constructor_prototype_leaves_later_mints_native() {
+        init_v8();
+        let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+        v8::scope!(let handle_scope, &mut isolate);
+        let context = v8::Context::new(handle_scope, Default::default());
+        let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+        mint_global(scope, "first", "usr_01");
+        // The assignment takes effect, which is the control for what follows.
+        assert_eq!(
+            run_script(
+                scope,
+                "first.constructor.prototype = { evil: true }; \
+                 String(first.constructor.prototype.evil === true)"
+            ),
+            "true"
+        );
+        mint_global(scope, "second", "usr_02");
+        assert_eq!(
+            run_script(
+                scope,
+                "JSON.stringify({ tag: Object.prototype.toString.call(second), \
+                 unmask: typeof second.unmask, evil: 'evil' in second, \
+                 shared: Object.getPrototypeOf(second) === Object.getPrototypeOf(first), \
+                 pk: second._meta?.row_pk ?? null })"
+            ),
+            r#"{"tag":"[object MaskedValue]","unmask":"function","evil":false,"shared":true,"pk":"usr_02"}"#
         );
     }
 
@@ -844,89 +739,6 @@ mod tests {
         )
         .expect("mint should succeed");
         assert!(MaskedValue::is_instance(scope, obj.into()));
-    }
-
-    fn set_str<'s>(
-        scope: &mut v8::PinScope<'s, '_>,
-        obj: v8::Local<'s, v8::Object>,
-        k: &str,
-        v: &str,
-    ) {
-        let key = v8::String::new(scope, k).unwrap().into();
-        let val = v8::String::new(scope, v).unwrap().into();
-        let _ = obj.set(scope, key, val);
-    }
-
-    fn build_sentinel<'s>(
-        scope: &mut v8::PinScope<'s, '_>,
-        sig: Option<&str>,
-    ) -> v8::Local<'s, v8::Object> {
-        let obj = v8::Object::new(scope);
-        set_str(scope, obj, "sentinel", "__zsmask__");
-        set_str(scope, obj, "masked", "***-**-6789");
-        set_str(scope, obj, "classification", "spi");
-        if let Some(s) = sig {
-            set_str(scope, obj, "_sig", s);
-        }
-        let meta = v8::Object::new(scope);
-        set_str(scope, meta, "collection", "users");
-        set_str(scope, meta, "row_pk", "usr_01");
-        set_str(scope, meta, "column", "ssn");
-        let meta_key = v8::String::new(scope, "_meta").unwrap().into();
-        let _ = obj.set(scope, meta_key, meta.into());
-        obj
-    }
-
-    #[test]
-    fn rehydrate_refuses_forged_sentinel_db7() {
-        // DB-7: a `__zsmask__` object app JS fabricated (e.g. read back from a
-        // JSONB column it wrote) lacks the per-process `_sig` the read pipeline
-        // stamps, so the decoder must NOT mint it into a MaskedValue (which
-        // could then `.unmask()` an attacker-chosen cell). A correctly-signed
-        // sentinel — what the pipeline actually produces — IS minted.
-        init_v8();
-        let mut isolate = v8::Isolate::new(v8::CreateParams::default());
-        v8::scope!(let handle_scope, &mut isolate);
-        let context = v8::Context::new(handle_scope, Default::default());
-        let scope = &mut v8::ContextScope::new(handle_scope, context);
-
-        // Drive the walker directly (rehydrate_masked_values reads APP_ID from
-        // the runtime SharedState, absent in a bare test isolate; the walker
-        // carries the binding itself and is the unit under test).
-        fn new_walker() -> RehydrateWalker {
-            RehydrateWalker {
-                binding: crate::tests::fixtures::binding("app_a"),
-                depth: 0,
-                cap: 16,
-            }
-        }
-
-        let forged = build_sentinel(scope, None);
-        assert!(
-            new_walker().walk(scope, forged.into()).is_none(),
-            "an unsigned (forged) sentinel must not be minted"
-        );
-        assert!(
-            !MaskedValue::is_instance(scope, forged.into()),
-            "forged stays a plain object"
-        );
-
-        let wrong = build_sentinel(scope, Some("not-the-real-signature"));
-        assert!(
-            new_walker().walk(scope, wrong.into()).is_none(),
-            "a wrong-signature sentinel must not be minted"
-        );
-
-        let signed = build_sentinel(
-            scope,
-            Some(zeroship_data_orm::protection::mask_pass::mask_sentinel_signature()),
-        );
-        let out = new_walker().walk(scope, signed.into());
-        assert!(out.is_some(), "a correctly-signed sentinel must be minted");
-        assert!(
-            MaskedValue::is_instance(scope, out.unwrap()),
-            "minted into a MaskedValue"
-        );
     }
 
     #[test]
@@ -1093,33 +905,5 @@ mod tests {
             !MaskedValue::is_instance(scope, plain.into()),
             "plain object must not pass MaskedValue brand check"
         );
-    }
-
-    #[test]
-    fn rehydrate_walker_skips_non_sentinel_objects() {
-        init_v8();
-        let mut isolate = v8::Isolate::new(v8::CreateParams::default());
-        v8::scope!(let handle_scope, &mut isolate);
-        let context = v8::Context::new(handle_scope, Default::default());
-        let scope = &mut v8::ContextScope::new(handle_scope, context);
-
-        // Pre-install the class template so `mint_masked_value` would
-        // work if invoked. The input has no sentinel so the walker
-        // should return None.
-        let _ = MaskedValue::install(scope);
-
-        let plain_src = v8::String::new(scope, "({id: 1, name: 'alice'})").unwrap();
-        let script = v8::Script::compile(scope, plain_src, None).unwrap();
-        let val = script.run(scope).unwrap();
-        // No SharedState slot set in this minimal harness; the walker
-        // gracefully no-ops since there are no sentinels regardless.
-        // We just need to make sure the walker doesn't panic on a plain
-        // object.
-        let mut walker = RehydrateWalker {
-            binding: crate::tests::fixtures::binding("app_a"),
-            depth: 0,
-            cap: 16,
-        };
-        assert!(walker.walk(scope, val).is_none());
     }
 }

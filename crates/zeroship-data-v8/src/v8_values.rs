@@ -1,53 +1,54 @@
-//! Materialize protected native database values directly in V8.
-use zeroship_data_orm::value::Value;
+//! Materialize native database values directly in V8.
+//!
+//! Every value is built with `create_data_property` and template
+//! instantiation, so materialization runs no creator code: a getter or setter
+//! creator code installs on a prototype is never consulted. A masked cell is
+//! minted into a native `MaskedValue` here, from the typed cell itself.
+use zeroship_data_orm::binding::DbBinding;
+use zeroship_data_orm::value::{MaskedCell, Value};
 use zeroship_runtime::state::{NativeValue, OpError, ResolveValue};
 
 struct ResultValue {
     value: Value,
-    /// The binding the rows came from, when any column of them is masked. A
-    /// masked column rehydrates against the schema of the database that
-    /// produced it, never against `env.db`'s. `None` is a result with nothing
-    /// to rehydrate, which is why it needs no database at all.
-    masked_from: Option<zeroship_data_orm::binding::DbBinding>,
+    /// The binding the value was read through. A masked cell is minted against
+    /// the database that produced it, never against whatever `env.db` names.
+    binding: DbBinding,
 }
 impl NativeValue for ResultValue {
     fn into_v8<'s>(
         self: Box<Self>,
         scope: &mut v8::PinScope<'s, '_>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        let value = encode(scope, self.value)?;
-        let masked_from = self.masked_from;
-        Ok(match masked_from {
-            Some(binding) => {
-                crate::v8_classes::masked_value::rehydrate_masked_values(scope, value, binding)
-                    .unwrap_or(value)
-            }
-            None => value,
-        })
+        encode(scope, self.value, &self.binding)
     }
 }
 
-/// Materialize a native result that carries no masked column.
-pub fn resolve(value: Value) -> ResolveValue {
-    ResolveValue::Native(Box::new(ResultValue {
-        value,
-        masked_from: None,
-    }))
-}
-
-/// Materialize a native result whose masked columns rehydrate against the
-/// binding the rows were read through.
-pub fn resolve_masked(
-    value: Value,
-    binding: zeroship_data_orm::binding::DbBinding,
-) -> ResolveValue {
-    ResolveValue::Native(Box::new(ResultValue {
-        value,
-        masked_from: Some(binding),
-    }))
+/// Materialize a value read through `binding`.
+pub fn resolve(value: Value, binding: DbBinding) -> ResolveValue {
+    ResolveValue::Native(Box::new(ResultValue { value, binding }))
 }
 fn allocation_error() -> OpError {
     OpError::error("could not materialize database result")
+}
+
+/// Mint the native `MaskedValue` for a masked cell, against the binding the
+/// result was read through.
+fn mint<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    cell: &MaskedCell,
+    binding: &DbBinding,
+) -> Result<v8::Local<'s, v8::Value>, OpError> {
+    crate::v8_classes::masked_value::mint_masked_value(
+        scope,
+        binding.clone(),
+        cell.collection().to_owned(),
+        cell.row_pk().to_owned(),
+        cell.column().to_owned(),
+        cell.classification().to_owned(),
+        cell.display().to_owned(),
+    )
+    .map(Into::into)
+    .ok_or_else(allocation_error)
 }
 
 enum EncodeStep {
@@ -57,14 +58,16 @@ enum EncodeStep {
 }
 
 pub fn encode<'s>(
-    scope: &v8::PinScope<'s, '_>,
+    scope: &mut v8::PinScope<'s, '_>,
     value: Value,
+    binding: &DbBinding,
 ) -> Result<v8::Local<'s, v8::Value>, OpError> {
     let mut pending = vec![EncodeStep::Value(value)];
     let mut values: Vec<v8::Local<'s, v8::Value>> = Vec::new();
     while let Some(step) = pending.pop() {
         match step {
             EncodeStep::Value(value) => values.push(match value {
+                Value::Masked(cell) => mint(scope, &cell, binding)?,
                 Value::Json(encoded) => {
                     let parsed = serde_json::from_str(&encoded)
                         .map_err(|_| OpError::error("invalid JSON value"))?;
@@ -153,6 +156,10 @@ pub fn encode<'s>(
 mod tests {
     use super::*;
 
+    fn binding() -> DbBinding {
+        crate::tests::fixtures::binding("app_values")
+    }
+
     #[test]
     fn timestamp_results_preserve_the_portable_domain() {
         use zeroship_data_orm::sql::temporal::{MAX_TIMESTAMP_MICROS, MIN_TIMESTAMP_MICROS};
@@ -162,7 +169,7 @@ mod tests {
         let context = v8::Context::new(handles, Default::default());
         let scope = &mut v8::ContextScope::new(handles, context);
         for micros in [MIN_TIMESTAMP_MICROS, -1_000, 0, MAX_TIMESTAMP_MICROS] {
-            let result = encode(scope, Value::TimestampMicros(micros)).unwrap();
+            let result = encode(scope, Value::TimestampMicros(micros), &binding()).unwrap();
             assert_eq!(
                 result.to_rust_string_lossy(scope),
                 micros.div_euclid(1_000).to_string()
@@ -174,7 +181,7 @@ mod tests {
             MAX_TIMESTAMP_MICROS + 1,
             i64::MAX,
         ] {
-            let error = encode(scope, Value::TimestampMicros(micros)).unwrap_err();
+            let error = encode(scope, Value::TimestampMicros(micros), &binding()).unwrap_err();
             assert_eq!(error.message, "invalid timestamp value");
         }
     }
@@ -197,7 +204,7 @@ mod tests {
             (1_999, 1),
             (1, 0),
         ] {
-            let result = encode(scope, Value::TimestampMicros(micros)).unwrap();
+            let result = encode(scope, Value::TimestampMicros(micros), &binding()).unwrap();
             assert_eq!(
                 result.to_rust_string_lossy(scope),
                 millis.to_string(),
@@ -209,7 +216,7 @@ mod tests {
         // Control: an exact millisecond multiple crosses unchanged in both
         // directions, so the floor is visible only on the sub-millisecond part.
         for millis in [-2_i64, -1, 0, 1, 2] {
-            let result = encode(scope, Value::TimestampMicros(millis * 1_000)).unwrap();
+            let result = encode(scope, Value::TimestampMicros(millis * 1_000), &binding()).unwrap();
             assert_eq!(result.to_rust_string_lossy(scope), millis.to_string());
             assert_eq!(timestamp_micros(&Value::from(millis)), Some(millis * 1_000));
         }
@@ -234,7 +241,7 @@ mod tests {
         v8::scope!(let handles, &mut isolate);
         let context = v8::Context::new(handles, Default::default());
         let scope = &mut v8::ContextScope::new(handles, context);
-        let result = encode(scope, rows).unwrap();
+        let result = encode(scope, rows, &binding()).unwrap();
         let rows = v8::Local::<v8::Array>::try_from(result).unwrap();
         let row = rows.get_index(scope, 0).unwrap().to_object(scope).unwrap();
         let key = v8::String::new(scope, "payload").unwrap();
@@ -261,14 +268,14 @@ mod tests {
         let bytes = crate::v8_bridge::decode_native(scope, input).unwrap();
         assert_eq!(bytes.as_bytes(), Some([0, 255].as_slice()));
         let native = Value::Array(vec![bytes, Value::from(i64::MAX), Value::from(u64::MAX)]);
-        let output = encode(scope, native.clone()).unwrap();
+        let output = encode(scope, native.clone(), &binding()).unwrap();
         let decoded = crate::v8_bridge::decode_native(scope, output).unwrap();
         assert_eq!(decoded, native);
         let array = v8::Local::<v8::Array>::try_from(output).unwrap();
         assert!(array.get_index(scope, 0).unwrap().is_uint8_array());
         assert!(array.get_index(scope, 1).unwrap().is_big_int());
         let native = Value::Object([("__proto__".into(), Value::from("ordinary field"))].into());
-        let output = encode(scope, native.clone()).unwrap();
+        let output = encode(scope, native.clone(), &binding()).unwrap();
         assert_eq!(
             crate::v8_bridge::decode_native(scope, output).unwrap(),
             native
@@ -287,7 +294,7 @@ mod tests {
             "private-invalid-json".to_owned(),
             format!("{}null{}", "[".repeat(depth), "]".repeat(depth)),
         ] {
-            let error = encode(scope, Value::Json(encoded)).unwrap_err();
+            let error = encode(scope, Value::Json(encoded), &binding()).unwrap_err();
             assert_eq!(error.message, "invalid JSON value");
         }
     }

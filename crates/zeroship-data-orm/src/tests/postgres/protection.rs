@@ -1963,14 +1963,17 @@ fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
                 keys.difference(&allowed).collect::<Vec<_>>(),
             );
             // And the VALUE is gone, not merely re-keyed.
-            let serialized = serde_json::to_string(&finalized[0]).unwrap();
+            let serialized = format!("{:?}", finalized[0]);
             assert!(
                 !serialized.contains("123-45-6789"),
                 "the real value must not cross the JS boundary from a write: {serialized}",
             );
             // Paired with what must still come back, so this is not a green from
             // returning an empty row.
-            assert_eq!(finalized[0]["ssn"]["masked"], value!("***"));
+            assert_eq!(
+                finalized[0]["ssn"].as_masked().map(|cell| cell.display()),
+                Some("***")
+            );
             assert_eq!(finalized[0]["nickname"], value!("ada"));
             assert_eq!(finalized[0]["id"], value!(minted_id));
 

@@ -48,12 +48,6 @@ impl<'a> Default for ApplyOptions<'a> {
     }
 }
 
-#[derive(Debug)]
-pub struct ApplyResult {
-    pub rows: Vec<Value>,
-    pub has_masked: bool,
-}
-
 /// Apply the canonical row-read pipeline once for every row-returning path.
 ///
 /// The sequence is fixed:
@@ -74,7 +68,7 @@ pub async fn apply(
     collection: &str,
     mut rows: Vec<Value>,
     opts: ApplyOptions<'_>,
-) -> Result<ApplyResult, DbError> {
+) -> Result<Vec<Value>, DbError> {
     // Installed model metadata determines types and protection.
     let schema = scope_schema(
         crate::descriptor::collection_schema(binding, collection)?,
@@ -94,12 +88,9 @@ pub async fn apply(
         .await?;
     }
 
-    let has_masked = if opts.wrap_masked && super::schema_has_masked_columns(&schema) {
+    if opts.wrap_masked && super::schema_has_masked_columns(&schema) {
         wrap_masked_rows_on_read(collection, &schema, &mut rows)?;
-        true
-    } else {
-        false
-    };
+    }
 
     if !opts.unmask_columns.is_empty() {
         super::unmask::dispatch_unmask_for_query(
@@ -114,7 +105,7 @@ pub async fn apply(
 
     restrict_rows_to_surface(&schema, &opts.row_surface, &mut rows);
 
-    Ok(ApplyResult { rows, has_masked })
+    Ok(rows)
 }
 
 /// Narrow a shared schema to the fields this read projected.
@@ -224,7 +215,7 @@ mod tests {
         // free oracle. With no backend installed, a regression in the
         // `SchemaFieldScope::Only(&[])` narrowing reached the decrypt stage and
         // failed loudly on `not_configured`. It now reaches a working backend
-        // instead, so the `assert_eq!` on `result.rows` below is the ONLY thing
+        // instead, so the `assert_eq!` on `result` below is the ONLY thing
         // that rules on the narrowing. Do not weaken it.
         let (route, dir) =
             rt.block_on(async { crate::tests::fixtures::unit_route(binding.app_id()) });
@@ -243,8 +234,7 @@ mod tests {
             ))
             .expect("aggregate aliases must bypass schema-driven transforms");
 
-        assert_eq!(result.rows, vec![crate::value!({ "secret": 3 })]);
-        assert!(!result.has_masked);
+        assert_eq!(result, vec![crate::value!({ "secret": 3 })]);
 
         // The control, and the reason `RowSurface` has no permissive arm: a
         // caller that does NOT name its aliases loses them. That is the safe
@@ -263,7 +253,7 @@ mod tests {
                 },
             ))
             .expect("apply");
-        assert_eq!(defaulted.rows, vec![crate::value!({})]);
+        assert_eq!(defaulted, vec![crate::value!({})]);
 
         // Drop route-then-directory explicitly. `unit_route` returns
         // `(TxRoute, TempDir)` and the route owns the backend; scope exit drops
@@ -296,8 +286,8 @@ mod tests {
         let rt = compio::runtime::Runtime::new().expect("compio runtime build");
         // Inside the runtime: see the sibling test above.
         //
-        // ORACLE NOTE: the `assert_eq!` on `result.rows` and the `has_masked`
-        // assertion below are the ONLY things ruling on the `wrap_masked: false`
+        // ORACLE NOTE: the `assert_eq!` on `result` and the wrapped control
+        // below are the ONLY things ruling on the `wrap_masked: false`
         // narrowing - a real handle has no free `not_configured` oracle.
         let (route, dir) =
             rt.block_on(async { crate::tests::fixtures::unit_route(binding.app_id()) });
@@ -306,7 +296,7 @@ mod tests {
                 &route,
                 &binding,
                 "users",
-                rows,
+                rows.clone(),
                 ApplyOptions {
                     wrap_masked: false,
                     ..ApplyOptions::default()
@@ -314,11 +304,23 @@ mod tests {
             ))
             .expect("distinct scalars should bypass masked-value wrapping");
 
+        assert_eq!(result, vec![crate::value!({ "email": "a***@example.com" })]);
+
+        // The control: the same row through the default options comes back as
+        // a masked cell, so the plain string above is the narrowing's doing.
+        let wrapped = rt
+            .block_on(apply(
+                &route,
+                &binding,
+                "users",
+                rows,
+                ApplyOptions::default(),
+            ))
+            .expect("apply");
         assert_eq!(
-            result.rows,
-            vec![crate::value!({ "email": "a***@example.com" })]
+            wrapped[0]["email"].as_masked().map(|cell| cell.display()),
+            Some("a***@example.com")
         );
-        assert!(!result.has_masked);
 
         // Route before directory: see the sibling test above.
         drop(route);

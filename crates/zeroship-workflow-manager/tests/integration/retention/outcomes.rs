@@ -52,7 +52,7 @@ async fn snapshot(fixture: &Fixture) -> BTreeMap<&'static str, Vec<Value>> {
         "recovery_duties",
         "schedule_occurrences",
     ] {
-        let Output::Rows { rows, .. } = fixture
+        let Output::Rows(rows) = fixture
             .database()
             .await
             .collection(table)

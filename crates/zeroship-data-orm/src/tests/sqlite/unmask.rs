@@ -1381,7 +1381,7 @@ fn cold_query_unmask_hint_open_comes_from_ensure_backend_not_the_fixture() {
 
 /// **per-query gate #1**: an authorised actor with a query
 /// hint sees plaintext in the listed columns; non-listed masked
-/// columns keep their `__zsmask__` wrapping.
+/// columns keep their masked cells.
 ///
 /// The ATTACH is what this rules on. The OPEN is the harness's - see
 /// `unmask_backend` - and is bound by the cold-open gate directly above.
@@ -1451,7 +1451,7 @@ fn cold_query_unmask_hint_attaches_before_read() {
             configure_cold_sqlite_unmask_fixture(host, &dir, app_id, collection, schema, policy_v);
 
             // Simulate the row shape `dispatch_find` would produce
-            // AFTER `apply_mask_wrap_on_read` has wrapped the masked
+            // AFTER `mask_pass::wrap_row_on_read` has wrapped the masked
             // columns. We're driving `dispatch_unmask_for_query` directly
             // since the full V8 round-trip is out of scope for this
             // integration test.
@@ -1472,21 +1472,26 @@ fn cold_query_unmask_hint_attaches_before_read() {
             .expect("authorize_query_hint must succeed");
 
             // Step 2 — simulate post-wrap row + run unmask-for-query.
-            let mut rows = vec![crate::value!({
-                "id": "u1",
-                "email": {
-                    "sentinel": "__zsmask__",
-                    "masked": "a***@example.com",
-                    "classification": "pii",
-                    "_meta": { "collection": "users", "row_pk": "u1", "column": "email" },
-                },
-                "ssn": {
-                    "sentinel": "__zsmask__",
-                    "masked": "***-**-6789",
-                    "classification": "spi",
-                    "_meta": { "collection": "users", "row_pk": "u1", "column": "ssn" },
-                },
-            })];
+            let masked = |column: &str, classification: &str, display: &str| {
+                crate::value::Value::Masked(Box::new(crate::value::MaskedCell::new(
+                    "users".into(),
+                    "u1".into(),
+                    column.into(),
+                    classification.into(),
+                    display.into(),
+                )))
+            };
+            let email_cell = masked("email", "pii", "a***@example.com");
+            // Built by hand: `value!` serializes its operands, which turns a cell
+            // into its display.
+            let mut rows = vec![crate::value::Value::Object(
+                [
+                    ("id".to_owned(), crate::value::Value::from("u1")),
+                    ("email".to_owned(), email_cell.clone()),
+                    ("ssn".to_owned(), masked("ssn", "spi", "***-**-6789")),
+                ]
+                .into(),
+            )];
             dispatch_unmask_for_query(
                 &unmask_route(host, app_id).await,
                 &crate::tests::fixtures::harness_binding(app_id),
@@ -1497,23 +1502,15 @@ fn cold_query_unmask_hint_attaches_before_read() {
             .await
             .expect("dispatch_unmask_for_query");
 
-            // `ssn` slot now carries plaintext; `email` slot keeps the
-            // sentinel-wrapped form.
+            // `ssn` slot now carries plaintext; `email` slot keeps its
+            // masked cell.
             let row = &rows[0];
             assert_eq!(
                 row.get("ssn").and_then(|v| v.as_str()),
                 Some("123-45-6789"),
                 "ssn must be plaintext: {row:?}"
             );
-            let email = row
-                .get("email")
-                .and_then(|v| v.as_object())
-                .expect("email obj");
-            assert_eq!(
-                email.get("sentinel").and_then(|v| v.as_str()),
-                Some("__zsmask__"),
-                "email must remain wrapped: {row:?}"
-            );
+            assert_eq!(row["email"], email_cell, "email must remain masked: {row:?}");
 
             // Step 3 — granted audit row lands.
             audit_query_hint_granted(

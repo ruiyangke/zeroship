@@ -43,7 +43,7 @@ async fn exercise(db: &Database) {
         "profile":{"instant":iso,"schedule":{"instant":iso},"payload":{"instant":iso}},
         "event":{"kind":"dated","instant":iso}, "payload":[iso,0]
     });
-    let Output::Rows { rows, .. } = events.insert(document.clone()).await.unwrap() else {
+    let Output::Rows(rows) = events.insert(document.clone()).await.unwrap() else {
         panic!("insert must return rows")
     };
     check(&rows[0], &document);
@@ -53,7 +53,7 @@ async fn exercise(db: &Database) {
             value!({"instants":instants.clone()}),
             value!({"instants":{"$in":[instants]}}),
         ] {
-            let Output::Rows { rows, .. } = events.find(filter, value!({})).await.unwrap() else {
+            let Output::Rows(rows) = events.find(filter, value!({})).await.unwrap() else {
                 panic!("find must return rows")
             };
             assert_eq!(rows.len(), 1, "equivalent temporal values must match");
@@ -65,7 +65,7 @@ async fn exercise(db: &Database) {
         value!({"instants":{"$set":[iso,0]},"profile":{"$set":document["profile"].clone()}}),
         value!({"$set":{"instants":[iso,0],"profile":document["profile"].clone()}}),
     ] {
-        let Output::Rows { rows, .. } = events
+        let Output::Rows(rows) = events
             .update(value!({"id":id.clone()}), patch)
             .await
             .unwrap()
@@ -74,7 +74,7 @@ async fn exercise(db: &Database) {
         };
         check(&rows[0], &document);
     }
-    let Output::Rows { rows, .. } = events
+    let Output::Rows(rows) = events
         .execute(Operation::Upsert {
             document: document.clone(),
             conflict_fields: value!(["key"]),
@@ -89,7 +89,7 @@ async fn exercise(db: &Database) {
 
     let mut batch_document = document.clone();
     batch_document["key"] = value!("batch_created");
-    let Output::Rows { rows, .. } = db
+    let Output::Rows(rows) = db
         .transaction(|tx| async move {
             tx.collection("events")?
                 .execute(Operation::InsertMany {
@@ -145,7 +145,7 @@ async fn exercise(db: &Database) {
         count(events.count(value!({}), value!({})).await.unwrap()),
         before
     );
-    let Output::Rows { rows, .. } = events
+    let Output::Rows(rows) = events
         .update(
             value!({"id":id}),
             value!({"event":{"kind":"text","instant":iso}}),
@@ -225,7 +225,7 @@ async fn postgres_timestamp_array_operations_compare_canonical_instants() {
         ),
         (value!({"$pull":"1970-01-01"}), value!([-1, 1])),
     ] {
-        let Output::Rows { rows, .. } = events
+        let Output::Rows(rows) = events
             .update(value!({}), value!({"instants":operation}))
             .await
             .unwrap()

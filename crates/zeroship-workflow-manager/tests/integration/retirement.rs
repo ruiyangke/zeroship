@@ -398,7 +398,7 @@ fn fanout(app: &AppId, available_at: i64) -> JobSpec {
 const FUTURE: i64 = i64::MAX / 2;
 
 async fn rows(fixture: &Fixture, collection: &str, filter: Value) -> Vec<Value> {
-    let Output::Rows { rows, .. } = fixture
+    let Output::Rows(rows) = fixture
         .database()
         .await
         .collection(collection)

@@ -2,7 +2,7 @@ use super::fixtures::CollectionFixture;
 use super::*;
 
 fn rows(output: Output) -> Vec<Value> {
-    let Output::Rows { rows, .. } = output else {
+    let Output::Rows(rows) = output else {
         panic!("expected rows")
     };
     assert!(!rows.is_empty());
@@ -56,9 +56,10 @@ async fn hidden_id(postgres: bool) {
                 .unwrap(),
         );
         assert_eq!(inserted[0]["secret"], value!("private"));
-        assert!(!inserted[0]["masked"]["_meta"]["row_pk"]
-            .as_str()
+        assert!(!inserted[0]["masked"]
+            .as_masked()
             .unwrap()
+            .row_pk()
             .is_empty());
         let source = ReadSource::new("records", "r");
         let mut read = ReadQuery::new(source.clone());

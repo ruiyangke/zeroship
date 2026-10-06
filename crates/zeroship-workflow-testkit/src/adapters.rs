@@ -664,7 +664,7 @@ macro_rules! workflow_fixtures {
                     .unwrap();
                 let mut counted = 0;
                 loop {
-                    let Output::Rows { rows: page, .. } = collection
+                    let Output::Rows(page) = collection
                         .find(
                             filter.clone().into(),
                             $crate::adapters::__private::zeroship_data_orm::value!({

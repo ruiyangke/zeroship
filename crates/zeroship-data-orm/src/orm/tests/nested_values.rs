@@ -69,7 +69,7 @@ async fn exercise_scalar_types(database: &Database) {
             assert!(matches!(error, DbError::ValidationFailed { .. }), "{error}");
         }
     }
-    let Output::Rows { rows, .. } = profiles.find(value!({}), value!({})).await.unwrap() else {
+    let Output::Rows(rows) = profiles.find(value!({}), value!({})).await.unwrap() else {
         panic!("find must return rows")
     };
     assert_eq!(rows.len(), 1);

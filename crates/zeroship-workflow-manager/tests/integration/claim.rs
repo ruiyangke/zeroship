@@ -331,7 +331,7 @@ fn skip(app: &AppId, reason: ClaimSkipReason) -> ClaimSkip {
 }
 
 async fn stored(fixture: &Fixture, job: &JobSpec) -> Value {
-    let Output::Rows { rows, .. } = fixture
+    let Output::Rows(rows) = fixture
         .database()
         .await
         .collection("jobs")

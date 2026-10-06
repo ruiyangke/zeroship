@@ -172,7 +172,7 @@ impl<E: Entity> EntityCollection<E> {
 fn decode_count(output: Output) -> Result<i64, DbError> {
     match output {
         Output::Count(count) => Ok(count),
-        Output::Rows { .. } => Err(DbError::internal("expected an affected row count")),
+        Output::Rows(_) => Err(DbError::internal("expected an affected row count")),
     }
 }
 

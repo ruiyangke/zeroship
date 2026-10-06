@@ -709,7 +709,6 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
                 )
                 .await
                 .expect("run_near")
-                .rows
             };
 
             // ---- CONTROL: a route captured OUTSIDE the transaction. `op_conn`
@@ -838,8 +837,7 @@ fn near_uses_an_unreadable_identity_without_returning_it() {
             .unwrap();
             let rows = zeroship_data_orm::crud::run_near(&route, binding, "places".into(), plan)
                 .await
-                .unwrap()
-                .rows;
+                .unwrap();
 
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0]["label"], "visible");

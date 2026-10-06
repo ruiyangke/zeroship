@@ -5,7 +5,7 @@
 //! result resolvers materialize V8 values when the runtime re-enters the isolate.
 
 use zeroship_data_orm::value::Value;
-use zeroship_runtime::state::{ResolveValue, SharedState};
+use zeroship_runtime::state::SharedState;
 
 // ---------------------------------------------------------------------------
 // State accessors
@@ -343,41 +343,6 @@ pub(crate) fn setup_js_promise<'s>(
     let global_resolver = v8::Global::new(scope, resolver);
     let request_id = state.borrow().executing_request_id;
     (global_resolver, request_id, promise)
-}
-
-// Native result conversion and masked-value wrappers belong to this adapter.
-
-/// Materialize the first native row and rehydrate masked fields when present.
-pub(crate) fn first_row_or_null_masked(
-    rows: Vec<Value>,
-    has_masked: bool,
-    binding: zeroship_data_orm::binding::DbBinding,
-) -> ResolveValue {
-    let value = rows.into_iter().next().unwrap_or(Value::Null);
-    maybe_rehydrate(value, has_masked, binding)
-}
-
-/// Materialize native rows and rehydrate masked fields when present.
-pub(crate) fn rows_as_array_masked(
-    rows: Vec<Value>,
-    has_masked: bool,
-    binding: zeroship_data_orm::binding::DbBinding,
-) -> ResolveValue {
-    let value = Value::Array(rows);
-    maybe_rehydrate(value, has_masked, binding)
-}
-
-/// Schedule direct V8 materialization of a protected result.
-pub(crate) fn maybe_rehydrate(
-    value: Value,
-    has_masked: bool,
-    binding: zeroship_data_orm::binding::DbBinding,
-) -> ResolveValue {
-    if has_masked {
-        crate::v8_values::resolve_masked(value, binding)
-    } else {
-        crate::v8_values::resolve(value)
-    }
 }
 
 #[cfg(test)]

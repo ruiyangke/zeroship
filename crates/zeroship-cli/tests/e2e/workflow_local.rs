@@ -487,7 +487,7 @@ impl Platform {
                     .await
             })
             .await;
-            let Output::Rows { rows, .. } = output else {
+            let Output::Rows(rows) = output else {
                 panic!("expected platform metadata rows");
             };
             rows

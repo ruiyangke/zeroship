@@ -35,7 +35,7 @@ async fn calendar_dates_round_trip_through_sqlite_and_reject_corrupt_storage() {
         .execute("UPDATE people SET birthday = ?1", ["0004-02-29"])
         .unwrap();
     drop(fixture);
-    let Output::Rows { rows, .. } = db
+    let Output::Rows(rows) = db
         .collection("people")
         .unwrap()
         .find(value!({}), value!({}))
@@ -67,7 +67,7 @@ async fn exercise_calendar_dates(db: &Database) {
         let id = db
             .transaction(|tx| async move {
                 let people = tx.collection("people")?;
-                let Output::Rows { rows, .. } = people.insert(value!({"birthday":encoded})).await?
+                let Output::Rows(rows) = people.insert(value!({"birthday":encoded})).await?
                 else {
                     panic!("insert must return rows")
                 };
@@ -76,7 +76,7 @@ async fn exercise_calendar_dates(db: &Database) {
                 )?;
                 assert_eq!(decoded, date);
                 let id = rows[0]["id"].clone();
-                let Output::Rows { rows, .. } = people
+                let Output::Rows(rows) = people
                     .update(
                         value!({"id":id.clone()}),
                         value!({"birthday":{"$set":date}}),
@@ -90,7 +90,7 @@ async fn exercise_calendar_dates(db: &Database) {
             })
             .await
             .unwrap();
-        let Output::Rows { rows, .. } = people
+        let Output::Rows(rows) = people
             .find(value!({"id":id.clone(),"birthday":date}), value!({}))
             .await
             .unwrap()
@@ -112,7 +112,7 @@ async fn exercise_calendar_dates(db: &Database) {
                 .unwrap_err();
             assert!(matches!(error, DbError::ValidationFailed { .. }), "{error}");
         }
-        let Output::Rows { rows, .. } = people.find(value!({"id":id}), value!({})).await.unwrap()
+        let Output::Rows(rows) = people.find(value!({"id":id}), value!({})).await.unwrap()
         else {
             panic!("find must return rows")
         };
@@ -151,7 +151,7 @@ async fn exercise_calendar_dates(db: &Database) {
         count(people.count(value!({}), value!({})).await.unwrap()),
         before
     );
-    let Output::Rows { rows, .. } = people.insert(value!({"birthday":null})).await.unwrap() else {
+    let Output::Rows(rows) = people.insert(value!({"birthday":null})).await.unwrap() else {
         panic!("insert must return rows")
     };
     assert_eq!(rows[0]["birthday"], Value::Null);

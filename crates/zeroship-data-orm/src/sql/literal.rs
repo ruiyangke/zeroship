@@ -219,6 +219,7 @@ impl Literal {
     /// SQL JSON parameters require an explicit storage representation.
     pub fn try_from_value(value: Value) -> Result<Option<Self>, LiteralError> {
         Ok(Some(match value {
+            Value::Masked(_) => return Err(LiteralError::MaskedCell),
             Value::Null => return Ok(None),
             Value::Bool(value) => Self::Bool(value),
             Value::Number(value) if value.as_i64().is_some() => {
@@ -237,6 +238,9 @@ impl Literal {
                 Self::Json(value)
             }
             value @ (Value::Array(_) | Value::Object(_)) => {
+                if value.contains_masked() {
+                    return Err(LiteralError::MaskedCell);
+                }
                 Self::Json(serde_json::to_string(&value).map_err(|_| LiteralError::InvalidJson)?)
             }
         }))
@@ -373,6 +377,9 @@ pub enum LiteralError {
     NulByteInText,
     /// An encoded JSON value was invalid.
     InvalidJson,
+    /// A masked cell from a read result was offered as a parameter. Its
+    /// display is not the column's value and its coordinates are not data.
+    MaskedCell,
     /// A membership set had no members. Not representable: see
     /// [`crate::sql::Predicate::membership`], which simplifies that case away
     /// before a set is built.
@@ -399,6 +406,9 @@ impl fmt::Display for LiteralError {
             ),
             Self::NulByteInText => f.write_str("a text parameter must not contain a NUL byte"),
             Self::InvalidJson => f.write_str("a JSON parameter must contain valid JSON"),
+            Self::MaskedCell => f.write_str(
+                "a masked cell is not a parameter; unmask it or leave the column out",
+            ),
             Self::EmptyLiteralSet => f.write_str(
                 "a membership set must not be empty; empty membership is a constant, \
                  not an IN list",
@@ -431,6 +441,35 @@ impl std::error::Error for LiteralError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A masked cell from a read result is refused as a literal, on its own
+    /// and nested in a JSON container, so a read row cannot become a filter.
+    #[test]
+    fn masked_cells_are_not_literals() {
+        let masked = crate::tests::fixtures::masked_cell();
+        assert_eq!(
+            Literal::try_from_value(masked.clone()),
+            Err(LiteralError::MaskedCell)
+        );
+        for container in [
+            Value::Array(vec![Value::from("first"), masked.clone()]),
+            Value::Object([("nested".into(), Value::Array(vec![masked]))].into()),
+        ] {
+            assert_eq!(
+                Literal::try_from_value(container),
+                Err(LiteralError::MaskedCell)
+            );
+        }
+        // Control: the same shapes holding the display as plain text convert.
+        assert_eq!(
+            Literal::try_from_value(Value::from("***-**-6789")),
+            Ok(Some(Literal::Text("***-**-6789".into())))
+        );
+        assert_eq!(
+            Literal::try_from_value(Value::Array(vec![Value::from("first"), Value::from("x")])),
+            Ok(Some(Literal::Json(r#"["first","x"]"#.into())))
+        );
+    }
 
     /// The total order keeps canonical predicate construction deterministic.
     /// `-0.0` and `0.0` are the pair

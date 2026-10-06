@@ -169,15 +169,14 @@ impl Host {
         // `exec_mutation_with_emit_for_tests` below documents. `apply` needs a
         // route, not a handle: its unmask stage issues SELECTs of its own and they
         // must land on the lane the read that produced these rows ran on.
-        let result = crud::read_pipeline::apply(
+        crud::read_pipeline::apply(
             &exec::ambient_route_for_tests(&crate::tests::fixtures::harness_binding(app_id), backend),
             &binding,
             collection,
             rows,
             crud::read_pipeline::ApplyOptions::default(),
         )
-        .await?;
-        Ok(result.rows)
+        .await
     }
 
     pub(crate) async fn exec_mutation_with_emit(

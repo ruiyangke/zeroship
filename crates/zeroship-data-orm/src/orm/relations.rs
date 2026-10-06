@@ -82,7 +82,6 @@ pub(super) struct PreparedRelations {
 pub(super) struct LoadedRelation {
     pub field: String,
     pub rows: Vec<Option<Value>>,
-    pub has_masked: bool,
 }
 
 impl PreparedRelations {
@@ -204,7 +203,6 @@ impl PreparedRelations {
                 }
             }
             let mut targets = HashMap::new();
-            let mut has_masked = false;
             let mut target_budget = read::MAX_READ_RESULT_BYTES;
             for chunk in ids.chunks(reference.batch_size) {
                 self.validate_schemas(binding)?;
@@ -244,7 +242,7 @@ impl PreparedRelations {
                     })
                     .collect::<Result<Vec<_>, DbError>>()?;
                 self.validate_schemas(binding)?;
-                let result = crate::crud::read_pipeline::apply(
+                let decoded = crate::crud::read_pipeline::apply(
                     route,
                     binding,
                     &reference.collection,
@@ -253,13 +251,12 @@ impl PreparedRelations {
                 )
                 .await?;
                 self.validate_schemas(binding)?;
-                has_masked |= result.has_masked;
-                if result.rows.len() != matches.len() {
+                if decoded.len() != matches.len() {
                     return Err(DbError::internal(
                         "reference protection changed row alignment",
                     ));
                 }
-                for (row, matches) in result.rows.into_iter().zip(matches) {
+                for (row, matches) in decoded.into_iter().zip(matches) {
                     if matches.is_empty() {
                         return Err(DbError::internal(
                             "reference target has no matching lookup key",
@@ -292,7 +289,6 @@ impl PreparedRelations {
             loaded.push(LoadedRelation {
                 field: reference.field.clone(),
                 rows,
-                has_masked,
             });
         }
         Ok(loaded)
@@ -377,12 +373,11 @@ impl FindRelations {
         self,
         binding: &DbBinding,
         route: &TxRoute,
-        result: &mut crate::crud::read_pipeline::ApplyResult,
+        rows: &mut [Value],
     ) -> Result<(), DbError> {
-        let loaded = self.prepared.load(binding, route, &result.rows).await?;
+        let loaded = self.prepared.load(binding, route, rows).await?;
         for relation in loaded {
-            result.has_masked |= relation.has_masked;
-            for (row, target) in result.rows.iter_mut().zip(relation.rows) {
+            for (row, target) in rows.iter_mut().zip(relation.rows) {
                 let row = row
                     .as_object_mut()
                     .ok_or_else(|| DbError::internal("expected relation parent record"))?;
@@ -395,7 +390,7 @@ impl FindRelations {
                 }
             }
         }
-        for row in &mut result.rows {
+        for row in rows.iter_mut() {
             let row = row
                 .as_object_mut()
                 .ok_or_else(|| DbError::internal("expected relation parent record"))?;
@@ -404,7 +399,7 @@ impl FindRelations {
             }
         }
         let mut output_budget = read::MAX_READ_RESULT_BYTES;
-        for row in &result.rows {
+        for row in rows.iter() {
             read::consume_budget(row, &mut output_budget)?;
         }
         Ok(())

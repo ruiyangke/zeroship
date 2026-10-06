@@ -149,7 +149,7 @@ async fn journal_rows(
         .unwrap();
     let mut rows = Vec::new();
     loop {
-        let Output::Rows { rows: page, .. } = collection
+        let Output::Rows(page) = collection
             .find(
                 filter.clone().into(),
                 value!({"offset":rows.len(), "limit":zeroship_data_orm::sql::MAX_ROW_LIMIT, "orderBy":{"id":1}}),

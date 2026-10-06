@@ -59,7 +59,7 @@ pub(super) async fn cascade(fixture: &Fixture) -> (JobSpec, String) {
 
 async fn child_runs(fixture: &Fixture, parent: &str) -> Vec<String> {
     let tx = fixture.service.begin().await.unwrap();
-    let Output::Rows { rows, .. } = tx
+    let Output::Rows(rows) = tx
         .database()
         .collection("__zeroship_workflow_runs")
         .unwrap()
@@ -80,7 +80,7 @@ async fn child_runs(fixture: &Fixture, parent: &str) -> Vec<String> {
 
 pub(super) async fn control(fixture: &Fixture, run: &str) -> String {
     let tx = fixture.service.begin().await.unwrap();
-    let Output::Rows { rows, .. } = tx
+    let Output::Rows(rows) = tx
         .database()
         .collection("__zeroship_workflow_runs")
         .unwrap()

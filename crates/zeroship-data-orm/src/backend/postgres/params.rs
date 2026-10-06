@@ -3,6 +3,8 @@ use crate::value::Value;
 use compio_postgres::types::{private::BytesMut, Format, IsNull, Kind, ToSql, Type};
 type EncodeError = Box<dyn std::error::Error + Send + Sync>;
 
+const MASKED_PARAMETER: &str = "a masked cell from a read result is not a bind parameter";
+
 #[derive(Debug)]
 pub struct Parameter<'a>(pub &'a Value);
 
@@ -95,11 +97,17 @@ impl ToSql for Parameter<'_> {
             return Ok(IsNull::No);
         }
         if matches!(*ty, Type::JSON | Type::JSONB) && !self.0.is_null() {
+            // Serializing a masked cell would write its display into the
+            // column, so a read result cannot be bound back, at any depth.
+            if self.0.contains_masked() {
+                return Err(MASKED_PARAMETER.into());
+            }
             out.extend_from_slice(&serde_json::to_vec(self.0)?);
             return Ok(IsNull::No);
         }
         match (self.0, ty) {
             (Value::Null, _) => return Ok(IsNull::Yes),
+            (Value::Masked(_), _) => return Err(MASKED_PARAMETER.into()),
             (Value::Bytes(v), &Type::BYTEA) => out.extend_from_slice(v),
             (Value::Bytes(_), _) => return Err("binary parameter requires a bytea column".into()),
             (Value::Bool(v), &Type::BOOL) => out.extend_from_slice(&[u8::from(*v)]),
@@ -178,6 +186,37 @@ pub async fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A masked cell from a read result is never bound: not as a scalar, not as
+    /// a JSON value, and not nested inside one.
+    #[test]
+    fn masked_cells_are_not_bind_parameters() {
+        let masked = crate::tests::fixtures::masked_cell();
+        // Built by hand: `value!` serializes its operands, which turns a cell
+        // into its display before it could reach the encoder.
+        let nested = Value::Object([("kept".into(), Value::Array(vec![masked.clone()]))].into());
+        for (value, ty) in [
+            (&masked, &Type::TEXT),
+            (&masked, &Type::JSONB),
+            (&nested, &Type::JSONB),
+            (&nested, &Type::JSON),
+        ] {
+            let Err(error) = Parameter(value).to_sql(ty, &mut BytesMut::new()) else {
+                panic!("a masked cell must not bind as {ty}");
+            };
+            assert_eq!(error.to_string(), MASKED_PARAMETER, "{ty}");
+        }
+        // Control: the display as plain data binds in both positions.
+        let plain = crate::value!({ "kept": ["***-**-6789"] });
+        let mut bytes = BytesMut::new();
+        Parameter(&plain).to_sql(&Type::JSONB, &mut bytes).unwrap();
+        assert_eq!(bytes.as_ref(), br#"{"kept":["***-**-6789"]}"#);
+        bytes.clear();
+        Parameter(&Value::from("***-**-6789"))
+            .to_sql(&Type::TEXT, &mut bytes)
+            .unwrap();
+        assert_eq!(bytes.as_ref(), b"***-**-6789");
+    }
 
     #[test]
     fn vector_parameters_require_finite_numeric_components() {

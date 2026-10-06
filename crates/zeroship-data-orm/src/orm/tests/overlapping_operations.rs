@@ -71,7 +71,7 @@ impl Hold {
 
 /// The committed ids, sorted, read on a fresh autocommit call.
 async fn committed_ids(database: &Database) -> Vec<String> {
-    let Output::Rows { rows, .. } = database
+    let Output::Rows(rows) = database
         .collection("records")
         .unwrap()
         .find(value!({}), value!({"orderBy": {"id": 1}}))
@@ -259,7 +259,7 @@ async fn an_atomic_write_frame_runs_under_its_operations_claim(postgres: bool) {
         })
         .await
         .unwrap();
-    let Output::Rows { rows, .. } = many.expect("insertMany owns the frame and runs") else {
+    let Output::Rows(rows) = many.expect("insertMany owns the frame and runs") else {
         panic!("insertMany must return rows")
     };
     assert_eq!(rows.len(), 2);

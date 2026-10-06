@@ -258,6 +258,8 @@ impl<'de> de::Deserializer<'de> for Value {
                 visitor.visit_f64(v.as_f64().ok_or_else(|| Error("invalid number".into()))?)
             }
             Value::String(v) | Value::Decimal(v) => visitor.visit_string(v),
+            // Mirrors `Serialize`: a masked cell reads as its display.
+            Value::Masked(cell) => visitor.visit_string(cell.display),
             Value::TimestampMicros(v) => visitor.visit_i64(v),
             Value::Bytes(v) => visitor.visit_byte_buf(v),
             Value::Json(v) => serde_json::from_str::<Value>(&v)
@@ -322,5 +324,49 @@ mod tests {
         // Control: a plain number stays a number, so the restored variant comes
         // from the tag and not from the integer's shape.
         assert_eq!(to_value(&Value::from(5_i64)).unwrap(), Value::from(5_i64));
+    }
+
+    /// A masked cell serializes as its display alone, and no decode path turns
+    /// data of any shape back into one.
+    #[test]
+    fn masked_cells_serialize_as_their_display_and_never_decode() {
+        let cell = super::super::MaskedCell {
+            collection: "users".into(),
+            row_pk: "usr_1".into(),
+            column: "ssn".into(),
+            classification: "spi".into(),
+            display: "***-**-6789".into(),
+        };
+        // Built by hand: `value!` serializes its operands, which would hand the
+        // assertions below a string instead of a cell.
+        let row = Value::Object([("ssn".into(), Value::Masked(Box::new(cell)))].into());
+        assert!(row.contains_masked());
+        assert_eq!(
+            serde_json::to_value(&row).unwrap(),
+            serde_json::json!({ "ssn": "***-**-6789" })
+        );
+        assert_eq!(
+            to_value(&row).unwrap(),
+            crate::value!({ "ssn": "***-**-6789" })
+        );
+        assert_eq!(
+            from_value::<std::collections::BTreeMap<String, String>>(row).unwrap(),
+            [("ssn".to_owned(), "***-**-6789".to_owned())].into()
+        );
+        // The cell's own field names, as JSON, stay a plain object through
+        // every decoder.
+        let lookalike = serde_json::json!({
+            "collection": "users", "row_pk": "usr_1", "column": "ssn",
+            "classification": "spi", "display": "***-**-6789"
+        });
+        let decoded = [
+            serde_json::from_value::<Value>(lookalike.clone()).unwrap(),
+            Value::from(lookalike.clone()),
+            to_value(&lookalike).unwrap(),
+        ];
+        for value in decoded {
+            assert!(value.is_object(), "{value:?}");
+            assert!(!value.contains_masked(), "{value:?}");
+        }
     }
 }

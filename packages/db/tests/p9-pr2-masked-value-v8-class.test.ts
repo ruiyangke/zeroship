@@ -1,16 +1,13 @@
 import { generatedSchema } from "./_install-helper.js";
 /**
- * **P9 PR 2** — `MaskedValue` promoted to a native v8_class +
- * Rust-side rehydration.
+ * **P9 PR 2** - `MaskedValue` promoted to a native v8_class.
  *
  * Two SDK-observable consequences are pinned here:
  *
- *  1. The JS-side `__zsmask__` rehydration loop is GONE. Masked
- *     columns are minted as native `MaskedValue` v8_class instances
- *     Rust-side at `JSON.parse` time (`ResolveValue::JsonWithRehydration`
- *     → `masked_value::rehydrate_masked_values`), so `mapResultDoc`
- *     only renames keys and passes the native instances through
- *     unchanged.
+ *  1. Masked columns arrive as native `MaskedValue` v8_class instances,
+ *     minted natively from the read path's typed masked cell, so
+ *     `mapResultDoc` only renames keys and passes the native instances
+ *     through unchanged.
  *
  *  2. `Db.unmaskField` / `Db.bulkUnmaskFields` were removed. The bulk
  *     unmask round-trip is now collection-scoped: `Collection.bulkUnmask`
@@ -39,7 +36,7 @@ import type { NativeDb } from "../src/native.js";
 type AnyRec = Record<string, unknown>;
 
 // ---------------------------------------------------------------------------
-// 1. mapResultDoc no longer rehydrates — native MaskedValue passes through
+// 1. mapResultDoc passes native MaskedValue instances through
 // ---------------------------------------------------------------------------
 
 describe("P9 PR 2 — mapResultDoc passes native MaskedValue instances through", () => {
@@ -47,28 +44,13 @@ describe("P9 PR 2 — mapResultDoc passes native MaskedValue instances through",
 
   test("a native-MaskedValue-shaped value is NOT reconstructed (passes by reference)", () => {
     // Simulate a native MaskedValue instance: an opaque object the SDK
-    // must NOT touch. Pre-P9 the SDK recognised `sentinel: "__zsmask__"`
-    // and rebuilt it; now the runtime has already minted the instance,
-    // so `mapResultDoc` must return the SAME object reference.
+    // must NOT touch. The runtime has already minted the instance, so
+    // `mapResultDoc` must return the SAME object reference.
     const nativeMasked = { masked: "***-**-6789", classification: "spi" };
     const doc: AnyRec = { id: "usr_1", ssn: nativeMasked };
     const out = mapResultDoc(doc, identity);
     assert.equal(out.ssn, nativeMasked, "MaskedValue instance must pass by reference");
     assert.equal(out.id, "usr_1");
-  });
-
-  test("a raw __zsmask__ sentinel object is NOT rehydrated by the SDK anymore", () => {
-    // Even if a sentinel-shaped object somehow reached the SDK, the JS
-    // rehydration arm is deleted — it must pass through verbatim (the
-    // runtime is responsible for replacing it before the SDK sees it).
-    const sentinel = {
-      sentinel: "__zsmask__",
-      masked: "***",
-      classification: "pii",
-      _meta: { collection: "users", row_pk: "usr_1", column: "ssn" },
-    };
-    const out = mapResultDoc({ ssn: sentinel }, identity);
-    assert.equal(out.ssn, sentinel, "sentinel must pass through untouched");
   });
 
   test("key renaming still applies (general mapping is intact)", () => {

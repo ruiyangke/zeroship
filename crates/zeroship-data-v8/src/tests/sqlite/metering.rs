@@ -78,7 +78,7 @@ fn platform_round_trip(directory: &std::path::Path) -> Result<Vec<Value>, DbErro
         notes
             .insert(value!({"id": "n1", "title": "platform"}))
             .await?;
-        let zeroship_data_orm::orm::Output::Rows { rows, .. } =
+        let zeroship_data_orm::orm::Output::Rows(rows) =
             notes.find(value!({}), value!({})).await?
         else {
             return Err(DbError::internal("find returned a count"));

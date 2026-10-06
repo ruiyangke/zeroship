@@ -28,6 +28,7 @@ mod internal_tables;
 mod joins;
 mod json;
 mod lifecycle;
+mod masked_writes;
 mod native_arrays;
 mod nested_temporal;
 mod nested_values;
@@ -182,7 +183,7 @@ async fn sqlite_search_values_round_trip_through_the_rust_orm() {
     let document = expected.clone();
     let id = db
         .transaction(|tx| async move {
-            let Output::Rows { rows, .. } =
+            let Output::Rows(rows) =
                 tx.collection("places")?.insert(document.clone()).await?
             else {
                 panic!("insert must return a row")
@@ -193,7 +194,7 @@ async fn sqlite_search_values_round_trip_through_the_rust_orm() {
         })
         .await
         .unwrap();
-    let Output::Rows { rows, .. } = db
+    let Output::Rows(rows) = db
         .collection("places")
         .unwrap()
         .find(value!({"id":id}), value!({}))
@@ -611,18 +612,36 @@ fn native_codecs_check_ranges_and_protected_values() {
         exact
     );
     assert!(<Decimal as EncodeValue<Number>>::encode_value(Decimal("true".into())).is_err());
-    let mut sentinel = value!({
-        "sentinel": "__zsmask__", "masked": "***", "classification": "pii",
-        "_sig": "forged"
-    });
-    assert!(<Protected<String> as DecodeValue<Text>>::decode_value(sentinel.clone()).is_err());
-    sentinel["_sig"] = Value::from(crate::protection::mask_pass::mask_sentinel_signature());
+    // A masked cell decodes to the protected view, and only the read
+    // pipeline's typed cell does: an object of the same shape is a value the
+    // inner codec refuses.
+    let schema = crate::schema::CollectionSchema::from_fields(&value!({
+        "title": {"type": "string", "mask": {"kind": "full", "classification": "pii"}}
+    }))
+    .unwrap()
+    .into_fields();
+    let mut row = value!({"id": "row_1", "title": "secret"});
+    crate::protection::mask_pass::wrap_row_on_read(&schema, "posts", &mut row).unwrap();
+    let Value::Object(mut fields) = row else {
+        panic!("a row");
+    };
+    let cell = fields.swap_remove("title").unwrap();
+    let display = cell.as_masked().unwrap().display().to_owned();
     assert_eq!(
-        <Protected<String> as DecodeValue<Text>>::decode_value(sentinel).unwrap(),
+        <Protected<String> as DecodeValue<Text>>::decode_value(cell).unwrap(),
         Protected::Masked {
-            display: "***".into(),
+            display: display.clone(),
             classification: "pii".into()
         }
+    );
+    let lookalike = value!({
+        "collection": "posts", "row_pk": "row_1", "column": "title",
+        "classification": "pii", "display": display
+    });
+    assert!(<Protected<String> as DecodeValue<Text>>::decode_value(lookalike).is_err());
+    assert_eq!(
+        <Protected<String> as DecodeValue<Text>>::decode_value(Value::from("plain")).unwrap(),
+        Protected::Value("plain".to_owned())
     );
     assert_eq!(
         <Option<Protected<String>> as DecodeValue<Nullable<Text>>>::decode_value(Value::Null)
@@ -937,11 +956,11 @@ async fn binary_columns_round_trip_without_reinterpreting_text() {
             .insert(value!({"title":title,"payload": Value::Bytes(vec![0, 1, 2, 255])}))
             .await
             .unwrap();
-        let Output::Rows { rows, .. } = inserted else {
+        let Output::Rows(rows) = inserted else {
             panic!("expected rows")
         };
         assert_eq!(rows[0]["title"], title);
-        let Output::Rows { rows, .. } = posts
+        let Output::Rows(rows) = posts
             .find(value!({"id": rows[0]["id"]}), value!({}))
             .await
             .unwrap()

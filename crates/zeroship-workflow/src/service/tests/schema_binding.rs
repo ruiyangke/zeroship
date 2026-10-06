@@ -57,7 +57,7 @@ async fn journal_installation_leaves_other_tables_in_its_file_unchanged() {
         .unwrap()
         .state;
     schema::initialize_sqlite(&path).unwrap();
-    let zeroship_data_orm::orm::Output::Rows { rows, .. } = orders
+    let zeroship_data_orm::orm::Output::Rows(rows) = orders
         .find(
             zeroship_data_orm::value!({"id":"native"}),
             zeroship_data_orm::value!({}),

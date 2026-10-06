@@ -458,7 +458,7 @@ async fn case_insensitive_key(postgres: bool) {
             .await
             .unwrap();
     }
-    let Output::Rows { rows, .. } = db
+    let Output::Rows(rows) = db
         .collection("posts")
         .unwrap()
         .find(
@@ -553,10 +553,7 @@ async fn related_null_aliases_obey_the_final_result_budget() {
     let mut check = read::MAX_READ_RESULT_BYTES;
     read::consume_budget(&row, &mut check).unwrap();
     assert_eq!(check, 0);
-    let mut result = crate::crud::read_pipeline::ApplyResult {
-        rows: vec![row],
-        has_masked: false,
-    };
+    let mut result = vec![row];
     let outcome = db
         .context
         .scope(relation.apply(&db.binding, &route, &mut result))

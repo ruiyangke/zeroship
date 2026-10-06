@@ -45,9 +45,9 @@ pub(super) fn dispatch_operation<'s>(
     operation: Operation,
     mode: OutputMode,
 ) -> v8::Local<'s, v8::Promise> {
-    // The rows will have come from THIS binding, so their masked columns
-    // rehydrate against its schema. An app on two databases would otherwise
-    // resolve one database's column metadata out of the other.
+    // The rows will have come from THIS binding, so their masked cells are
+    // minted against it. An app on two databases would otherwise resolve one
+    // database's column metadata out of the other.
     let result_binding = binding.clone();
     let state = runtime_state(scope);
     let policy_ready = match &operation {
@@ -93,12 +93,11 @@ pub(super) fn dispatch_operation<'s>(
                 ResolveValue::Bool(count != 0)
             }
             Output::Count(count) => ResolveValue::F64(count as f64),
-            Output::Rows { rows, has_masked } if matches!(mode, OutputMode::One) => {
-                crate::v8_bridge::first_row_or_null_masked(rows, has_masked, result_binding)
-            }
-            Output::Rows { rows, has_masked } => {
-                crate::v8_bridge::rows_as_array_masked(rows, has_masked, result_binding)
-            }
+            Output::Rows(rows) if matches!(mode, OutputMode::One) => crate::v8_values::resolve(
+                rows.into_iter().next().unwrap_or(Value::Null),
+                result_binding,
+            ),
+            Output::Rows(rows) => crate::v8_values::resolve(Value::Array(rows), result_binding),
         },
     )));
     promise
@@ -480,6 +479,7 @@ pub(crate) fn dispatch_unmask_field<'s>(
     // before anything is spawned and cannot race the spawn.
     let parsed = crate::startup_policy::require_finalized(scope).and_then(|()| parse_args(&args_v));
     let binding = binding.clone();
+    let result_binding = binding.clone();
     // The route is captured HERE, on the adapter side, while the V8 frame is
     // live, and handed to the engine. `protection::unmask` used to open a backend
     // itself through `exec::ensure_backend_for_shared_sql`, which read
@@ -512,12 +512,13 @@ pub(crate) fn dispatch_unmask_field<'s>(
                 let route = crate::tx_scope::bind_route(route).await?;
                 dispatch_unmask(&route, &binding, args).await
             },
-            |result| {
+            move |result| {
                 // Wire shape: `{ plaintext: <string> }`. The SDK reads
                 // `result.plaintext` directly; for `type = bytes` the
                 // SDK base64-decodes on its side.
                 crate::v8_values::resolve(
                     zeroship_data_orm::value!({ "plaintext": result.plaintext }),
+                    result_binding,
                 )
             },
         )));
@@ -541,6 +542,7 @@ pub(crate) fn dispatch_bulk_unmask_field<'s>(
 
     let parsed = crate::startup_policy::require_finalized(scope).and_then(|()| parse_bulk_args(&args_v));
     let binding = binding.clone();
+    let result_binding = binding.clone();
     // Captured adapter-side, as in [`dispatch_unmask_field`].
     let route = crate::tx_scope::capture_route(scope, &binding);
 
@@ -562,7 +564,7 @@ pub(crate) fn dispatch_bulk_unmask_field<'s>(
                 let route = crate::tx_scope::bind_route(route).await?;
                 dispatch_bulk_unmask(&route, &binding, args).await
             },
-            |result| {
+            move |result| {
                 // Wire shape: `{ results: { <rowPk>: { <col>: <plaintext> } } }`.
                 // `BTreeMap` serialises as a JSON object with sorted
                 // keys — deterministic for golden-snapshot tests. The reshaping is
@@ -577,6 +579,7 @@ pub(crate) fn dispatch_bulk_unmask_field<'s>(
                 }
                 crate::v8_values::resolve(
                     zeroship_data_orm::value!({ "results": Value::Object(obj) }),
+                    result_binding,
                 )
             },
         )));

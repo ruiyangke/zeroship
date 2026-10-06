@@ -414,7 +414,6 @@ impl PreparedRead {
             decode_scalars(route.sql_registration(), &self.scalar_schema, &mut rows)?;
         }
         let mut blocks: Vec<Vec<Value>> = Vec::new();
-        let mut has_masked = false;
         for source in &self.sources {
             let mut present = Vec::new();
             let mut positions = Vec::new();
@@ -459,9 +458,8 @@ impl PreparedRead {
                 },
             )
             .await?;
-            has_masked |= decoded.has_masked;
             let mut block = vec![Value::Null; rows.len()];
-            for (index, row) in positions.into_iter().zip(decoded.rows) {
+            for (index, row) in positions.into_iter().zip(decoded) {
                 block[index] = row;
             }
             blocks.push(block);
@@ -525,10 +523,7 @@ impl PreparedRead {
         for row in &result {
             consume_budget(row, &mut budget)?;
         }
-        Ok(Output::Rows {
-            rows: result,
-            has_masked,
-        })
+        Ok(Output::Rows(result))
     }
 }
 
@@ -602,6 +597,7 @@ pub(super) fn consume_budget(value: &Value, budget: &mut usize) -> Result<(), Db
             }
             Value::String(v) | Value::Decimal(v) | Value::Json(v) => v.len(),
             Value::Bytes(v) => v.len(),
+            Value::Masked(cell) => cell.text_len(),
             _ => std::mem::size_of::<Value>(),
         };
         *budget = budget
@@ -1073,6 +1069,41 @@ mod tests {
     use super::*;
     use crate::sql::CompareOp;
     use crate::value;
+
+    /// A masked cell is charged for the text it carries, so a wide masked
+    /// column counts against the read budget the way its display does.
+    #[test]
+    fn the_read_budget_charges_a_masked_cell_for_its_text() {
+        let schema = crate::schema::CollectionSchema::from_fields(&value!({
+            "ssn": {"type": "string", "mask": {"kind": "last4", "classification": "spi"}}
+        }))
+        .unwrap()
+        .into_fields();
+        let wide = "1".repeat(100_000);
+        let mut row = value!({"id": "usr_1", "ssn": wide.clone()});
+        crate::protection::mask_pass::wrap_row_on_read(&schema, "users", &mut row).unwrap();
+        let charged = |value: &Value| {
+            let mut budget = MAX_READ_RESULT_BYTES;
+            consume_budget(value, &mut budget).unwrap();
+            MAX_READ_RESULT_BYTES - budget
+        };
+        let cell = row["ssn"].as_masked().unwrap();
+        assert_eq!(cell.display().len(), wide.len());
+        let text = [
+            cell.collection(),
+            cell.row_pk(),
+            cell.column(),
+            cell.classification(),
+            cell.display(),
+        ]
+        .iter()
+        .map(|field| field.len())
+        .sum::<usize>();
+        assert_eq!(charged(&row["ssn"]), text);
+        // Control: the display as a plain string is charged its length, so the
+        // cell costs what its text costs and not a constant.
+        assert_eq!(charged(&Value::from(cell.display())), wide.len());
+    }
 
     #[test]
     fn row_presence_selects_a_constant_without_loading_fields() {

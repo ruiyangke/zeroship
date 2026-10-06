@@ -129,9 +129,9 @@ async fn insert_on(route: TxRoute, app: &str, doc: Value) -> String {
     )
     .await
     .expect("the write pipeline + insert builder must apply");
-    result.rows[0]["id"]
+    result[0]["id"]
         .as_str()
-        .unwrap_or_else(|| panic!("the write pipeline must mint an id: {:?}", result.rows))
+        .unwrap_or_else(|| panic!("the write pipeline must mint an id: {result:?}"))
         .to_string()
 }
 
@@ -146,7 +146,6 @@ async fn find_on(
     let plan = zeroship_data_orm::crud::plan_find(&binding, "people", &filter, &opts).unwrap();
     zeroship_data_orm::crud::run_find(binding, "people".to_string(), route, filter, plan)
         .await
-        .map(|r| r.rows)
 }
 
 fn code_of(err: &DbError) -> String {

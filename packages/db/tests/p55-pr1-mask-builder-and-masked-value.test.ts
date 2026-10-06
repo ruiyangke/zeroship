@@ -39,7 +39,7 @@ import { t } from "../src/index.js";
 // brand check) is covered by the Rust unit tests in
 // `crates/zeroship-data-v8/src/v8_classes/masked_value.rs` and the
 // `p9-pr2-masked-value-v8-class` suite.
-import type { Row, MaskedValueRepr, MaskedValue } from "../src/index.js";
+import type { Row, MaskedValue } from "../src/index.js";
 
 describe("P5.5 PR 1 — .encrypted() default-mask rule", () => {
   test("bare .encrypted() auto-populates mask = { kind: 'full', classification: 'pii' }", () => {
@@ -159,8 +159,6 @@ describe("P5.5 PR 1 — Row<S> type inference (compile-time)", () => {
   // casts rather than `new MaskedValue(...)`. The load-bearing
   // assertion is that `tsc` accepts these assignments — i.e. `Row<S>`
   // still infers the masked column as `MaskedValue<T>`, not bare `T`.
-  // (A `MaskedValueRepr`-typed value is used to keep the import live and
-  // double as documentation of the wire shape.)
 
   test("masked encrypted field is wrapped in MaskedValue<string>", () => {
     const fields = {
@@ -171,11 +169,7 @@ describe("P5.5 PR 1 — Row<S> type inference (compile-time)", () => {
     // Type-level assertion: `ssn` is MaskedValue<string>, `name` is
     // string | undefined. The line below would fail to compile if the
     // inference broke (e.g. a bare string assigned to `ssn`).
-    const repr: MaskedValueRepr = {
-      masked: "***",
-      classification: "pii",
-      sentinel: "__zsmask__",
-    };
+    const standIn = { masked: "***", classification: "pii" };
     const sample: R = {
       id: "usr_001",
       created_at: 0,
@@ -184,10 +178,10 @@ describe("P5.5 PR 1 — Row<S> type inference (compile-time)", () => {
       updated_by: null,
       version: 1,
       deleted_at: null,
-      ssn: repr as unknown as MaskedValue<string>,
+      ssn: standIn as unknown as MaskedValue<string>,
     };
     // Runtime sanity: the cast value's masked field is reachable.
-    assert.equal((sample.ssn as unknown as MaskedValueRepr).masked, "***");
+    assert.equal(sample.ssn.masked, "***");
     // `name` is optional + bare string when present.
     assert.equal(sample.name, undefined);
   });

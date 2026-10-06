@@ -40,3 +40,21 @@ pub(crate) use state::{
 };
 mod unit;
 pub(crate) use unit::{unit_backend, unit_route};
+
+/// A masked cell as the read pipeline produces it: `users.ssn` of row `usr_1`,
+/// classified `spi`, displaying `***-**-6789`.
+pub(crate) fn masked_cell() -> crate::value::Value {
+    let schema = crate::schema::CollectionSchema::from_fields(&crate::value!({
+        "ssn": {"type": "string", "mask": {"kind": "last4", "classification": "spi"}}
+    }))
+    .unwrap()
+    .into_fields();
+    let mut row = crate::value!({"id": "usr_1", "ssn": "123-45-6789"});
+    crate::protection::mask_pass::wrap_row_on_read(&schema, "users", &mut row).unwrap();
+    let crate::value::Value::Object(mut fields) = row else {
+        panic!("wrap_row_on_read keeps a record a record");
+    };
+    let cell = fields.swap_remove("ssn").unwrap();
+    assert!(cell.as_masked().is_some(), "{cell:?}");
+    cell
+}

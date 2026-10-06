@@ -216,7 +216,7 @@ impl SqlCompiler for AllocationCountingCompiler {
 }
 
 async fn assert_empty(owner: &CollectionFixture) {
-    let Output::Rows { rows, .. } = owner
+    let Output::Rows(rows) = owner
         .database
         .collection("records")
         .unwrap()
@@ -315,7 +315,7 @@ async fn ordinary_generated_writes_do_not_require_explicit_identity_support() {
     .unwrap();
     let constrained = database_with_registration(&owner, registration).await;
 
-    let Output::Rows { rows, .. } = constrained
+    let Output::Rows(rows) = constrained
         .collection("records")
         .unwrap()
         .insert(value!({"label":"ordinary"}))
@@ -326,7 +326,7 @@ async fn ordinary_generated_writes_do_not_require_explicit_identity_support() {
     };
     assert!(!rows[0]["id"].is_null());
 
-    let Output::Rows { rows, .. } = constrained
+    let Output::Rows(rows) = constrained
         .collection("records")
         .unwrap()
         .execute(Operation::Upsert {
@@ -375,7 +375,7 @@ async fn conditional_upsert_is_refused_before_the_write_frame_and_row_mutation()
 #[compio::test]
 async fn update_one_is_refused_by_the_registered_compiler_before_row_mutation() {
     let owner = CollectionFixture::sqlite("records", value!({"label":{"type":"string"}})).await;
-    let Output::Rows { rows, .. } = owner
+    let Output::Rows(rows) = owner
         .database
         .collection("records")
         .unwrap()
@@ -402,7 +402,7 @@ async fn update_one_is_refused_by_the_registered_compiler_before_row_mutation() 
         "{error}"
     );
 
-    let Output::Rows { rows, .. } = owner
+    let Output::Rows(rows) = owner
         .database
         .collection("records")
         .unwrap()
@@ -524,7 +524,7 @@ async fn typed_update_and_delete_use_the_registered_compiler() {
         super::fixtures::post_migration_fields(),
     )
     .await;
-    let Output::Rows { rows, .. } = owner
+    let Output::Rows(rows) = owner
         .database
         .collection("posts")
         .unwrap()

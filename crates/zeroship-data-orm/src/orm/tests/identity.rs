@@ -80,7 +80,7 @@ async fn exercise_identity(db: &Database) {
         );
     }
 
-    let Output::Rows { rows, .. } = contacts
+    let Output::Rows(rows) = contacts
         .execute(Operation::Upsert {
             document: value!({"email":"alice@example.com", "name":"Alice"}),
             conflict_fields: value!(["email"]),
@@ -105,7 +105,7 @@ async fn exercise_identity(db: &Database) {
             conflict_fields: value!(["email"]),
         }).await
     }).await.unwrap();
-    let Output::Rows { rows, .. } = output else {
+    let Output::Rows(rows) = output else {
         panic!("upsert must return rows")
     };
     assert_eq!(rows[0]["id"], original["id"]);
@@ -124,7 +124,7 @@ async fn exercise_identity(db: &Database) {
         )
         .await
         .unwrap();
-    let Output::Rows { rows, .. } = contacts.find(value!({}), value!({})).await.unwrap() else {
+    let Output::Rows(rows) = contacts.find(value!({}), value!({})).await.unwrap() else {
         panic!("find must return rows")
     };
     assert_eq!(rows[0]["id"], original["id"]);

@@ -24,7 +24,7 @@ async fn projection(postgres: bool, column: &str, unmask: bool) {
         .install_mask_policy(value!({"support":["pii"]}))
         .unwrap();
     let records = owner.database.collection("records").unwrap();
-    let Output::Rows { rows, .. } = records
+    let Output::Rows(rows) = records
         .insert(value!({
             "label":"record", "secret":"private", "masked":"12345678"
         }))
@@ -40,7 +40,7 @@ async fn projection(postgres: bool, column: &str, unmask: bool) {
         options["actor"] = value!({"kind":"support","id":"usr_reader"});
         options["unmaskReason"] = value!("projection regression");
     }
-    let Output::Rows { rows, .. } = records
+    let Output::Rows(rows) = records
         .find(value!({"id":id.clone()}), options)
         .await
         .unwrap()
@@ -58,8 +58,9 @@ async fn projection(postgres: bool, column: &str, unmask: bool) {
     } else if column == "secret" {
         assert_eq!(rows[0][column], value!("private"));
     } else {
-        assert_eq!(rows[0][column]["_meta"]["row_pk"], id);
-        assert_eq!(rows[0][column]["_meta"]["column"], value!(column));
+        let cell = rows[0][column].as_masked().unwrap();
+        assert_eq!(Value::from(cell.row_pk()), id);
+        assert_eq!(cell.column(), column);
     }
     owner.close().await;
 }

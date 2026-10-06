@@ -104,7 +104,7 @@ async fn management_denial_settles_without_executor_or_lifecycle_mutation() {
 
 async fn run_state(fixture: &Fixture, run_id: &str) -> (String, i64) {
     let tx = fixture.service.begin().await.unwrap();
-    let Output::Rows { rows, .. } = tx
+    let Output::Rows(rows) = tx
         .database()
         .collection("__zeroship_workflow_runs")
         .unwrap()

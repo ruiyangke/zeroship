@@ -432,22 +432,15 @@ CREATE TABLE "{alias}"."people" ({PG_COMMON_FIXTURE_COLUMNS},
                 "encrypted column must decrypt to plaintext on read, got {:?}",
                 out["ssn"]
             );
-            // Masked column wrapped into the platform MaskedValue sentinel, carrying the
+            // Masked column replaced by a masked cell, carrying the
             // last4-masked string + the introspected classification.
-            assert_eq!(
-                out["phone"]["sentinel"],
-                value!("__zsmask__"),
-                "phone wrapped"
-            );
-            assert_eq!(
-                out["phone"]["masked"],
-                value!("***-***-0142"),
-                "masked phone surfaces last4 form, got {:?}",
-                out["phone"]
-            );
-            assert_eq!(out["phone"]["classification"], value!("pci"));
+            let phone = out["phone"]
+                .as_masked()
+                .unwrap_or_else(|| panic!("phone must be a masked cell, got {:?}", out["phone"]));
+            assert_eq!(phone.display(), "***-***-0142", "masked phone surfaces last4 form");
+            assert_eq!(phone.classification(), "pci");
             assert!(
-                !out.to_string().contains("415-555-0142"),
+                !format!("{out:?}").contains("415-555-0142"),
                 "the real phone number must not appear anywhere in the finalized row, got {out:?}"
             );
             release_pg(host, pool).await;

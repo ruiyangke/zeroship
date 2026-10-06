@@ -195,7 +195,7 @@ async fn until_past(fixture: &Fixture, instant: i64) {
 }
 
 async fn stored(fixture: &Fixture, job: &JobSpec) -> Value {
-    let Output::Rows { rows, .. } = fixture
+    let Output::Rows(rows) = fixture
         .database()
         .await
         .collection("jobs")
@@ -472,7 +472,7 @@ async fn interrupted_attempts_exhaust(fixture: &Fixture) {
         )
         .await
         .unwrap();
-    let Output::Rows { rows, .. } = fixture
+    let Output::Rows(rows) = fixture
         .database()
         .await
         .collection("capacity_targets")

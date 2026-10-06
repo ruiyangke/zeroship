@@ -227,6 +227,13 @@ impl SqlRegistration {
     /// A value that is not a readable instant at all falls through to the
     /// codec, which names it as invalid storage.
     pub fn encode(&self, storage: StorageType, value: Value) -> Result<Value, CompileError> {
+        // Before any codec: a JSON codec serializes its value, and a masked
+        // cell serializes as its display. The values the statement builders
+        // bind (insert, update, upsert, aggregate, search, and filter operands
+        // resolved against the descriptor) cross this function.
+        if value.contains_masked() {
+            return Err(CompileError::MaskedCell);
+        }
         if storage == StorageType::Json {
             validate_json(&value)?;
         }
@@ -281,6 +288,53 @@ fn validate_json(value: &Value) -> Result<(), CompileError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every bound value crosses `encode`, so it refuses a masked cell before
+    /// any codec can serialize it into its display: on its own or nested, for
+    /// every storage type and both registrations. The refusal reaches callers
+    /// under its own code.
+    #[test]
+    fn encode_refuses_masked_cells_before_any_codec() {
+        let cell = crate::tests::fixtures::masked_cell();
+        let values = [
+            cell.clone(),
+            Value::Array(vec![Value::from("kept"), cell.clone()]),
+            Value::Object([("nested".into(), cell)].into()),
+        ];
+        for registration in [SqlRegistration::sqlite(), SqlRegistration::postgres()] {
+            for storage in [StorageType::Json, StorageType::Text] {
+                for value in &values {
+                    assert_eq!(
+                        registration.encode(storage, value.clone()),
+                        Err(CompileError::MaskedCell),
+                        "{storage:?} {value:?}"
+                    );
+                }
+            }
+            // Control: the display as plain data encodes for both storages.
+            for storage in [StorageType::Json, StorageType::Text] {
+                assert!(
+                    registration
+                        .encode(storage, Value::from("***-**-6789"))
+                        .is_ok(),
+                    "{storage:?}"
+                );
+            }
+        }
+        let error = crate::error::DbError::from(crate::sql::mapping::QueryError::from(
+            CompileError::MaskedCell,
+        ));
+        assert!(
+            matches!(
+                error,
+                crate::error::DbError::ValidationFailed {
+                    code: "masked_cell_refused",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
 
     #[test]
     fn canonical_boolean_metadata_decodes_native_and_artifact_columns_identically() {

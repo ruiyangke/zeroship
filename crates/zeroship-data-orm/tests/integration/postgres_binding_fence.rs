@@ -245,7 +245,7 @@ async fn read_total(url: &str, binding: DbBinding) -> Result<i64, DbError> {
         .collection("orders")?
         .find(value!({ "id": 1 }), value!({}))
         .await?;
-    let Output::Rows { rows, .. } = found else {
+    let Output::Rows(rows) = found else {
         panic!("find must return rows");
     };
     assert_eq!(rows.len(), 1, "the seeded row must be present to be read");
@@ -607,7 +607,7 @@ async fn one_app_holds_a_transaction_on_each_of_its_two_databases() {
 
             let inner = to_mine
                 .transaction(|first| async move {
-                    let Output::Rows { rows, .. } = first
+                    let Output::Rows(rows) = first
                         .collection("orders")?
                         .find(value!({ "id": 1 }), value!({}))
                         .await?
@@ -620,7 +620,7 @@ async fn one_app_holds_a_transaction_on_each_of_its_two_databases() {
                     // while this callback is being polled.
                     to_theirs
                         .transaction(|second| async move {
-                            let Output::Rows { rows, .. } = second
+                            let Output::Rows(rows) = second
                                 .collection("orders")?
                                 .find(value!({ "id": 1 }), value!({}))
                                 .await?
@@ -1054,7 +1054,7 @@ async fn unmasked_ssn(database: &Database) -> Result<Value, DbError> {
         .collection(MASKED_COLLECTION)?
         .find(value!({ "id": ROW_PK }), unmask_opts("ssn"))
         .await?;
-    let Output::Rows { mut rows, .. } = found else {
+    let Output::Rows(mut rows) = found else {
         panic!("find must return rows");
     };
     assert_eq!(rows.len(), 1, "the seeded row must be present to be read");
@@ -1067,19 +1067,19 @@ async fn masked_ssn(database: &Database) -> Result<Value, DbError> {
         .collection(MASKED_COLLECTION)?
         .find(value!({ "id": ROW_PK }), value!({}))
         .await?;
-    let Output::Rows { mut rows, .. } = found else {
+    let Output::Rows(mut rows) = found else {
         panic!("find must return rows");
     };
     assert_eq!(rows.len(), 1, "the seeded row must be present to be read");
     let wrapper = rows.remove(0)["ssn"].clone();
-    assert_eq!(
-        wrapper["classification"],
-        Value::from("spi"),
-        "an ordinary read must return the masked-value wrapper, not a bare \
-         string - otherwise the control below is not about a masked field: \
-         {wrapper:?}"
-    );
-    Ok(wrapper["masked"].clone())
+    let cell = wrapper.as_masked().unwrap_or_else(|| {
+        panic!(
+            "an ordinary read must return a masked cell, not a bare string - \
+             otherwise the control below is not about a masked field: {wrapper:?}"
+        )
+    });
+    assert_eq!(cell.classification(), "spi");
+    Ok(Value::from(cell.display()))
 }
 
 /// **The property.** An audited unmask reaches the real value on a session

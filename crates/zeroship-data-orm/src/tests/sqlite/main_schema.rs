@@ -103,7 +103,7 @@ async fn write_notes(database: &Database) -> Result<Vec<Value>, DbError> {
             Ok::<_, DbError>(())
         })
         .await?;
-    let Output::Rows { rows, .. } = notes
+    let Output::Rows(rows) = notes
         .find(value!({}), value!({"orderBy": {"id": 1}}))
         .await?
     else {

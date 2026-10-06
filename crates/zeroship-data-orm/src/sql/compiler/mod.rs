@@ -43,6 +43,9 @@ pub enum CompileError {
     /// cannot store. It is refused rather than floored: a caller that reads an
     /// instant back and compares it for equality must get the value it wrote.
     TimestampPrecisionUnsupported,
+    /// A masked cell from a read result was offered as a value. Its serialized
+    /// form is its display, so binding it would write or compare a mask.
+    MaskedCell,
 }
 
 impl std::fmt::Display for CompileError {
@@ -55,6 +58,9 @@ impl std::fmt::Display for CompileError {
             }
             Self::TimestampPrecisionUnsupported => f.write_str(
                 "this database stores whole milliseconds; a sub-millisecond timestamp is refused",
+            ),
+            Self::MaskedCell => f.write_str(
+                "a masked cell from a read result is not a value; unmask it or leave the column out",
             ),
         }
     }

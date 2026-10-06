@@ -78,7 +78,7 @@ async fn typed_reads_keep_execution_state_off_the_callers_stack() {
     assert_eq!(count.await.unwrap(), 1);
     assert!(exists.await.unwrap());
     assert_eq!(projected.await.unwrap().len(), 1);
-    assert!(matches!(dynamic.await.unwrap(), Output::Rows {rows, ..} if rows.len() == 1));
+    assert!(matches!(dynamic.await.unwrap(), Output::Rows(rows) if rows.len() == 1));
     let (found, queried) = caller.await.unwrap();
     assert_eq!((found.len(), queried.len()), (1, 1));
     owner.close().await;

@@ -43,7 +43,7 @@ async fn exercise_protected_updates(db: &Database) {
         .insert(value!({"label":"original","random":10,"second_secret":20,"masked":30,"plain":40}))
         .await
         .unwrap();
-    let Output::Rows { rows: before, .. } = records.find(value!({}), value!({})).await.unwrap()
+    let Output::Rows(before) = records.find(value!({}), value!({})).await.unwrap()
     else {
         panic!("find must return rows")
     };
@@ -88,7 +88,7 @@ async fn exercise_protected_updates(db: &Database) {
             }
         }
     }
-    let Output::Rows { rows: after, .. } = records.find(value!({}), value!({})).await.unwrap()
+    let Output::Rows(after) = records.find(value!({}), value!({})).await.unwrap()
     else {
         panic!("find must return rows")
     };
@@ -120,7 +120,7 @@ async fn exercise_protected_updates(db: &Database) {
     })
     .await
     .unwrap();
-    let Output::Rows { rows, .. } = records.find(value!({}), value!({})).await.unwrap() else {
+    let Output::Rows(rows) = records.find(value!({}), value!({})).await.unwrap() else {
         panic!("find must return rows")
     };
     assert_eq!(rows[0]["random"].as_f64(), Some(11.0));

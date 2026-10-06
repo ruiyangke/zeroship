@@ -82,7 +82,7 @@ Built:
   under the binding the host resolved for THAT database and publishes `env.databases` through
   the new `NativePlugin::companion_namespaces` hook, with the primary's handle being the SAME
   OBJECT as `env.db` - identity, not equality, so there is one concept and one code path. A
-  masked value rehydrates against the binding its rows were read through rather than against
+  masked value is minted against the binding its rows were read through rather than against
   whatever `env.db` names.
 
 - the deploy-time binding verification, and the deletion of the schema-equality gate in the same

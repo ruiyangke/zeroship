@@ -74,7 +74,7 @@ async fn corrupt_scalar(fixture: &Fixture, app: &AppId, kind: &str, field: &str,
 }
 
 async fn provenance(fixture: &Fixture, app: &AppId) -> Vec<Value> {
-    let Output::Rows { rows, .. } = fixture
+    let Output::Rows(rows) = fixture
         .database()
         .await
         .collection("recovery_scopes")

@@ -44,7 +44,7 @@ pub async fn exec_mutation_then_read(
     route: crate::tx_route::TxRoute,
     bq: crate::sql::compiler::CompiledQuery,
     op: zeroship_data_orm::cdc::ChangeOp,
-) -> Result<read_pipeline::ApplyResult, DbError> {
+) -> Result<Vec<Value>, DbError> {
     let rows = exec_mutation_with_emit(bq, &route, &coll, op, &binding).await?;
     read_pipeline::apply(
         &route,
@@ -65,7 +65,7 @@ pub(crate) async fn exec_aggregate_read(
     bq: crate::sql::compiler::CompiledQuery,
     group_fields: Vec<String>,
     result_projection: Option<aggregate::AggregateProjection>,
-) -> Result<read_pipeline::ApplyResult, DbError> {
+) -> Result<Vec<Value>, DbError> {
     let mut rows = exec_query(&route, bq).await?;
     if let Some(projection) = &result_projection {
         crate::orm::read::decode_scalars(route.sql_registration(), &projection.schema, &mut rows)?;
@@ -104,7 +104,7 @@ pub async fn exec_distinct_read(
     route: crate::tx_route::TxRoute,
     bq: crate::sql::compiler::CompiledQuery,
     reads_masked_value: bool,
-) -> Result<read_pipeline::ApplyResult, DbError> {
+) -> Result<Vec<Value>, DbError> {
     let rows = exec_query(&route, bq).await?;
     read_pipeline::apply(
         &route,
@@ -314,7 +314,7 @@ pub async fn run_find(
     route: crate::tx_route::TxRoute,
     filter: Value,
     plan: FindPlan,
-) -> Result<read_pipeline::ApplyResult, DbError> {
+) -> Result<Vec<Value>, DbError> {
     // Unmask reads follow this operation's transaction route. Authorization and
     // audit writes use the backend separately so creator rollback cannot erase
     // an attempt's audit record.
@@ -409,7 +409,7 @@ pub async fn run_insert(
     route: crate::tx_route::TxRoute,
     doc: Value,
     actor_id: Option<String>,
-) -> Result<read_pipeline::ApplyResult, DbError> {
+) -> Result<Vec<Value>, DbError> {
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     let allocates_identity = identity::requires_allocation(&schema, &doc);
     route
@@ -480,7 +480,7 @@ pub async fn run_insert_many(
     route: crate::tx_route::TxRoute,
     docs: Value,
     actor_id: Option<String>,
-) -> Result<read_pipeline::ApplyResult, DbError> {
+) -> Result<Vec<Value>, DbError> {
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     let allocates_identity = identity::requires_allocation(&schema, &docs);
     route
@@ -538,7 +538,7 @@ pub async fn run_insert_many(
 // updateOne / updateMany — write paths
 // ---------------------------------------------------------------------------
 
-/// Update one row and retain whether its result contains masked fields.
+/// Update one row and return it through the read pipeline.
 pub(crate) async fn run_update_one(
     binding: DbBinding,
     coll: String,
@@ -546,7 +546,7 @@ pub(crate) async fn run_update_one(
     filter: predicate::Input,
     update: update::Input,
     actor_id: Option<String>,
-) -> Result<(Vec<Value>, bool), DbError> {
+) -> Result<Vec<Value>, DbError> {
     if update.expressions.is_empty() {
         return run_update_one_inner(binding, coll, route, filter, update, actor_id).await;
     }
@@ -570,7 +570,7 @@ async fn run_update_one_inner(
     filter: predicate::Input,
     update: update::Input,
     actor_id: Option<String>,
-) -> Result<(Vec<Value>, bool), DbError> {
+) -> Result<Vec<Value>, DbError> {
     let mut update = update;
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     update.inspect(&schema)?;
@@ -604,8 +604,8 @@ async fn run_update_one_inner(
                     guard.expected,
                 ));
             }
-            // An absent match has no row to decode or masked value to rehydrate.
-            return Ok((Vec::new(), false));
+            // An absent match has no row to decode.
+            return Ok(Vec::new());
         };
         Some(target_row)
     } else {
@@ -658,7 +658,7 @@ async fn run_update_one_inner(
         &coll,
         zeroship_data_orm::cdc::ChangeOp::Update,
     );
-    let result = read_pipeline::apply(
+    let rows = read_pipeline::apply(
         &route,
         &binding,
         &coll,
@@ -668,7 +668,7 @@ async fn run_update_one_inner(
     .await?;
     // An empty result with a concurrency predicate is a CAS failure.
     if let Some(guard) = &concurrency {
-        if result.rows.is_empty() {
+        if rows.is_empty() {
             let row_id = filter.conjunctive_value("id").and_then(Value::as_str);
             return Err(DbError::concurrency_mismatch(
                 &coll,
@@ -678,10 +678,10 @@ async fn run_update_one_inner(
             ));
         }
         // The required `id` primary key bounds this update to one row.
-        if result.rows.len() > 1 {
+        if rows.len() > 1 {
             tracing::error!(
                 collection = %coll,
-                row_count = result.rows.len(),
+                row_count = rows.len(),
                 "concurrency_mismatch_unexpected_multi_row: CAS update returned >1 row"
             );
             return Err(DbError::internal(
@@ -689,7 +689,7 @@ async fn run_update_one_inner(
             ));
         }
     }
-    Ok((result.rows, result.has_masked))
+    Ok(rows)
 }
 
 /// Update matching rows and return the database's affected-row count.
@@ -1189,7 +1189,7 @@ pub async fn run_upsert(
     doc: Value,
     conflict_fields: Value,
     actor_id: Option<String>,
-) -> Result<read_pipeline::ApplyResult, DbError> {
+) -> Result<Vec<Value>, DbError> {
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     let guard_identity = write_pipeline::upsert_requires_conflict_probe(&schema, &doc);
     route
@@ -1288,7 +1288,7 @@ pub async fn run_insert_on_conflict(
     doc: Value,
     conflict_fields: Value,
     actor_id: Option<String>,
-) -> Result<read_pipeline::ApplyResult, DbError> {
+) -> Result<Vec<Value>, DbError> {
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     route
         .sql_registration()
@@ -1471,7 +1471,7 @@ pub async fn run_search(
     binding: DbBinding,
     coll: String,
     plan: SearchPlan,
-) -> Result<read_pipeline::ApplyResult, DbError> {
+) -> Result<Vec<Value>, DbError> {
     let rows = crate::backend_handle::routed_vector_search(route, &binding, plan.query).await?;
 
     // Count the successful database read even if later result decoding fails.
@@ -1593,7 +1593,7 @@ pub async fn run_near(
     binding: DbBinding,
     coll: String,
     plan: NearPlan,
-) -> Result<read_pipeline::ApplyResult, DbError> {
+) -> Result<Vec<Value>, DbError> {
     let NearPlan {
         field,
         point,

@@ -2,7 +2,7 @@ use super::fixtures::CollectionFixture;
 use super::*;
 
 fn rows(output: Output) -> Vec<Value> {
-    let Output::Rows { rows, .. } = output else {
+    let Output::Rows(rows) = output else {
         panic!("expected rows")
     };
     rows

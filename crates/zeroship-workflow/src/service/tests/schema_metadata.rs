@@ -129,7 +129,7 @@ async fn assert_scoped_writes(store: OrmStore) {
 }
 
 fn rows(output: Output) -> Vec<Value> {
-    let Output::Rows { rows, .. } = output else {
+    let Output::Rows(rows) = output else {
         panic!("expected returned journal rows");
     };
     rows

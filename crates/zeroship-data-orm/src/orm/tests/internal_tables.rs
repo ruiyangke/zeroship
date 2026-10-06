@@ -14,7 +14,7 @@ fn fields() -> Value {
 
 fn rows(output: Output) -> Vec<Value> {
     match output {
-        Output::Rows { rows, .. } => rows,
+        Output::Rows(rows) => rows,
         output => panic!("expected rows, got {output:?}"),
     }
 }

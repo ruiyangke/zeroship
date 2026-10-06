@@ -184,7 +184,7 @@ async fn isolation(db: &Database) -> String {
 }
 
 async fn label(db: &Database) -> String {
-    let Output::Rows { rows, .. } = db
+    let Output::Rows(rows) = db
         .collection("records")
         .unwrap()
         .find(value!({"id":"record"}), value!({}))
@@ -398,7 +398,7 @@ async fn nested_callbacks_and_rollback(fixture: CollectionFixture) {
             ..
         }
     ));
-    let Output::Rows { rows, .. } = db
+    let Output::Rows(rows) = db
         .collection("records")
         .unwrap()
         .find(value!({}), value!({"orderBy":{"id":1}}))

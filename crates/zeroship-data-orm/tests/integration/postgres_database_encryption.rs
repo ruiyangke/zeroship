@@ -395,7 +395,7 @@ async fn read_column(database: &Database) -> Result<String, DbError> {
         .collection(COLLECTION)?
         .find(value!({ "id": ROW_PK }), value!({}))
         .await?;
-    let Output::Rows { rows, .. } = found else {
+    let Output::Rows(rows) = found else {
         panic!("find must return rows");
     };
     assert_eq!(rows.len(), 1, "the row must be present to be read");

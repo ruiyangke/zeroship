@@ -186,7 +186,7 @@ fn assignment(app: &AppId) -> Owner {
 }
 
 async fn rows(fixture: &Fixture, table: &str, filter: Value) -> Vec<Value> {
-    let Output::Rows { mut rows, .. } = fixture
+    let Output::Rows(mut rows) = fixture
         .database()
         .await
         .collection(table)

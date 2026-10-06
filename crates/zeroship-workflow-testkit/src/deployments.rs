@@ -192,7 +192,7 @@ impl Catalog {
         raw["deploy_hash"] = serde_json::json!(hash);
         let encoded = serde_json::to_string(&raw).unwrap();
         let records = self.database.collection("app_deploys").unwrap();
-        let Output::Rows { rows, .. } = records
+        let Output::Rows(rows) = records
             .find(value!({"id":declaration.id}), value!({}))
             .await
             .unwrap()
@@ -325,7 +325,7 @@ impl RegistrationSource {
         app: &AppId,
         deployment: &str,
     ) -> Option<(String, Vec<u8>)> {
-        let Output::Rows { rows, .. } = self
+        let Output::Rows(rows) = self
             .database
             .collection("app_deploys")
             .unwrap()

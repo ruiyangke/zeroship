@@ -241,7 +241,7 @@ async fn settle_all(queue: &Queue, app: &AppId) {
 }
 
 async fn rows(fixture: &Fixture, collection: &str, filter: Value) -> Vec<Value> {
-    let Output::Rows { rows, .. } = fixture
+    let Output::Rows(rows) = fixture
         .database()
         .await
         .collection(collection)

@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 
 use crate::schema::FieldMap;
-use crate::value::Value;
+use crate::value::{MaskedCell, Value};
 use zeroize::Zeroizing;
 
 use crate::sql::catalog::MaskKind;
@@ -187,28 +187,21 @@ pub fn relocate_masked_columns(masks: &DerivedMasks, row: &mut Value) -> Result<
 }
 
 // =====================================================================
-// Read-side flip: wrap masked columns in MaskedValueRepr
+// Read-side flip: replace each masked column with a typed masked cell
 // =====================================================================
 
-/// Wrap each masked column on `row` in a
-/// `MaskedValueRepr` so the JS-side SDK can construct `MaskedValue<T>`
-/// from the wire payload.
+/// Replace each masked column on `row` with a [`Value::Masked`] cell, from
+/// which an adapter materializes its native masked value.
 ///
 /// Called AFTER the SELECT (or RETURNING) materialises rows, BEFORE
 /// the row crosses back to V8.
 ///
-/// One row shape, two sources of it:
-///
-/// - a **SELECT or RETURNING** projects only logical names, so `row[col]`
-///   already holds the masked string and no raw key is present. That was true
-///   of SELECT alone until the write builders stopped starring: a
-///   `RETURNING *` write returned every physical column, so the row also
-///   carried `__zs_raw__<col>` with the real value;
-/// - the **WAL consumer**, which decodes pgoutput with no schema in reach and
-///   no projection to apply, and therefore still produces the second shape.
-///
-/// Both are handled by the same two steps: re-apply the mask transform to
-/// `row[col]`, and remove the raw key if it is there.
+/// Its production caller is `crud::read_pipeline::apply`, whose rows come from a
+/// SELECT or RETURNING that projects logical names only: `row[col]` holds the
+/// masked string and no raw key is present. The pass still takes two steps on
+/// every masked column - re-apply the mask transform to `row[col]`, and remove
+/// the raw key if it is there - so a row that does carry physical columns, the
+/// shape a builder projecting the raw column would produce, leaves masked.
 ///
 /// The re-application is not redundant. `row[col]` is the mask on every
 /// correct path, and re-masking a mask is a no-op for every built-in kind
@@ -219,12 +212,12 @@ pub fn relocate_masked_columns(masks: &DerivedMasks, row: &mut Value) -> Result<
 /// class of bug the flip exists to make impossible, not a class that is
 /// impossible to reintroduce - is masked here rather than returned.
 ///
-/// The wire shape mirrors the SDK's `MaskedValueRepr` (packages/db/src/
-/// types.ts): a `sentinel: "__zsmask__"` discriminator plus `masked`
-/// (the user-facing string) and `classification` (drives unmask
-/// authorization). Per-row metadata (`{collection, row_pk,
-/// column}`) rides on a `_meta` key so `.unmask()` can route
-/// the round-trip back to the right row.
+/// The cell carries the display string, the classification and the row's
+/// coordinates (`collection`, `row_pk`, `column`) so `.unmask()` can route the
+/// round-trip back to the right row. It is a typed value rather than an object
+/// in the row because the row also carries creator-controlled JSON: an in-band
+/// shape would be one any stored object could imitate, and reading it back out
+/// of a V8 object would run creator getters. See [`MaskedCell`].
 ///
 /// **Opt-out** (`mask: { kind: "none" }`): columns explicitly opted
 /// out of masking are skipped — they retain whatever value the SELECT
@@ -232,7 +225,7 @@ pub fn relocate_masked_columns(masks: &DerivedMasks, row: &mut Value) -> Result<
 ///
 /// Returns `Ok(())` when the schema declares no masked columns or the
 /// row is missing fields; never errors on a malformed row.
-pub fn wrap_row_on_read(
+pub(crate) fn wrap_row_on_read(
     schema: &FieldMap,
     collection: &str,
     row: &mut Value,
@@ -272,10 +265,10 @@ pub fn wrap_row_on_read(
             .and_then(|v| v.as_str())
             .map(|s| apply_mask_kind(kind, s));
 
-        // The raw column rides out of a WAL-decoded row (and out of every
-        // `RETURNING *`, back when the write builders starred). Strip it here -
-        // `read_pipeline`'s surface stage would too, but this pass runs first
-        // and the sentinel it writes must not sit beside the value it hides.
+        // A row that carries the raw column (a builder that projected physical
+        // columns) has it stripped here. `read_pipeline`'s surface stage would
+        // too, but this pass runs first and the cell it writes must not sit
+        // beside the value it hides.
         //
         // The name comes from the descriptor, not from a `format!` here: see
         // `crate::sql::mapping::declared_raw_column`, which also refuses a
@@ -302,47 +295,17 @@ pub fn wrap_row_on_read(
         obj.shift_remove(&stripped);
     }
 
-    for (col, masked, classification) in to_wrap {
-        let repr = crate::value!({
-            "sentinel": "__zsmask__",
-            // DB-7: an unforgeable per-process signature. Only sentinels the
-            // read pipeline itself produced carry it; the decoder refuses to
-            // mint a MaskedValue from any sentinel lacking it, so app JS cannot
-            // fabricate a `__zsmask__` object (e.g. stashed in a JSONB column it
-            // controls) and have it minted into a MaskedValue pointing at an
-            // attacker-chosen (collection, row, column).
-            "_sig": mask_sentinel_signature(),
-            "masked": masked,
-            "classification": classification,
-            "_meta": {
-                "collection": collection,
-                "row_pk": row_pk,
-                "column": col,
-            },
-        });
-        obj.insert(col, repr);
+    for (col, display, classification) in to_wrap {
+        let cell = MaskedCell::new(
+            collection.to_owned(),
+            row_pk.clone(),
+            col.clone(),
+            classification,
+            display,
+        );
+        obj.insert(col, Value::Masked(Box::new(cell)));
     }
     Ok(())
-}
-
-/// DB-7: per-process secret stamped into every pipeline-minted mask sentinel
-/// (`_sig`) and verified at rehydration. App JS cannot read it — the rehydrator
-/// consumes the raw sentinel into a `MaskedValue` (whose internal fields do not
-/// expose `_sig`) before any handler sees the row, and the value is never
-/// serialized back to JS. Generated once per process from the OS RNG.
-pub fn mask_sentinel_signature() -> &'static str {
-    use std::sync::OnceLock;
-    static SIG: OnceLock<String> = OnceLock::new();
-    SIG.get_or_init(|| {
-        use aes_gcm::{aead::OsRng, AeadCore, Aes256Gcm};
-        // Two 12-byte GCM nonces → 24 bytes of OS entropy, hex-encoded.
-        let a = Aes256Gcm::generate_nonce(&mut OsRng);
-        let b = Aes256Gcm::generate_nonce(&mut OsRng);
-        a.iter()
-            .chain(b.iter())
-            .map(|x| format!("{x:02x}"))
-            .collect()
-    })
 }
 
 #[cfg(test)]
@@ -653,29 +616,30 @@ mod tests {
 
         wrap_row_on_read(&schema, "users", &mut row).unwrap();
 
-        let obj = row.as_object().unwrap();
-        let ssn = obj.get("ssn").and_then(|v| v.as_object()).unwrap();
         assert_eq!(
-            ssn.get("sentinel").and_then(|v| v.as_str()),
-            Some("__zsmask__")
+            cell(&row, "ssn"),
+            &MaskedCell::new(
+                "users".into(),
+                "usr_01".into(),
+                "ssn".into(),
+                "spi".into(),
+                "***-**-6789".into(),
+            )
         );
-        assert_eq!(
-            ssn.get("masked").and_then(|v| v.as_str()),
-            Some("***-**-6789")
-        );
-        assert_eq!(
-            ssn.get("classification").and_then(|v| v.as_str()),
-            Some("spi")
-        );
-        let meta = ssn.get("_meta").and_then(|v| v.as_object()).unwrap();
-        assert_eq!(
-            meta.get("collection").and_then(|v| v.as_str()),
-            Some("users")
-        );
-        assert_eq!(meta.get("row_pk").and_then(|v| v.as_str()), Some("usr_01"));
-        assert_eq!(meta.get("column").and_then(|v| v.as_str()), Some("ssn"));
         // Non-masked column untouched.
-        assert_eq!(obj.get("name").and_then(|v| v.as_str()), Some("alice"));
+        assert_eq!(row["name"], value!("alice"));
+        // Serialization carries the display and nothing else.
+        assert_eq!(
+            serde_json::to_value(&row).unwrap(),
+            serde_json::json!({ "id": "usr_01", "ssn": "***-**-6789", "name": "alice" })
+        );
+    }
+
+    /// The masked cell `wrap_row_on_read` left under `col`.
+    fn cell<'a>(row: &'a Value, col: &str) -> &'a MaskedCell {
+        row[col]
+            .as_masked()
+            .unwrap_or_else(|| panic!("`{col}` is not a masked cell: {row:?}"))
     }
 
     #[test]
@@ -684,12 +648,9 @@ mod tests {
         // real value under the raw column. The wrap must return the mask and
         // remove the raw key.
         //
-        // Named for the SHAPE, not for a producer. It was
-        // `..._from_a_returning_star_row` while the write builders starred;
-        // they project now, and the surviving producer of this shape is the WAL
-        // consumer. The fixture is hand-built either way, so what the test
-        // exercises never depended on which producer made the row - only the
-        // name did.
+        // Named for the SHAPE, not for a producer: the read pipeline's rows
+        // project logical names only, so this hand-built row stands for a
+        // builder that projected the raw column, which the pass must still mask.
         let schema = test_schema(value!({
             "ssn": {
                 "type": "string",
@@ -714,11 +675,7 @@ mod tests {
             !serde_json::to_string(&row).unwrap().contains("123-45-6789"),
             "and neither must its value: {row}",
         );
-        let ssn = obj.get("ssn").and_then(|v| v.as_object()).unwrap();
-        assert_eq!(
-            ssn.get("masked").and_then(|v| v.as_str()),
-            Some("***-**-6789")
-        );
+        assert_eq!(cell(&row, "ssn").display(), "***-**-6789");
     }
 
     #[test]
@@ -764,11 +721,7 @@ mod tests {
 
         wrap_row_on_read(&schema, "users", &mut row).unwrap();
 
-        let email = row.get("email").and_then(|v| v.as_object()).unwrap();
-        assert_eq!(
-            email.get("classification").and_then(|v| v.as_str()),
-            Some("pii")
-        );
+        assert_eq!(cell(&row, "email").classification(), "pii");
     }
 
     #[test]
@@ -789,9 +742,7 @@ mod tests {
 
         wrap_row_on_read(&schema, "users", &mut row).unwrap();
 
-        let ssn = row.get("ssn").and_then(|v| v.as_object()).unwrap();
-        let meta = ssn.get("_meta").and_then(|v| v.as_object()).unwrap();
-        assert_eq!(meta.get("row_pk").and_then(|v| v.as_str()), Some("42"));
+        assert_eq!(cell(&row, "ssn").row_pk(), "42");
     }
 
     #[test]
@@ -809,13 +760,8 @@ mod tests {
 
         wrap_row_on_read(&schema, "users", &mut row).unwrap();
 
-        let ssn = row.get("ssn").and_then(|v| v.as_object()).unwrap();
-        let meta = ssn.get("_meta").and_then(|v| v.as_object()).unwrap();
-        assert_eq!(meta.get("row_pk").and_then(|v| v.as_str()), Some(""));
-        assert_eq!(
-            meta.get("collection").and_then(|v| v.as_str()),
-            Some("users")
-        );
+        assert_eq!(cell(&row, "ssn").row_pk(), "");
+        assert_eq!(cell(&row, "ssn").collection(), "users");
     }
 
     #[test]
@@ -831,24 +777,13 @@ mod tests {
 
         wrap_row_on_read(&schema, "users", &mut row).unwrap();
 
-        let surfaced = row.get("ssn").cloned().unwrap_or(Value::Null);
-        if let Some(s) = surfaced.as_str() {
-            assert_ne!(
-                s, "123-45-6789",
-                "SEC-4: wrap_row_on_read must never surface the parent \
-                 plaintext verbatim as if already masked: {row}"
-            );
-        }
-        // If it did wrap into a sentinel, the masked payload must be the
-        // re-masked value, not plaintext.
-        if let Some(obj) = surfaced.as_object() {
-            assert_eq!(
-                obj.get("masked").and_then(Value::as_str),
-                Some("***-**-6789"),
-                "SEC-4: a parent-only masked column must be re-masked, not \
-                 echoed as plaintext: {row}"
-            );
-        }
+        // SEC-4: a parent-only masked column is re-masked, never echoed as
+        // plaintext, and the plaintext appears nowhere in the row.
+        assert_eq!(cell(&row, "ssn").display(), "***-**-6789");
+        assert!(
+            !format!("{row:?}").contains("123-45-6789"),
+            "SEC-4: wrap_row_on_read must never surface the parent plaintext: {row:?}"
+        );
     }
 
     #[test]
@@ -908,17 +843,9 @@ mod tests {
         wrap_row_on_read(&schema, "users", &mut row).unwrap();
 
         for (col, classification) in [("ssn", "spi"), ("email", "pii"), ("dob", "pii")] {
-            let wrapped = row.get(col).and_then(|v| v.as_object()).unwrap();
-            assert_eq!(
-                wrapped.get("sentinel").and_then(|v| v.as_str()),
-                Some("__zsmask__"),
-                "col {col}"
-            );
-            assert_eq!(
-                wrapped.get("classification").and_then(|v| v.as_str()),
-                Some(classification),
-                "col {col}"
-            );
+            let wrapped = cell(&row, col);
+            assert_eq!(wrapped.column(), col);
+            assert_eq!(wrapped.classification(), classification, "col {col}");
         }
     }
 
@@ -1056,8 +983,8 @@ mod tests {
             assert_eq!(row["ssn"], value!("***-**-6789"));
             wrap_row_on_read(&schema, "people", &mut row).unwrap();
             assert!(row.get("__zs_raw2__ssn").is_none());
-            assert_eq!(row["ssn"]["masked"], value!("***-**-6789"));
-            assert_eq!(row["ssn"]["classification"], value!("spi"));
+            assert_eq!(cell(&row, "ssn").display(), "***-**-6789");
+            assert_eq!(cell(&row, "ssn").classification(), "spi");
         }
     }
 }

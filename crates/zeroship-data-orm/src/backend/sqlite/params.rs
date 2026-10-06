@@ -3,6 +3,12 @@ use crate::value::Value;
 use rusqlite::types::{ToSql, ToSqlOutput};
 
 pub(crate) struct Parameter<'a>(pub &'a Value);
+
+fn masked_parameter() -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(
+        "a masked cell from a read result is not a bind parameter".into(),
+    )
+}
 impl ToSql for Parameter<'_> {
     fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
         use rusqlite::types::Value as SqliteValue;
@@ -43,6 +49,12 @@ impl ToSql for Parameter<'_> {
             }
             Value::String(v) | Value::Decimal(v) => ToSqlOutput::Borrowed(v.as_str().into()),
             Value::Bytes(v) => ToSqlOutput::Borrowed(v.as_slice().into()),
+            // Serializing a masked cell would write its display into the
+            // column, so a read result cannot be bound back, at any depth.
+            Value::Masked(_) => return Err(masked_parameter()),
+            Value::Array(_) | Value::Object(_) if self.0.contains_masked() => {
+                return Err(masked_parameter());
+            }
             Value::Array(_) | Value::Object(_) => ToSqlOutput::Owned(SqliteValue::Text(
                 serde_json::to_string(self.0)
                     .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
@@ -131,5 +143,40 @@ mod tests {
             .unwrap();
         assert_eq!(kind, "text");
         assert!(Parameter(&Value::from(u64::MAX)).to_sql().is_err());
+    }
+
+    /// A masked cell from a read result is never bound, on its own or nested
+    /// inside a JSON value.
+    #[test]
+    fn masked_cells_are_not_bind_parameters() {
+        let masked = crate::tests::fixtures::masked_cell();
+        for value in [
+            masked.clone(),
+            Value::Array(vec![Value::from("first"), masked.clone()]),
+            // Built by hand: `value!` serializes its operands, which turns a
+            // cell into its display before it could reach the encoder.
+            Value::Object(
+                [(
+                    "kept".into(),
+                    Value::Object([("deeper".into(), masked)].into()),
+                )]
+                .into(),
+            ),
+        ] {
+            let error = Parameter(&value)
+                .to_sql()
+                .expect_err("a masked cell must not bind");
+            assert!(
+                error.to_string().contains("not a bind parameter"),
+                "{error}"
+            );
+        }
+        // Control: the display as plain data binds.
+        for value in [
+            Value::from("***-**-6789"),
+            value!({ "kept": { "deeper": "***-**-6789" } }),
+        ] {
+            assert!(Parameter(&value).to_sql().is_ok(), "{value:?}");
+        }
     }
 }

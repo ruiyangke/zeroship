@@ -484,7 +484,7 @@ impl<E: Entity> EntityCollection<E> {
 }
 
 fn decode_rows<E: Entity, R: FromRow<E>>(output: Output) -> Result<Vec<R>, DbError> {
-    let Output::Rows { rows, .. } = output else {
+    let Output::Rows(rows) = output else {
         return Err(DbError::internal("expected model rows"));
     };
     rows.into_iter()
@@ -616,16 +616,13 @@ impl Operation {
 /// Result data before the adapter encodes it for its language runtime.
 #[derive(Debug)]
 pub enum Output {
-    Rows { rows: Vec<Value>, has_masked: bool },
+    Rows(Vec<Value>),
     Count(i64),
 }
 
-impl From<crud::read_pipeline::ApplyResult> for Output {
-    fn from(result: crud::read_pipeline::ApplyResult) -> Self {
-        Self::Rows {
-            rows: result.rows,
-            has_masked: result.has_masked,
-        }
+impl From<Vec<Value>> for Output {
+    fn from(rows: Vec<Value>) -> Self {
+        Self::Rows(rows)
     }
 }
 
@@ -947,11 +944,11 @@ impl PreparedOperation {
                 patch,
                 many: false,
             } => {
-                let (rows, has_masked) = Box::pin(crud::run_update_one(
+                Box::pin(crud::run_update_one(
                     binding, collection, route, filter, patch, actor_id,
                 ))
-                .await?;
-                Output::Rows { rows, has_masked }
+                .await?
+                .into()
             }
             Plan::Update {
                 filter,
@@ -1029,17 +1026,13 @@ impl PreparedOperation {
                 ))
                 .await?;
                 let rows = result
-                    .rows
                     .into_iter()
                     .filter_map(|row| match row {
                         Value::Object(map) => map.into_values().next(),
                         _ => None,
                     })
                     .collect();
-                Output::Rows {
-                    rows,
-                    has_masked: result.has_masked,
-                }
+                Output::Rows(rows)
             }
             Plan::Search(plan) => Box::pin(crud::run_search(&route, binding, collection, plan))
                 .await?

@@ -32,6 +32,120 @@ pub enum Value {
     Json(String),
     Array(Vec<Value>),
     Object(Record),
+    /// A masked column's cell, as the read pipeline produced it. See
+    /// [`MaskedCell`] for why no decoder can produce one.
+    Masked(Box<MaskedCell>),
+}
+
+/// A masked column's cell: its display value and the coordinates an unmask
+/// needs to find the real one.
+///
+/// Only this crate constructs one. The fields are private and the constructor
+/// is crate-private, so another crate can read and clone a cell but cannot
+/// build one by hand or edit one. The producer is
+/// `protection::mask_pass::wrap_row_on_read`, which `crud::read_pipeline::apply`
+/// runs on the rows it is given: it takes the collection, column and
+/// classification from the descriptor's masked column and the row key from the
+/// row's `id`. No deserializer and no `From` conversion produces this variant,
+/// so decoded JSON, metadata and creator input of any shape stay plain data. An
+/// adapter reads the cell through its accessors and materializes its native
+/// masked value from them.
+///
+/// Serialization emits only [`MaskedCell::display`]. `SqlRegistration::encode`
+/// (`crate::sql::registration`), query literals, bind parameters and JSON
+/// storage validation refuse a cell at any depth of a value, so a read result
+/// cannot be written back or compared with its coordinates.
+///
+/// Neither a struct literal nor a field assignment compiles outside this crate:
+///
+/// ```compile_fail
+/// let cell = zeroship_data_orm::value::MaskedCell {
+///     collection: "users".into(),
+///     row_pk: "usr_victim".into(),
+///     column: "ssn".into(),
+///     classification: "public".into(),
+///     display: "***".into(),
+/// };
+/// ```
+///
+/// ```compile_fail
+/// fn retarget(cell: &zeroship_data_orm::value::MaskedCell) -> zeroship_data_orm::value::MaskedCell {
+///     let mut copy = cell.clone();
+///     copy.row_pk = "usr_victim".into();
+///     copy
+/// }
+/// ```
+///
+/// Reading one does:
+///
+/// ```
+/// fn coordinates(cell: &zeroship_data_orm::value::MaskedCell) -> [&str; 5] {
+///     [
+///         cell.collection(),
+///         cell.row_pk(),
+///         cell.column(),
+///         cell.classification(),
+///         cell.display(),
+///     ]
+/// }
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MaskedCell {
+    collection: String,
+    row_pk: String,
+    column: String,
+    classification: String,
+    display: String,
+}
+
+impl MaskedCell {
+    pub(crate) const fn new(
+        collection: String,
+        row_pk: String,
+        column: String,
+        classification: String,
+        display: String,
+    ) -> Self {
+        Self {
+            collection,
+            row_pk,
+            column,
+            classification,
+            display,
+        }
+    }
+    /// The collection the row was read from.
+    pub fn collection(&self) -> &str {
+        &self.collection
+    }
+    /// The row's primary key, as text. Empty when the projection omitted it.
+    pub fn row_pk(&self) -> &str {
+        &self.row_pk
+    }
+    /// The declared column the cell belongs to.
+    pub fn column(&self) -> &str {
+        &self.column
+    }
+    /// The column's declared classification, which unmask authorizes against.
+    pub fn classification(&self) -> &str {
+        &self.classification
+    }
+    /// The masked representation the creator sees.
+    pub fn display(&self) -> &str {
+        &self.display
+    }
+    /// The bytes of text the cell carries, which is what holding it costs.
+    pub(crate) fn text_len(&self) -> usize {
+        self.collection.len()
+            + self.row_pk.len()
+            + self.column.len()
+            + self.classification.len()
+            + self.display.len()
+    }
+    /// The display and classification, for the typed ORM's protected view.
+    pub(crate) fn into_protected_view(self) -> (String, String) {
+        (self.display, self.classification)
+    }
 }
 
 impl Value {
@@ -115,6 +229,27 @@ impl Value {
         } else {
             None
         }
+    }
+    /// The masked cell this value is, when it is one.
+    pub fn as_masked(&self) -> Option<&MaskedCell> {
+        if let Self::Masked(cell) = self {
+            Some(cell)
+        } else {
+            None
+        }
+    }
+    /// Whether a masked cell appears anywhere in this value.
+    pub(crate) fn contains_masked(&self) -> bool {
+        let mut pending = vec![self];
+        while let Some(value) = pending.pop() {
+            match value {
+                Self::Masked(_) => return true,
+                Self::Array(values) => pending.extend(values),
+                Self::Object(fields) => pending.extend(fields.values()),
+                _ => {}
+            }
+        }
+        false
     }
     pub fn is_null(&self) -> bool {
         matches!(self, Self::Null)
@@ -308,6 +443,9 @@ impl Serialize for Value {
             }
             Self::Array(v) => v.serialize(serializer),
             Self::Object(v) => v.serialize(serializer),
+            // The display only: the coordinates are for the adapter that
+            // mints a native masked value, never for a serialized form.
+            Self::Masked(cell) => serializer.serialize_str(&cell.display),
         }
     }
 }

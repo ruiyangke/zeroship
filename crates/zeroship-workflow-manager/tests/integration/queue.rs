@@ -189,7 +189,7 @@ fn settlement(delivery: &Delivery) -> JournalSettlement {
 }
 
 async fn stored(fixture: &Fixture, id: &JobId) -> Option<Value> {
-    let Output::Rows { rows, .. } = fixture
+    let Output::Rows(rows) = fixture
         .database()
         .await
         .collection("jobs")
@@ -358,7 +358,7 @@ async fn register_scopes_together(_fixture: &Fixture, hosts: &[Queue], app: &App
 }
 
 async fn registered_scope(database: &Database, app: &AppId) -> Value {
-    let Output::Rows { mut rows, .. } = database
+    let Output::Rows(mut rows) = database
         .collection("queue_scopes")
         .unwrap()
         .find(value!({"id":app.as_str()}), value!({"limit":2}))
@@ -737,7 +737,7 @@ async fn revocation_rolls_back_mutations(fixture: &Fixture) {
 }
 
 async fn assert_transaction_job(tx: &Database, spec: &JobSpec, state: &str) -> Result<(), Error> {
-    let Output::Rows { rows, .. } = tx
+    let Output::Rows(rows) = tx
         .collection("jobs")?
         .find(
             value!({"app_id":spec.app_id.as_str(),"id":spec.id.as_str()}),
@@ -781,7 +781,7 @@ async fn revoke_in_transaction(
 }
 
 async fn assert_authorization_rolled_back(fixture: &Fixture, app: &AppId) {
-    let Output::Rows { rows, .. } = fixture
+    let Output::Rows(rows) = fixture
         .database()
         .await
         .collection("queue_scopes")

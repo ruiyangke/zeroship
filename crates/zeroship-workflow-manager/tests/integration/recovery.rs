@@ -117,7 +117,7 @@ async fn host(fixture: &Fixture) -> (Recovery, Queue) {
 
 async fn snapshot(fixture: &Fixture, app: &AppId, kind: DutyKind) -> Value {
     let db = fixture.database().await;
-    let Output::Rows { mut rows, .. } = db
+    let Output::Rows(mut rows) = db
         .collection("recovery_duties")
         .unwrap()
         .find(
@@ -153,7 +153,7 @@ async fn set_deadline(fixture: &Fixture, app: &AppId, kind: DutyKind, deadline: 
 }
 
 async fn stored_job(fixture: &Fixture, job: &JobSpec) -> Option<Value> {
-    let Output::Rows { mut rows, .. } = fixture
+    let Output::Rows(mut rows) = fixture
         .database()
         .await
         .collection("jobs")

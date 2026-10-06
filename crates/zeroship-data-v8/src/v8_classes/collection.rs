@@ -458,6 +458,7 @@ impl Collection {
                     Value::TimestampMicros(_) => "timestamp".into(),
                     Value::Decimal(_) => "decimal".into(),
                     Value::Json(_) => "JSON".into(),
+                    Value::Masked(_) => "masked value".into(),
                 };
                 return Err(OpError::type_error(format!(
                     "upsert: opts.conflictFields must be an array of strings (got {detail})"

@@ -21,6 +21,7 @@ pub enum QueryError {
     ReservedIdPrefix(String),
     ImmutableAssignedField(String),
     TimestampPrecisionUnsupported(String),
+    MaskedCell(String),
 }
 
 impl From<crate::sql::compiler::CompileError> for QueryError {
@@ -29,6 +30,7 @@ impl From<crate::sql::compiler::CompileError> for QueryError {
             crate::sql::compiler::CompileError::TimestampPrecisionUnsupported => {
                 Self::TimestampPrecisionUnsupported(error.to_string())
             }
+            crate::sql::compiler::CompileError::MaskedCell => Self::MaskedCell(error.to_string()),
             error => Self::InvalidFilter(error.to_string()),
         }
     }
@@ -44,7 +46,9 @@ impl std::fmt::Display for QueryError {
             Self::ImmutableAssignedField(message) => {
                 write!(f, "immutable assigned field: {message}")
             }
-            Self::TimestampPrecisionUnsupported(message) => write!(f, "{message}"),
+            Self::TimestampPrecisionUnsupported(message) | Self::MaskedCell(message) => {
+                write!(f, "{message}")
+            }
         }
     }
 }

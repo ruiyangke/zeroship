@@ -2,7 +2,7 @@ use super::*;
 use fixtures::CollectionFixture;
 
 fn row(output: Output) -> Value {
-    let Output::Rows { mut rows, .. } = output else {
+    let Output::Rows(mut rows) = output else {
         panic!("expected rows")
     };
     assert_eq!(rows.len(), 1);
@@ -82,11 +82,11 @@ async fn lifecycle(mut fixture: CollectionFixture) {
     let deleted = row(entries.delete(value!({"id":key.clone()})).await.unwrap());
     assert!(deleted["removed"].as_timestamp_micros().unwrap() > 0);
     assert_eq!(deleted["revision"], value!(5));
-    let Output::Rows { rows, .. } = entries.find(value!({}), value!({})).await.unwrap() else {
+    let Output::Rows(rows) = entries.find(value!({}), value!({})).await.unwrap() else {
         panic!("rows")
     };
     assert!(rows.is_empty());
-    let Output::Rows { rows, .. } = entries.delete(value!({"id":key.clone()})).await.unwrap()
+    let Output::Rows(rows) = entries.delete(value!({"id":key.clone()})).await.unwrap()
     else {
         panic!("rows")
     };
@@ -104,7 +104,7 @@ async fn lifecycle(mut fixture: CollectionFixture) {
         row(entries.find(value!({}), value!({})).await.unwrap())["id"],
         key
     );
-    let Output::Rows { rows, .. } = entries
+    let Output::Rows(rows) = entries
         .execute(Operation::Restore {
             filter: value!({"id":key.clone()}),
             many: false,

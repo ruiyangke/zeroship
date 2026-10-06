@@ -142,6 +142,13 @@ where
 }
 
 pub(super) fn literal<C: Column>(mut value: Value) -> Result<Option<crate::sql::Literal>, DbError> {
+    // Before the JSON serialization below, which would turn a masked cell into
+    // its display and compare against that.
+    if value.contains_masked() {
+        return Err(read::invalid(
+            crate::sql::LiteralError::MaskedCell.to_string(),
+        ));
+    }
     if !value.is_null()
         && !matches!(value, Value::Json(_))
         && C::Entity::schema()[C::NAME].logical_type.is_json()
@@ -178,6 +185,50 @@ mod tests {
         const NAME: &'static str = "embedding";
     }
     impl FilterableColumn for Embedding {}
+
+    struct Documents;
+    impl Entity for Documents {
+        const COLLECTION: &'static str = "documents";
+        fn schema() -> &'static crate::schema::CollectionSchema {
+            static SCHEMA: std::sync::LazyLock<crate::schema::CollectionSchema> =
+                std::sync::LazyLock::new(|| {
+                    crate::schema::CollectionSchema::new([(
+                        "payload".into(),
+                        crate::schema::ColumnSchema::new(crate::schema::LogicalType::Json),
+                    )])
+                });
+            &SCHEMA
+        }
+    }
+    struct Payload;
+    impl Column for Payload {
+        type Entity = Documents;
+        type SqlType = sql_types::Nullable<sql_types::Json>;
+        const NAME: &'static str = "payload";
+    }
+
+    /// A JSON column's operand is serialized before it becomes a literal, so
+    /// the masked-cell refusal has to come first: serializing would turn the
+    /// cell into its display and compare against that.
+    #[test]
+    fn json_operands_refuse_masked_cells_before_serializing() {
+        let cell = crate::tests::fixtures::masked_cell();
+        for operand in [
+            cell.clone(),
+            Value::Array(vec![Value::from("kept"), cell.clone()]),
+            Value::Object([("nested".into(), cell)].into()),
+        ] {
+            assert!(
+                literal::<Payload>(operand.clone()).is_err(),
+                "a masked cell must not become a JSON literal: {operand:?}"
+            );
+        }
+        // Control: the display as plain data becomes a JSON literal.
+        assert_eq!(
+            literal::<Payload>(Value::from("***-**-6789")).unwrap(),
+            Some(crate::sql::Literal::Json("\"***-**-6789\"".into()))
+        );
+    }
 
     #[test]
     fn membership_checks_equality_before_empty_and_null_simplification() {

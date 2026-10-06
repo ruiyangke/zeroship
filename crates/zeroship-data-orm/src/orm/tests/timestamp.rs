@@ -34,7 +34,7 @@ async fn exercise_timestamps(db: &Database, postgres: bool) {
             UtcInstant::from_unix_millis(millis).unwrap(),
         )
         .unwrap();
-        let Output::Rows { rows, .. } = db
+        let Output::Rows(rows) = db
             .transaction(|tx| async move {
                 tx.collection("events")?
                     .insert(value!({"instant":encoded}))
@@ -48,7 +48,7 @@ async fn exercise_timestamps(db: &Database, postgres: bool) {
         assert_eq!(rows[0]["instant"].as_timestamp_micros(), Some(micros), "{text}");
         let id = rows[0]["id"].clone();
         for input in [value!(millis), value!(text)] {
-            let Output::Rows { rows, .. } = events
+            let Output::Rows(rows) = events
                 .execute(Operation::Upsert {
                     document: value!({"instant":input.clone()}),
                     conflict_fields: value!(["instant"]),
@@ -60,7 +60,7 @@ async fn exercise_timestamps(db: &Database, postgres: bool) {
             };
             assert_eq!(rows[0]["id"], id, "equivalent instants must conflict");
             assert_eq!(rows[0]["instant"].as_timestamp_micros(), Some(micros));
-            let Output::Rows { rows, .. } = events
+            let Output::Rows(rows) = events
                 .update(
                     value!({"id":id.clone()}),
                     value!({"instant":{"$set":input.clone()}}),
@@ -76,7 +76,7 @@ async fn exercise_timestamps(db: &Database, postgres: bool) {
                 value!({"instant":{"$in":[input.clone()]}}),
                 value!({"instant":{"$gte":input.clone(),"$lte":input.clone()}}),
             ] {
-                let Output::Rows { rows, .. } = events
+                let Output::Rows(rows) = events
                     .find(value!({"$and":[{"id":id.clone()},filter]}), value!({}))
                     .await
                     .unwrap()
@@ -127,7 +127,7 @@ async fn exercise_timestamps(db: &Database, postgres: bool) {
         count(events.count(value!({}), value!({})).await.unwrap()),
         before
     );
-    let Output::Rows { rows, .. } = events.insert(value!({"instant":null})).await.unwrap() else {
+    let Output::Rows(rows) = events.insert(value!({"instant":null})).await.unwrap() else {
         panic!("insert must return rows")
     };
     assert_eq!(rows[0]["instant"], Value::Null);
@@ -138,11 +138,11 @@ async fn exercise_timestamps(db: &Database, postgres: bool) {
     let fine = "1969-12-31T23:59:59.999999Z";
     let written = events.insert(value!({"instant":fine})).await;
     if postgres {
-        let Output::Rows { rows, .. } = written.unwrap() else {
+        let Output::Rows(rows) = written.unwrap() else {
             panic!("insert must return rows")
         };
         assert_eq!(rows[0]["instant"].as_timestamp_micros(), Some(-1));
-        let Output::Rows { rows, .. } = events
+        let Output::Rows(rows) = events
             .find(value!({"instant":fine}), value!({}))
             .await
             .unwrap()
@@ -192,7 +192,7 @@ async fn exercise_timestamp_extrema(postgres: bool) {
         .await
         .unwrap();
 
-    let Output::Rows { rows, .. } = events
+    let Output::Rows(rows) = events
         .execute(Operation::Aggregate {
             pipeline: value!([{"$group":{
                 "earliest":{"$min":"instant"},
@@ -215,7 +215,7 @@ async fn exercise_timestamp_extrema(postgres: bool) {
         Value::TimestampMicros(1_767_398_400_000_000)
     ));
 
-    let Output::Rows { rows, .. } = events
+    let Output::Rows(rows) = events
         .execute(Operation::Aggregate {
             pipeline: value!([{"$group":{"instant":{"$count":true}}}]),
             options: value!({}),
@@ -256,7 +256,7 @@ async fn max_aggregate_preserves_microseconds() {
             .insert(value!({"instant": Value::TimestampMicros(second_micros + fraction)}))
             .await
             .unwrap();
-        let Output::Rows { rows, .. } = events
+        let Output::Rows(rows) = events
             .execute(Operation::Aggregate {
                 pipeline: value!([{"$group":{"latest":{"$max":"instant"}}}]),
                 options: value!({}),
@@ -322,7 +322,7 @@ async fn timestamps_reject_corrupt_sqlite_storage_without_exposing_it() {
         )
         .unwrap();
     drop(fixture);
-    let Output::Rows { rows, .. } = events.find(value!({}), value!({})).await.unwrap() else {
+    let Output::Rows(rows) = events.find(value!({}), value!({})).await.unwrap() else {
         panic!("find must return rows")
     };
     assert_eq!(rows[0]["instant"].as_timestamp_micros(), Some(0));

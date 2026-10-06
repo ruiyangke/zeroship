@@ -344,23 +344,15 @@ pub enum Protected<T> {
 }
 impl<S, T: DecodeValue<S>> DecodeValue<S> for Protected<T> {
     fn decode_value(value: Value) -> Result<Self, DbError> {
-        if value.get("sentinel").and_then(Value::as_str) == Some("__zsmask__")
-            && value.get("_sig").and_then(Value::as_str)
-                == Some(crate::protection::mask_pass::mask_sentinel_signature())
-        {
-            return Ok(Self::Masked {
-                display: value
-                    .get("masked")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| invalid("masked display"))?
-                    .into(),
-                classification: value
-                    .get("classification")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| invalid("classification"))?
-                    .into(),
-            });
+        match value {
+            Value::Masked(cell) => {
+                let (display, classification) = cell.into_protected_view();
+                Ok(Self::Masked {
+                    display,
+                    classification,
+                })
+            }
+            value => T::decode_value(value).map(Self::Value),
         }
-        T::decode_value(value).map(Self::Value)
     }
 }

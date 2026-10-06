@@ -445,9 +445,7 @@ async fn submit_dependency_after_first_page(
     for spec in &pending {
         queue.submit(spec).await.unwrap();
     }
-    let Output::Rows {
-        rows: first_page, ..
-    } = fixture
+    let Output::Rows(first_page) = fixture
         .database()
         .await
         .collection("jobs")

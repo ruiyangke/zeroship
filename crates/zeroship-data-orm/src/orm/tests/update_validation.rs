@@ -78,10 +78,10 @@ async fn exercise_arithmetic_validation(db: &Database) {
             assert!(error.message_str().contains("numeric column and operand"));
         }
     }
-    let Output::Rows { rows: before, .. } = before else {
+    let Output::Rows(before) = before else {
         panic!("find must return rows")
     };
-    let Output::Rows { rows: after, .. } = accounts.find(value!({}), value!({})).await.unwrap()
+    let Output::Rows(after) = accounts.find(value!({}), value!({})).await.unwrap()
     else {
         panic!("find must return rows")
     };
@@ -113,7 +113,7 @@ async fn exercise_arithmetic_validation(db: &Database) {
     })
     .await
     .unwrap();
-    let Output::Rows { rows, .. } = accounts.find(value!({}), value!({})).await.unwrap() else {
+    let Output::Rows(rows) = accounts.find(value!({}), value!({})).await.unwrap() else {
         panic!("find must return rows")
     };
     assert_eq!(rows[0]["balance"].as_f64(), Some(11.5));
@@ -166,7 +166,7 @@ async fn exercise_update_grammar(db: &Database) {
         }
     }
     let literal = value!({"$inc":2,"description":"literal JSON"});
-    let Output::Rows { rows, .. } = accounts
+    let Output::Rows(rows) = accounts
         .update(
             value!({}),
             value!({"$set":{"payload":literal.clone()},"$inc":{"balance":1}}),
@@ -179,7 +179,7 @@ async fn exercise_update_grammar(db: &Database) {
     assert_eq!(rows[0]["payload"], literal);
     assert_eq!(rows[0]["balance"].as_f64(), Some(11.0));
     assert_eq!(rows[0]["version"].as_i64(), Some(2));
-    let Output::Rows { rows, .. } = accounts
+    let Output::Rows(rows) = accounts
         .update(
             value!({}),
             value!({"payload":{"$set":{"$mul":3}},"balance":{"$mul":2}}),
@@ -208,7 +208,7 @@ async fn postgres_patches_emptied_by_write_assignments_are_refused() {
 }
 
 async fn stored_rows(accounts: &Collection) -> Vec<Value> {
-    let Output::Rows { rows, .. } = accounts.find(value!({}), value!({})).await.unwrap() else {
+    let Output::Rows(rows) = accounts.find(value!({}), value!({})).await.unwrap() else {
         panic!("find must return rows")
     };
     assert_eq!(rows.len(), 1, "the fixture holds one account");
@@ -266,7 +266,7 @@ async fn exercise_patches_emptied_by_write_assignments(db: &Database) {
         }
     }
 
-    let Output::Rows { rows, .. } = accounts
+    let Output::Rows(rows) = accounts
         .update(value!({}), value!({"balance":11,"version":99}))
         .await
         .unwrap()

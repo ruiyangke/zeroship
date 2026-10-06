@@ -39,7 +39,7 @@ fn manual_database(owner: &CollectionFixture) -> Database {
 }
 
 fn row(output: Output) -> Value {
-    let Output::Rows { mut rows, .. } = output else {
+    let Output::Rows(mut rows) = output else {
         panic!("expected rows")
     };
     assert_eq!(rows.len(), 1);

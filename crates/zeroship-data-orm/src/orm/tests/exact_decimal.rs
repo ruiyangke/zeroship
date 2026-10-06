@@ -41,7 +41,7 @@ fn membership(values: &[&str]) -> Value {
 
 async fn exercise(owner: &CollectionFixture) {
     let records = owner.database.collection("records").unwrap();
-    let Output::Rows { rows, .. } = records
+    let Output::Rows(rows) = records
         .insert(document("9007199254740993.00"))
         .await
         .unwrap()
@@ -50,7 +50,7 @@ async fn exercise(owner: &CollectionFixture) {
     };
     assert_eq!(rows[0]["amount"], decimal("9007199254740993.00"));
 
-    let Output::Rows { rows, .. } = records
+    let Output::Rows(rows) = records
         .find(document("9007199254740993.000"), value!({}))
         .await
         .unwrap()
@@ -59,18 +59,18 @@ async fn exercise(owner: &CollectionFixture) {
     };
     assert_eq!(rows.len(), 1);
 
-    let Output::Rows { rows, .. } = records.update(value!({}), increment("0.01")).await.unwrap()
+    let Output::Rows(rows) = records.update(value!({}), increment("0.01")).await.unwrap()
     else {
         panic!("update must return rows")
     };
     assert_eq!(rows[0]["amount"], decimal("9007199254740993.01"));
 
-    let Output::Rows { rows, .. } = records.insert(document("1.005")).await.unwrap() else {
+    let Output::Rows(rows) = records.insert(document("1.005")).await.unwrap() else {
         panic!("insert must return rows")
     };
     assert_eq!(rows[0]["amount"], decimal("1.01"));
 
-    let Output::Rows { rows, .. } = records
+    let Output::Rows(rows) = records
         .find(membership(&["0", "1.010"]), value!({}))
         .await
         .unwrap()
@@ -79,7 +79,7 @@ async fn exercise(owner: &CollectionFixture) {
     };
     assert_eq!(rows.len(), 1);
 
-    let Output::Rows { rows, .. } = records
+    let Output::Rows(rows) = records
         .update(document("1.010"), arithmetic("$mul", "2"))
         .await
         .unwrap()
@@ -88,7 +88,7 @@ async fn exercise(owner: &CollectionFixture) {
     };
     assert_eq!(rows[0]["amount"], decimal("2.02"));
 
-    let Output::Rows { rows, .. } = records
+    let Output::Rows(rows) = records
         .update(document("2.020"), arithmetic("$dec", "0.02"))
         .await
         .unwrap()
@@ -105,7 +105,7 @@ async fn exercise(owner: &CollectionFixture) {
 
 async fn exercise_v8_shape(owner: &CollectionFixture) {
     let records = owner.database.collection("records").unwrap();
-    let Output::Rows { rows, .. } = records
+    let Output::Rows(rows) = records
         .insert(value!({"amount":"9007199254740993.00"}))
         .await
         .unwrap()
@@ -113,7 +113,7 @@ async fn exercise_v8_shape(owner: &CollectionFixture) {
         panic!("insert must return rows")
     };
     assert_eq!(rows[0]["amount"], decimal("9007199254740993.00"));
-    let Output::Rows { rows, .. } = records
+    let Output::Rows(rows) = records
         .update(
             value!({"amount":"9007199254740993.000"}),
             value!({"amount":{"$inc":"0.01"}}),

@@ -791,6 +791,10 @@ impl From<crate::sql::mapping::QueryError> for DbError {
                 "timestamp_precision_unsupported", m,
                 Some("Round the instant to a whole millisecond before writing it to this database.".into()),
             ),
+            QueryError::MaskedCell(m) => (
+                "masked_cell_refused", m,
+                Some("A masked value read back from the database cannot be written or compared; unmask it first or omit the field.".into()),
+            ),
         };
         DbError::ValidationFailed {
             code,

@@ -73,7 +73,7 @@ impl<P: ReadSelection> ReadBuilder<P> {
     pub fn all(self) -> impl Future<Output = Result<Vec<P::Output>, DbError>> {
         let work = self.execute();
         async move {
-            let (Output::Rows { rows, .. }, selection) = work.await? else {
+            let (Output::Rows(rows), selection) = work.await? else {
                 return Err(DbError::internal("read returned a count"));
             };
             rows.into_iter()

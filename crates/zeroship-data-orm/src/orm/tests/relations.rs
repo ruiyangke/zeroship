@@ -12,7 +12,7 @@ fn fields() -> Value {
 
 async fn exercise(db: &Database) {
     let nodes = db.collection("nodes").unwrap();
-    let Output::Rows { rows, .. } = nodes.insert(value!({"title":"parent"})).await.unwrap() else {
+    let Output::Rows(rows) = nodes.insert(value!({"title":"parent"})).await.unwrap() else {
         panic!("expected insert")
     };
     let parent_id = rows[0]["id"].clone();
@@ -21,7 +21,7 @@ async fn exercise(db: &Database) {
         .await
         .unwrap();
     nodes.insert(value!({"title":"orphan"})).await.unwrap();
-    let Output::Rows { rows, .. } = nodes
+    let Output::Rows(rows) = nodes
         .find(value!({"title":"child"}), value!({"with":{"parent":true}}))
         .await
         .unwrap()
@@ -30,7 +30,7 @@ async fn exercise(db: &Database) {
     };
     assert_eq!(rows[0]["parent"]["title"], value!("parent"));
     assert_eq!(rows[0]["parentId"], parent_id);
-    let Output::Rows { rows, .. } = nodes
+    let Output::Rows(rows) = nodes
         .find(
             value!({"title":"child"}),
             value!({"select":["title"], "with":{"parent":true}}),
@@ -42,7 +42,7 @@ async fn exercise(db: &Database) {
     };
     assert_eq!(rows[0]["parent"]["title"], value!("parent"));
     assert_eq!(rows[0].as_object().unwrap().len(), 2);
-    let Output::Rows { rows, .. } = nodes
+    let Output::Rows(rows) = nodes
         .find(
             value!({"title":{"$in":["parent","orphan"]}}),
             value!({"with":{"parent":true}}),
@@ -55,7 +55,7 @@ async fn exercise(db: &Database) {
     assert_eq!(rows.len(), 2);
     assert!(rows.iter().all(|row| row["parent"].is_null()));
     nodes.delete(value!({"title":"parent"})).await.unwrap();
-    let Output::Rows { rows, .. } = nodes
+    let Output::Rows(rows) = nodes
         .find(value!({"title":"child"}), value!({"with":{"parent":true}}))
         .await
         .unwrap()
@@ -91,7 +91,7 @@ async fn exercise(db: &Database) {
             .any(|read| read.collection == "nodes"
                 && read.matches(&std::collections::HashMap::new()))
     );
-    assert!(matches!(prepared.await.unwrap(), Output::Rows { rows, .. } if rows.is_empty()));
+    assert!(matches!(prepared.await.unwrap(), Output::Rows(rows) if rows.is_empty()));
 }
 
 async fn batches(db: &Database) {
@@ -103,7 +103,7 @@ async fn batches(db: &Database) {
         .collect::<Vec<_>>();
     let mut targets = Vec::new();
     for chunk in documents.chunks(crate::budgets::MAX_INSERT_MANY_BATCH) {
-        let Output::Rows { rows, .. } = nodes
+        let Output::Rows(rows) = nodes
             .execute(Operation::InsertMany {
                 documents: Value::Array(chunk.to_vec()),
             })
@@ -125,7 +125,7 @@ async fn batches(db: &Database) {
             .await
             .unwrap();
     }
-    let Output::Rows { rows, .. } = nodes.find(value!({"title":{"$like":"child-%"}}), value!({
+    let Output::Rows(rows) = nodes.find(value!({"title":{"$like":"child-%"}}), value!({
         "limit":crate::sql::MAX_ROW_LIMIT, "orderBy":{"title":1}, "with":{"parent":true,"other":true}
     })).await.unwrap() else { panic!("expected rows") };
     assert_eq!(rows.len(), targets.len() * 2);
@@ -160,7 +160,7 @@ async fn relation_fanout_obeys_the_read_result_budget() {
     let nodes = fixture.database.collection("nodes").unwrap();
     let count = crate::sql::MAX_ROW_LIMIT as usize;
     let body = "x".repeat(super::super::read::MAX_READ_RESULT_BYTES / count + 1);
-    let Output::Rows { rows, .. } = nodes
+    let Output::Rows(rows) = nodes
         .insert(value!({"title":"target", "body":body}))
         .await
         .unwrap()

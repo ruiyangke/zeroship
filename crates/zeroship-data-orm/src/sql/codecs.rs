@@ -71,6 +71,14 @@ pub(crate) fn validate_json_value(field: &str, value: &Value) -> Result<(), Code
                 check_json_depth(field, depth + 1)?;
                 pending.extend(values.values().map(|value| (value, depth + 1)));
             }
+            // Its serialized form is the display alone, so storing one would
+            // replace the column's data with a mask.
+            Value::Masked(_) => {
+                return Err(CodecError::validation(
+                    "masked_cell_refused",
+                    format!("column '{field}' cannot store a masked cell from a read result"),
+                ));
+            }
             _ => {}
         }
     }
@@ -338,6 +346,35 @@ fn normalize_timestamp_value(field: &str, value: &mut Value) -> Result<(), Codec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A masked cell is not JSON data: its serialized form is its display, so
+    /// storing one would replace the column's value with a mask. Refused on
+    /// its own and at any depth, and only for the cell.
+    #[test]
+    fn json_values_refuse_masked_cells_at_any_depth() {
+        let cell = crate::tests::fixtures::masked_cell();
+        for value in [
+            cell.clone(),
+            Value::Array(vec![Value::from("kept"), cell.clone()]),
+            Value::Object([("nested".into(), Value::Array(vec![cell]))].into()),
+        ] {
+            assert!(
+                matches!(
+                    validate_json_value("prefs", &value),
+                    Err(CodecError::Validation { code: "masked_cell_refused", .. })
+                ),
+                "{value:?}"
+            );
+        }
+        // Control: the same shapes holding plain text validate.
+        for value in [
+            Value::from("***-**-6789"),
+            Value::Array(vec![Value::from("kept"), Value::from("***-**-6789")]),
+        ] {
+            assert_eq!(validate_json_value("prefs", &value), Ok(()), "{value:?}");
+        }
+    }
+
     #[test]
     fn sqlite_registration_packs_vector_and_geopoint_values() {
         let schema = crate::schema::CollectionSchema::from_fields(&crate::value!({

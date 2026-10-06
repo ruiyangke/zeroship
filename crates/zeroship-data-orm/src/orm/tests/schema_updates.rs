@@ -31,7 +31,7 @@ async fn exercise_field_types(db: &Database) {
         .insert(value!({"label":"original","active":true,"payload":[],"balance":10,"items":[]}))
         .await
         .unwrap();
-    let Output::Rows { rows: before, .. } = records.find(value!({}), value!({})).await.unwrap()
+    let Output::Rows(before) = records.find(value!({}), value!({})).await.unwrap()
     else {
         panic!("find must return rows")
     };
@@ -79,7 +79,7 @@ async fn exercise_field_types(db: &Database) {
             }
         }
     }
-    let Output::Rows { rows: after, .. } = records.find(value!({}), value!({})).await.unwrap()
+    let Output::Rows(after) = records.find(value!({}), value!({})).await.unwrap()
     else {
         panic!("find must return rows")
     };

@@ -135,7 +135,7 @@ impl<E: Entity, R: Relation<Source = E>> RelatedQuery<E, R> {
                 .clone()
                 .scope(async move {
                     let route = captured.bind(database.backend.clone())?;
-                    let Output::Rows { rows, .. } =
+                    let Output::Rows(rows) =
                         parent.execute(&database.binding, &route).await?
                     else {
                         return Err(DbError::internal("related parent query returned a count"));

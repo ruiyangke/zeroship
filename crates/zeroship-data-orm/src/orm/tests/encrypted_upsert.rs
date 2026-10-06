@@ -2,7 +2,7 @@ use super::fixtures::CollectionFixture;
 use super::*;
 
 fn row(output: Output) -> Value {
-    let Output::Rows { mut rows, .. } = output else {
+    let Output::Rows(mut rows) = output else {
         panic!("expected rows")
     };
     assert_eq!(rows.len(), 1);

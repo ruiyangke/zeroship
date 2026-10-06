@@ -135,7 +135,7 @@ async fn cold_transaction(database: &Database) {
     .await
     .expect("cold catalog reads must not wait for a second pool connection")
     .unwrap();
-    let Output::Rows { rows, .. } = database
+    let Output::Rows(rows) = database
         .collection("records")
         .unwrap()
         .find(value!({}), value!({}))
@@ -204,7 +204,7 @@ async fn postgres_catalog_protection_follows_the_bound_schema() {
             "{error:?}"
         );
     }
-    let Output::Rows { rows, .. } = owner
+    let Output::Rows(rows) = owner
         .database
         .collection("records")
         .unwrap()

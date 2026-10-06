@@ -14,6 +14,8 @@ pub enum ParameterType {
     Json,
     Array,
     Object,
+    /// A masked cell, which binding refuses.
+    Masked,
 }
 
 impl ParameterType {
@@ -29,6 +31,7 @@ impl ParameterType {
             Value::Json(_) => Self::Json,
             Value::Array(_) => Self::Array,
             Value::Object(_) => Self::Object,
+            Value::Masked(_) => Self::Masked,
         }
     }
 }

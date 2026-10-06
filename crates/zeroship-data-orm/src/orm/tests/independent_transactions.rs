@@ -512,7 +512,7 @@ async fn a_fork_inherits_the_installed_mask_policy() {
         "unmaskReason":"mask policy parity"
     });
     let fork = owner.database.independent().unwrap();
-    let Output::Rows { rows, .. } = fork
+    let Output::Rows(rows) = fork
         .collection("records")
         .unwrap()
         .find(value!({"label":"visible"}), unmask.clone())

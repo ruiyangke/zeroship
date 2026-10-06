@@ -251,7 +251,7 @@ async fn finish(queue: &Queue, authority: &Owner, expected: &JobSpec) -> Journal
 }
 
 async fn rows(fixture: &Fixture, collection: &str, filter: Value) -> Vec<Value> {
-    let Output::Rows { rows, .. } = fixture
+    let Output::Rows(rows) = fixture
         .database()
         .await
         .collection(collection)

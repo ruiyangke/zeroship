@@ -770,7 +770,7 @@ pub(crate) async fn lock_run(
     if locked != 1 {
         return Err(not_found("workflow run"));
     }
-    let Output::Rows { rows, .. } = runs
+    let Output::Rows(rows) = runs
         .find(
             value!({"app_id":app.as_str(), "id":run_id}),
             value!({"limit":1}),

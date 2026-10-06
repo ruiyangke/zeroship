@@ -39,7 +39,7 @@ async fn exercise(postgres: bool) {
             AggregateRef::over_path(function, source.column(field).unwrap(), false).unwrap(),
         )
     };
-    let Output::Rows { rows, .. } = db
+    let Output::Rows(rows) = db
         .read(query(aggregate("visible", AggregateFunc::Count)))
         .await
         .unwrap()
@@ -76,16 +76,18 @@ async fn exercise(postgres: bool) {
         ));
     }
 
-    let Output::Rows { rows, has_masked } = db
+    let Output::Rows(rows) = db
         .read(query(Operand::Path(source.column("masked").unwrap())))
         .await
         .unwrap()
     else {
         panic!("expected protected projection");
     };
-    assert!(has_masked);
-    assert_eq!(rows[0]["result"]["_meta"]["column"], value!("masked"));
-    let Output::Rows { rows, .. } = db
+    assert_eq!(
+        rows[0]["result"].as_masked().map(|cell| cell.column()),
+        Some("masked")
+    );
+    let Output::Rows(rows) = db
         .read(query(Operand::Path(source.column("encrypted").unwrap())))
         .await
         .unwrap()

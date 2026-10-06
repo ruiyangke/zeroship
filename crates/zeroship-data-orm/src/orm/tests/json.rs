@@ -30,7 +30,7 @@ async fn sqlite_json_values_round_trip_through_the_orm() {
         .execute("UPDATE documents SET payload = ?1", ["\"true\""])
         .unwrap();
     drop(fixture);
-    let Output::Rows { rows, .. } = db
+    let Output::Rows(rows) = db
         .collection("documents")
         .unwrap()
         .find(value!({}), value!({}))
@@ -63,7 +63,7 @@ async fn exercise_json_values(db: &Database) {
         let id = db
             .transaction(|tx| async move {
                 let collection = tx.collection("documents")?;
-                let Output::Rows { rows, .. } = collection
+                let Output::Rows(rows) = collection
                     .insert(value!({"payload":payload.clone()}))
                     .await?
                 else {
@@ -74,7 +74,7 @@ async fn exercise_json_values(db: &Database) {
                     "insert must preserve the JSON type"
                 );
                 let id = rows[0]["id"].clone();
-                let Output::Rows { rows, .. } = collection
+                let Output::Rows(rows) = collection
                     .update(
                         value!({"id":id.clone()}),
                         value!({"payload":{"$set":payload.clone()}}),
@@ -91,7 +91,7 @@ async fn exercise_json_values(db: &Database) {
             })
             .await
             .unwrap();
-        let Output::Rows { rows, .. } = db
+        let Output::Rows(rows) = db
             .collection("documents")
             .unwrap()
             .find(value!({"id":id}), value!({}))
@@ -113,11 +113,11 @@ async fn exercise_json_values(db: &Database) {
         .insert(value!({"payload":{"a":1,"b":[2,3]}}))
         .await
         .unwrap();
-    let Output::Rows { rows: inserted, .. } = id else {
+    let Output::Rows(inserted) = id else {
         panic!("insert must return rows")
     };
     let id = inserted[0]["id"].clone();
-    let Output::Rows { rows, .. } = db
+    let Output::Rows(rows) = db
         .collection("documents")
         .unwrap()
         .find(

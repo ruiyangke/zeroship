@@ -108,7 +108,7 @@ pub(super) async fn exercise(db: &Database) {
         CompareOp::Eq,
         Operand::Lit(crate::sql::Literal::Int(0)),
     );
-    let Output::Rows { rows, .. } = db.read(grouped.clone()).await.unwrap() else {
+    let Output::Rows(rows) = db.read(grouped.clone()).await.unwrap() else {
         panic!("expected rows")
     };
     assert_eq!(rows, vec![value!({"matches":0})]);
@@ -126,7 +126,7 @@ pub(super) async fn exercise(db: &Database) {
         ),
     })
     .collect();
-    let Output::Rows { rows, .. } = db.read(grouped).await.unwrap() else {
+    let Output::Rows(rows) = db.read(grouped).await.unwrap() else {
         panic!("expected aggregate rows")
     };
     assert_eq!(rows[0]["average"].as_f64(), Some(7.0));

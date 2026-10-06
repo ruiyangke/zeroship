@@ -279,7 +279,8 @@ pub fn normalise_filter(filter: &Value, schema: &FieldMap) -> Option<Predicate> 
             | Value::Array(_)
             | Value::Bytes(_)
             | Value::TimestampMicros(_)
-            | Value::Decimal(_) => return None,
+            | Value::Decimal(_)
+            | Value::Masked(_) => return None,
         }
     }
     Some(Predicate::All(conjuncts))

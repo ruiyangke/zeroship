@@ -27,7 +27,7 @@ async fn exercise_arithmetic(db: &Database) {
         (value!({"balance":{"$dec":0.5}}), 12.0),
         (value!({"balance":{"$mul":2}}), 24.0),
     ] {
-        let Output::Rows { rows, .. } = accounts.update(value!({}), patch).await.unwrap() else {
+        let Output::Rows(rows) = accounts.update(value!({}), patch).await.unwrap() else {
             panic!("update must return rows")
         };
         assert_eq!(rows[0]["balance"].as_f64(), Some(expected));
@@ -44,7 +44,7 @@ async fn exercise_arithmetic(db: &Database) {
         })
         .await;
     assert!(result.is_err());
-    let Output::Rows { rows, .. } = accounts.find(value!({}), value!({})).await.unwrap() else {
+    let Output::Rows(rows) = accounts.find(value!({}), value!({})).await.unwrap() else {
         panic!("find must return rows")
     };
     assert_eq!(rows[0]["balance"].as_f64(), Some(24.0));
@@ -108,7 +108,7 @@ async fn exercise_arrays(db: &Database) {
             value!(["1",{"a":1,"b":2},false,[2,3],{"a":1}]),
         ),
     ] {
-        let Output::Rows { rows, .. } = accounts
+        let Output::Rows(rows) = accounts
             .update(value!({}), value!({"items":operation}))
             .await
             .unwrap()
@@ -140,10 +140,10 @@ async fn exercise_arrays(db: &Database) {
         })
         .await;
     assert!(rollback.is_err());
-    let Output::Rows { rows: before, .. } = before else {
+    let Output::Rows(before) = before else {
         panic!("find must return rows")
     };
-    let Output::Rows { rows: after, .. } = accounts.find(value!({}), value!({})).await.unwrap()
+    let Output::Rows(after) = accounts.find(value!({}), value!({})).await.unwrap()
     else {
         panic!("find must return rows")
     };
@@ -178,7 +178,7 @@ async fn exercise_arrays(db: &Database) {
         })
         .await
         .unwrap();
-    let Output::Rows { rows, .. } = accounts
+    let Output::Rows(rows) = accounts
         .find(value!({"balance":100}), value!({}))
         .await
         .unwrap()
@@ -201,7 +201,7 @@ async fn exercise_arrays(db: &Database) {
             )
             .await
             .unwrap();
-        let Output::Rows { rows, .. } = accounts
+        let Output::Rows(rows) = accounts
             .update(value!({"balance":0}), value!({"items":{"$pull":null}}))
             .await
             .unwrap()
@@ -211,7 +211,7 @@ async fn exercise_arrays(db: &Database) {
         assert_eq!(rows[0]["items"], initial);
     }
     for operation in [value!({"$push":1}), value!({"$addToSet":1})] {
-        let Output::Rows { rows, .. } = accounts
+        let Output::Rows(rows) = accounts
             .update(value!({"balance":0}), value!({"items":operation}))
             .await
             .unwrap()

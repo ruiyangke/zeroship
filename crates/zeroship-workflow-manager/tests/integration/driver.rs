@@ -171,7 +171,7 @@ async fn queue(fixture: &Fixture, holds: Rc<dyn HoldClient>) -> Queue {
 }
 
 async fn rows(fixture: &Fixture, table: &str, filter: Value) -> Vec<Value> {
-    let Output::Rows { mut rows, .. } = fixture
+    let Output::Rows(mut rows) = fixture
         .database()
         .await
         .collection(table)
