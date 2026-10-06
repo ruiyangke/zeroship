@@ -50,10 +50,21 @@ impl Database {
             admin_driver,
             service_driver,
         } = database;
-        drop(service);
-        let service_closed = compio::time::timeout(Duration::from_secs(15), service_driver).await;
+        // Release BOTH sockets before polling either driver. A connection
+        // queues its drop-time housekeeping (for example `Close(S)` for the
+        // statement a query left cached) the moment the query returns, and the
+        // connection task only writes that request when the runtime next polls
+        // it. Awaiting one driver first is exactly such a poll: it flushes the
+        // other connection's queued housekeeping to the server, so when that
+        // other client is then dropped the server still holds its unread
+        // reply and answers the close with a reset instead of a FIN. Dropping
+        // every client up front runs each synchronous release (`Socket::shutdown`)
+        // before any task can write, so the queued housekeeping is discarded
+        // locally and the close stays clean.
         drop(admin);
+        drop(service);
         let admin_closed = compio::time::timeout(Duration::from_secs(15), admin_driver).await;
+        let service_closed = compio::time::timeout(Duration::from_secs(15), service_driver).await;
         service_closed
             .expect("service connection timed out")
             .expect("service task")
