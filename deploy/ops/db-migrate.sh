@@ -18,7 +18,7 @@
 # The apply is idempotent: a re-run re-derives byte-identical journal versions
 # (each is a hash of owner_app + migration name) and skips every applied file.
 #
-# `cargo xtask test migrations` exercises this CLI and platform policy directly
+# `cargo xtask test migrate` exercises this CLI and platform policy directly
 # from Rust. It reconciles the recorder-operation ledger, applies the corpus to
 # owned PostgreSQL, verifies journal and status identities, and checks that
 # applying again leaves history unchanged. It does not invoke this wrapper.

@@ -23,7 +23,7 @@ use std::sync::OnceLock;
 use zeroship_shared_server::{self as shared, Scope};
 
 /// The image the server runs.
-const IMAGE: &str = "postgres:16";
+const IMAGE: shared::images::Image = shared::images::POSTGRES_16;
 
 /// The superuser's password, a fixture value. Socket connections are trusted
 /// by the image's own `pg_hba.conf`, so the suite never sends it.
@@ -152,7 +152,7 @@ fn short_link(target: &Path) -> Result<PathBuf, String> {
 /// The recipe the shared server runs under, its identity keyed to every input
 /// that changes what a ready server holds.
 fn spec() -> Result<shared::Spec, String> {
-    let image = shared::image::with_watchdog(IMAGE)?;
+    let image = shared::image::with_watchdog(&IMAGE.reference())?;
     let environment = vec![
         ("POSTGRES_PASSWORD".to_owned(), PASSWORD.to_owned()),
         ("POSTGRES_DB".to_owned(), DATABASE.to_owned()),

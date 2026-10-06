@@ -1,0 +1,53 @@
+name: fixture images
+description: >
+  Load the container images the test fixtures start from the Actions cache the
+  plan job filled, prove the daemon carries every one, then stop the daemon
+  from pulling, so no test can reach a public registry.
+
+inputs:
+  key:
+    description: The fixture image cache key the plan job computed.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Restore the fixture images
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}/fixture-images.tar.zst
+        key: ${{ inputs.key }}
+        fail-on-cache-miss: true
+    - name: Load the fixture images
+      shell: bash
+      run: |
+        set -euo pipefail
+        zstd -dc "$RUNNER_TEMP/fixture-images.tar.zst" | docker load
+        rm "$RUNNER_TEMP/fixture-images.tar.zst"
+    - name: The daemon carries every fixture image
+      shell: bash
+      run: nix develop --command cargo xtask images check
+    # The daemon's own registry traffic (`daemon.json` `proxies`) goes to a
+    # closed port, so a fixture whose image is not in
+    # zeroship_shared_server::images fails naming the image instead of pulling
+    # it. Builds of the testkit's derived images still work: BuildKit resolves
+    # a base the daemon carries without asking a registry, and the proxy covers
+    # the daemon, not the build containers' own network.
+    - name: Stop the daemon from pulling
+      shell: bash
+      run: |
+        set -euo pipefail
+        config=/etc/docker/daemon.json
+        current='{}'
+        if sudo test -s "$config"; then current=$(sudo cat "$config"); fi
+        echo "$current" \
+          | jq '. + {proxies: {"http-proxy": "http://127.0.0.1:9", "https-proxy": "http://127.0.0.1:9"}}' \
+          | sudo tee "$config" > /dev/null
+        sudo systemctl restart docker
+        docker image rm hello-world:latest > /dev/null 2>&1 || true
+        if docker pull hello-world:latest > "$RUNNER_TEMP/pull-probe.log" 2>&1; then
+          echo "::error::a pull still reached a registry"
+          exit 1
+        fi
+        cat "$RUNNER_TEMP/pull-probe.log"
+        grep -q "127.0.0.1:9" "$RUNNER_TEMP/pull-probe.log"

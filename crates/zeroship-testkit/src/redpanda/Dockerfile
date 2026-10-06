@@ -1,4 +1,5 @@
-FROM docker.redpanda.com/redpandadata/redpanda:v26.2.2
+# The fixture prepends the FROM line from zeroship_shared_server::images::REDPANDA,
+# the one list of fixture images CI restores from its cache.
 # The image runs as `redpanda` by default, which cannot write the host's
 # bind-mounted lease state. The shared container runs as root so the watchdog can
 # maintain that state, and the watchdog starts the broker with the same

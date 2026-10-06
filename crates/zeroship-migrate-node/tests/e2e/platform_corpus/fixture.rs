@@ -31,9 +31,9 @@ impl Platform {
             root()
                 .join("packages/zero-migrate-cli/dist/cli-bin.js")
                 .is_file(),
-            "build the migration host first: cargo xtask test migrations"
+            "build the migration host first: pnpm build, or cargo xtask test migrate"
         );
-        let postgres = GenericImage::new("postgres", "17")
+        let postgres = zeroship_testkit::images::POSTGRES_17.generic()
             .with_exposed_port(5432.tcp())
             .with_wait_for(WaitFor::message_on_stdout(
                 "PostgreSQL init process complete; ready for start up.",

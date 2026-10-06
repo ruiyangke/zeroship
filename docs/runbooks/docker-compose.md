@@ -253,8 +253,8 @@ their test issuer through Testcontainers. They boot control, gateway and
 worker with S3-backed deploy blobs and object storage, deploy the built
 examples, and check browser loading, RPC operations, multipart transfers and
 LocalFs/S3 parity. Docker is required; unavailable dependencies fail setup.
-Run `cargo xtask test storage` for the Rust suites and the examples'
-Vitest/Playwright tests.
+Run `cargo xtask test examples` for the examples' Vitest/Playwright tests; the
+storage crates' Rust suites run in the `runtime` shard (`cargo xtask test runtime`).
 
 ### Console / AI builder
 

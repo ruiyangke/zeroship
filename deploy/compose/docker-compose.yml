@@ -187,7 +187,7 @@ services:
   # gateway, worker and auth - none of which migrate anything - so the Dockerfile
   # grew a `migrate` target and this service builds it.
   #
-  # `cargo xtask test migrations` verifies the host CLI's apply, durable journal
+  # `cargo xtask test migrate` verifies the host CLI's apply, durable journal
   # and repeat-apply contract against an owned database. It does not build this
   # image. Destructive in-place evolutions in the committed set are approved by
   # construction (`--approve`): this operator one-shot treats the committed

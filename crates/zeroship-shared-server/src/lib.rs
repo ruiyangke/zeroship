@@ -39,6 +39,7 @@
 //!   whether the boot is `booting`, `ready` or `failed`.
 
 pub mod image;
+pub mod images;
 pub mod lifetime;
 
 use std::any::Any;

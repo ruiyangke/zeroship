@@ -2,20 +2,6 @@ use crate::{cargo, checked, script, Result};
 use xtask::build_chain::BUILD_CHAIN;
 use zeroship_testkit::prebuilt;
 
-pub fn run() -> Result<()> {
-    build_host()?;
-    checked(
-        cargo().args([
-            "test",
-            "-p",
-            "zeroship-migrate-node",
-            "--test",
-            "platform_corpus",
-        ]),
-        "platform migration corpus",
-    )
-}
-
 /// Run the ordered package chain that produces the generated build inputs.
 pub fn build_host() -> Result<()> {
     for step in BUILD_CHAIN {
@@ -30,12 +16,20 @@ pub fn build_host() -> Result<()> {
 /// Build the workspace executables the control workflow process suites run.
 ///
 /// This is its own step rather than an entry in `BUILD_CHAIN`: the package
-/// chain is JavaScript, and a test area that runs neither Control's workflow
-/// suites nor the gate that owns them does not need the service binaries.
+/// chain is JavaScript, and a shard that runs none of Control's workflow suites
+/// does not need the service binaries.
 pub fn build_services() -> Result<()> {
     checked(
         cargo().args(prebuilt::BUILD_ARGS),
         "build the workflow process executables",
+    )
+}
+
+/// Build the real CDC relay the data suites start.
+pub fn build_relay() -> Result<()> {
+    checked(
+        cargo().args(["build", "--locked", "-p", "zeroship-data-cdc-server"]),
+        "build the real CDC relay",
     )
 }
 

@@ -306,8 +306,7 @@ fn apply_corpus(url: &str) {
     assert!(
         cli.is_file(),
         "the CDC relay's tests read the platform schema; `cargo xtask test data` builds \
-         the migration host they apply it with (as do `cargo xtask test migrations` and \
-         `pnpm build`)"
+         the migration host they apply it with (as does `pnpm build`)"
     );
     let corpus = root.join("db/migrations-ts");
     let registry = root.join("policies/platform-table-owners.json");

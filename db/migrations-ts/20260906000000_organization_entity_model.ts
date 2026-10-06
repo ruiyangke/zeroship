@@ -92,7 +92,7 @@ const userIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
 // `crates/zeroship-migrate-node/tests/e2e/platform_corpus/organization_authority.rs`
 // applies the corpus to owned PostgreSQL databases and exercises these
 // constraints, accepted controls, privileges and collations through the Rust
-// driver. Run it with `cargo xtask test migrations`.
+// driver. Run it with `cargo xtask test migrate`.
 //
 // EACH NEW TABLE IS ALSO REGISTERED IN policies/platform-table-owners.json, and
 // that file is not optional bookkeeping: the applier refuses fail-closed on any

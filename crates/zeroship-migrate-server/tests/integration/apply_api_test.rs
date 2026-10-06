@@ -208,7 +208,7 @@ async fn assert_platform_schema_present(conn: &Client) {
          and creates no table of its own. Its fixture server migrates from \
          db/migrations-ts when it boots, so a server without these tables booted \
          from a migration host that did not produce them: rebuild it with\n  \
-         cargo xtask test migrations",
+         pnpm build",
         missing.join(", zeroship."),
     );
 }

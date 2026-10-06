@@ -11,13 +11,15 @@ use std::time::Duration;
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::{runners::SyncRunner, Container, GenericImage, ImageExt};
 
+use crate::images::{self, Image};
+
 /// The major the platform deploys (`deploy/compose/docker-compose.yml`), and
 /// the floor the tenant fence exists on.
-pub const DEPLOY_MAJOR: &str = "16";
+pub const DEPLOY_IMAGE: Image = images::POSTGRES_16;
 
 /// A major BELOW the floor, used to exhibit the bootstrap's version refusal.
 /// `pg_auth_members` carries no `inherit_option` here at all.
-pub const PRE_FENCE_IMAGE: (&str, &str) = ("postgres", "15-alpine");
+pub const PRE_FENCE_IMAGE: Image = images::POSTGRES_15_ALPINE;
 
 #[derive(Debug)]
 pub struct Cluster {
@@ -28,12 +30,13 @@ pub struct Cluster {
 impl Cluster {
     /// A cluster on the deployed major.
     pub fn start() -> Self {
-        Self::of("postgres", DEPLOY_MAJOR)
+        Self::of(DEPLOY_IMAGE)
     }
 
     /// A cluster on a named image, for the arms that are about the version.
-    pub fn of(image: &str, tag: &str) -> Self {
-        let container = GenericImage::new(image, tag)
+    pub fn of(image: Image) -> Self {
+        let container = image
+            .generic()
             .with_exposed_port(5432.tcp())
             .with_wait_for(WaitFor::message_on_stdout(
                 "PostgreSQL init process complete; ready for start up.",
@@ -48,7 +51,7 @@ impl Cluster {
             .start()
             .unwrap_or_else(|error| {
                 panic!(
-                    "REFUSED: this test requires Docker and a {image}:{tag} cluster, and it is \
+                    "REFUSED: this test requires Docker and a {} cluster, and it is \
                      not there.\n\
                      \n\
                      \x20   problem   {error}\n\
@@ -57,7 +60,8 @@ impl Cluster {
                      \x20   failure says nothing about the code.\n\
                      \n\
                      \x20   Start Docker and re-run. There is no environment variable that\n\
-                     \x20   makes this a skip."
+                     \x20   makes this a skip.",
+                    image.reference()
                 )
             });
         let host = container.get_host().expect("tenant cluster host");

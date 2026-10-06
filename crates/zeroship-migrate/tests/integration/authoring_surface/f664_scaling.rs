@@ -23,9 +23,9 @@
 //! And a live-database conformance matrix multiplies load on the same runners, so a
 //! known flake sitting next to a NEW suite gets the new suite blamed for it.
 //!
-//! So these run in their own CI job (`scaling` in `.github/workflows/ci.yml`) with no
-//! service containers and nothing else on the machine, reached with
-//! `cargo test -- --ignored`. `#[ignore]` rather than a cargo feature ON PURPOSE:
+//! So no CI job runs these: run them by hand on a machine with no service
+//! containers and nothing else running, with `cargo test -p zeroship-migrate --test
+//! main -- --ignored`. `#[ignore]` rather than a cargo feature ON PURPOSE:
 //! an ignored test is still COMPILED and still linted by
 //! `cargo clippy --all-targets`, so it cannot rot into something that no longer
 //! builds while nobody is looking. A `required-features` gate would hide it from

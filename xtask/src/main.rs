@@ -1,16 +1,17 @@
-mod auth;
-mod billing;
 mod data;
-mod migrations;
-mod storage;
-mod worker;
-mod workflow;
+mod examples;
+mod images;
+mod memlock;
+mod prepare;
+mod shard;
+mod verify;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+use xtask::shards::{self, SHARDS};
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
@@ -25,41 +26,52 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Task {
-    /// Run native and example test suites with owned backing services.
+    /// Run a test area: a shard from `cargo xtask shards list`, or one of
+    /// `repository`, `data-architecture`, `playwright-browsers` and `examples`.
     Test {
+        /// The shard or check to run.
+        area: String,
+        /// Select tests of a shard for a diagnostic run; preparation stays
+        /// mandatory and doctests are skipped.
+        #[arg(long)]
+        filter: Option<String>,
+        /// Build every artifact a shard runs, and run nothing.
+        #[arg(long)]
+        build_only: bool,
+    },
+    /// The test shards CI runs, one job each.
+    Shards {
         #[command(subcommand)]
-        suite: Suite,
+        action: ShardsAction,
+    },
+    /// The container images the test fixtures start, which CI restores from
+    /// its cache instead of pulling.
+    Images {
+        #[command(subcommand)]
+        action: images::Action,
     },
 }
 
 #[derive(Subcommand)]
-enum Suite {
-    /// Run auth, authorization, mailer and gateway tests with owned services.
-    Auth,
-    /// Run billing, migration and stream tests with owned services.
-    Billing,
-    /// Run worker tests with owned `PostgreSQL` and Redis fixtures.
-    Worker,
-    /// Build the Node host and test the platform corpus on owned PostgreSQL.
-    Migrations,
-    /// Check workspace dependency and feature declarations.
-    Repository,
-    /// Check the workspace's Playwright against the development shell's
-    /// browsers. Needs Nix, `pnpm install` and the shell's browsers built.
-    PlaywrightBrowsers,
-    /// Run workflow crates, runtime, control-plane, SDK and example tests.
-    Workflow,
-    /// Run storage crate tests and the examples' Vitest/Playwright suites.
-    Storage,
-    /// Check data crate boundaries and database deployment/test posture.
-    DataArchitecture,
-    /// Run the data crates against PostgreSQL, SQLite files and the CDC relay.
-    Data {
-        /// Select tests for a diagnostic run; database setup remains mandatory.
-        #[arg(long)]
-        filter: Option<String>,
+enum ShardsAction {
+    /// Print the shard names as the JSON array CI's test matrix reads.
+    List,
+    /// Check the reports every shard left in `directory` against what the
+    /// shards build: CI's `verify` job.
+    Verify {
+        /// The directory holding every shard's downloaded reports.
+        directory: PathBuf,
     },
 }
+
+/// The test areas that are not shards: repository-wide checks, and the example
+/// apps' own suites.
+const CHECKS: [&str; 4] = [
+    "repository",
+    "data-architecture",
+    "playwright-browsers",
+    "examples",
+];
 
 fn main() -> ExitCode {
     let args = Args::parse();
@@ -68,19 +80,46 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let result = match args.command {
-        Task::Test { suite: Suite::Auth } => auth::run(),
         Task::Test {
-            suite: Suite::Billing,
-        } => billing::run(),
-        Task::Test {
-            suite: Suite::Worker,
-        } => worker::run(),
-        Task::Test {
-            suite: Suite::Migrations,
-        } => migrations::run(),
-        Task::Test {
-            suite: Suite::Repository,
-        } => checked(
+            area,
+            filter,
+            build_only,
+        } => test(&area, filter.as_deref(), build_only),
+        Task::Shards {
+            action: ShardsAction::List,
+        } => {
+            let names: Vec<&str> = SHARDS.iter().map(|shard| shard.name).collect();
+            println!("{}", serde_json::Value::from(names));
+            Ok(())
+        }
+        Task::Shards {
+            action: ShardsAction::Verify { directory },
+        } => shard::workspace_metadata().and_then(|metadata| verify::run(&directory, &metadata)),
+        Task::Images { action } => images::run(action),
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("tests failed: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn test(area: &str, filter: Option<&str>, build_only: bool) -> Result<()> {
+    if let Some(shard) = shards::find(area) {
+        let mode = if build_only {
+            shard::Mode::Build
+        } else {
+            shard::Mode::Run
+        };
+        return shard::run(shard, filter, mode);
+    }
+    if filter.is_some() || build_only {
+        return Err(format!("--filter and --build-only select within a shard, and {area} is not one").into());
+    }
+    match area {
+        "repository" => checked(
             cargo().args([
                 "test",
                 "--manifest-path",
@@ -107,9 +146,7 @@ fn main() -> ExitCode {
                 "harness unit tests",
             )
         }),
-        Task::Test {
-            suite: Suite::PlaywrightBrowsers,
-        } => checked(
+        "playwright-browsers" => checked(
             cargo().args([
                 "test",
                 "--manifest-path",
@@ -120,24 +157,16 @@ fn main() -> ExitCode {
             ]),
             "playwright browsers",
         ),
-        Task::Test {
-            suite: Suite::Workflow,
-        } => workflow::run(),
-        Task::Test {
-            suite: Suite::Storage,
-        } => storage::run(),
-        Task::Test {
-            suite: Suite::DataArchitecture,
-        } => data::architecture(),
-        Task::Test {
-            suite: Suite::Data { filter },
-        } => data::run(filter.as_deref()),
-    };
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("tests failed: {error}");
-            ExitCode::FAILURE
+        "data-architecture" => data::architecture(),
+        "examples" => examples::run(),
+        _ => {
+            let shards: Vec<&str> = SHARDS.iter().map(|shard| shard.name).collect();
+            Err(format!(
+                "no test area named {area}; the shards are {} and the other areas are {}",
+                shards.join(", "),
+                CHECKS.join(", ")
+            )
+            .into())
         }
     }
 }
@@ -266,37 +295,6 @@ pub(crate) mod script_contract {
             "{directory}'s {name} script yielded no words to check"
         );
     }
-}
-
-/// Run `packages`' tests under nextest with the CI profile.
-///
-/// The worktree's shared server is booted and leased by the caller before this
-/// runs; nextest starts one process per test and each joins that server.
-fn nextest(packages: &[&str], description: &str) -> Result<()> {
-    let mut command = cargo();
-    command.args([
-        "nextest",
-        "run",
-        "--locked",
-        "--profile",
-        "ci",
-        "--no-tests",
-        "fail",
-    ]);
-    for package in packages {
-        command.args(["-p", package]);
-    }
-    checked(&mut command, description)
-}
-
-/// Run `packages`' doctests, which nextest does not run.
-fn doctests(packages: &[&str], description: &str) -> Result<()> {
-    let mut command = cargo();
-    command.args(["test", "--locked", "--no-fail-fast", "--doc"]);
-    for package in packages {
-        command.args(["-p", package]);
-    }
-    checked(&mut command, description)
 }
 
 fn checked(command: &mut Command, description: &str) -> Result<()> {

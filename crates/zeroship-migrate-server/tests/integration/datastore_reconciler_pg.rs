@@ -1663,8 +1663,9 @@ async fn a_direct_worker_membership_in_a_database_role_refuses_the_pass() {
 /// capacity would read a confusing SQL error instead of the reason.
 #[ntex::test]
 async fn a_cluster_below_the_version_floor_is_refused_and_never_bootstrapped() {
-    let (image, tag) = crate::support::fixture::tenant::PRE_FENCE_IMAGE;
-    let cluster_fixture = crate::support::fixture::tenant::Cluster::of(image, tag);
+    let cluster_fixture = crate::support::fixture::tenant::Cluster::of(
+        crate::support::fixture::tenant::PRE_FENCE_IMAGE,
+    );
     let cluster = connect(cluster_fixture.url()).await;
     let pg = control_superuser().await;
     let world = World::new(&pg, "old-major").await;

@@ -6,9 +6,11 @@
 mod build_inputs;
 mod crypto_library;
 mod jwt_backend;
+mod shards;
 mod testkit_boundaries;
 mod tls_provider;
 mod tokio_boundary;
+mod workflow_crates;
 
 use crate::architecture::repo;
 use serde_json::Value;

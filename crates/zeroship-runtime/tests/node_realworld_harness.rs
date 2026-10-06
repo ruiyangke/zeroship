@@ -222,7 +222,7 @@ pub fn ensure_pg_migrate_postgres() -> ServerInfo {
 /// other case could share it.
 pub fn ensure_tls_postgres() -> TlsPostgresInfo {
     let (certs, _) = ensure_pg_tls_cert_files();
-    let container = GenericImage::new("postgres", "16")
+    let container = zeroship_testkit::images::POSTGRES_16.generic()
         .with_exposed_port(5432.tcp())
         // The image's entrypoint initialises the data directory behind a
         // temporary server, which accepts no TCP connection, and then starts
@@ -298,7 +298,7 @@ pub fn ensure_redis() -> ServerInfo {
 /// A memcached server this case starts and removes when it drops the returned
 /// handle.
 pub fn ensure_memcached() -> ServerInfo {
-    let container = GenericImage::new("memcached", "1.6")
+    let container = zeroship_testkit::images::MEMCACHED_1_6.generic()
         .with_exposed_port(11211.tcp())
         .with_wait_for(WaitFor::message_on_stderr("server listening"))
         // The default verbosity does not print the listening line the wait

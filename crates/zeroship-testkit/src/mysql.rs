@@ -16,6 +16,7 @@ use zeroship_shared_server::{self as shared, HostPort, Port, Readiness, Scope, S
 
 mod image;
 pub use image::reference as image;
+pub(crate) use image::RECIPE;
 
 /// The port MySQL listens on in the image.
 const MYSQL_PORT: u16 = 3306;

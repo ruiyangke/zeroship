@@ -42,10 +42,10 @@ use zeroship_shared_server::{self as shared, Scope};
 /// The PostgreSQL image the suite runs against. Its protocol claims were
 /// measured on PostgreSQL 16; a server of another major answers some of them
 /// differently, which is what [`POSTGRES_18`] is for.
-pub const IMAGE: &str = "postgres:16";
+pub const IMAGE: shared::images::Image = shared::images::POSTGRES_16;
 
 /// The second major the suite is crossed against, with the same settings.
-pub const POSTGRES_18: &str = "postgres:18";
+pub const POSTGRES_18: shared::images::Image = shared::images::POSTGRES_18;
 
 /// The superuser's password. The server listens on a loopback-mapped port for
 /// the life of one worktree run, so this is a fixture value, not a credential.
@@ -73,7 +73,7 @@ impl Server {
     ///
     /// # Errors
     /// When the image cannot be built or the server cannot be booted or joined.
-    pub fn join(scope: &Scope, image: &str) -> Result<Self, String> {
+    pub fn join(scope: &Scope, image: shared::images::Image) -> Result<Self, String> {
         let lease = shared::join(scope, &spec(image)?, |_| Ok(()))?;
         Ok(Self { lease })
     }
@@ -130,7 +130,7 @@ pub fn server_on_postgres_18() -> &'static Server {
     )
 }
 
-fn joined<'a>(outcome: &'a Result<Server, String>, image: &str) -> &'a Server {
+fn joined<'a>(outcome: &'a Result<Server, String>, image: shared::images::Image) -> &'a Server {
     match outcome {
         Ok(server) => server,
         Err(reason) => panic!(
@@ -143,8 +143,8 @@ fn joined<'a>(outcome: &'a Result<Server, String>, image: &str) -> &'a Server {
 
 /// The recipe the shared server runs under, its identity keyed to every input
 /// that changes what a ready server holds.
-fn spec(base: &str) -> Result<shared::Spec, String> {
-    let image = shared::image::with_watchdog(base)?;
+fn spec(base: shared::images::Image) -> Result<shared::Spec, String> {
+    let image = shared::image::with_watchdog(&base.reference())?;
     let environment = vec![
         ("POSTGRES_PASSWORD".to_owned(), PASSWORD.to_owned()),
         ("POSTGRES_DB".to_owned(), DATABASE.to_owned()),

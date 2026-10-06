@@ -13,29 +13,252 @@ on: [push, pull_request]
 # `package.json#packageManager` version, which is what keeps that field the pin
 # CI runs. Docker is the one tool the flake does not carry: it stays a host
 # service, and the jobs that own containers use the runner's daemon.
+#
+# `pipefail` is part of the shell, because bash's default reports a pipeline's
+# LAST command: a test command piped into anything would report the pipe's
+# status, and every failing test would pass.
+#
+# Every test runs in exactly one `test (<shard>)` job. The shards are declared
+# once, in xtask/src/shards.rs; the plan job prints them and the test job's
+# matrix reads that output. `cargo xtask test repository` fails when a
+# workspace package with tests is in no shard or in two, when the test job's
+# shape could skip a shard, or when another job here runs a workspace
+# package's tests; the one deliberate exception is `miri`, which interprets a
+# few unit tests the shards also run natively. The `verify` job then checks
+# what every shard actually ran against what it builds.
+#
+# CI builds dependencies without debuginfo (`.github/cargo-ci.toml`, which the
+# setup action installs as the runner's cargo config), so the cached dependency
+# artifacts fit the Actions cache budget.
 
 defaults:
   run:
-    shell: nix develop --command bash -e {0}
+    shell: nix develop --command bash -eo pipefail {0}
 
 jobs:
-  rust:
+  # Lists the shards and makes sure the fixture image cache exists before any
+  # shard restores it. The images are pulled only here, only when the list in
+  # zeroship_shared_server::images changes, and only the references the
+  # previous cache lacks.
+  plan:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      shards: ${{ steps.shards.outputs.shards }}
+      images-key: ${{ steps.images.outputs.key }}
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/nix-toolchain
-      # Build the JavaScript packages before Cargo. zeroship-data-v8 embeds the DB
-      # adapter bundle with `include_str!`, and its test module
-      # (src/tests/startup_policy.rs) embeds the built DB SDK bundle too. Both are
-      # gitignored, so a fresh checkout has neither. The root `build` script is the
-      # one definition of the package build order: the schema leaf comes before
-      # the migration DSL and the DB SDK that inline it.
+      - uses: ./.github/actions/setup
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: xtask
+          workspaces: xtask -> target
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - id: shards
+        run: echo "shards=$(cargo xtask shards list)" >> "$GITHUB_OUTPUT"
+      # The list is every base image and every fetching recipe's content-hashed
+      # reference, so a recipe edit moves the key as a base bump does.
+      - id: images
+        run: |
+          cargo xtask images list > "$RUNNER_TEMP/fixture-images.txt"
+          echo "key=fixture-images-$(sha256sum "$RUNNER_TEMP/fixture-images.txt" | cut -c1-16)" \
+            >> "$GITHUB_OUTPUT"
+      - id: lookup
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/fixture-images.tar.zst
+          key: ${{ steps.images.outputs.key }}
+          lookup-only: true
+      - name: Restore the previous fixture images
+        if: steps.lookup.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/fixture-images.tar.zst
+          key: ${{ steps.images.outputs.key }}
+          restore-keys: fixture-images-
+      # Pulls only the base images the previous cache lacks, and builds only the
+      # fetching recipes it lacks: this is the one place a CI run reaches a
+      # registry or a package mirror for a fixture.
+      - name: Pull and build the fixture images the cache lacks
+        if: steps.lookup.outputs.cache-hit != 'true'
+        run: |
+          archive="$RUNNER_TEMP/fixture-images.tar.zst"
+          if [ -f "$archive" ]; then
+            zstd -dc "$archive" | docker load
+            rm "$archive"
+          fi
+          cargo xtask images pull
+          cargo xtask images check
+          mapfile -t references < "$RUNNER_TEMP/fixture-images.txt"
+          docker save "${references[@]}" | zstd -T0 -3 -o "$archive"
+          ls -l "$archive"
+      - if: steps.lookup.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/fixture-images.tar.zst
+          key: ${{ steps.images.outputs.key }}
+
+  # One job per shard. The contract in xtask/tests/repository/shards.rs holds
+  # this job's shape exactly: the matrix is the plan's list with nothing added
+  # or removed, and nothing here may skip the shard or forgive its failure.
+  test:
+    name: test (${{ matrix.shard }})
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      # Restore only: the cargo-cache job saves this entry, built from every
+      # shard's selection, so every shard finds the dependencies its own
+      # feature resolution compiles.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: shards
+          workspaces: |
+            . -> target
+            xtask -> target
+          save-if: false
+      - uses: ./.github/actions/fixture-images
+        with:
+          key: ${{ needs.plan.outputs.images-key }}
+      # Build the JavaScript packages before Cargo. zeroship-data-v8 embeds the
+      # DB adapter bundle with `include_str!`, and its test module embeds the
+      # built DB SDK bundle too. Both are gitignored, so a fresh checkout has
+      # neither. The root `build` script is the one definition of the package
+      # build order.
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Run the shard
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: cargo xtask test "$SHARD"
+      - name: Upload the shard's reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-${{ matrix.shard }}
+          path: target/nextest/ci/
+          if-no-files-found: error
+
+  # What the shards actually ran, checked against what they build: every
+  # shard reported, each ran exactly the tests its build lists, no test ran in
+  # two shards, and every test target cargo declares is in one shard. It runs
+  # whatever happened to the shards, so a missing shard is a red verify.
+  verify:
+    needs: [plan, test]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: xtask
+          workspaces: xtask -> target
+          save-if: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: reports-*
+          path: reports
+          merge-multiple: true
+      - name: Every shard ran exactly what it builds
+        run: cargo xtask shards verify reports
+
+  # Builds every shard's artifacts and saves the one dependency cache the
+  # shards restore. It runs beside the shards rather than before them: a shard
+  # restores the entry the previous main build saved. On an exact hit there is
+  # nothing new to save, so it builds nothing.
+  cargo-cache:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      # Every shard's artifacts share one target directory here, which needs
+      # more disk than a shard does. The runner image's own SDKs are unused:
+      # the toolchains come from the flake.
+      - name: Free the disk the runner image's SDKs take
+        shell: bash
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+          df -h /
+      - uses: ./.github/actions/setup
+      - id: cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: shards
+          workspaces: |
+            . -> target
+            xtask -> target
+          cache-on-failure: true
+      - if: steps.cargo.outputs.cache-hit != 'true'
+        run: pnpm install --frozen-lockfile
+      - if: steps.cargo.outputs.cache-hit != 'true'
+        run: pnpm build
+      - name: Build every shard
+        if: steps.cargo.outputs.cache-hit != 'true'
+        run: |
+          for shard in $(cargo xtask shards list | jq -r '.[]'); do
+            cargo xtask test "$shard" --build-only
+          done
+          du -sh target
+
+  # The Actions cache budget, measured: every entry this repository holds and
+  # their total, after the jobs that save one. `cargo-cache` saves only on
+  # main, so a main run is the one that measures the shard dependency entry.
+  cache-budget:
+    needs: [plan, test, verify, cargo-cache, checks]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Actions cache entries and their total
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh cache list --repo "$GITHUB_REPOSITORY" --limit 1000 --json key,sizeInBytes,ref \
+            > "$RUNNER_TEMP/caches.json"
+          jq -r '.[] | [.sizeInBytes, .ref, .key] | @tsv' "$RUNNER_TEMP/caches.json" | sort -rn \
+            | awk -F'\t' '{ printf "%10.1f MiB  %s  %s\n", $1 / 1048576, $2, $3 }'
+          jq -r '"\(length) entries, \(map(.sizeInBytes) | add / 1073741824 * 100 | floor / 100) GiB in total"' \
+            "$RUNNER_TEMP/caches.json"
+
+  # Everything that is not a test of a workspace package: generator checks,
+  # the shipped build, documentation links, the repository-wide contracts, and
+  # clippy. Every step after the build carries `!cancelled()`, so one failure
+  # does not skip the checks behind it - a skipped step reports nothing.
+  # `!cancelled()` rather than `always()`: a cancelled run should stop.
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: checks
+          workspaces: |
+            . -> target
+            xtask -> target
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       # This is the no-hoist condition the gate must survive. Prove the root
       # import fails for the expected reason, then prove the declaring package
       # resolves its own dependency before trusting the contract run.
       - name: Prove tsx is package-local
+        if: ${{ !cancelled() }}
         run: |
           if node --import tsx --eval "" >"$RUNNER_TEMP/root-tsx.out" \
               2>"$RUNNER_TEMP/root-tsx.err"; then
@@ -49,101 +272,33 @@ jobs:
           fi
           pnpm --dir packages/vite-plugin exec node --import tsx --eval ""
       - name: Project config schema and generator
+        if: ${{ !cancelled() }}
         run: |
           node --test schema/codegen.test.mjs
           node schema/codegen.mjs --check
-      # The same kind of check as the step above, for generators no job ran.
       # These artifacts are TRACKED, so the build-input walker cannot hold them:
       # it compares mtimes, and checkout order makes an mtime meaningless for a
-      # tracked file. `--check` compares content instead, which is the question
-      # actually being asked - does the committed artifact still match what its
-      # sources generate. `cargo xtask test workflow` runs these; nothing in CI
-      # invoked that area, so a schema edited without regenerating reached main
-      # unreported.
+      # tracked file. `--check` compares content instead: does the committed
+      # artifact still match what its sources generate.
       - name: Workflow schema artifacts match their sources
+        if: ${{ !cancelled() }}
         run: |
           node crates/zeroship-workflow-schema/schema/generate.mjs --check
           node crates/zeroship-workflow-manager/schema/generate.mjs --check
           node crates/zeroship-workflow-manager/schema/deployments/generate.mjs --check
-      - name: Project config Rust behavior
-        run: |
-          cargo test --locked -p zeroship-cli --bin zeroship project_config::tests
-          cargo test --locked -p zeroship-cli --test main e2e::deploy_test::
+          node --test crates/zeroship-workflow-manager/schema/generate.test.mjs
       - name: Project config build behavior
+        if: ${{ !cancelled() }}
         run: >-
           pnpm --dir packages/vite-plugin exec node --import tsx --test
           test/project-config.test.ts test/zship.test.ts
       # Keep test targets out of this build: their dev-dependency features may
       # unify into normal dependencies and hide a broken shipped configuration.
       - name: Shipped Rust targets compile
+        if: ${{ !cancelled() }}
         run: cargo check --locked --workspace --lib --bins
-      # The owning crate checks the shipped-vs-test feature split against the
-      # emitted object. Its integration target links through the dev-only
-      # `napi/dyn-symbols`, then builds the shipped library configuration and
-      # verifies that the Node host must resolve the imported API while the
-      # addon exports its registrar.
-      - name: napi addon symbol shape
-        run: cargo test --locked -p zeroship-migrate-node --test main shipped_symbol_shape
-      # crates/zeroship-runtime declares a `wpt` test target whose modules
-      # `include_str!` crates/zeroship-runtime/tests/wpt/. The development shell
-      # links its pinned `wpt` flake input there (flake.nix shellHook), so the
-      # directory exists before `cargo test` runs and no fetch step or cache
-      # entry is needed here. Nix resolves the tree from flake.lock.
-      #
-      # Every suite that needs PostgreSQL starts or joins its own server through
-      # testcontainers, so the runner's Docker daemon is the one service the
-      # test steps below need.
-      #
-      # The control workflow process suites start the real service binaries and
-      # the workflow-test-environment example. Build them here, once, so each
-      # nextest process locates a fresh artifact instead of running a nested
-      # cargo build of its own on the shared target directory. The same step
-      # warms the ORM compile-fail project's trybuild target directory, which
-      # trybuild otherwise compiles cold inside its test process.
-      - name: Build the test artifacts and warm the ORM trybuild target
-        run: pnpm build:test-artifacts
-      # nextest runs every test, not just every target: a failing test does not
-      # stop the targets after it, and the `ci` profile's `fail-fast = false`
-      # keeps a failure from hiding the suites behind it. The verdict is
-      # unchanged either way - the job still fails if anything fails - but
-      # without this the run only tells you about the first thing that broke.
-      #
-      # `set -o pipefail` stays on every such step, because GitHub's default
-      # shell is `bash -e` WITHOUT pipefail: the moment anyone pipes a test
-      # command into anything the status reported is the LAST command's - 0
-      # whenever it could write - and every failing test in the workspace sails
-      # through as a pass. The billing gate hit that trap and solved it with
-      # PIPESTATUS.
-      - run: |
-          set -o pipefail
-          cargo nextest run --workspace --profile ci
-      # nextest runs no doctests, so they are their own step.
-      - name: Rust doctests
-        run: |
-          set -o pipefail
-          cargo test --workspace --doc
-      # EVERY STEP BELOW CARRIES `!cancelled()`, and the reason is the step
-      # above. A step that fails skips the rest of the job, so an ordinary test
-      # failure silently stops the architecture invariants from being measured -
-      # the zero-tokio boundary, the dependency boundaries, the Caddyfile
-      # sha256 pin and clippy. A skipped step is not a failed step, so nothing
-      # reports it, and those checks exist precisely to catch what no test
-      # catches. The test command above already declines to stop at its first
-      # failure; the job it sits in should not either.
-      #
-      # `!cancelled()` rather than `always()`: a cancelled run should stop. On a
-      # tree that does not compile these run and fail on their own builds rather
-      # than skipping, which is louder and correct - each gate then names itself
-      # instead of hiding behind whichever step failed first.
-      # The step above resolves citations that name a FILE. This one resolves
-      # citations that name an ITEM: no job runs `cargo doc`, so a rustdoc link
-      # pointing at a deleted or renamed symbol is otherwise invisible.
-      #
-      # Runs through a script rather than inline because the measurement has
-      # failure modes that each produce a confident wrong number (warm cache,
-      # `-D` truncating the count, and a build that did not run reporting zero
-      # warnings). The script's header documents each and asserts the
-      # documented-crate count as the control; see it before touching the floors.
+      # No other job runs `cargo doc`, so a rustdoc link pointing at a deleted
+      # or renamed symbol is otherwise invisible.
       - name: Rustdoc links resolve with default features
         if: ${{ !cancelled() }}
         env:
@@ -157,10 +312,7 @@ jobs:
       - name: Data architecture and database posture
         if: ${{ !cancelled() }}
         run: cargo xtask test data-architecture
-      - name: KV storage remains independent of the V8 binding
-        if: ${{ !cancelled() }}
-        run: "cargo test -p zeroship-kv --test main integration::architecture::"
-      - name: Repository dependency and feature contracts
+      - name: Repository dependency, feature and shard contracts
         if: ${{ !cancelled() }}
         run: cargo xtask test repository
       # No CI job runs a Playwright suite, so this is where a flake.lock bump
@@ -168,133 +320,57 @@ jobs:
       - name: Playwright matches the development shell's browsers
         if: ${{ !cancelled() }}
         run: cargo xtask test playwright-browsers
-      # deploy/compose/docker-compose.yml HAS NO AUTOMATED CHECK. The
-      # properties a check would hold - named volumes on stateful services,
-      # 0.0.0.0 published only by the edge, secret strength, and worker flags -
-      # are unguarded.
-      #
-      # THE ONE STEP IN THIS JOB THAT USES DOCKER, and it has to.
-      # crates/control/src/reserved_names.rs decides which app names creators
-      # may not take by reading deploy/ops/caddy-claimed-hosts.json - the
-      # Caddyfile as `caddy adapt` lowers it. Its cargo test binds the artifact
-      # to the Caddyfile's sha256, so an edge edit without a regenerate is
-      # already red there. What that test structurally CANNOT check is whether
-      # the artifact is what Caddy actually produces: a hand-edited JSON with
-      # an untouched Caddyfile keeps the sha valid. Only re-running the adapter
-      # catches it, and only this step does that.
-      #
-      # It REFUSES rather than skips when caddy and docker are both absent. A
-      # gate that quietly does nothing when its tool is missing prints the same
-      # green as one that ran.
+      # crates/zeroship-control/src/reserved_names.rs decides which app names
+      # creators may not take by reading deploy/ops/caddy-claimed-hosts.json -
+      # the Caddyfile as `caddy adapt` lowers it. Its cargo test binds the
+      # artifact to the Caddyfile's sha256, so an edge edit without a
+      # regenerate is already red there. What that test structurally CANNOT
+      # check is whether the artifact is what Caddy actually produces: only
+      # re-running the adapter catches a hand-edited JSON, and only this step
+      # does that. It runs the compose file's caddy image through the runner's
+      # Docker, and REFUSES rather than skips when caddy and docker are both
+      # absent.
       - name: edge claimed-host artifact is what caddy makes of the Caddyfile
         if: ${{ !cancelled() }}
         run: deploy/ops/caddy-claimed-hosts.sh --check
-      # Data tests own PostgreSQL containers and run without optional features.
-      - run: |
-          set -o pipefail
-          cargo test -p zeroship-data-v8 --lib tests::sqlite::
-          cargo test -p zeroship-data-orm
-      # compio-postgres' `tls` feature is absent from the default feature set,
-      # so the workspace run above builds none of it: the rustls connector, the
-      # certificate-verification policy and the live TLS suite, which drives
-      # the six servers `compio_postgres_testkit::tls` starts in Docker and
-      # checks with libpq as each boots, reading `pg_stat_ssl` to find out what
-      # transport the SERVER thinks it is serving. This step builds and runs
-      # all of them. The certificate-verifier proofs need no server: they drive
-      # the real verifiers, through the real mode-to-verifier selection, against
-      # certificates committed under tests/data/. nextest runs no doctests, so
-      # the feature's doctests are their own command.
-      - run: |
-          set -o pipefail
-          cargo nextest run --profile ci -p compio-postgres --features tls
-          cargo test -p compio-postgres --features tls --doc
-      # The same suite against PostgreSQL 18, the second major the driver
-      # supports. Every protocol claim the suite makes was measured on the
-      # server it ran against; this is the run that notices a test pinning
-      # behaviour only PostgreSQL 16 has.
-      - run: |
-          set -o pipefail
-          cargo nextest run --profile ci -p compio-postgres --features suite-on-postgres-18
-      # Cargo propagates lint and compilation failures using workspace lint levels.
+      # The root Cargo.toml sets lint severity; a blanket `-D warnings` would
+      # turn intentionally warning-level groups into errors.
       - name: Clippy across workspace targets and features
         if: ${{ !cancelled() }}
         run: cargo clippy --workspace --all-targets --all-features
-
-  # Required billing and migration verification. Rust fixtures own PostgreSQL
-  # and Redpanda, while xtask builds the migration host before running the crates.
-  # The job name is kept because branch protection references it.
-  billing-gate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/nix-toolchain
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm build
-      - name: Run billing tests with owned services
-        run: cargo xtask test billing
-
-  # Auth packages own their PostgreSQL, SMTP and HTTP fixtures.
-  auth-gate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/nix-toolchain
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm build
-      - name: Run native auth tests with owned services
-        run: cargo xtask test auth
-
-  # Native data tests own their PostgreSQL fixture and real CDC relay process.
-  data-tests:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/nix-toolchain
-      # Build the SDK modules embedded by the V8 runtime.
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm build
-      - name: Run native data tests with owned PostgreSQL
-        run: cargo xtask test data
-      - name: Upload native test results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: data-test-results
-          path: target/nextest/ci/junit.xml
-
-  # Worker fixtures own their databases and apply the platform corpus.
-  worker-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/nix-toolchain
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm build
-      - name: Run native worker tests with owned services
-        run: cargo xtask test worker
 
   # Gate the SDK type-level and unit suites. This includes @zeroship/migrate's
   # `check` (tsc plus the `tsconfig.types.json` `@ts-expect-error`
   # structural-safety and names-stay-strings suite) and its node:test suite, so
   # the tsc-as-assertion structural proof is a CI gate.
+  #
+  # zero-migrate-cli's host suite starts PostgreSQL and MySQL through
+  # testcontainers-node, which also starts its reaper, so this job restores the
+  # fixture images and stops the daemon from pulling, like the shards.
   sdk:
-    runs-on: ubuntu-latest
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/nix-toolchain
+      - uses: ./.github/actions/setup
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: xtask
+          workspaces: xtask -> target
+          save-if: false
+      - uses: ./.github/actions/fixture-images
+        with:
+          key: ${{ needs.plan.outputs.images-key }}
       - run: pnpm install --frozen-lockfile
       # The checks below resolve workspace packages through their built types:
       # @zeroship/migrate's `check` reads @zeroship/schema's.
       - run: pnpm build
-      # Ticket #267 - @zeroship/db's base `typecheck` (`tsc --noEmit`) reads
-      # `include: ["src"]`, so nothing under tests/ was ever in the tsc
-      # program: `tsc --noEmit --listFiles` showed 0 files under tests/,
-      # so the several tests/*.test.ts files carrying `@ts-expect-error`
-      # type-only assertions were checked by NOTHING (`npm test` runs them
-      # through tsx, which strips types without checking them). `check`
-      # additionally runs `tsconfig.tests.json` (extends the base config,
-      # widens `include` to `["src", "tests"]`, drops rootDir/outDir),
-      # mirroring the @zeroship/migrate pattern below.
+      # @zeroship/db's base `typecheck` reads `include: ["src"]`, so its
+      # tests/*.test.ts `@ts-expect-error` assertions are outside that program,
+      # and `npm test` runs them through tsx, which strips types without
+      # checking them. `check` additionally runs `tsconfig.tests.json`, which
+      # widens `include` to `["src", "tests"]`.
       - run: pnpm --filter @zeroship/db run check
       - run: pnpm --filter @zeroship/migrate run check
       # The dev-bundle fixture the CLI's workflow suite runs under tsx is a
@@ -307,15 +383,11 @@ jobs:
       # directly against the current policy, renderer, and migration engine.
       - name: Committed gen-types artifacts are not stale
         run: pnpm gen-types:check
-      # Run SDK and migration package suites in the job that builds their
-      # artifacts. The Vite plugin's manual-schema fixtures currently fail
-      # during generation; focused Vite contracts run above. Example and browser
-      # suites require provisioned process-level harnesses and stay outside these
-      # SDK commands.
-      #
       # One step per suite, each carrying `!cancelled()`: by default a failing
       # suite skips the rest of the job, which would let one suite's failure
-      # hide every later suite's result. A cancelled run still stops.
+      # hide every later suite's result. Example and browser suites need a
+      # provisioned live platform and run by hand (`cargo xtask test
+      # examples`).
       - name: JavaScript package suites
         if: ${{ !cancelled() }}
         run: pnpm -r --no-bail --filter='./packages/*' --filter='!@zeroship/vite-plugin' --filter='!@zeroship/migrate' --filter='!zero-migrate-cli' --filter='!zeroship-migrate-node' test
@@ -336,7 +408,7 @@ jobs:
       - name: Example packages typecheck
         if: ${{ !cancelled() }}
         run: |
-          set -euo pipefail
+          set -u
           failed=0
           for dir in examples/*/; do
             [ -f "$dir/package.json" ] || continue
@@ -358,13 +430,14 @@ jobs:
   # decoding error is not, so a clean exit is the whole verdict.
   fuzz-smoke:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     defaults:
       run:
-        shell: nix develop .#fuzz --command bash -e {0}
+        shell: nix develop .#fuzz --command bash -eo pipefail {0}
         working-directory: libs/compio-postgres
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/nix-toolchain
+      - uses: ./.github/actions/setup
       - name: Smoke-fuzz the backend frame decoder
         run: cargo fuzz run backend_message -- -max_total_time=60
       - name: Smoke-fuzz the pgoutput decoder
@@ -378,12 +451,13 @@ jobs:
   # the others.
   miri:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     defaults:
       run:
-        shell: nix develop .#miri --command bash -e {0}
+        shell: nix develop .#miri --command bash -eo pipefail {0}
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/nix-toolchain
+      - uses: ./.github/actions/setup
       - name: compio-postgres waker vtables and TLS buffer commit
         if: ${{ !cancelled() }}
         run: |

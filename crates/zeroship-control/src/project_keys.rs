@@ -97,12 +97,12 @@ mod tests {
     use testcontainers::{
         core::{IntoContainerPort, WaitFor},
         runners::SyncRunner,
-        GenericImage, ImageExt,
+        ImageExt,
     };
 
     #[test]
     fn project_keys_survive_concurrent_provisioning_restarts_and_wrapping_key_rotation() {
-        let postgres = GenericImage::new("postgres", "18")
+        let postgres = zeroship_testkit::images::POSTGRES_18.generic()
             .with_exposed_port(5432.tcp())
             .with_wait_for(WaitFor::message_on_stdout(
                 "PostgreSQL init process complete; ready for start up.",

@@ -123,8 +123,10 @@ pub const REBUILD: &str = "pnpm build:test-artifacts";
 ///
 /// `trybuild` compiles its generated project's whole dependency graph inside
 /// the test process, into a target directory of its own, on the first run of a
-/// cold checkout. The ordered build chain runs this once before the suite, so
-/// the test only compiles its fixture bins rather than the ORM's closure.
+/// cold checkout. The `data` shard runs exactly this, untimed, before its
+/// nextest run, which excludes the test (`Untimed` in `xtask/src/shards.rs`,
+/// which the repository contract holds to these arguments), and
+/// [`REBUILD`] runs it after building the executables.
 pub const WARM_ARGS: &[&str] = &[
     "test",
     "-p",

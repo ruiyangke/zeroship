@@ -83,8 +83,8 @@ fn a_server_container_that_cannot_see_the_lease_is_refused_and_removed() {
     // The suite's image with no lease directory mounted: its watchdog could never
     // see a host lease, so the boot must refuse it rather than serve from a
     // container nothing would remove.
-    let image = zeroship_shared_server::image::with_watchdog("postgres:18")
-        .expect("build the suite's image");
+    let base = zeroship_shared_server::images::POSTGRES_18.reference();
+    let image = zeroship_shared_server::image::with_watchdog(&base).expect("build the suite's image");
     let name = format!("zeroship-migrate-blind-{}", std::process::id());
     let blind = shared::run_detached(&image, &[], &[], &name).expect("run the blind container");
     let refusal = shared::refuse_a_blind_container(&blind)

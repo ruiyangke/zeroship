@@ -26,8 +26,11 @@
 //! - [`recorded`] holds the recorded artifacts several crates pin against.
 //! - [`prebuilt`] locates the service executables the workflow process suites
 //!   run, refusing when one is absent or older than its build record.
+//! - [`images`] names every container image a fixture starts or builds on, and
+//!   the recipes CI builds ahead of the tests.
 
 pub mod fingerprint;
+pub mod images;
 pub mod mysql;
 pub mod nested_cargo;
 pub mod prebuilt;

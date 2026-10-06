@@ -12,4 +12,3 @@
 mod architecture;
 mod playwright;
 mod repository;
-mod workflow;

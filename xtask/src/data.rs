@@ -2,6 +2,7 @@ use crate::{Result, cargo, checked};
 use serde_json::Value;
 use std::process::Command;
 
+/// The data packages whose database targets must stay ordinary tests.
 const PACKAGES: &[&str] = &[
     "zeroship-data-macros",
     "zeroship-data-orm",
@@ -10,51 +11,12 @@ const PACKAGES: &[&str] = &[
     "zeroship-data-cdc-server",
 ];
 
-pub fn run(filter: Option<&str>) -> Result<()> {
-    if filter.is_none() {
-        architecture()?;
-    }
-    checked(
-        cargo().args(["nextest", "--version"]),
-        "cargo-nextest is required",
-    )?;
+/// Refuse a data run that could pass without its database: the snapshot
+/// clients must match the fixture server's major, and no data package may hide
+/// a database target behind an optional feature.
+pub fn posture(metadata: &Value) -> Result<()> {
     check_snapshot_clients()?;
-    let output = cargo()
-        .args(["metadata", "--no-deps", "--format-version", "1"])
-        .output()?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
-    }
-    validate_targets(&serde_json::from_slice(&output.stdout)?)?;
-    checked(
-        cargo().args(["build", "-p", "zeroship-data-cdc-server"]),
-        "build the real CDC relay",
-    )?;
-    // The relay reads Control's rows under its production login, so its tests
-    // build the platform schema with the canonical migration CLI.
-    crate::migrations::build_host()?;
-
-    eprintln!("Booting the PostgreSQL servers the native fixtures share");
-    // Hold the bare and migrated servers for the whole run, so each first boot
-    // is paid once and every test process within the run joins them rather than
-    // rebuilding after the idle grace.
-    let _bare = zeroship_testkit::postgres::server::warm();
-    let _platform = zeroship_testkit::postgres::platform();
-    crate::cancelled()?;
-    let mut command = cargo();
-    command.args(["nextest", "run", "--profile", "ci", "--no-tests", "fail"]);
-    packages(&mut command);
-    if let Some(filter) = filter {
-        command.args(["--filter-expr", filter]);
-    }
-    // Preserve a failed nextest verdict while still checking Rust documentation.
-    let tests = checked(&mut command, "nextest data suite");
-    let docs = if filter.is_none() {
-        crate::doctests(PACKAGES, "data doctests")
-    } else {
-        Ok(())
-    };
-    tests.and(docs)
+    validate_targets(metadata)
 }
 
 pub fn architecture() -> Result<()> {
@@ -72,10 +34,10 @@ pub fn architecture() -> Result<()> {
 }
 
 fn check_snapshot_clients() -> Result<()> {
-    let server_major: u32 = include_str!("../../crates/zeroship-testkit/src/postgres/Dockerfile")
-        .lines()
-        .find_map(|line| line.strip_prefix("FROM pgvector/pgvector:pg"))
-        .ok_or("PostgreSQL fixture must declare its pgvector server tag")?
+    let server_major: u32 = zeroship_testkit::images::PGVECTOR_16
+        .tag
+        .strip_prefix("pg")
+        .ok_or("the PostgreSQL fixture's pgvector tag must name its server major")?
         .parse()?;
     for tool in ["pg_dump", "pg_restore"] {
         let output = Command::new(tool)
@@ -105,12 +67,6 @@ fn client_major(version: &str) -> Option<u32> {
         .next()?
         .parse()
         .ok()
-}
-
-fn packages(command: &mut Command) {
-    for package in PACKAGES {
-        command.args(["-p", package]);
-    }
 }
 
 // Database targets must remain in ordinary package tests. No optional feature

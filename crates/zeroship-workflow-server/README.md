@@ -169,7 +169,7 @@ listener attached to a dead verifier connection.
 
 Run `cargo test -p zeroship-workflow-server` for the host contracts. Required
 PostgreSQL fixtures are owned by Testcontainers. `cargo xtask test workflow`
-includes the coordinator alongside the engine and example suites.
+runs the coordinator alongside the engine, manager, runner and binding crates.
 Regenerate metadata SQL with
 `node crates/zeroship-workflow-manager/schema/generate.mjs`.
 

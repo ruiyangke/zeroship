@@ -77,7 +77,7 @@ Relay `max_apps`, `max_connections`, and `clients_per_app` bound admission;
 limits bound retained decoding state. Overflow or reconnect causes a fresh
 snapshot through `Resync`; delivery is not a durable replay API.
 
-Run `cargo xtask test data`. Each PostgreSQL test owns a
+Run the `data` shard, `cargo xtask test data`. Each PostgreSQL test owns a
 testcontainer with the required extensions and logical WAL.
 It builds the relay and the migration host, and exercises TypeScript live queries
 through TLS using a worker login without replication privileges. The relay's own

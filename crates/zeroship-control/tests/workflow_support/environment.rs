@@ -34,7 +34,7 @@ pub fn root() -> PathBuf {
 /// cores, and a service that cannot connect exits rather than waits, so the
 /// suite would fail as a dead worker rather than as a refused connection.
 fn image(owner: &str, database: &str) -> testcontainers::ContainerRequest<GenericImage> {
-    GenericImage::new("postgres", "18")
+    zeroship_testkit::images::POSTGRES_18.generic()
         .with_exposed_port(5432.tcp())
         .with_wait_for(WaitFor::message_on_stdout(
             "PostgreSQL init process complete; ready for start up.",

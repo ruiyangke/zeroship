@@ -288,7 +288,8 @@ COPY db/migrations-ts /db/migrations-ts
 # `/app/packages/zero-migrate` because the repo-relative layout is preserved; and
 # `db/migrations-ts/package.json` supplies `"type": "module"`.
 #
-# `cargo xtask test migrations` verifies the host CLI against an owned database.
+# The `migrate` shard (`cargo xtask test migrate`) verifies the host CLI against
+# an owned database.
 # It does not build or run this image; image packaging needs a deployment smoke
 # test. The `--version` step below checks that the packaged CLI can load.
 #

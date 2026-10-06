@@ -80,7 +80,7 @@ checks applied identities against durable history and strict status, and verifie
 that applying again skips exactly those identities without changing history:
 
 ```bash
-cargo xtask test migrations
+cargo xtask test migrate
 ```
 
 The organization-authority tests apply the same corpus before exercising
@@ -99,11 +99,12 @@ database constraints; authorization decisions remain covered in `zeroship-authz`
 3. Keep DDL in `schema()`. Put DML in a separate `data()` migration and declare
    either its recorded `inverse()` or why it is `irreversible`.
 4. Update `db/migrations-ts/op-counts.json` when the recorded operations change.
-   Run the corpus test before relying on the change; this command builds the
-   migration host and CLI and provisions its own fresh PostgreSQL database:
+   Run the corpus test before relying on the change; the `migrate` shard builds
+   the migration host and CLI, and the corpus test provisions its own fresh
+   PostgreSQL database:
 
    ```bash
-   cargo xtask test migrations
+   cargo xtask test migrate --filter 'package(zeroship-migrate-node)'
    ```
 
 Docker and Node are required. After building the artifacts, the same tests run
@@ -286,4 +287,4 @@ and never migrate it themselves. Their fixture (`zeroship_testkit::postgres`)
 boots the shared platform server, applies the committed corpus to a pristine
 template with the `zero-migrate` CLI and clones the working database from it,
 so a test run needs Docker and the built migration host
-(`cargo xtask test migrations`), and no database of its own.
+(`pnpm build`), and no database of its own.

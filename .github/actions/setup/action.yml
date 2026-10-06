@@ -1,0 +1,60 @@
+name: setup
+description: >
+  Install Nix, install the CI cargo configuration, expose the flake toolchain
+  to host-level actions, and raise the runner's locked-memory limit for every
+  later step. Every job uses this, so the environment has one definition
+  (flake.nix) rather than a separately maintained apt list.
+
+runs:
+  using: composite
+  steps:
+    # The dev shell substitutes from cache.nixos.org. No Nix store cache is
+    # kept in the Actions cache: a per-store-path cache writes one entry per
+    # path, which rate-limits the cache API every other restore in the run
+    # depends on.
+    - uses: DeterminateSystems/nix-installer-action@v23
+    - name: Install the CI cargo configuration
+      shell: bash
+      run: |
+        mkdir -p "${CARGO_HOME:-$HOME/.cargo}"
+        cp .github/cargo-ci.toml "${CARGO_HOME:-$HOME/.cargo}/config.toml"
+    # Swatinem/rust-cache keys itself on `rustc -vV`, and the compiler comes
+    # from the flake, so it has to be visible on PATH before that action runs.
+    - name: Expose the flake toolchain for cache keying
+      shell: bash
+      run: |
+        nix develop --command bash -c \
+          'printf "%s:%s\n" "$(dirname "$(command -v cargo)")" "$(dirname "$(command -v rustc)")"' \
+          >> "$GITHUB_PATH"
+    # Every compio runtime opens an io_uring, and the kernel charges each
+    # ring's memory to the locked memory of the user that created it, refusing
+    # a new ring once that user-wide total would pass the creating process's
+    # RLIMIT_MEMLOCK. Every test process and every service binary a test starts
+    # runs as `runner` and shares that one budget, and the runner's default
+    # limit is sized for a desktop session, so concurrent platform fleets
+    # exhaust it and the next runtime to start fails with
+    # `Os { code: 12, kind: OutOfMemory }`. Steps are spawned by the job's
+    # Runner.Worker process and inherit its limits, so the limit is raised
+    # there, once, for every later step.
+    - name: Raise the locked-memory limit for later steps
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "RLIMIT_MEMLOCK before raising: soft $(ulimit -Sl), hard $(ulimit -Hl) (KiB)"
+        pid=$$
+        while [ "$pid" -gt 1 ] && [ "$(ps -o comm= -p "$pid")" != Runner.Worker ]; do
+          pid=$(ps -o ppid= -p "$pid" | tr -d ' ')
+        done
+        if [ "$pid" -le 1 ]; then
+          echo "::error::no Runner.Worker process spawned this step"
+          exit 1
+        fi
+        sudo prlimit --pid "$pid" --memlock=unlimited:unlimited
+    - name: Prove later steps inherit the raised limit
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ "$(ulimit -Sl)" != unlimited ] || [ "$(ulimit -Hl)" != unlimited ]; then
+          echo "::error::RLIMIT_MEMLOCK is $(ulimit -Sl)/$(ulimit -Hl) KiB in a later step"
+          exit 1
+        fi

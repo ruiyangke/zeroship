@@ -35,7 +35,7 @@ const WAIT_BOUND: Duration = Duration::from_secs(120);
 const CONTAINER_DIR: &str = "/run/zeroship-testkit";
 
 /// The server the cases boot: a stock `PostgreSQL` with the watchdog on top.
-const POSTGRES_IMAGE: &str = "postgres:16";
+const POSTGRES_IMAGE: shared::images::Image = shared::images::POSTGRES_16;
 
 const CHILD_REPORT: &str = "integration::shared_server::child_join_report";
 const CHILD_JOURNAL: &str = "integration::shared_server::child_join_journal";
@@ -65,7 +65,8 @@ fn cleanup(dir: &Path) {
 
 /// The server image, built before any process runs a container from it.
 fn image() -> String {
-    shared::image::with_watchdog(POSTGRES_IMAGE).expect("build the throwaway PostgreSQL image")
+    shared::image::with_watchdog(&POSTGRES_IMAGE.reference())
+        .expect("build the throwaway PostgreSQL image")
 }
 
 /// The image must exist before any process runs a container from it.

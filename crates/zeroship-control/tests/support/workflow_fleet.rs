@@ -191,7 +191,7 @@ impl Fleet {
         fs::create_dir_all(&logs).unwrap();
         eprintln!("workflow fleet logs: {}", logs.display());
         let jwks = json!({"keys":[{"kty":"OKP", "crv":"Ed25519", "alg":"EdDSA", "use":"sig", "kid":"workflow-issuer", "x":signing_key("control").public_jwk_x()}]});
-        let issuer = GenericImage::new("nginx", "1")
+        let issuer = zeroship_testkit::images::NGINX_1.generic()
             .with_wait_for(WaitFor::message_on_stderr("start worker processes"))
             .with_exposed_port(testcontainers::core::IntoContainerPort::tcp(80))
             .with_copy_to(

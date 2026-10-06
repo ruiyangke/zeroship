@@ -29,7 +29,7 @@ pub struct Postgres {
 
 impl Postgres {
     pub fn start() -> Self {
-        let owned = GenericImage::new("postgres", "17")
+        let owned = zeroship_testkit::images::POSTGRES_17.generic()
             .with_exposed_port(5432.tcp())
             .with_wait_for(WaitFor::message_on_stdout(
                 "PostgreSQL init process complete; ready for start up.",

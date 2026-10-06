@@ -5,9 +5,9 @@ async fn dispatch_resolves_full_kernel_kv_storage_db_auth() {
     use testcontainers::{
         core::{IntoContainerPort, WaitFor},
         runners::SyncRunner,
-        GenericImage,
     };
-    let redis = GenericImage::new("redis", "7")
+    let redis = zeroship_testkit::images::REDIS_7
+        .generic()
         .with_exposed_port(6379.tcp())
         .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
         .start()

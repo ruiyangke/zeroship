@@ -104,6 +104,63 @@ pub fn with_watchdog(base: &str) -> Result<String, String> {
     Ok(reference)
 }
 
+/// A Dockerfile recipe built on a base image from [`crate::images`].
+///
+/// `body` is the Dockerfile without its `FROM` line, which the recipe prepends
+/// from `base`, so the base is named in that one list and the tag moves when the
+/// base does.
+#[derive(Clone, Copy, Debug)]
+pub struct Recipe {
+    /// The image name the recipe builds under; the tag carries the content hash.
+    pub name: &'static str,
+    /// The image the recipe builds on.
+    pub base: crate::images::Image,
+    /// The Dockerfile after its `FROM` line.
+    pub body: &'static str,
+    /// The files the Dockerfile copies in, as (path in the context, contents).
+    pub files: &'static [(&'static str, &'static [u8])],
+}
+
+impl Recipe {
+    fn dockerfile(&self) -> String {
+        format!("FROM {}\n{}", self.base, self.body)
+    }
+
+    /// The reference (`name:tag`) the recipe builds under, without building.
+    #[must_use]
+    pub fn reference(&self) -> String {
+        reference(self.name, &self.dockerfile(), self.files)
+    }
+
+    /// The reference (`name:tag`) of the recipe's image, built when the daemon
+    /// does not already carry it.
+    ///
+    /// # Errors
+    /// As [`build`].
+    pub fn build(&self) -> Result<String, String> {
+        build(self.name, &self.dockerfile(), self.files)
+    }
+}
+
+/// The reference (`name:tag`) the image `dockerfile` builds from `files` is
+/// tagged under: the content hash of the Dockerfile and every file handed to
+/// the build, names included.
+fn reference(name: &str, dockerfile: &str, files: &[(&str, &[u8])]) -> String {
+    format!("{name}:{}", content_tag(dockerfile, files))
+}
+
+/// The content hash a recipe is tagged with.
+fn content_tag(dockerfile: &str, files: &[(&str, &[u8])]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(dockerfile.as_bytes());
+    for (path, bytes) in files {
+        hasher.update(path.as_bytes());
+        hasher.update([0]);
+        hasher.update(bytes);
+    }
+    format!("{:x}", hasher.finalize())[..12].to_owned()
+}
+
 /// The reference (`name:tag`) of the image `dockerfile` builds from `files`,
 /// built when the daemon does not already carry it.
 ///
@@ -117,14 +174,7 @@ pub fn with_watchdog(base: &str) -> Result<String, String> {
 /// When the Docker daemon cannot build the image, or another process holds the
 /// build lock past [`BUILD_LOCK_WAIT`].
 pub fn build(name: &str, dockerfile: &str, files: &[(&str, &[u8])]) -> Result<String, String> {
-    let mut hasher = Sha256::new();
-    hasher.update(dockerfile.as_bytes());
-    for (path, bytes) in files {
-        hasher.update(path.as_bytes());
-        hasher.update([0]);
-        hasher.update(bytes);
-    }
-    let tag = format!("{:x}", hasher.finalize())[..12].to_string();
+    let tag = content_tag(dockerfile, files);
     let reference = format!("{name}:{tag}");
     build_locked(&reference, || {
         let mut image =
@@ -172,4 +222,41 @@ fn lock_path(reference: &str) -> Result<PathBuf, String> {
     hasher.update(reference.as_bytes());
     let digest = format!("{:x}", hasher.finalize());
     Ok(dir.join(format!("{}.lock", &digest[..12])))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Recipe;
+    use crate::images::{POSTGRES_16, POSTGRES_18};
+
+    const RECIPE: Recipe = Recipe {
+        name: "zeroship-recipe-fixture",
+        base: POSTGRES_16,
+        body: "RUN true\n",
+        files: &[("watchdog.sh", b"one")],
+    };
+
+    /// A recipe's reference is its name and a content tag that moves with the
+    /// base, the body and every copied file, and with nothing else: CI keys its
+    /// image cache on it and the shards find the image the plan job built by it.
+    #[test]
+    fn a_recipe_reference_moves_with_its_content_and_only_with_it() {
+        let reference = RECIPE.reference();
+        let (name, tag) = reference.split_once(':').expect("name:tag");
+        assert_eq!(name, RECIPE.name);
+        assert!(
+            tag.len() == 12 && tag.chars().all(|c| c.is_ascii_hexdigit()),
+            "{tag} is not a content tag"
+        );
+        assert_eq!(RECIPE.reference(), reference, "the reference is deterministic");
+        let moved = [
+            Recipe { base: POSTGRES_18, ..RECIPE },
+            Recipe { body: "RUN false\n", ..RECIPE },
+            Recipe { files: &[("watchdog.sh", b"two")], ..RECIPE },
+            Recipe { files: &[("other.sh", b"one")], ..RECIPE },
+        ];
+        for recipe in moved {
+            assert_ne!(recipe.reference(), reference, "{recipe:?} must move the tag");
+        }
+    }
 }

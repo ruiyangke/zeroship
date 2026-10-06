@@ -31,7 +31,8 @@ const PASSWORD: &str = "zeroship-migrate-fixture";
 
 /// The PostgreSQL image. The suites target PostgreSQL 18: database-generated UUIDv7
 /// exists from 18 on, and the catalog shapes the drift suites pin were read from it.
-const POSTGRES_IMAGE: &str = "postgres:18";
+const POSTGRES_IMAGE: zeroship_shared_server::images::Image =
+    zeroship_shared_server::images::POSTGRES_18;
 const POSTGRES_PORT: u16 = 5432;
 /// The database the admin connection uses to create and drop per-test databases.
 const POSTGRES_ADMIN_DATABASE: &str = "postgres";
@@ -86,7 +87,7 @@ impl SharedServer {
 /// The recipe the shared server runs under, its identity keyed to every input
 /// that changes what a ready server holds.
 fn spec() -> Result<shared::Spec, String> {
-    let image = zeroship_shared_server::image::with_watchdog(POSTGRES_IMAGE)?;
+    let image = zeroship_shared_server::image::with_watchdog(&POSTGRES_IMAGE.reference())?;
     let environment = vec![("POSTGRES_PASSWORD".to_owned(), PASSWORD.to_owned())];
     // Every test of a run reaches this one server, each with its own sessions, so
     // the stock connection ceiling is too low for a run on every core.

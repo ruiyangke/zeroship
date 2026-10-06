@@ -125,8 +125,8 @@ server that waits for the alert and asserts `peer_has_closed()`:
 is why they and not this runbook are what gates a change.
 
 They are `#[cfg(feature = "tls")]`, so `cargo test --workspace` does NOT build
-them - the crate's default feature set is empty. CHECKED 2026-08-25: CI runs
-`cargo test -p compio-postgres --features tls` as its own step (`ci.yml`), and
-that step builds this target, so the three do gate every push. If that step is
-ever dropped, these tests stop running everywhere except by hand, and the
-symptom is silence rather than a failure.
+them - the crate's default feature set is empty. CI's `compio-postgres` shard
+runs the crate under `--features tls` (`xtask/src/shards.rs`), which builds this
+target, so the three gate every push. If that feature leaves the shard, these
+tests stop running everywhere except by hand, and the symptom is silence rather
+than a failure.

@@ -59,14 +59,23 @@ Rust gates - run them before pushing, from the `nix develop` shell:
 ```
 cargo clippy --workspace --all-targets --all-features
 cargo check --workspace
-cargo nextest run --workspace --profile ci   # the gate: every test, one process each
+cargo xtask shards list                      # the test shards CI runs, one job each
+cargo xtask test <shard>                     # one shard's tests and doctests, as CI runs them
+cargo nextest run --workspace --profile ci   # every test at once, without shard preparation
 cargo test --workspace --doc                 # nextest runs no doctests
 ```
 
 `cargo-nextest` comes from the development shell, and the `ci` profile is the
 one CI runs. A plain `cargo test --workspace` runs the same tests in-process and
-still works; nextest is what the gate uses because it runs one process per test
+still works; nextest is what the shards use because it runs one process per test
 and every suite in parallel against the shared servers.
+
+`cargo xtask test <shard>` raises its soft locked-memory limit to the hard limit,
+and a shard whose tests start service fleets refuses to start below a floor,
+saying how to raise the hard limit: every io_uring a test process, or a service
+binary a test starts, opens is charged to one per-user locked-memory budget, and
+a service default runs out partway through such a run as `Os { code: 12 }`
+panics.
 
 **Use the same Clippy invocation locally and in CI.** The root `Cargo.toml`
 sets lint severity. Preserve those levels; a blanket `-D warnings` would turn
@@ -170,30 +179,74 @@ development shell's pinned `wpt` flake input, which the shell links at
 running that target; the tree is not tracked in git and nothing is fetched into
 the checkout.
 
-The native auth suite builds the platform migration host and runs the complete
-auth, authn, authz, mailer and gateway packages. Tests join the migrated
-platform server every test process of the worktree shares and own their SMTP
-and HTTP fixtures through Rust; Docker is required. No external test
-database address is needed.
+The workspace's tests are divided into shards (`xtask/src/shards.rs`), and each
+shard prepares what its tests need before running them. The `auth` shard builds
+the platform migration host and runs the complete auth, authn, authz, mailer and
+gateway packages; their tests join the migrated platform server every test
+process of the worktree shares and own their SMTP and HTTP fixtures through Rust.
+The `billing` shard also builds the service binaries Control's workflow process
+suites start, and runs control, migration, metering, and stream tests against
+the PostgreSQL servers and the Redpanda broker every test process shares. The
+`runtime` shard covers the runtime, worker, CLI, KV and storage packages, whose
+worker tests own their PostgreSQL and Redis containers. Docker is required; no
+external test database address is needed.
 
 ```bash
 cargo xtask test auth
-```
-
-Worker tests also own their PostgreSQL and Redis containers. Run
-`cargo xtask test worker` to build the migration host and test the package.
-The billing suite runs control, migration, metering, and stream tests against
-the PostgreSQL servers and the Redpanda broker every test process shares:
-
-```bash
 cargo xtask test billing
+cargo xtask test runtime
 ```
 
-The compio-postgres suites start their own PostgreSQL server the same way:
+A shard is a set of packages, not a feature area. `cargo xtask test workflow`
+runs the workflow crates (the engine, calendar, client, schema, fixtures,
+testkit, V8 binding, manager, server and runner) and their doctests. The CLI's
+workflow tests run in `runtime`, Control's workflow process suites in `billing`,
+the workflow SDK packages' suites in `pnpm test`, the schema generators'
+`--check` runs in CI's `checks` job, and the example apps' suites in
+`cargo xtask test examples`.
+
+The compio-postgres suites start their own PostgreSQL server the same way. Its
+shard runs them with every feature the workspace-wide build gives the crate -
+`tls`, which builds the TLS connector and its live suite, and the `with-*`
+codecs other members enable - then again against PostgreSQL 18:
 
 ```bash
 cargo nextest run -p compio-postgres
+cargo xtask test compio-postgres
 ```
+
+### CI
+
+`.github/workflows/ci.yml` runs on GitHub-hosted runners:
+
+- `plan` prints `cargo xtask shards list` for the test matrix, and fills the
+  fixture image cache when `cargo xtask images list` changes.
+- `test (<shard>)` runs `cargo xtask test <shard>`, one job per shard, so every
+  test runs exactly once. `cargo xtask test repository` fails when a workspace
+  package with tests is in no shard or in two, when the test job's shape could
+  skip a shard or forgive its failure, or when another CI job runs a workspace
+  package's tests. `miri` is the one deliberate exception: it interprets a few
+  unit tests the shards also run natively.
+- `verify` reads every shard's reports and fails unless each run executed
+  exactly what its build lists, no test ran in two shards, and every declared
+  test target is in one shard.
+- `checks` runs the generator checks, the shipped-target build, rustdoc links,
+  the data-architecture, repository and Playwright checks, the edge artifact
+  check and clippy; `sdk`, `miri` and `fuzz-smoke` run the JavaScript suites,
+  Miri and the fuzz smoke runs.
+- `cargo-cache` builds every shard on `main` and saves the dependency cache the
+  shards restore; `cache-budget` prints every Actions cache entry and their
+  total. CI builds dependencies without debuginfo (`.github/cargo-ci.toml`) so
+  that cache fits the budget.
+
+No test pulls an image or installs a package at run time. The images every
+fixture starts or builds on are listed once, in `zeroship_shared_server::images`,
+and the testkit recipes whose build installs packages in
+`zeroship_testkit::images::FETCHING`; CI's plan job pulls and builds them once,
+the shards and the `sdk` job restore them from the cache, and the Docker daemon
+is stopped from pulling before the tests start, so a fixture image missing from
+the list fails by name. Add a new fixture image to that list in the same change
+as the fixture.
 
 ## Key invariants
 

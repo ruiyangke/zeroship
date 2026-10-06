@@ -23,10 +23,7 @@ pub struct SmtpSink {
 
 impl SmtpSink {
     pub async fn run(test: impl AsyncFnOnce(&Self)) {
-        let container = GenericImage::new(
-            "axllent/mailpit",
-            "latest@sha256:98b916bd3c8d61f7633a52d3ea2f58d00620cb01ca57ab59edde68c347a95365",
-        )
+        let container = zeroship_testkit::images::MAILPIT.generic()
         .with_exposed_port(1025.tcp())
         .with_exposed_port(8025.tcp())
         .with_wait_for(WaitFor::message_on_stdout("accessible via"))

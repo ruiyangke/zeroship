@@ -1,0 +1,11 @@
+# The cargo configuration CI's jobs build with. The setup action installs it as
+# the runner's own cargo config, so every cargo a job starts reads it, nested
+# ones included (trybuild's, and the cargo a test spawns).
+#
+# Dependencies carry no debuginfo: the dev profile's line tables are what
+# dominate their artifacts after code, and dropping them is what lets the one
+# shared dependency cache fit the Actions cache budget. A backtrace through a
+# dependency still names its functions; workspace members keep the dev
+# profile's line tables, so their frames keep file and line.
+[profile.dev.package."*"]
+debug = false

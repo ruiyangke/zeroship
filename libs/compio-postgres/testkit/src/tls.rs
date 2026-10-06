@@ -66,9 +66,9 @@ const POSTGRES_PORT: u16 = 5432;
 /// The material generator the PostgreSQL 16 image build runs.
 const CERTS_SCRIPT: &[u8] = include_bytes!("tls/certs.sh");
 
-/// The PostgreSQL 16 image: the stock server, the watchdog, and the material.
-const DOCKERFILE_16: &str = "FROM postgres:16\n\
-    COPY watchdog.sh /usr/local/bin/zeroship-watchdog\n\
+/// The PostgreSQL 16 image on top of the stock server: the watchdog and the
+/// material, built as a `Recipe`, which prepends the `FROM` line.
+const RECIPE_16: &str = "COPY watchdog.sh /usr/local/bin/zeroship-watchdog\n\
     COPY certs.sh /usr/local/bin/compio-postgres-certs\n\
     RUN chmod 0755 /usr/local/bin/zeroship-watchdog \\\n\
     \x20   && sh /usr/local/bin/compio-postgres-certs /certs compio-postgres-encrypted-key-test\n";
@@ -240,11 +240,13 @@ fn recipes() -> [Recipe; 6] {
 /// material out of the `tls` server.
 fn join_all() -> Result<TlsServers, String> {
     let watchdog = shared::image::WATCHDOG_SCRIPT;
-    let sixteen = shared::image::build(
-        "compio-postgres-tls-16",
-        DOCKERFILE_16,
-        &[("watchdog.sh", watchdog), ("certs.sh", CERTS_SCRIPT)],
-    )?;
+    let sixteen = shared::image::Recipe {
+        name: "compio-postgres-tls-16",
+        base: shared::images::POSTGRES_16,
+        body: RECIPE_16,
+        files: &[("watchdog.sh", shared::image::WATCHDOG_SCRIPT), ("certs.sh", CERTS_SCRIPT)],
+    }
+    .build()?;
     // Keyed to the BUILD of the 16 image, not its tag: the material is made at
     // build time, so two builds of one tag are two CAs, and the 18 image must
     // carry the CA of the build the 16 servers run.
@@ -253,13 +255,14 @@ fn join_all() -> Result<TlsServers, String> {
         "compio-postgres-tls-18",
         &format!(
             "FROM {sixteen} AS certs\n\
-             FROM postgres:18\n\
+             FROM {}\n\
              LABEL compio-postgres.certs-from=\"{sixteen_id}\"\n\
              COPY watchdog.sh /usr/local/bin/zeroship-watchdog\n\
              COPY --from=certs /certs /certs\n\
              RUN chmod 0755 /usr/local/bin/zeroship-watchdog \\\n\
              \x20   && chown root:postgres /certs/server.key /certs/mismatch.key \\\n\
-             \x20   && chmod 0640 /certs/server.key /certs/mismatch.key\n"
+             \x20   && chmod 0640 /certs/server.key /certs/mismatch.key\n",
+            shared::images::POSTGRES_18
         ),
         &[("watchdog.sh", watchdog)],
     )?;

@@ -30,8 +30,6 @@ use zeroship_id::AppId;
 
 use compio_s3::{S3Client, S3Config, S3Credentials};
 
-const IMAGE: &str = "ghcr.io/versity/versitygw";
-const TAG: &str = "v1.3.0";
 const ACCESS_KEY: &str = "zeroship-fixture";
 const SECRET_KEY: &str = "zeroship-fixture-secret";
 /// The gateway's own listener port inside the container.
@@ -59,7 +57,8 @@ impl S3Fixture {
         let boot = format!(
             "mkdir -p /data/{BUCKET} && exec /usr/local/bin/versitygw --port :{SERVER_PORT} posix /data"
         );
-        let container = GenericImage::new(IMAGE, TAG)
+        let container = zeroship_shared_server::images::VERSITYGW
+            .generic()
             .with_exposed_port(SERVER_PORT.tcp())
             .with_wait_for(WaitFor::message_on_stdout(READY_MARKER))
             .with_entrypoint("/bin/sh")

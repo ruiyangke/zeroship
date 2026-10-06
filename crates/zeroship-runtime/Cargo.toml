@@ -174,15 +174,18 @@ indexmap = { workspace = true }
 # impossible.
 uuid = { workspace = true }
 
+# The bench binaries carry no tests, so no test run builds them.
 [[bin]]
 name = "zeroship-bench-server"
 path = "src/core/server.rs"
 required-features = ["bench-bins"]
+test = false
 
 [[bin]]
 name = "echo-server"
 path = "src/core/echo_server.rs"
 required-features = ["bench-bins"]
+test = false
 
 [features]
 # Opt-in bench/echo binaries — kept out of the default library build so a
@@ -190,10 +193,6 @@ required-features = ["bench-bins"]
 bench-bins = []
 default = ["runtime_tls"]
 runtime_tls = ["dep:compio-tls", "dep:rustls-native-certs"]
-# Strict-throws path for `binaryType` setter on unknown values. v2 D-7
-# default is silent-no-op (matches undici, workerd, the WPT test); the
-# strict path is preserved behind this feature only for WPT-update tracking.
-runtime_websocket_strict_enum = []
 
 [dev-dependencies]
 # Compile-fail snapshot tests for proc-macro diagnostics. Locks in

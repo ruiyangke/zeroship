@@ -98,7 +98,7 @@
             llvmPackages.libclang
 
             # Databases. Keep postgresql at the fixture server's major
-            # (crates/zeroship-testkit/src/postgres/Dockerfile) or the data suite refuses.
+            # (zeroship_shared_server::images::PGVECTOR_16) or the data shard refuses.
             postgresql_16
             sqlite
 

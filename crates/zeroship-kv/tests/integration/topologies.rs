@@ -22,6 +22,7 @@ use testcontainers::{
     Container, GenericImage, ImageExt,
 };
 use zeroship_kv::{Auth, KvConfig, KvStore, Namespace, RedisConfig, TlsConfig, Topology};
+use zeroship_testkit::images;
 
 const PORT: u16 = 6379;
 
@@ -29,9 +30,9 @@ type Server = Container<GenericImage>;
 
 fn start(dragonfly: bool, args: Vec<String>) -> Server {
     let (image, tag) = if dragonfly {
-        ("docker.dragonflydb.io/dragonflydb/dragonfly", "latest")
+        (images::DRAGONFLY_2_0.name, images::DRAGONFLY_2_0.tag)
     } else {
-        ("redis", "7")
+        (images::REDIS_7.name, images::REDIS_7.tag)
     };
     let wait = if dragonfly {
         WaitFor::message_on_stderr("listening on")
@@ -322,7 +323,8 @@ async fn sentinel_discovers_and_follows_redis_and_dragonfly_primaries() {
         .await
         .expect("replica catches up");
         let sentinel_config = format!("port 6379\nbind 0.0.0.0\nprotected-mode no\nrequirepass sentinel-secret\nsentinel monitor kv {} 6379 1\nsentinel auth-pass kv {password}\nsentinel down-after-milliseconds kv 300\nsentinel failover-timeout kv 3000\n", primary.get_bridge_ip_address().unwrap());
-        let sentinel = GenericImage::new("redis", "7")
+        let sentinel = images::REDIS_7
+            .generic()
             .with_exposed_port(PORT.tcp())
             .with_wait_for(WaitFor::message_on_stdout("+monitor"))
             .with_copy_to("/data/sentinel.conf", sentinel_config.into_bytes())
@@ -421,9 +423,9 @@ async fn tls_and_acl_credentials_work_with_redis_and_dragonfly() {
     std::fs::write(&ca_file, &cert).unwrap();
     for dragonfly in [false, true] {
         let (image, tag) = if dragonfly {
-            ("docker.dragonflydb.io/dragonflydb/dragonfly", "latest")
+            (images::DRAGONFLY_2_0.name, images::DRAGONFLY_2_0.tag)
         } else {
-            ("redis", "7")
+            (images::REDIS_7.name, images::REDIS_7.tag)
         };
         let wait = if dragonfly {
             WaitFor::message_on_stderr("listening on")

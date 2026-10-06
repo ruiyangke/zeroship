@@ -12,7 +12,7 @@
 //! `zeroship-workflow-client` in `[dependencies]` -- so the client naming that
 //! trait is a Cargo CYCLE before it is anything else, and
 //! `workflow_process_dependencies_follow_crate_ownership`
-//! (`xtask/tests/workflow/mod.rs`) additionally forbids the client that
+//! (`xtask/tests/repository/workflow_crates.rs`) additionally forbids the client that
 //! edge in the dev and transitive spellings Cargo would tolerate. Three reasons,
 //! one answer. This crate depends on both, and it already holds the payload
 //! object store the two reads open.

@@ -188,7 +188,7 @@ pub fn case_prefix() -> String {
 /// # Errors
 /// When the image cannot be built.
 pub fn standalone_spec() -> Result<Spec, String> {
-    let image = zeroship_shared_server::image::with_watchdog("redis:7")?;
+    let image = zeroship_shared_server::image::with_watchdog(&crate::images::REDIS_7.reference())?;
     let args = vec!["docker-entrypoint.sh".to_owned(), "redis-server".to_owned()];
     let ready = standalone_readiness();
     let inputs = standalone_inputs(&image, &args, &ready);
@@ -373,7 +373,7 @@ fn cluster_host_ports(container_id: &str) -> Result<[u16; CLUSTER_NODES], String
 /// When Docker cannot start the container.
 #[must_use]
 pub fn start_redis() -> Container<GenericImage> {
-    GenericImage::new("redis", "7")
+    crate::images::REDIS_7.generic()
         .with_exposed_port(STANDALONE_PORT.tcp())
         .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
         .with_startup_timeout(Duration::from_secs(60))

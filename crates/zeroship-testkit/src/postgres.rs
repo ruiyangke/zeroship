@@ -29,6 +29,7 @@ pub mod server;
 
 pub use case::{run, run_fresh, Case, CaseFixture};
 pub use image::reference as image;
+pub(crate) use image::RECIPE;
 
 /// The database the shared platform migration is applied to.
 const DATABASE: &str = "zeroship_testkit";

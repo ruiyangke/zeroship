@@ -219,13 +219,36 @@ Every suite that needs PostgreSQL starts or joins its own server through
 testcontainers. Docker is the one prerequisite; no environment variable or
 generated file selects a database. Database verification is part of ordinary
 `cargo test`; it has no opt-in feature, and a suite whose server cannot start
-fails. The suite runners below prepare the required migrations.
+fails.
 
-Auth, authn and mailer tests run on the migrated platform server every test
-process of the worktree shares. Mailer owns its Mailpit SMTP sink and inspects captured messages through its API;
-these tests require Docker and accept no external database or SMTP address.
-Run `cargo xtask test migrations` to build their migration host, then
-`cargo test -p zeroship-mailer` to verify delivery and suppression.
+The workspace's tests are divided into shards, the same shards CI runs one job
+each for. `cargo xtask shards list` lists them and `xtask/src/shards.rs` says which
+packages each one owns. `cargo xtask test <shard>` prepares what that shard's
+tests need (the migration host, the service binaries, the shared servers it
+holds for the run), runs every test of its packages under nextest, and runs
+their doctests. `--filter` narrows a diagnostic run to a nextest filter
+expression; the preparation still runs.
+
+```bash
+cargo xtask shards list
+cargo xtask test auth
+cargo xtask test billing
+cargo xtask test runtime
+cargo xtask test compio-postgres
+cargo xtask test data --filter 'test(tests::postgres::transactions::)'
+```
+
+A shard that starts service fleets needs a large locked-memory limit. Every
+io_uring a test process, or a service binary a test starts, opens is charged to
+one per-user locked-memory budget, and a service default is far too small for
+such a run. `cargo xtask test` raises its soft limit to the hard limit itself,
+and when the hard limit is still below its floor it refuses to start and names
+the command that raises it (`ulimit -Hl` shows the hard limit, in KiB).
+
+Ordinary `cargo test -p <package>` and `cargo nextest run -p <package>` run the
+same cases once the shard's preparation has run; `pnpm build` builds the
+migration host most of them apply the platform schema with.
+
 KV and Redis driver tests provision their required servers with Testcontainers;
 they need Docker and do not read shared Redis URLs. See the
 [KV test commands](../../crates/zeroship-kv/README.md).
@@ -233,48 +256,34 @@ The compio-postgres suites and live benches dial the PostgreSQL server
 `compio_postgres_testkit::server` starts, which every test process of the
 worktree shares the same way.
 
-```bash
-cargo test -p zeroship-core
-cargo test -p zeroship-gateway
-cargo xtask test billing
-cargo xtask test worker
-cargo test -p zeroship-runtime --lib
-cargo nextest run -p compio-postgres
-```
-
 The Playwright suites launch the browsers `nix develop` exports as
 `PLAYWRIGHT_BROWSERS_PATH`, so run them inside it. After `pnpm install`,
 `cargo xtask test playwright-browsers` checks that the installed Playwright is
 the release those browsers were built for; `xtask/README.md` lists what it needs.
+`cargo xtask test examples` runs the example apps' own Vitest and Playwright
+suites, which start a live platform.
 
 ### Test database ownership
 
-`cargo xtask test auth` builds the platform migration host and runs the auth,
-authn, authz, mailer and gateway packages. Their Rust fixtures join the migrated
+The `auth` shard builds the platform migration host and runs the auth, authn,
+authz, mailer and gateway packages. Their Rust fixtures join the migrated
 platform server every test process of the worktree shares, and own SMTP
-listeners, HTTP servers and temporary files. Docker must be
-available; no external address selects their databases.
-Ordinary `cargo test -p <package>` runs the same required cases once the
-migration host has been built.
+listeners, HTTP servers and temporary files. Mailer owns its Mailpit SMTP sink
+and inspects captured messages through its API. Docker must be available; no
+external address selects their databases.
 
-`cargo xtask test worker` builds the same migration host and runs the worker
-package. Its posture and workflow cases each own a PostgreSQL server. Workflow
+The `runtime` shard runs the runtime, worker, CLI, KV and storage packages.
+The worker's posture and workflow cases each own a PostgreSQL server. Workflow
 requests connect as the migrated worker role; fixture setup and observations
 use a separate administrator connection. The fixtures release connections,
 isolates and temporary storage when the case ends, including on failure.
 
-```bash
-cargo xtask test auth
-cargo xtask test billing
-cargo xtask test worker
-```
-
-`cargo xtask test billing` builds the migration host and runs control,
-migration-service, metering, and stream tests. Their Rust fixtures join the
-PostgreSQL servers and the Redpanda broker every test process of the worktree
-shares; no external address selects those services.
-`cargo xtask test workflow` runs against the same shared platform server. Its
-control plane tests clone private databases from a migrated, quiescent template.
+The `billing` shard builds the migration host and the service binaries
+Control's workflow process suites start, and runs control, migration-service,
+metering, and stream tests. Their Rust fixtures join the PostgreSQL servers and
+the Redpanda broker every test process of the worktree shares; no external
+address selects those services. Its control plane tests clone private databases
+from a migrated, quiescent template.
 
 A shared server is booted by the first test process that asks for it and
 leased by every process that uses it, through a lock file under
