@@ -274,20 +274,25 @@ async fn stored_reservation_instant_finalizes_its_own_row() {
         magic_completions::consume_pending(&client, &nonce, CODE)
             .await
             .unwrap();
+        // Pin the reservation to an instant with a sub-millisecond fraction. The
+        // database clock lands on a whole millisecond now and then, and a
+        // millisecond-floored bind would match such an instant by accident; this
+        // one it cannot.
         let stored: chrono::DateTime<chrono::Utc> = client
             .query_one(
-                "SELECT consumed_pending_at FROM zeroship.magic_completions WHERE csrf_nonce = $1",
+                "UPDATE zeroship.magic_completions \
+                 SET consumed_pending_at = date_trunc('millisecond', consumed_pending_at) \
+                     + interval '417 microseconds' \
+                 WHERE csrf_nonce = $1 RETURNING consumed_pending_at",
                 &[&nonce],
             )
             .await
             .unwrap()
             .get(0);
-        // The database clock carries a fraction, so a millisecond-floored bind
-        // would be a different instant than the one stored.
-        assert_ne!(
+        assert_eq!(
             stored.timestamp_subsec_micros() % 1_000,
-            0,
-            "the database clock must supply a sub-millisecond fraction for this case to bind"
+            417,
+            "the reservation instant carries the pinned sub-millisecond fraction"
         );
         assert!(
             magic_completions::finalize_consume(&orm, &nonce, &stored)
