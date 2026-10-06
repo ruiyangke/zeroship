@@ -22,6 +22,7 @@ path = "tests/main.rs"
 [dependencies]
 async-trait = { workspace = true }
 zeroship-core = { workspace = true }
+zeroship-memlock = { workspace = true }
 uuid = { workspace = true }
 zeroship-runtime = { workspace = true }
 zeroship-data-v8 = { workspace = true }

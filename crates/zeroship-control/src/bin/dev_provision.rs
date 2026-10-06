@@ -99,8 +99,21 @@ fn err(msg: impl Into<String>) -> DevProvisionError {
     DevProvisionError(msg.into())
 }
 
-#[compio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
+    // Probe at the boundary that the kernel grants a ring; the runtime this
+    // tool runs on is still mapped through `explain` below.
+    zeroship_memlock::prepare_or_exit("dev-provision");
+    let runtime = match compio::runtime::Runtime::new().map_err(zeroship_memlock::explain) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("dev-provision: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    runtime.block_on(run_cli())
+}
+
+async fn run_cli() -> ExitCode {
     let cli = Cli::parse();
     match run(cli).await {
         Ok(app) => {

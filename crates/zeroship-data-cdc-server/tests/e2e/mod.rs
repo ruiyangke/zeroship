@@ -4,4 +4,5 @@
 //! here.
 
 mod boot;
+mod low_memlock;
 mod relay;

@@ -235,6 +235,9 @@ testcontainers = { version = "0.28", default-features = false, features = ["bloc
 
 # Internal crates
 zeroship-id = { path = "crates/zeroship-id" }
+# Explains the kernel's refusal of an io_uring ring when the locked-memory
+# budget is exhausted, and lifts the soft limit to the hard one at startup.
+zeroship-memlock = { path = "crates/zeroship-memlock" }
 zeroship-core = { path = "crates/zeroship-core" }
 zeroship-bundle = { path = "crates/zeroship-bundle" }
 # Dev-only test fixtures, members so their own tests run in the workspace

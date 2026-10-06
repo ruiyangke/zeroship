@@ -29,6 +29,7 @@ harness = false
 
 [dependencies]
 zeroship-core = { workspace = true }
+zeroship-memlock = { workspace = true }
 zeroship-bundle = { workspace = true }
 # Wrapper-token family revocation (`wrapper_revocation`) lives in zeroship-authz
 # rather than zeroship-core, so core links no DB driver. The gate's OIDC-RP

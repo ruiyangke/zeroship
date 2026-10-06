@@ -413,6 +413,7 @@ fn empty_string_as_none(value: &str) -> Option<String> {
 }
 
 fn main() -> std::io::Result<()> {
+    zeroship_memlock::prepare_or_exit("control");
     // ONE declaration, one parser. There is no second hand-written struct
     // holding the credentials any more, so there is no second place a flag, an
     // environment name or an overlay path can be spelled.

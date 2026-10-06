@@ -181,6 +181,27 @@ passes `--addr 0.0.0.0:9092`. Outside compose (single-host dev), the loopback de
 need no override. Authentication and secret checks remain active on those
 non-loopback container binds.
 
+### Locked memory (io_uring)
+
+Every shipped binary runs its I/O on compio/io_uring, and the kernel charges
+each ring to the user's locked-memory budget (`RLIMIT_MEMLOCK`). The compose
+file states the limit once as the `x-memlock-ulimits` anchor and aliases it onto
+every service that runs one:
+
+```yaml
+x-memlock-ulimits: &memlock-ulimits
+  memlock:
+    soft: -1
+    hard: -1
+```
+
+A binary checks at start that the kernel grants it an io_uring ring and exits
+naming `RLIMIT_MEMLOCK`, the values it read and the remedy if not, instead of
+panicking with `Os { code: 12, kind: OutOfMemory }`. An override that replaces
+`ulimits` on a service removes the unlimited setting; keep the anchor's value,
+or raise the limit on the host with `LimitMEMLOCK=infinity` (systemd) or
+`ulimit -l unlimited`.
+
 ### Auth service
 
 The `auth` service runs `zeroship-auth`, the native OIDC OP and login UI. The

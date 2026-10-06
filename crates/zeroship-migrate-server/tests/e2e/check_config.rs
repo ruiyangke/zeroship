@@ -10,7 +10,7 @@ use std::process::{Command, Output};
 
 use zeroship_core::config::{REMEDIATION_COMMAND, SERVICE_CREDENTIAL_SENTINEL};
 
-const STRONG_HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+use crate::support::service::{service_command, STRONG_HEX};
 
 struct Scratch(PathBuf);
 
@@ -37,18 +37,7 @@ impl Drop for Scratch {
 }
 
 fn run(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_zeroship-migrate-server"))
-        .env_clear()
-        .env("ZEROSHIP_CONTROL_KEY", STRONG_HEX)
-        .env("ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY", STRONG_HEX)
-        .env(
-            "ZEROSHIP_MIGRATE_SERVER_DATABASE_URL",
-            "postgresql://unused:unused@127.0.0.1:1/unused",
-        )
-        .env(
-            "ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL",
-            "postgresql://unused:unused@127.0.0.1:1/unused",
-        )
+    service_command()
         .args(args)
         .output()
         .expect("spawn zeroship-migrate-server")
@@ -312,18 +301,7 @@ fn an_explicit_thread_count_reaches_the_report_from_flag_and_environment() {
     assert_success(&flagged);
     assert_eq!(count(&report(&flagged.stdout), "threads"), 2);
 
-    let from_env = Command::new(env!("CARGO_BIN_EXE_zeroship-migrate-server"))
-        .env_clear()
-        .env("ZEROSHIP_CONTROL_KEY", STRONG_HEX)
-        .env("ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY", STRONG_HEX)
-        .env(
-            "ZEROSHIP_MIGRATE_SERVER_DATABASE_URL",
-            "postgresql://unused:unused@127.0.0.1:1/unused",
-        )
-        .env(
-            "ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL",
-            "postgresql://unused:unused@127.0.0.1:1/unused",
-        )
+    let from_env = service_command()
         .env("ZEROSHIP_MIGRATE_SERVER_THREADS", "3")
         .args([
             "--check-config",

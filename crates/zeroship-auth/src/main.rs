@@ -30,6 +30,7 @@ use zeroship_mailer::{
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    zeroship_memlock::prepare_or_exit("auth");
     let cli = AuthCli::parse();
     let (settings, boot) = bootstrap_or_exit::<AuthSettings>(
         cli.settings.clone(),

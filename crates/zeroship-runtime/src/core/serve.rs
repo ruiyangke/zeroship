@@ -1811,9 +1811,13 @@ fn run_single_worker(
         pump_cpu_budget: None,
     };
 
-    compio::runtime::RuntimeBuilder::new()
+    // A construction failure is returned, not acted on here: this is library
+    // code a test binary can run in-process, so the process boundary decides
+    // whether to exit and with what message.
+    let runtime = compio::runtime::RuntimeBuilder::new()
         .build()
-        .unwrap()
+        .map_err(zeroship_memlock::explain)?;
+    runtime
         .block_on(async move {
             let listener = if use_reuseport {
                 let std_listener = create_reuseport_listener(port)?;

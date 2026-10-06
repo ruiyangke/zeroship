@@ -238,6 +238,7 @@ fn build_service_auth(
 }
 
 fn main() -> std::io::Result<()> {
+    zeroship_memlock::prepare_or_exit("gateway");
     let (settings, boot) = bootstrap_or_exit::<GateSettings>(
         GateSettingsSources::parse(),
         zeroship_gateway::config::DEFAULT_LOG_FILTER,

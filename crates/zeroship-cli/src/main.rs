@@ -54,6 +54,12 @@ fn main() {
     // server that spawned it. See `parent_death` for what happened when it did.
     parent_death::arm_from_env();
 
+    // Before any compio runtime (the dev server, the control client, the
+    // workflow client) is built: probe that the kernel grants a ring, so a
+    // refusal exits naming `RLIMIT_MEMLOCK` rather than surfacing as an
+    // io_uring `ENOMEM` deep in a client.
+    zeroship_memlock::prepare_or_exit("zeroship");
+
     // The CLI does not boot through `bootstrap_or_exit`, so it installs the
     // process's rustls provider itself, before `deploy`, `login` or the dev
     // server can build an outbound client.

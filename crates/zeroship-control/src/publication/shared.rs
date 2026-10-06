@@ -330,11 +330,15 @@ fn host(
     opened: oneshot::Sender<Result<(), CatalogError>>,
 ) {
     LANE.set(true);
-    let Ok(runtime) = compio::runtime::Runtime::new() else {
-        let _ = opened.send(Err(CatalogError::Storage(
-            "a control catalog runtime could not start",
-        )));
-        return;
+    let runtime = match compio::runtime::Runtime::new().map_err(zeroship_memlock::explain) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            tracing::error!(%error, "a control catalog runtime could not start");
+            let _ = opened.send(Err(CatalogError::Storage(
+                "a control catalog runtime could not start",
+            )));
+            return;
+        }
     };
     runtime.block_on(async move {
         let database = match catalog::connect(url, role).await {

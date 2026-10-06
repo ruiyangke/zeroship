@@ -161,6 +161,7 @@ tracing = { workspace = true }
 # shared tracing subscriber. The library itself only emits via
 # `tracing::*`.
 zeroship-core = { workspace = true }
+zeroship-memlock = { workspace = true }
 zeroship-metering = { workspace = true }
 
 # Insertion-ordered map — used by the rpc::superjson encoder to build

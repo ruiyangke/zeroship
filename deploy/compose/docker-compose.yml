@@ -65,6 +65,19 @@ x-worker-port: &worker-port "8080"
 # consumers move together.
 x-compose-subnet: &compose-subnet "${ZEROSHIP_COMPOSE_SUBNET:-172.30.0.0/16}"
 
+# The locked-memory limit every compio service needs, aliased onto each of them.
+#
+# Every compio runtime opens an io_uring, and the kernel charges each ring to the
+# user's locked-memory budget (`RLIMIT_MEMLOCK`). The container default is sized
+# for a desktop session, not a platform of services, so a busy stack can exhaust
+# it; a binary checks at start that the kernel grants it an io_uring ring and
+# exits naming `RLIMIT_MEMLOCK`, the values it read and the remedy if not
+# (`crates/zeroship-memlock`). `-1` is Compose's "unlimited".
+x-memlock-ulimits: &memlock-ulimits
+  memlock:
+    soft: -1
+    hard: -1
+
 services:
   verdaccio:
     image: verdaccio/verdaccio:6
@@ -474,6 +487,7 @@ services:
       - join-tokens:/var/lib/zeroship/join
       # mounted at the well-known path => auto-discovered, no --config needed
       - ../ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
+    ulimits: *memlock-ulimits
     security_opt:
       - seccomp:unconfined
     depends_on:
@@ -581,6 +595,7 @@ services:
       # per-service readability probe now covers this container too.
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}/migrate-dsn:/etc/zeroship/secrets/migrate-dsn:ro
     # compio/io_uring, same as every other native service here.
+    ulimits: *memlock-ulimits
     security_opt:
       - seccomp:unconfined
     restart: on-failure
@@ -670,6 +685,7 @@ services:
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}/svc-workflow.pem:/etc/zeroship/secrets/svc-workflow.pem:ro
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}/service-peers.json:/etc/zeroship/secrets/service-peers.json:ro
     # compio/io_uring, same as every other native service here.
+    ulimits: *memlock-ulimits
     security_opt:
       - seccomp:unconfined
     restart: on-failure
@@ -774,6 +790,7 @@ services:
     # localhost:8000` and every local harness working; only remote reach goes.
     ports:
       - "127.0.0.1:8000:8000"
+    ulimits: *memlock-ulimits
     security_opt:
       - seccomp:unconfined
     depends_on:
@@ -806,6 +823,7 @@ services:
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}/cdc-cert.pem:/etc/zeroship/cdc-cert.pem:ro
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}/cdc-key.pem:/etc/zeroship/cdc-key.pem:ro
     restart: unless-stopped
+    ulimits: *memlock-ulimits
     security_opt:
       - seccomp:unconfined
     depends_on:
@@ -917,6 +935,7 @@ services:
     # `the_compose_stop_grace_covers_the_worker_drain_and_its_retirement` in
     # crates/zeroship-worker/tests/e2e/check_config.rs holds this value to it.
     stop_grace_period: 65s
+    ulimits: *memlock-ulimits
     security_opt:
       - seccomp:unconfined
     depends_on:
@@ -1102,6 +1121,7 @@ services:
       # frame_ancestor_origins comes from the shared [auth] overlay,
       # auto-discovered at the well-known path.
       - ../ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
+    ulimits: *memlock-ulimits
     security_opt:
       - seccomp:unconfined
     depends_on:

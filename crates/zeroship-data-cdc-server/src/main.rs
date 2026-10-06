@@ -15,8 +15,23 @@ mod transaction;
 #[cfg(test)]
 use zeroship_data_testkit::data::platform as platform_fixture;
 
-#[compio::main]
-async fn main() {
+fn main() {
+    // Probe at the boundary that the kernel grants a ring; a refusal names
+    // `RLIMIT_MEMLOCK`, the values and the remedy. The runtime this process
+    // serves on is still mapped through `explain` below, because a later ring
+    // can be refused after the probe succeeded.
+    zeroship_memlock::prepare_or_exit("data-cdc-server");
+    let runtime = match compio::runtime::Runtime::new().map_err(zeroship_memlock::explain) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("data-cdc-server: {error}");
+            std::process::exit(1);
+        }
+    };
+    runtime.block_on(run());
+}
+
+async fn run() {
     let (settings, boot) = bootstrap_or_exit::<CdcServerSettings>(
         CdcServerSettingsSources::parse(),
         DEFAULT_LOG_FILTER,

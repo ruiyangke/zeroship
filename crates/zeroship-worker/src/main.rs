@@ -218,6 +218,7 @@ fn load_join_material(
 }
 
 fn main() -> std::io::Result<()> {
+    zeroship_memlock::prepare_or_exit("worker");
     let (settings, boot) = bootstrap_or_exit::<WorkerSettings>(
         WorkerSettingsSources::parse(),
         "info,zeroship_worker=debug,zeroship_runtime=info",

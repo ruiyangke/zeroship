@@ -28,6 +28,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 zeroship-core = { workspace = true }
+zeroship-memlock = { workspace = true }
 zeroship-authn = { workspace = true }
 zeroship-data-orm = { workspace = true }
 zeroship-workflow-manager = { workspace = true }

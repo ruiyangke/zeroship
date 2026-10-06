@@ -299,7 +299,7 @@ impl WorkflowHost {
         let (finished, exit) = oneshot::channel::<Result<(), String>>();
         let thread = zeroship_workflow_runner::host::thread()
             .spawn(move || {
-                let result = match compio::runtime::Runtime::new() {
+                let result = match compio::runtime::Runtime::new().map_err(zeroship_memlock::explain) {
                     Ok(runtime) => runtime.block_on(body(stopped)),
                     Err(error) => Err(format!("workflow host runtime: {error}")),
                 };

@@ -313,13 +313,14 @@ impl LocalHost {
         zeroship_runtime::init_v8();
         let thread = zeroship_workflow_runner::host::thread()
             .spawn(move || {
-                let runtime = match compio::runtime::Runtime::new() {
-                    Ok(runtime) => runtime,
-                    Err(error) => {
-                        let _ = ready.send(Err(error.to_string()));
-                        return;
-                    }
-                };
+                let runtime =
+                    match compio::runtime::Runtime::new().map_err(zeroship_memlock::explain) {
+                        Ok(runtime) => runtime,
+                        Err(error) => {
+                            let _ = ready.send(Err(error.to_string()));
+                            return;
+                        }
+                    };
                 runtime.block_on(async move {
                     let opened = match host::open(settings, composition).await {
                         Ok(opened) => opened,

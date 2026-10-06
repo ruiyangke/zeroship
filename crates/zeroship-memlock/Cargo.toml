@@ -1,0 +1,17 @@
+[package]
+name = "zeroship-memlock"
+version = "0.1.0"
+edition = "2021"
+description = "Lifts the locked-memory soft limit and probes that the kernel grants an io_uring ring, explaining a refusal at a binary boundary."
+
+[dependencies]
+# `setrlimit`/`getrlimit` are the whole syscall surface, and nix's safe wrappers
+# keep `unsafe` out of a crate the workspace forbids it in. `resource` is the
+# only feature this crate needs.
+nix = { version = "0.31", features = ["resource"] }
+# The probe builds and drops one real runtime, so the kernel's own answer
+# decides whether a binary starts. compio is in every shipped closure already.
+compio = { workspace = true }
+
+[lints]
+workspace = true

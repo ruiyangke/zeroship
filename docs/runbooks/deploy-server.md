@@ -586,6 +586,25 @@ A database URL that sets `application_name` itself overrides every one of
 these names, because Control offers its names only as
 `fallback_application_name`.
 
+## Locked memory (io_uring)
+
+Every shipped binary runs its I/O on compio/io_uring, and the kernel charges each
+ring to the user's locked-memory budget (`RLIMIT_MEMLOCK`). The tracked compose
+file sets
+
+```yaml
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+```
+
+on every service that runs one. A binary checks at start that the kernel grants
+it an io_uring ring and exits naming `RLIMIT_MEMLOCK`, the values it read and the
+remedy if not, rather than panicking with `Os { code: 12, kind: OutOfMemory }`.
+See [the compose runbook](docker-compose.md#locked-memory-io_uring) for the full
+section.
+
 ## Things that will bite you
 
 **The control port exists only in the server override.** The base file has no

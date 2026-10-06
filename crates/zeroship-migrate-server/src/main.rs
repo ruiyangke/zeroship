@@ -90,6 +90,7 @@ fn enforce_migrated_credentials(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    zeroship_memlock::prepare_or_exit("migrate-server");
     let (settings, boot) = bootstrap_or_exit::<MigrateServerSettings>(
         MigrateServerSettingsSources::parse(),
         DEFAULT_LOG_FILTER,

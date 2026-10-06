@@ -17,6 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 zeroship-core = { workspace = true }
+zeroship-memlock = { workspace = true }
 zeroship-bundle = { workspace = true }
 zeroship-runtime = { workspace = true }
 zeroship-data-v8 = { workspace = true }

@@ -30,7 +30,8 @@ path = "tests/main.rs"
 # The generated settings carrier. `clap`'s derive is what `bootstrap_or_exit`
 # parses, and `env` is what projects the canonical ZEROSHIP_* names.
 clap = { workspace = true, features = ["derive", "env"] }
-# The runtime `main` runs on. Zero tokio: `#[compio::main]`, io_uring.
+# The runtime `main` runs on. Zero tokio: a plain `main` builds a compio
+# `Runtime` and blocks on it, after lifting the locked-memory soft limit, io_uring.
 compio = { workspace = true }
 compio-postgres = { workspace = true, features = ["tls"] }
 zeroship-data-cdc-wire = { workspace = true }
@@ -42,11 +43,15 @@ rustls = { workspace = true }
 # `zeroship_config`, the bootstrap/overlay resolver, `CheckConfigReport`, and the
 # tracing subscriber every platform service installs the same way.
 zeroship-core = { workspace = true }
+zeroship-memlock = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
 # Exercise the public ORM client against the separate relay executable.
 zeroship-data-orm = { workspace = true }
+# The low-locked-memory regression spawns the relay with `pre_exec` and calls
+# `setrlimit` in the child, which is a `libc` call the std API does not wrap.
+libc = { workspace = true }
 rcgen = { workspace = true }
 tempfile = { workspace = true }
 url = { workspace = true }
