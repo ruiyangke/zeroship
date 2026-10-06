@@ -156,7 +156,7 @@ struct ResolvedWorkers {
 /// if `database_url` resolves to SQLite, the count is clamped to **1**.
 ///
 /// Why: a bare `zeroship serve` with `--workers=0` spins N isolates, each its
-/// own worker thread. The SQLite data-plane backend AND (post-P6b) the hardened
+/// own worker thread. The SQLite data-plane backend AND the hardened
 /// migration backend are per-isolate, so N isolates would open their own
 /// connections on the SAME `zs-<app>.sqlite` and run N concurrent cold-path
 /// migrations with the engine's project-lock a no-op (it assumes single-actor

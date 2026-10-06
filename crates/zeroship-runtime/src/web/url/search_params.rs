@@ -54,7 +54,7 @@ pub struct URLSearchParams {
     parent_url: Option<v8::Weak<v8::Object>>,
     /// Cache of the parent's last-observed `inner.search()`. Skipping
     /// the re-parse when the search hasn't changed turns iterator
-    /// for-of from O(n²) to O(n) (see C3).
+    /// for-of from O(n^2) to O(n).
     last_seen_search: String,
 }
 
@@ -77,7 +77,7 @@ impl URLSearchParams {
     /// parent already GC'd) returns `&self.entries` as-is.
     ///
     /// Caches `last_seen_search` so back-to-back reads (notably the
-    /// iterator's `next()` per C3) skip the re-parse when the parent's
+    /// iterator's `next()`) skip the re-parse when the parent's
     /// search hasn't changed. The cache also covers the orphan case:
     /// once the weak fails to upgrade, `entries` keeps whatever it had
     /// at last sync — effectively detaching to standalone.
@@ -162,7 +162,7 @@ impl URLSearchParams {
 /// pointer to the boxed `URL` if present. Returns `None` for non-URL
 /// receivers.
 ///
-/// SAFETY contract for callers (C2):
+/// SAFETY contract for callers:
 ///   - The External pointer was set by `URL::install`'s constructor
 ///     callback (or by `URL::install_search_params_global`).
 ///   - The caller must hold a Local (or some other liveness anchor)
@@ -218,12 +218,10 @@ impl URLSearchParams {
         // plain objects fall through to the record path. The string
         // path is the catch-all.
         //
-        // C5: Per WebIDL §3.10 record conversion, ANY non-iterable
-        // object goes through the record path. The previous code
-        // excluded ArrayBuffer/ArrayBufferView from the object branch,
-        // forcing them into the string path where ToString produced
-        // "[object ArrayBuffer]" or similar — non-spec garbage. The
-        // correct behaviour:
+        // Per WebIDL 3.10 record conversion, ANY non-iterable object
+        // goes through the record path; ArrayBuffer/ArrayBufferView take
+        // this path rather than the string path, which would ToString
+        // them to "[object ArrayBuffer]" or similar. The behaviour:
         //   - Plain ArrayBuffer (no @@iterator): record path → empty
         //     (no own enumerable string-keyed properties).
         //   - Typed-array views (Uint8Array etc.) ARE iterable via

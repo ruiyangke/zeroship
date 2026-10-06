@@ -7,7 +7,7 @@
 //! `crates/zeroship-runtime/tests/wpt/fetch/api/body/`.
 //!
 //! Mirrors the `wpt_fetch_request.rs` / `wpt_fetch_response.rs`
-//! pattern. The body suite is small (3 files) — most body-consumer
+//! pattern. The body suite is small - most body-consumer
 //! WPT lives in `request-consume*.any.js` / `response-consume*.any.js`
 //! which need full Blob support to run cleanly.
 

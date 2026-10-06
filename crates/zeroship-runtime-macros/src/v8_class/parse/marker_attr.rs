@@ -9,7 +9,7 @@
 //! All marker attributes emit `compile_error!` on malformed shape
 //! (`#[v8_name(foo)]` with no `=`, `#[v8_to_string_tag = 42]` with a
 //! non-string literal). Compile-fail fixtures live in
-//! `crates/runtime/tests/compile_fail_marker_attr/`.
+//! `crates/zeroship-runtime/tests/compile_fail_marker_attr/`.
 //!
 //! ## Repeatable vs. at-most-one
 //!

@@ -121,7 +121,7 @@ pub fn search_params_reparse_count(scope: &v8::PinScope) -> u64 {
 /// up the URL Function so it can `new_instance` for the parse result.
 ///
 /// Also caches `URLSearchParams.prototype` so the iterator factories
-/// and forEach callback can perform a real brand check (M4/M5)
+/// and forEach callback can perform a real brand check
 /// — `args.this().[[Prototype]]` chain must contain the cached
 /// prototype for the call to be legal.
 ///
@@ -131,8 +131,7 @@ pub fn search_params_reparse_count(scope: &v8::PinScope) -> u64 {
 pub struct UrlNativeSlot {
     pub url_class_fn: v8::Global<v8::Function>,
     pub search_params_class_fn: v8::Global<v8::Function>,
-    /// `URLSearchParams.prototype` for the per-class brand check
-    /// (M4/M5).
+    /// `URLSearchParams.prototype` for the per-class brand check.
     ///
     /// Storage: `v8::Eternal<v8::Object>` rather than
     /// `v8::Global<v8::Object>`. Set-once at install time; the brand
@@ -157,7 +156,7 @@ pub fn install_globals<'s>(scope: &mut v8::PinScope<'s, '_>, global: v8::Local<v
     let url_class_fn = url::install_global(scope, global);
 
     // Capture URLSearchParams.prototype for brand-checking iterator
-    // factories and forEach (M4/M5).
+    // factories and forEach.
     let proto_key = v8::String::new(scope, "prototype").unwrap();
     let sp_proto_v = sp_class_fn.get(scope, proto_key.into()).unwrap();
     let sp_proto: v8::Local<v8::Object> = sp_proto_v

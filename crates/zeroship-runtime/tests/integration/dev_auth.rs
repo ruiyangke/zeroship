@@ -1,8 +1,8 @@
 //! Faithful integration test for the DEV-TIER auth provider's server-side
 //! identity injection — the `pnpm dev` peer of `env.db`→SQLite / `env.kv`→redb.
 //!
-//! This drives the EXACT seam the dev serve path (`crates/runtime/src/core/
-//! serve.rs::handle_request`) composes:
+//! This drives the EXACT seam the dev serve path
+//! (`crates/zeroship-runtime/src/core/serve.rs::handle_request`) composes:
 //! `dev_auth::resolve_dev_user_json(headers, &settings)`
 //! → `Runtime::call_fetch_handler_with_user(..., user_json)`. `handle_request`
 //! itself is `resolve_dev_user_json` followed by `call_fetch_handler_with_user`

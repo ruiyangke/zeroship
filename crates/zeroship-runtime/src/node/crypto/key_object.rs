@@ -1681,8 +1681,8 @@ fn derive_ec_pubkey(raw_d: &[u8], curve: NamedCurve) -> Result<Vec<u8>, &'static
     // "derive public point from raw scalar" directly. SEC1 inputs
     // typically include the public part inline; if absent we
     // synthesise a length-correct placeholder and rely on the curve-
-    // detection path (raw_xy length → curve). This is a Stage-C
-    // limitation; npm packages typically import via PKCS#8 / SPKI
+    // detection path (raw_xy length). This is a limitation of the
+    // curve-detection path; npm packages typically import via PKCS#8 / SPKI
     // which carry the public part explicitly.
     let _ = raw_d;
     let n = curve.order_len();

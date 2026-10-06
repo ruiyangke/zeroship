@@ -82,9 +82,9 @@ impl std::fmt::Debug for FetchSettlement {
 // ===========================================================================
 //
 // Two pre-built plain objects (one per limit) cached as v8::Globals in an
-// isolate-scoped slot. The bench shows ~13% of CPU spent in
-// `v8::Exception::RangeError`'s stack-capture chain when admission fires
-// at ~50K rejections/s. Building the error once and rejecting all
+// isolate-scoped slot. Under load, `v8::Exception::RangeError`'s
+// stack-capture chain dominates the cost of admission. Building the
+// error once and rejecting all
 // subsequent over-quota promises with the same object reduces that to
 // one `v8::Local::new` (Global → Local handle resurrect) per rejection.
 
@@ -108,7 +108,7 @@ struct AdmissionErrors {
 /// absent: `v8_exception_to_{stack,code,details_json,retryable}` each
 /// call `obj.get(scope, key)` on the rejection value. If the key is
 /// **absent**, V8 walks the prototype chain (Object.prototype → null) to
-/// confirm absence — a measured ~0.6-0.7% per lookup in our perf data.
+/// confirm absence, at the cost of a prototype walk per lookup.
 /// If the key is **present and null**, V8 returns the slot value directly.
 /// All four helpers null-check the result and return `None` either way,
 /// so the wire shape is identical; we just trade a prototype walk for an
@@ -373,8 +373,8 @@ fn fetch_callback(
     // object instead of `v8::Exception::range_error` — building a real
     // RangeError captures a full stack trace (`CaptureSimpleStackTrace` +
     // `Translated*` deopt frames) and registering a lazy `.stack` getter,
-    // which together cost ~13% of CPU in the saturated fetchEcho bench
-    // (one rejection per dropped request). A plain object with `.name`
+    // which together dominate the cost of admission under load. A
+    // plain object with `.name`
     // and `.message` round-trips through dispatch's
     // `v8_exception_to_{message,name,stack}` helpers identically — they
     // do `Object::Get(scope, "<key>")` and accept any value with the

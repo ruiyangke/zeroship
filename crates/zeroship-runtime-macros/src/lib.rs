@@ -111,7 +111,7 @@ pub fn v8_method(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// `&mut self` async methods are rejected — borrow across `.await` is
 /// unsound under V8 re-entry. The macro emits a `compile_error!` with
 /// the suggested fix (use `&self` + `Cell` / `RefCell`). See
-/// `crates/zeroship-runtime/tests/v8_async_method_smoke.rs` for the positive
+/// `crates/zeroship-runtime/tests/integration/v8_async_method_smoke.rs` for the positive
 /// shapes and the runtime-level doctests for the rejection rules.
 ///
 /// Non-`async` methods marked with the attribute are also rejected for

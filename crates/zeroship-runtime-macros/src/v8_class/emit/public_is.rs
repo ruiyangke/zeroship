@@ -47,9 +47,8 @@ pub(super) fn gen_public_is_fn(cfg: &ClassConfig) -> TokenStream2 {
             /// `false`, as does an isolate where the class hasn't been
             /// installed. Spec alignment: WebIDL §3.7 brand identity.
             ///
-            /// This is the stable public entry point. The old
-            /// `__zs_is_<Class>` shim has been removed, so this method
-            /// now owns the `Local<Value>::try_into` gate directly.
+            /// This is the stable public entry point. It owns the
+            /// `Local<Value>::try_into` gate directly.
             pub fn is_instance(
                 scope: &mut v8::PinScope,
                 value: v8::Local<v8::Value>,

@@ -248,8 +248,8 @@ impl StreamWriter {
 
     /// Push a chunk into the buffer and wake the reader. Returns an explicit
     /// status so the producer knows whether the chunk was accepted — a
-    /// previously-unbounded queue could silently accumulate gigabytes if the
-    /// consumer was slow.
+    /// without an explicit status, an unbounded queue could silently
+    /// accumulate gigabytes if the consumer is slow.
     ///
     /// Overflow semantics: the chunk is rejected if EITHER the per-stream
     /// cap OR the process-wide cap would be exceeded. The per-stream cap

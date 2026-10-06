@@ -404,12 +404,12 @@ fn langgraph_shaped_runwithconfig_after_await_sees_config() {
         function fakeFetch() {
             return Promise.resolve("model-output");
         }
-        // The "node body" — awaits then calls interrupt(). This is the
-        // single-node shape that previously failed.
+        // The "node body" - awaits then calls interrupt(), so the slot
+        // must survive the await.
         async function nodeBody() {
             const out = await fakeFetch();
-            // Pre-fix this would throw because the slot was reverted
-            // synchronously in the polyfill's `finally`.
+            // If the slot were reverted synchronously in the polyfill's
+            // `finally`, this would throw.
             return interrupt({ from: "node", model: out });
         }
         globalThis.__post_fix_outcome = null;

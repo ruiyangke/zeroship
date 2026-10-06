@@ -59,7 +59,7 @@ fn dispatch_against(runtime: &Runtime) -> (u16, String) {
             (status, String::from_utf8_lossy(&body).into_owned())
         }
         // Name the VARIANT. `type_name_of_val` on the binding prints the enum's
-        // own path for every arm, so a mismatch here used to report only
+        // own path for every arm, so a mismatch here reports only
         // "got FetchOutcome" - true of all four and a description of none.
         FetchOutcome::Stream { status, .. } => {
             panic!("expected sync Response, got Stream (status {status})")
@@ -186,9 +186,6 @@ fn runtime_heap_cap_enforces_oom() {
     // WITNESS, asserted before the outcome: the heap cap is what refused this
     // request. A non-2xx alone is satisfied by any failure - a CPU kill, a
     // module error, a panic mapped to 500 - none of which exercise the cap.
-    // This test previously "failed" for a reason unrelated to the cap and I
-    // read the failure as a cap defect, so the same confusion in the passing
-    // direction is exactly what needs closing off.
     assert!(
         fired > 0,
         "the near-heap-limit callback never fired, so whatever produced status \

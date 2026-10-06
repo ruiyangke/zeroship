@@ -686,8 +686,8 @@ fn wpt_streams_piping_compliance() {
 
     // Soft-pass: emit the totals; only fail the test when a sufficient
     // fraction of unexpected failures show up. The pipe-WPT subset is
-    // large (200+ subtests across 8 files); the dispatch goal is >85%
-    // pass rate after AbortSignal-dependent skips.
+    // large; the test fails only when the pass rate falls below the
+    // configured gate after AbortSignal-dependent skips.
     let attempted = totals.pass + totals.fail;
     if attempted == 0 {
         panic!("no WPT pipe subtests ran");

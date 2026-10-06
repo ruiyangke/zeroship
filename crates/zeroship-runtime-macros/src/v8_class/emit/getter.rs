@@ -70,7 +70,7 @@ use super::reentry_guard::gen_reentry_guard;
 /// We don't migrate existing classes to this attribute in this PR
 /// (Request.headers, Response.headers, URL.searchParams continue to
 /// hand-roll their own private-symbol stash for now). The smoke test
-/// in `crates/zeroship-runtime/tests/v8_same_object_smoke.rs` proves the macro wiring
+/// in `crates/zeroship-runtime/tests/integration/v8_same_object_smoke.rs` proves the macro wiring
 /// works. The crate prefix is load-bearing: this crate has no tests directory
 /// at all, so a bare `tests/...` path here resolves to nothing.
 pub(crate) fn gen_same_object_getter_callback(
@@ -114,7 +114,7 @@ pub(crate) fn gen_same_object_getter_callback(
     let brand_check = recover_box::gen_brand_check_throw(&cfg.brand_check_ident);
     let recover_external = recover_box::gen_recover_external();
     let reentry_guard = gen_reentry_guard(class_ty, method_name, m.mut_receiver);
-    // NS1: same `&mut *` vs `&*` switch as `gen_recover_box`. For
+    // Same `&mut *` vs `&*` switch as `gen_recover_box`. For
     // `&self` SameObject getters (the common shape — `Request.headers`,
     // `URL.searchParams`), materialise as `&Self` so a synchronous
     // re-entry on the cache-miss path cannot manifest two `&mut Self`

@@ -204,10 +204,9 @@ fn shared_self_synchronous_reentry_is_sound() {
         r.set_callback(() => {
             calls += 1;
             if (calls < 2) {
-                // Re-enter peek on the SAME instance. The post-NS1
-                // codegen materialises `&Self`, so this is sound; the
-                // pre-NS1 codegen materialised `&mut Self`, which is
-                // UB per stacked-borrows.
+                // Re-enter peek on the SAME instance. The codegen
+                // materialises `&Self`, so this is sound; materialising
+                // `&mut Self` here would be UB per stacked-borrows.
                 r.peek();
             }
         });

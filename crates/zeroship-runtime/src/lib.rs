@@ -182,7 +182,7 @@ pub use core::serve;
 pub use core::state;
 pub use core::strings;
 
-// Back-compat re-exports for the webidl/ types (formerly at root).
+// Re-exports for the webidl types.
 pub use webidl::byte_string;
 pub use webidl::clamp;
 pub use webidl::convert;

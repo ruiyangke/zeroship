@@ -3,7 +3,7 @@
 //! Locks the WebIdlDict derive's emit shape
 //! against drift, mirroring the pattern in
 //! `v8_class/snapshot_tests.rs`. The snapshots live at the workspace
-//! default `crates/runtime-macros/src/snapshots/` (insta resolves
+//! default `crates/zeroship-runtime-macros/src/snapshots/` (insta resolves
 //! relative to the test file).
 //!
 //! The 3 representative shapes:

@@ -143,10 +143,9 @@ pub(super) fn validate_tls_policy(reject_unauthorized: bool) -> Result<(), OpErr
     }
     // The dev relaxation, which only a dev-tier binary states through
     // `set_dev_mode` - `zeroship serve`, and nothing else
-    // (`crates/zeroship-cli/src/main.rs`, `cmd_serve`). It used to resolve
-    // from `ZEROSHIP_DEV` in the process environment, so the message named
-    // that variable; it no longer does, and a worker that inherited it is
-    // refused here exactly like any other production process.
+    // (`crates/zeroship-cli/src/main.rs`, `cmd_serve`). The process
+    // environment is not consulted, so a worker is refused here exactly
+    // like any other production process.
     let allowed = crate::transport::ssrf::dev_mode_enabled();
     if allowed {
         Ok(())

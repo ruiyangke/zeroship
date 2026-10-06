@@ -33,9 +33,8 @@ pub(crate) fn gen_method_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenSt
 
     // Skip the receiver param when extracting JS args.
     let params = parse_params_skipping_self(m.func);
-    // Pre-parsed by the analyse phase; emit just reads.
-    // for per-method walks (reject_shared used to be re-extracted at
-    // every emit site).
+    // Pre-parsed by the analyse phase; emit just reads them rather
+    // than re-extracting `reject_shared` on every per-method walk.
     let extractions = gen_param_extractions(&params, &m.reject_shared_names);
 
     let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
@@ -115,9 +114,8 @@ pub(crate) fn gen_setter_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenSt
 
     // Setters take exactly one logical param: the new value.
     let params = parse_params_skipping_self(m.func);
-    // Pre-parsed by the analyse phase; emit just reads.
-    // for per-method walks (reject_shared used to be re-extracted at
-    // every emit site).
+    // Pre-parsed by the analyse phase; emit just reads them rather
+    // than re-extracting `reject_shared` on every per-method walk.
     let extractions = gen_param_extractions(&params, &m.reject_shared_names);
     let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
     let receiver_ref = if m.mut_receiver {
@@ -255,9 +253,8 @@ pub(crate) fn gen_async_method_callback(cfg: &ClassConfig, m: &ClassMethod) -> T
 
     // Skip the receiver param when extracting JS args.
     let params = parse_params_skipping_self(m.func);
-    // Pre-parsed by the analyse phase; emit just reads.
-    // for per-method walks (reject_shared used to be re-extracted at
-    // every emit site).
+    // Pre-parsed by the analyse phase; emit just reads them rather
+    // than re-extracting `reject_shared` on every per-method walk.
     let extractions = gen_param_extractions(&params, &m.reject_shared_names);
 
     let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();

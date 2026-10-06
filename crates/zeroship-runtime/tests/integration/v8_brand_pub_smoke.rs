@@ -16,10 +16,7 @@
 //! non-Object values (primitives, null, undefined) return `false`
 //! instead of UB.
 //!
-//! The legacy underscored `__zs_is_<Class>` shim was removed
-//! per `crates/zeroship-runtime-macros/STABILITY.md`. This test now exercises
-//! `<Class>::is_instance` directly — same observable behaviour, the
-//! only change is the call-site spelling.
+//! This test exercises `<Class>::is_instance` directly.
 //!
 //! Coverage:
 //!   - matches a real instance of the class

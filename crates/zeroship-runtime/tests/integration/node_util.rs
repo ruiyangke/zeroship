@@ -1,6 +1,6 @@
 //! `node:util` registered as a native V8 SyntheticModule.
 //!
-//! Covers the most-used 90% of the Node 22 surface: `format`,
+//! Covers the most-used Node 22 surface: `format`,
 //! `inspect` (primitives / arrays / objects / circulars), `promisify`,
 //! `callbackify`, `deprecate`, `types.*` predicates,
 //! `isDeepStrictEqual`, `parseArgs` (long-form `--flag value`), and

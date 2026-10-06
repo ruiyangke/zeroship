@@ -362,10 +362,8 @@ fn require_user_anonymous_surfaces_as_401_not_masked_500() {
         v["message"], "internal error",
         "the message must NOT be the 5xx mask sentinel; body: {body}"
     );
-    // This previously asserted the lowercase "unauthenticated", which ENCODED
-    // the dev-vs-deployed divergence: no consumer in the tree compares against
-    // that spelling. Compare against the wire enum rather than a literal so a
-    // drift in either direction fails here.
+    // Compare against the wire enum rather than a literal so a drift in
+    // either direction fails here.
     assert_eq!(
         v["code"],
         ZsErrorCode::Unauthenticated.as_wire_str(),

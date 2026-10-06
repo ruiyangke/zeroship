@@ -401,7 +401,7 @@ pub(crate) fn build_env_object(
         let mut registrar = NativeRegistrar::new();
         plugin.register(&mut registrar);
 
-        // Stage 1: if the plugin provides a custom namespace instance
+        // If the plugin provides a custom namespace instance
         // (typically a `#[v8_class]`-backed object with internal fields
         // + methods + Weak finalizers), use it as the namespace value.
         // Otherwise fall back to a fresh `v8::Object` — the legacy

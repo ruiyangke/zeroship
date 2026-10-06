@@ -29,8 +29,7 @@ pub(super) fn method_callback_ident(class_ty: &syn::Ident, method: &syn::Ident) 
 /// implicit borrows that `args.get(idx)` keeps alive (the returned
 /// `Local<'s, Value>` borrows from `args`, whose lifetime can unify
 /// with `scope`'s in inference; reborrowing `scope` mutably while a
-/// `Local<'s>` is alive triggers E0502 — see commit 4c41d... for
-/// the regression test case).
+/// `Local<'s>` is alive triggers E0502).
 ///
 /// Concrete output for `fn decode(&mut self, scope: &mut PinScope, n:
 /// u32)` is:

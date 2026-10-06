@@ -74,8 +74,7 @@ fn mode_typed_enum_set_get() {
 
 #[test]
 fn mode_unknown_throws_type_error() {
-    // Behaviour change: previously the bogus value was silently stored
-    // as a string. Now WebIDL §3.13.7 step 4 throws TypeError.
+    // WebIDL 3.13.7 step 4 throws TypeError on the bogus value.
     let s = run_in_v8(
         r#"
         let err = null;

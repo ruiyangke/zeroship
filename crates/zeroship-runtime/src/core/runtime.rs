@@ -614,7 +614,7 @@ impl Runtime {
 
     /// Variant of [`Runtime::call_fetch_handler`] used by the worker once it
     /// has verified the gateway-issued `ZeroShip-User` envelope.
-    // Public API consumed by crates/worker; bundling these into a request
+    // Public API consumed by `crates/zeroship-worker`; bundling these into a request
     // struct would ripple across a crate outside this lint pass's scope.
     #[allow(clippy::too_many_arguments)]
     pub fn call_fetch_handler_with_user(
@@ -3216,7 +3216,7 @@ impl RuntimeInner {
                             r.reject(scope, exc);
                         }
                         ResolveValue::Continuation(run) => {
-                            // **P9 PR 3** — the orchestrator's begin/savepoint
+                            // The orchestrator's begin/savepoint
                             // step finished; run the plugin-supplied
                             // continuation in this live scope. It owns
                             // whichever resolver it settles (it does NOT

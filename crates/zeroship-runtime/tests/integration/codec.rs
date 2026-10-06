@@ -85,11 +85,10 @@ fn roundtrip_brotli() {
 //   "If the end of the compressed input has been reached, and ds's
 //    context has not fully consumed chunk, then throw a TypeError"
 //
-// flate2's `finish()` does NOT detect this — its source comment in
-// `src/zlib/write.rs:357-358` and `src/gz/write.rs:614-615` says
-// "ZlibDecoder consumes one zlib archive and then returns 0 for
-// subsequent writes, allowing any additional data to be consumed by
-// the caller." So `Codec::write` must return `(Vec<u8>, usize)` and
+// flate2's `finish()` does NOT detect this: `ZlibDecoder`/`GzDecoder`
+// consume one archive and return 0 for subsequent writes, allowing any
+// additional data to be consumed by the caller. So `Codec::write` must
+// return `(Vec<u8>, usize)` and
 // the caller has to compare `consumed` against `chunk.len()`.
 
 fn encode_then_append(format: CompressionFormat, suffix: &[u8]) -> Vec<u8> {
@@ -415,4 +414,4 @@ fn x_gzip_alias_works() {
 }
 
 // The lenient deflate fallback is `pub(crate)`; tests for it
-// live in `src/codec.rs` `#[cfg(test)] mod internal_tests`.
+// live in `crates/zeroship-runtime/src/web/codec.rs` `#[cfg(test)] mod internal_tests`.

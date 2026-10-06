@@ -101,8 +101,8 @@ fn atob_throws_on_invalid_chars() {
 
 #[test]
 fn atob_strips_ascii_whitespace() {
-    // Per spec: atob strips ASCII whitespace before validation/decoding.
-    // The polyfill didn't, so this used to fail.
+    // Per spec: atob strips ASCII whitespace before validation/decoding;
+    // this pins that the polyfill conforms.
     let r = dispatch(
         m(r#"export function test() {
             return { decoded: atob("aGVs\nbG8=") };

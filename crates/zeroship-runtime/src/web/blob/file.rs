@@ -8,9 +8,8 @@
 //!
 //! Composition: `File` carries a `Blob` field plus its own `name` and
 //! `last_modified`. We could subclass via `#[v8_inherit(Blob)]`, but
-//! the macro doesn't yet support inheritance (`v8_class.rs` line 26-27
-//! lists this as a known gap). Instead we handle inheritance manually
-//! in `install`:
+//! the macro doesn't yet support inheritance. Instead we handle
+//! inheritance manually in `install`:
 //!   1. Install `File` as its own class with its own constructor.
 //!   2. Set `File.prototype.__proto__ = Blob.prototype` so all Blob
 //!      methods resolve via prototype lookup.

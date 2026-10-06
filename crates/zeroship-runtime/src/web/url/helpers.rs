@@ -39,7 +39,7 @@ pub fn url_encoded_serialize(pairs: &[(String, String)]) -> String {
 }
 
 fn url_encoded_serialize_byte(bytes: &[u8], out: &mut String) {
-    // M10: avoid per-byte `format!("{:02X}", b)` allocation. Hex
+    // Avoid per-byte `format!("{:02X}", b)` allocation. Hex
     // lookup against a static table writes 2 ASCII chars per
     // percent-encoded byte with zero allocation.
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
@@ -103,7 +103,7 @@ pub fn url_encoded_parse(input: &str) -> Vec<(String, String)> {
         let name_decoded = percent_decode(&name_replaced);
         let value_decoded = percent_decode(&value_replaced);
 
-        // M11: avoid forced allocation when the bytes are valid UTF-8.
+        // Avoid forced allocation when the bytes are valid UTF-8.
         // `String::from_utf8_lossy` returns a `Cow::Borrowed` for ASCII-
         // clean / UTF-8-clean input, but `.into_owned()` then copies
         // the borrowed slice. `String::from_utf8` reuses the Vec

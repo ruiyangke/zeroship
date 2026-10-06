@@ -168,12 +168,11 @@ pub(crate) fn gen_extract_throw() -> TokenStream2 {
 
 /// Emit the per-arg extraction tokens for the slow-path
 /// FunctionCallback. Delegates to the table-driven
-/// [`super::known_type::KnownType`] classifier (design §3.7, closes
-/// F10 / H8). The body here is a thin shim: classify the type once,
-/// ask the variant for its emission. The 13-arm string-keyed dispatch
-/// and the `clamp_kind` / `wrap_kind` standalone helpers (with their
-/// `unreachable!` arms) used to live inline; they fold into
-/// `KnownType::extract_tokens` and the variant data, respectively.
+/// [`super::known_type::KnownType`] classifier. The body here is a
+/// thin shim: classify the type once, ask the variant for its
+/// emission. The string-keyed dispatch and the `clamp_kind` /
+/// `wrap_kind` helpers fold into `KnownType::extract_tokens` and the
+/// variant data, respectively.
 pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2 {
     let idx = index as i32;
     crate::known_type::KnownType::from_ty(ty).extract_tokens(name, idx)

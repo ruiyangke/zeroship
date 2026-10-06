@@ -384,7 +384,7 @@ export default {
 
 #[test]
 fn init_script_sources_schema_from_runtime_descriptor_when_present() {
-    // **Migration-first cutover (P4b).** When the deploy carries a bundled
+    // **Migration-first cutover.** When the deploy carries a bundled
     // `RuntimeSchemaDescriptor` (v2 `{ fields, options, indexes }` per collection), the
     // worker stamps it onto the runtime via `RuntimeBuilder::runtime_descriptor`.
     // Native plugin preparation must then install the schema FROM the
@@ -477,7 +477,7 @@ export default defaultExport;
 
 #[test]
 fn init_script_does_not_fallback_to_default_schema_without_descriptor() {
-    // **Migration-first cutover (P5 S3).** An app that ships no descriptor is
+    // **Migration-first cutover.** An app that ships no descriptor is
     // treated as schema-less by the runtime entry. Even if a stale
     // `default.schema` exists, the runtime host must not read it or import
     // the schema adapter module.

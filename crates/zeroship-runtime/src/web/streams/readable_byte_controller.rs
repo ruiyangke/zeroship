@@ -723,13 +723,10 @@ pub fn readable_byte_stream_controller_enqueue_detached_pull_into_to_queue(
 // the spec calls it from on our paths. See the note beside that loop for why
 // the invalidate sits where it does.
 //
-// It previously existed as a standalone `pub fn` with zero callers anywhere in
-// the tree - the only one of 33 in this file - carrying a doc claim that
-// "caller invariants are enforced by the spec algorithms", which described
-// callers that did not exist. Deleted rather than wired up: the inline form
-// operates on the `&mut PullIntoDescriptor` the caller already holds, whereas
-// the helper reached for the front of `pending_pull_intos`, and those are not
-// the same descriptor mid-fill.
+// A standalone helper cannot stand in for it: the inline form operates on
+// the `&mut PullIntoDescriptor` the caller already holds, whereas a helper
+// would reach for the front of `pending_pull_intos`, and those are not the
+// same descriptor mid-fill.
 
 /// `ReadableByteStreamControllerFillPullIntoDescriptorFromQueue(
 /// controller, descriptor)` — spec §3.11.x. Returns true if descriptor's

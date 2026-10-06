@@ -356,8 +356,8 @@ pub fn acquire_readable_stream_byob_reader<'s>(
     // The macro's `install` is idempotent and isolate-cached, so it
     // returns the same FunctionTemplate as the global `install_global`
     // path — which means `instanceof ReadableStreamBYOBReader` works
-    // either with or without the streams namespace installed (the prior
-    // hand-rolled defensive globalThis lookup is no longer needed).
+    // either with or without the streams namespace installed, so no
+    // hand-rolled defensive globalThis lookup is needed).
     let tmpl = ReadableStreamBYOBReader::install(scope);
     let inst_tmpl = tmpl.instance_template(scope);
     let reader_obj = inst_tmpl

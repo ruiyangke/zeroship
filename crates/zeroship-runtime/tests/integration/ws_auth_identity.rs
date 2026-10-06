@@ -1,4 +1,4 @@
-//! Regression test for P4-B-2: the WS-event pump must bind THIS
+//! Regression test: the WS-event pump must bind THIS
 //! connection's authenticated user for every WS turn (onmessage /
 //! onclose), so `env.auth.getUser()` inside a WebSocket handler returns
 //! the connection's user — never null, never a stale leftover from a

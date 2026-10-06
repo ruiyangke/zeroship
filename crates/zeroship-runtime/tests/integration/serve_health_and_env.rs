@@ -34,7 +34,7 @@ fn free_port() -> u16 {
 }
 
 /// A user app that:
-///   - serves its OWN `GET /health` (proving the kernel no longer squats it),
+///   - serves its OWN `GET /health` (proving the kernel leaves `/health` to the app),
 ///   - echoes `env.SECRET_TOKEN` / `env.HOME` at `GET /env-probe`,
 ///   - 404s everything else.
 ///

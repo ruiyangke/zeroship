@@ -34,11 +34,11 @@ fn text_decoder_respects_subarray_bounds() {
     assert!(r.json.contains("\"mid\":\"XYZ\""), "got: {}", r.json);
 }
 
-// Regression: ReadableStream used to stringify non-byte enqueued chunks
+// Regression: the polyfill must not stringify non-byte enqueued chunks
 // via `String(chunk)` and push the UTF-8 bytes of `"[object Foo]"` to the
-// native slot. LangChain's `.stream()` and any other source that emits
-// framework types through `controller.enqueue(obj)` received unusable
-// `Uint8Array` chunks. The fixed polyfill keeps non-byte values in a
+// native slot; LangChain's `.stream()` and any other source that emits
+// framework types through `controller.enqueue(obj)` would receive
+// unusable `Uint8Array` chunks. The polyfill keeps non-byte values in a
 // JS-side FIFO so the reader sees the original object.
 #[test]
 fn readable_stream_preserves_non_byte_values() {

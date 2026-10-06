@@ -251,9 +251,7 @@ fn result_err_throws_typed_exception() {
 // Mutator-style methods (Headers.append, Headers.set, etc.) return
 // nothing on success and throw on validation failure. The macro
 // must handle `Result<(), OpError>` cleanly: emit no-op on Ok,
-// throw the typed exception on Err. Previously this hit the
-// scalar-set fallback and tried `v8::String::new(scope, &())` —
-// compile failure.
+// throw the typed exception on Err.
 
 mod result_unit {
     use super::*;

@@ -711,7 +711,7 @@ fn streaming_async_closes_cleanly() {
 }
 
 // ===========================================================================
-// PR 2 Task 3 — zeroship module surface tests
+// zeroship module surface tests
 // ===========================================================================
 //
 // These lock in the three exports of the user-facing `zeroship` module:

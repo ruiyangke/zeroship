@@ -777,10 +777,9 @@ return typeof net;
 /// refusal arrives on the socket's `error` event rather than by throwing from
 /// `connect()`.
 ///
-/// It used to throw synchronously, because the old check was a boolean over the
-/// host STRING. A literal is now decided by the same address phase that decides
-/// a resolved answer - one ordering, with the platform floor ahead of every
-/// creator rule - and that phase is not reachable before the connect task runs.
+/// A literal is decided by the same address phase that decides a resolved
+/// answer - one ordering, with the platform floor ahead of every creator rule
+/// - and that phase is not reachable before the connect task runs.
 /// `ERR_NET_EGRESS_DENIED` rather than `ERR_NET_SSRF` is the point of the row:
 /// the creator's own rules refused this, not the platform floor.
 #[test]

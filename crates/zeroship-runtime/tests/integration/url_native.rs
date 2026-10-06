@@ -235,7 +235,7 @@ fn url_parse_runs_the_parser_once_per_call() {
     );
 }
 
-/// C4: URL.parse must NEVER throw. Even on internal V8 failure
+/// URL.parse must NEVER throw. Even on internal V8 failure
 /// (e.g. proxy traps that throw inside argument conversion), the API
 /// must return null, not propagate the exception.
 #[test]
@@ -538,7 +538,7 @@ fn search_params_from_record() {
     assert_eq!(s, "a=1&b=2");
 }
 
-/// C5: ArrayBuffer (non-iterable object) takes the record path; must
+/// ArrayBuffer (non-iterable object) takes the record path; must
 /// produce empty entries, not a "[object ArrayBuffer]=" string parse.
 #[test]
 fn search_params_from_array_buffer() {
@@ -558,7 +558,7 @@ fn search_params_from_array_buffer() {
     assert_eq!(s, "");
 }
 
-/// C5 (continued): Uint8Array (iterable object) goes through the
+/// Uint8Array (iterable object) goes through the
 /// sequence path and fails because each yielded number is not a
 /// 2-element pair iterable.
 #[test]
@@ -704,10 +704,10 @@ fn search_params_to_string_tag() {
 }
 
 // ===========================================================================
-// Brand check (M4/M5)
+// Brand check
 // ===========================================================================
 
-/// M4: URLSearchParams.prototype.entries.call(non-SP) must throw, not
+/// URLSearchParams.prototype.entries.call(non-SP) must throw, not
 /// reinterpret arbitrary memory.
 #[test]
 fn search_params_entries_call_with_wrong_this_throws() {
@@ -729,7 +729,7 @@ fn search_params_entries_call_with_wrong_this_throws() {
     assert_eq!(s, "TypeError");
 }
 
-/// M5: URLSearchParams.prototype.forEach.call(non-SP) must throw.
+/// URLSearchParams.prototype.forEach.call(non-SP) must throw.
 #[test]
 fn search_params_for_each_call_with_wrong_this_throws() {
     let s = run_in_v8(

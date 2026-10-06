@@ -185,10 +185,8 @@ pub(super) fn validate_fastcall_signature(func: &ImplItemFn) -> syn::Result<()> 
 /// array, the extern "C" fn signature, and the per-arg adaption that
 /// converts the fast-API value to the user method's expected param type.
 ///
-/// Classification + emission both delegate to
-/// [`FastcallType`] (design §3.7, closes F6). The two parallel
-/// string-keyed `match` tables that used to inline the per-type
-/// triples are gone — the variant carries the data.
+/// Classification + emission both delegate to [`FastcallType`]: the
+/// variant carries the per-type data.
 fn fastcall_arg_mapping(
     name: &syn::Ident,
     ty: &Type,

@@ -736,8 +736,9 @@ pub fn install(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     // re-routing through `with_state`, which is out of scope for this
     // constructor-only migration.
     //
-    // The headers.rs `install_global` pattern (lines 895–940) does exactly
-    // this for keys/values/entries/forEach.
+    // The `install_global` pattern in
+    // `crates/zeroship-runtime/src/web/headers.rs` does exactly this for
+    // keys/values/entries/forEach.
     let class_fn = tmpl.get_function(scope).unwrap();
     let proto_key = v8::String::new(scope, "prototype").unwrap();
     let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
@@ -747,8 +748,8 @@ pub fn install(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     // we're operating on the realised prototype Object, not an
     // ObjectTemplate (which would expose `set_accessor_property`).
     // No-setter shape via `new_from_get_set` with `undefined` setter,
-    // matching the body consumer accessor pattern in
-    // `fetch/body/consumers.rs:110`.
+    // matching the body-consumer accessor pattern in
+    // `crates/zeroship-runtime/src/web/fetch/body/consumers.rs`.
     {
         let closed_key = v8::String::new(scope, "closed").unwrap();
         let getter_tmpl = crate::callback::template(scope, closed_getter_callback);

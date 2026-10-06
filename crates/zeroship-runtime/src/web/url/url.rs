@@ -169,7 +169,7 @@ impl URL {
         input: v8::Local<v8::Value>,
         base: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        // C4: URL.parse must NEVER throw per §4.6. Every V8-fallible
+        // URL.parse must NEVER throw per 4.6. Every V8-fallible
         // step (USVString conversion via `to_string`, which throws for
         // Symbol; wrapper allocation, which can fail with OOM) runs
         // inside a TryCatch. On any thrown exception we drop it and
@@ -579,7 +579,7 @@ fn search_params_getter_callback(
     // macro-emitted constructor; we mutate its contents in place. No
     // other &mut to this Box exists.
     let sp_inst: &mut URLSearchParams = unsafe { &mut *old_raw };
-    // C1: SP holds a Weak<Object> to its parent URL — not a strong
+    // SP holds a Weak<Object> to its parent URL - not a strong
     // Global. The URL keeps a strong Global to the SP wrapper (forward
     // direction, below) for `[SameObject]`, but the back reference is
     // weak so the cycle is breakable. When the URL is GC'd the Weak

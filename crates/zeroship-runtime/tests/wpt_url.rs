@@ -457,8 +457,7 @@ const WPT_FILES: &[WptFile] = &[
         source: include_str!("wpt/url/url-setters.any.js"),
         fixture: &[("resources/setters_tests.json", SETTERS_TESTS_JSON)],
     },
-    // M2: previously omitted files. All inline (no fixture) except
-    // url-origin which uses urltestdata.json.
+    // All inline (no fixture) except url-origin which uses urltestdata.json.
     WptFile {
         name: "url-setters-stripping",
         source: include_str!("wpt/url/url-setters-stripping.any.js"),

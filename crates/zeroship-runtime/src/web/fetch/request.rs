@@ -660,8 +660,8 @@ impl RequestState {
             };
 
         // Apply pending Content-Type (set on the body but only if the user
-        // didn't already provide one on init.headers). PENDING_CT now lives
-        // as the local `pending_ct` variable above; apply it inline.
+        // didn't already provide one on init.headers) from the local
+        // `pending_ct` above.
         if let Some(ct) = pending_ct.take() {
             apply_content_type_if_absent(scope, headers_obj, &ct);
         }

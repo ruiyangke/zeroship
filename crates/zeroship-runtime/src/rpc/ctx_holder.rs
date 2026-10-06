@@ -29,8 +29,8 @@ pub struct RpcCtx {
     /// Stored as an `Arc` so the dispatch path can hand the same backing
     /// `Vec` to multiple consumers (the holder + future borrow-only paths)
     /// with a refcount-only clone instead of an O(N) Vec copy. The Vec
-    /// itself is still materialized once at dispatch entry — this shape
-    /// just removes the redundant clone the holder used to do.
+    /// itself is still materialized once at dispatch entry; this shape
+    /// avoids the redundant clone the holder would otherwise do.
     pub headers: Arc<Vec<(String, String)>>,
     pub user_json: Option<String>,
     pub idempotency_key: Option<String>,

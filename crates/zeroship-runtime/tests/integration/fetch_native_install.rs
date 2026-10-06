@@ -2,10 +2,6 @@
 //!
 //! The native install is unconditional, so these tests exercise the
 //! hand-rolled callback directly without flipping any env-var gate.
-//! A `ZEROSHIP_NATIVE_FETCH=1` set call survived here long after the
-//! gate it fed was deleted; no Rust in the tree reads that name any
-//! more (checked across the whole tracked source), so it is gone
-//! rather than converted.
 //!
 //! Coverage:
 //!   1. `install_fetch_global` registers `globalThis.fetch` as a

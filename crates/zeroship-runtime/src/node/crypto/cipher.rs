@@ -3,9 +3,9 @@
 //!
 //! The current implementation ships AES-{CBC,CTR,GCM} and
 //! ChaCha20-Poly1305 — the four
-//! modes that cover ~95% of npm-package usage. CCM is in the design as
+//! modes that cover the common npm-package usage. CCM is in the design as
 //! a later follow-up and still deferred (the raw aws-lc-sys FFI is
-//! ~120 LOC and rarely used in app-server code; covered when a creator
+//! sizable and rarely used in app-server code; covered when a creator
 //! app surfaces the need).
 //!
 //! Architecture:
@@ -434,12 +434,12 @@ fn run_aes_ctr(c: &mut Cipher) -> Result<Vec<u8>, OpError> {
 /// Refuse options that change CRYPTOGRAPHIC behaviour and that this runtime
 /// does not honour.
 ///
-/// The options bag used to be taken as `_options` and dropped entirely, so
-/// `createCipheriv(alg, key, iv, { authTagLength: 12 })` produced 16-byte tags
-/// and no error. Node honours `authTagLength` (GCM permits 4, 8, 12, 13, 14,
-/// 15, 16), so the value silently meant something else here. A wrong-but-quiet
-/// security parameter is worse than a loud stop, and a caller who wants the
-/// default can simply omit the option.
+/// Ignoring the options bag would let `createCipheriv(alg, key, iv,
+/// { authTagLength: 12 })` produce 16-byte tags with no error. Node honours
+/// `authTagLength` (GCM permits 4, 8, 12, 13, 14, 15, 16), so the value would
+/// silently mean something else here. A wrong-but-quiet security parameter is
+/// worse than a loud stop, and a caller who wants the default can simply omit
+/// the option.
 ///
 /// NOT a blanket rejection. `Cipher` is a stream, so Node callers legitimately
 /// pass stream options (`highWaterMark`, `encoding`) with no cryptographic

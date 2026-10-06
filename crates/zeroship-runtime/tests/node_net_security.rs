@@ -19,7 +19,7 @@ use zeroship_runtime::{EgressResolver, EgressRule, ResolveFuture, Verdict,
 };
 
 /// Mirrors `DEFAULT_GLOBAL_MAX_SOCKETS` / `RESOLVE_TIMEOUT` in
-/// `crates/runtime/src/transport/{net_policy,egress}.rs`. A test that names
+/// `crates/zeroship-runtime/src/transport/{net_policy,egress}.rs`. A test that names
 /// neither wants them out of the way, not a specific number.
 const DEFAULT_GLOBAL_MAX_SOCKETS: u32 = 4096;
 const DEFAULT_RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
