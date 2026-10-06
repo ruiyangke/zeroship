@@ -231,52 +231,29 @@ impl S3 {
         let mut part_buf: Vec<u8> = Vec::with_capacity(PART_SIZE);
         let mut producer_done = false;
 
-        // Single overlap loop: read the producer and drive the in-flight PUTs
-        // concurrently. Each iteration makes exactly one move forward.
-        loop {
-            if inflight.len() >= concurrency {
-                // At capacity: drain one completed PUT before reading more, so
-                // memory stays bounded. A part error propagates → caller aborts.
-                match inflight.next().await {
-                    Some(res) => parts.push(res?),
-                    None => break, // unreachable (non-empty above), but safe
-                }
-            } else if producer_done {
-                // Producer exhausted and we have spare capacity: stop reading
-                // and fall through to the final-part flush + drain below.
-                break;
-            } else if inflight.is_empty() {
-                // Nothing to overlap. Do NOT `select!` on an empty
-                // `FuturesUnordered` (its `next()` is immediately `Ready(None)`
-                // and would busy-loop) — just read the next chunk.
-                match body.next_chunk().await {
-                    Some(chunk) => {
-                        self.handle_chunk(
-                            chunk?,
-                            s3_key,
-                            content_type,
-                            &session_client,
-                            guard,
-                            &mut total,
-                            max_total,
-                            &mut part_buf,
-                            &mut part_number,
-                            &mut upload_id,
-                            &mut inflight,
-                            concurrency,
-                        )
-                        .await?;
+        let outcome: Result<(), StorageError> = async {
+            // Single overlap loop: read the producer and drive the in-flight PUTs
+            // concurrently. Each iteration makes exactly one move forward.
+            loop {
+                if inflight.len() >= concurrency {
+                    // At capacity: drain one completed PUT before reading more, so
+                    // memory stays bounded. A part error propagates -> caller aborts.
+                    match inflight.next().await {
+                        Some(res) => parts.push(res?),
+                        None => break, // unreachable (non-empty above), but safe
                     }
-                    None => producer_done = true,
-                }
-            } else {
-                // Overlap: a PUT completing WHILE the next chunk arrives is the
-                // whole point — neither starves the other.
-                futures::select! {
-                    chunk = body.next_chunk().fuse() => match chunk {
-                        Some(c) => {
+                } else if producer_done {
+                    // Producer exhausted and we have spare capacity: stop reading
+                    // and fall through to the final-part flush + drain below.
+                    break;
+                } else if inflight.is_empty() {
+                    // Nothing to overlap. Do NOT `select!` on an empty
+                    // `FuturesUnordered` (its `next()` is immediately `Ready(None)`
+                    // and would busy-loop) - just read the next chunk.
+                    match body.next_chunk().await {
+                        Some(chunk) => {
                             self.handle_chunk(
-                                c?,
+                                chunk?,
                                 s3_key,
                                 content_type,
                                 &session_client,
@@ -292,65 +269,103 @@ impl S3 {
                             .await?;
                         }
                         None => producer_done = true,
-                    },
-                    // `None` means the set drained; nothing to do, the next
-                    // iteration re-reads it.
-                    done = inflight.next() => if let Some(res) = done {
-                        parts.push(res?);
-                    },
+                    }
+                } else {
+                    // Overlap: a PUT completing WHILE the next chunk arrives is the
+                    // whole point - neither starves the other.
+                    futures::select! {
+                        chunk = body.next_chunk().fuse() => match chunk {
+                            Some(c) => {
+                                self.handle_chunk(
+                                    c?,
+                                    s3_key,
+                                    content_type,
+                                    &session_client,
+                                    guard,
+                                    &mut total,
+                                    max_total,
+                                    &mut part_buf,
+                                    &mut part_number,
+                                    &mut upload_id,
+                                    &mut inflight,
+                                    concurrency,
+                                )
+                                .await?;
+                            }
+                            None => producer_done = true,
+                        },
+                        // `None` means the set drained; nothing to do, the next
+                        // iteration re-reads it.
+                        done = inflight.next() => if let Some(res) = done {
+                            parts.push(res?);
+                        },
+                    }
                 }
             }
-        }
 
-        if let Some(id) = upload_id.as_ref() {
-            // Multipart path: dispatch the final (short) part too, then drain
-            // every in-flight upload before completing. Keep the upload id live
-            // through complete so a failure there is still abortable; disarm the
-            // guard only on a clean complete.
-            if !part_buf.is_empty() {
-                if part_number >= crate::limits::MAX_MULTIPART_PARTS {
-                    return Err(StorageError::LimitExceeded(format!(
-                        "storage: multipart upload would exceed the S3 {}-part limit",
-                        crate::limits::MAX_MULTIPART_PARTS
-                    )));
+            if let Some(id) = upload_id.as_ref() {
+                // Multipart path: dispatch the final (short) part too, then drain
+                // every in-flight upload before completing. Keep the upload id live
+                // through complete so a failure there is still abortable; disarm the
+                // guard only on a clean complete.
+                if !part_buf.is_empty() {
+                    if part_number >= crate::limits::MAX_MULTIPART_PARTS {
+                        return Err(StorageError::LimitExceeded(format!(
+                            "storage: multipart upload would exceed the S3 {}-part limit",
+                            crate::limits::MAX_MULTIPART_PARTS
+                        )));
+                    }
+                    part_number += 1;
+                    let part = Bytes::from(std::mem::take(&mut part_buf));
+                    inflight.push(
+                        self.upload_part_owned(&session_client, s3_key, id, part_number, part)
+                            .boxed_local(),
+                    );
                 }
-                part_number += 1;
-                let part = Bytes::from(std::mem::take(&mut part_buf));
-                inflight.push(
-                    self.upload_part_owned(&session_client, s3_key, id, part_number, part)
-                        .boxed_local(),
-                );
-            }
-            // Drain all remaining in-flight part uploads. An error here drops
-            // the rest (cancelling those plain futures); the caller aborts the
-            // multipart.
-            while let Some(res) = inflight.next().await {
-                parts.push(res?);
-            }
-            // Uploads finish out of order — S3 requires the parts list in
-            // ascending part-number order at complete time.
-            parts.sort_by_key(|p| p.part_number);
+                // Drain all remaining in-flight part uploads. An error here drops
+                // the rest (cancelling those plain futures); the caller aborts the
+                // multipart.
+                while let Some(res) = inflight.next().await {
+                    parts.push(res?);
+                }
+                // Uploads finish out of order - S3 requires the parts list in
+                // ascending part-number order at complete time.
+                parts.sort_by_key(|p| p.part_number);
 
-            // Finalize on the warm session client (no cold post-upload connect).
-            self.client
-                .complete_multipart_on(&session_client, s3_key, id, &parts)
-                .await
-                .map_err(|e| map_s3("complete_multipart", s3_key, e))?;
-            // Completed — disarm the guard so neither the explicit error path
-            // nor the Drop path aborts the now-live object.
-            let _ = guard.take();
-        } else {
-            // Single-part path: object below PART_SIZE → ordinary PutObject.
-            // No multipart was started, so nothing is in flight here.
-            let opts = PutOptions {
-                content_type,
-                ..PutOptions::default()
-            };
-            self.client
-                .put(s3_key, &part_buf, opts)
-                .await
-                .map_err(|e| map_s3("put", s3_key, e))?;
+                // Finalize on the warm session client (no cold post-upload connect).
+                self.client
+                    .complete_multipart_on(&session_client, s3_key, id, &parts)
+                    .await
+                    .map_err(|e| map_s3("complete_multipart", s3_key, e))?;
+                // Completed - disarm the guard so neither the explicit error path
+                // nor the Drop path aborts the now-live object.
+                let _ = guard.take();
+            } else {
+                // Single-part path: object below PART_SIZE -> ordinary PutObject.
+                // No multipart was started, so nothing is in flight here.
+                let opts = PutOptions {
+                    content_type,
+                    ..PutOptions::default()
+                };
+                self.client
+                    .put(s3_key, &part_buf, opts)
+                    .await
+                    .map_err(|e| map_s3("put", s3_key, e))?;
+            }
+
+            Ok(())
         }
+        .await;
+
+        if outcome.is_err() {
+            // The reader or a part PUT failed. Let every in-flight part PUT settle
+            // before returning, so the caller's abort does not race the gateway's
+            // part-file links; the abort then removes a stable upload directory
+            // instead of failing with "directory not empty" and leaving the
+            // multipart orphaned.
+            while inflight.next().await.is_some() {}
+        }
+        outcome?;
 
         Ok(total)
     }

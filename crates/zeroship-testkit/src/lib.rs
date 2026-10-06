@@ -20,7 +20,8 @@
 //! - [`redis`] owns the Redis and Dragonfly servers the driver, KV and binding
 //!   suites share.
 //! - [`tenant`] mints the scoped org/project/app/user ids a case owns.
-//! - [`s3`] owns an S3-compatible server with Docker-assigned ports.
+//! - [`s3`] is the S3 gateway every storage test process of a worktree shares,
+//!   isolated by the prefix a case passes to its URL.
 //! - [`session_keys`] writes the key files in-process auth servers read.
 //! - [`nested_cargo`] starts a cargo from inside a process cargo started.
 //! - [`recorded`] holds the recorded artifacts several crates pin against.

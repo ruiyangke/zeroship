@@ -7909,12 +7909,11 @@ dependencies = [
  "sha2 0.10.9",
  "tar",
  "tempfile",
- "testcontainers",
  "thiserror 2.0.18",
  "tracing",
  "uuid",
  "zeroship-id",
- "zeroship-shared-server",
+ "zeroship-testkit",
  "zstd",
 ]
 

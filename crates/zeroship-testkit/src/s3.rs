@@ -1,4 +1,16 @@
-//! An owned S3-compatible server with Docker-assigned ports.
+//! The S3 gateway every test process of a worktree shares.
+//!
+//! [`S3Server::start`] joins the one gateway a worktree boots through
+//! [`zeroship_shared_server`]: the first process elects itself, the image is
+//! built, the container starts, and every other process joins the ready gateway.
+//! A process holds its lease for as long as it runs; the container's watchdog
+//! removes the gateway once no process has held it for the idle grace.
+//!
+//! One gateway per run is what keeps the daemon's ephemeral host-port allocator
+//! to a single draw per worktree, and the published port is bound on loopback so
+//! the fixture does not depend on a wildcard host port being free. Tests stay
+//! isolated from each other by the prefix they pass to [`S3Server::url`], never
+//! by a server of their own.
 //!
 //! The server is the Versity S3 Gateway over its POSIX backend: a real S3
 //! implementation that verifies `SigV4` (an unsigned or wrongly-signed request is
@@ -6,70 +18,67 @@
 //! signing or multipart regression fails here instead of passing against a mock
 //! that accepts anything.
 //!
-//! The container is a testcontainers `Container` handle: dropping it removes the
-//! gateway, and the crate's process watchdog removes it if the owning process is
-//! signalled before the drop runs.
-//!
 //! [`StalledObject`] is the one fault the gateway cannot produce: a response
 //! body that stops arriving. It is a loopback endpoint, not a container.
 
 use std::time::Duration;
 
-use testcontainers::{
-    core::{IntoContainerPort, Mount, WaitFor},
-    runners::SyncRunner,
-    Container, GenericImage, ImageExt,
-};
+use zeroship_shared_server::{self as shared, Scope};
 
-const IMAGE: &str = "ghcr.io/versity/versitygw";
-/// Pinned: a floating tag is how a fixture silently changes servers under a
-/// green suite, or stops resolving when a tag is withdrawn.
-const TAG: &str = "v1.3.0";
+mod image;
+
+pub(crate) use image::RECIPE;
+
+/// The gateway's own listener port inside the container.
+const CONTAINER_PORT: u16 = 7070;
 const ACCESS: &str = "zeroship-fixture";
 const SECRET: &str = "zeroship-fixture-secret";
 const BUCKET: &str = "storage-fixture";
-const PORT: u16 = 7070;
-const DATA_CAPACITY: i64 = 1024 * 1024 * 1024;
 
+/// How long the gateway may go unleased before its watchdog removes it.
+///
+/// A run leases the gateway from the test processes that use it, and under a
+/// process-per-test runner those processes are interleaved with long S3-free
+/// stretches. A grace shorter than those gaps removes the gateway mid-run and a
+/// later test boots a second one, so the grace spans a run rather than one test.
+const S3_IDLE_GRACE: Duration = Duration::from_mins(15);
+
+/// The shared S3 gateway, leased by the process that holds it.
 #[derive(Debug)]
 pub struct S3Server {
-    _container: Container<GenericImage>,
+    lease: shared::Lease,
     endpoint: String,
 }
 
 impl S3Server {
+    /// Join the gateway `scope` names, booting it if this process is elected.
+    ///
+    /// # Errors
+    /// When the gateway image cannot be built, or the gateway cannot be booted
+    /// or joined.
+    pub fn join(scope: &Scope) -> Result<Self, String> {
+        let lease = shared::join(scope, &spec()?, |_| Ok(()))?;
+        let endpoint = format!("http://127.0.0.1:{}", lease.port);
+        Ok(Self { lease, endpoint })
+    }
+
+    /// Join the worktree's shared gateway, booting it if this process is elected.
+    ///
+    /// # Panics
+    /// When the gateway image cannot be built, or the gateway cannot be booted
+    /// or joined.
+    #[must_use]
     pub fn start() -> Self {
-        // The POSIX backend maps each bucket to a directory under the gateway
-        // root, so the bucket exists as soon as the directory does: no client
-        // and no vendor CLI take part in fixture setup.
-        let boot = format!(
-            "mkdir -p /data/{BUCKET} && exec /usr/local/bin/versitygw --port :{PORT} posix /data"
-        );
-        let container = GenericImage::new(IMAGE, TAG)
-            .with_exposed_port(PORT.tcp())
-            // The gateway prints its banner once the listener is bound.
-            .with_wait_for(WaitFor::message_on_stdout("VersityGW"))
-            .with_entrypoint("/bin/sh")
-            .with_env_var("ROOT_ACCESS_KEY_ID", ACCESS)
-            .with_env_var("ROOT_SECRET_ACCESS_KEY", SECRET)
-            // Disposable fixture data must not consume the host's build-cache
-            // space.
-            .with_mount(Mount::tmpfs_mount("/data").with_size_bytes(DATA_CAPACITY))
-            .with_cmd(["-c".to_string(), boot])
-            .with_startup_timeout(Duration::from_secs(90))
-            .start()
-            .expect("S3 tests require Docker");
-        let endpoint = format!(
-            "http://{}:{}",
-            container.get_host().expect("S3 fixture host"),
-            container
-                .get_host_port_ipv4(PORT.tcp())
-                .expect("S3 fixture mapped port"),
-        );
-        Self {
-            _container: container,
-            endpoint,
-        }
+        Self::join(&Scope::private("s3", S3_IDLE_GRACE)).unwrap_or_else(|error| {
+            panic!("the shared S3 gateway could not be started: {error}")
+        })
+    }
+
+    /// The Docker id of the shared gateway, so a contract can show two processes
+    /// joined the same container.
+    #[must_use]
+    pub fn container_id(&self) -> &str {
+        &self.lease.container_id
     }
 
     /// The `s3://` URL of `prefix` in the fixture bucket, in the form
@@ -80,8 +89,15 @@ impl S3Server {
     /// crate under test on this crate's normal edge.
     #[must_use]
     pub fn url(&self, prefix: &str) -> String {
+        self.url_with_checksum(prefix, "none")
+    }
+
+    /// The same URL with the `checksum` mode stated at the call site, so a suite
+    /// that pins a digest mode gets it without changing the shared default.
+    #[must_use]
+    pub fn url_with_checksum(&self, prefix: &str, checksum: &str) -> String {
         format!(
-            "s3://{BUCKET}/{prefix}?provider=generic&endpoint={}&region=us-east-1&style=path&dev_http=true&checksum=none",
+            "s3://{BUCKET}/{prefix}?provider=generic&endpoint={}&region=us-east-1&style=path&dev_http=true&checksum={checksum}",
             self.endpoint,
         )
     }
@@ -97,6 +113,87 @@ impl S3Server {
     pub fn secret_key(&self) -> &'static str {
         SECRET
     }
+}
+
+/// The recipe the shared gateway runs under, its identity keyed to every input
+/// that changes what a ready gateway holds.
+///
+/// # Errors
+/// When the image cannot be built.
+pub fn spec() -> Result<shared::Spec, String> {
+    let image =
+        image::reference().map_err(|error| format!("could not build the shared S3 image: {error}"))?;
+    // The POSIX backend maps each bucket to a directory under the gateway root,
+    // so the bucket exists as soon as the directory does: no client and no
+    // vendor CLI take part in fixture setup.
+    let boot = format!(
+        "mkdir -p /data/{BUCKET} && exec /usr/local/bin/versitygw --port :{CONTAINER_PORT} posix /data"
+    );
+    let args = vec!["/bin/sh".to_owned(), "-c".to_owned(), boot];
+    let environment = vec![
+        ("ROOT_ACCESS_KEY_ID".to_owned(), ACCESS.to_owned()),
+        ("ROOT_SECRET_ACCESS_KEY".to_owned(), SECRET.to_owned()),
+    ];
+    let ready = readiness();
+    let inputs = inputs(&image, &environment, &args, &ready);
+    Ok(shared::Spec {
+        inputs,
+        image,
+        environment,
+        ports: vec![shared::Port {
+            container: CONTAINER_PORT,
+            host: shared::HostPort::Assigned,
+        }],
+        watchdog: shared::image::WATCHDOG.to_owned(),
+        entrypoint: shared::Entrypoint::Watchdog,
+        args,
+        ready,
+    })
+}
+
+/// How to tell the gateway is ready and still answers.
+///
+/// The banner names the bound listener; the probe is a TCP connect, which is the
+/// only request the gateway answers without a signature.
+fn readiness() -> shared::Readiness {
+    let probe = vec![
+        "nc".to_owned(),
+        "-z".to_owned(),
+        "127.0.0.1".to_owned(),
+        CONTAINER_PORT.to_string(),
+    ];
+    shared::Readiness {
+        log_marker: "VersityGW".to_owned(),
+        probe: probe.clone(),
+        answer: probe,
+    }
+}
+
+/// The 12-hex identity of a gateway built from the image, environment, server
+/// command and readiness probe.
+fn inputs(
+    image: &str,
+    environment: &[(String, String)],
+    args: &[String],
+    ready: &shared::Readiness,
+) -> String {
+    let mut parts: Vec<Vec<u8>> = vec![
+        image.as_bytes().to_vec(),
+        CONTAINER_PORT.to_string().into_bytes(),
+        BUCKET.as_bytes().to_vec(),
+    ];
+    for argument in args {
+        parts.push(argument.as_bytes().to_vec());
+    }
+    for (key, value) in environment {
+        parts.push(format!("{key}={value}").into_bytes());
+    }
+    parts.push(ready.log_marker.as_bytes().to_vec());
+    for argument in ready.probe.iter().chain(&ready.answer) {
+        parts.push(argument.as_bytes().to_vec());
+    }
+    let refs: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
+    shared::digest(&refs)
 }
 
 /// An S3-shaped endpoint whose one object stalls partway through its body.

@@ -34,6 +34,7 @@ const CHILD_MYSQL: &str = "integration::testkit_shared_server::child_join_mysql_
 const CHILD_REDIS: &str = "integration::testkit_shared_server::child_join_redis_report";
 const CHILD_DRAGONFLY_CLUSTER: &str =
     "integration::testkit_shared_server::child_join_dragonfly_cluster_report";
+const CHILD_S3: &str = "integration::testkit_shared_server::child_join_s3_report";
 
 /// A throwaway lease directory under the worktree's `target`, canonical so its
 /// path is the one the container labels carry.
@@ -224,6 +225,20 @@ fn child_join_dragonfly_cluster_report() {
     println!("CONTAINER={}", lease.container_id);
     println!("NONCE={}", lease.nonce);
     println!("BOOTED={}", lease.booted);
+}
+
+/// Child side of the S3 gateway contract: join a throwaway gateway and report
+/// what this process saw.
+#[test]
+#[ignore = "spawned by a contract test as a child process, with its scope on stdin"]
+fn child_join_s3_report() {
+    let dir = read_scope();
+    let spec = zeroship_testkit::s3::spec().expect("the S3 gateway recipe");
+    let lease = shared::join(&Scope::at(&dir, GRACE), &spec, |_| Ok(())).expect("join the gateway");
+    println!("CONTAINER={}", lease.container_id);
+    println!("NONCE={}", lease.nonce);
+    println!("BOOTED={}", lease.booted);
+    println!("PORT={}", lease.port);
 }
 
 // --- identity ---------------------------------------------------------------------
@@ -563,6 +578,48 @@ fn two_processes_share_one_dragonfly_cluster_server() {
 
     assert_eq!(first, id, "a child must join the cluster container the parent booted");
     assert_eq!(second, id, "both children must join the one cluster container");
+
+    drop(held);
+    wait_removed(&id, REMOVAL_BOUND);
+    cleanup(&dir);
+}
+
+/// Two processes join one S3 gateway, and the watchdog removes it once the last
+/// lease is released.
+///
+/// The parent holds its own lease across both sequential children; without it
+/// the watchdog would remove the gateway after the grace between them and the
+/// second child would boot a new one.
+#[test]
+fn two_processes_share_one_s3_gateway() {
+    let dir = scratch("s3-shared");
+    let spec = zeroship_testkit::s3::spec().expect("the S3 gateway recipe");
+    let held = shared::join(&Scope::at(&dir, GRACE), &spec, |_| Ok(())).expect("boot the gateway");
+    let id = held.container_id.clone();
+
+    let (status, lines) = run_child(CHILD_S3, &dir);
+    assert!(
+        status.success(),
+        "the first S3 child failed:\n{}",
+        lines.join("\n")
+    );
+    let first = field(&lines, "CONTAINER=");
+    assert_eq!(
+        field(&lines, "BOOTED="),
+        "false",
+        "a child must join the gateway the parent booted"
+    );
+
+    let (status, lines) = run_child(CHILD_S3, &dir);
+    assert!(
+        status.success(),
+        "the second S3 child failed:\n{}",
+        lines.join("\n")
+    );
+    let second = field(&lines, "CONTAINER=");
+
+    assert_eq!(first, id, "a child must join the gateway the parent booted");
+    assert_eq!(second, id, "both children must join the one gateway");
 
     drop(held);
     wait_removed(&id, REMOVAL_BOUND);

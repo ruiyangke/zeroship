@@ -1,25 +1,20 @@
 //! S3-backed integration test for `S3BlobStore` + LocalDisk↔S3 parity.
 //!
-//! Self-contained: starts its own S3 server container, creates a bucket,
-//! exercises the `BlobStore` contract over S3 (blob round-trip, a
-//! MULTIPART-sized blob, manifest round-trip, dedup, `get_blob_to_file` refill,
-//! `delete_app_manifests`), then runs the SAME assertions against
-//! `LocalDiskBlobStore` for parity, and tears the container down. It **FAILS**
-//! when Docker is unavailable: a skip reports green on every machine that
-//! cannot run it, leaving `S3BlobStore` without coverage.
+//! The S3 leg runs against the shared worktree gateway the testkit starts, under
+//! a prefix of its own so parallel cases cannot collide. It exercises the
+//! `BlobStore` contract over S3 (blob round-trip, a MULTIPART-sized blob,
+//! manifest round-trip, dedup, `get_blob_to_file` refill, `delete_app_manifests`),
+//! then runs the SAME assertions against `LocalDiskBlobStore` for parity. It
+//! **FAILS** when Docker is unavailable, so the only coverage `S3BlobStore` has
+//! cannot report green on a machine that did not run it.
 //!
 //! Run explicitly:
 //!   `cargo test -p zeroship-bundle --test main integration::s3_blob_store:: -- --nocapture`
 
 #![allow(clippy::future_not_send)]
 
-use std::time::Duration;
+use std::sync::OnceLock;
 
-use testcontainers::{
-    core::{IntoContainerPort, WaitFor},
-    runners::SyncRunner,
-    Container, GenericImage, ImageExt,
-};
 use uuid::Uuid;
 use zeroship_bundle::s3_blob::PART_SIZE;
 use zeroship_bundle::{
@@ -27,93 +22,51 @@ use zeroship_bundle::{
     MAX_MANIFEST_BYTES,
 };
 use zeroship_id::AppId;
+use zeroship_testkit::s3::S3Server;
 
 use compio_s3::{S3Client, S3Config, S3Credentials};
 
-const ACCESS_KEY: &str = "zeroship-fixture";
-const SECRET_KEY: &str = "zeroship-fixture-secret";
-/// The gateway's own listener port inside the container.
-const SERVER_PORT: u16 = 7070;
-const BUCKET: &str = "zs-blob-bucket";
-/// The gateway prints this once its listener is bound; polling the container
-/// log for it is a readiness condition rather than a fixed sleep.
-const READY_MARKER: &str = "VersityGW";
-
-/// The gateway this test runs against, started through testcontainers.
+/// The prefix this suite owns in the shared bucket, so a parallel case's objects
+/// never appear under its listings.
 ///
-/// Dropping the handle removes the container and the crate's process watchdog
-/// covers a signal delivered before the drop. The gateway's POSIX backend maps
-/// each bucket to a directory under its root, so the boot command creates the
-/// bucket with `mkdir` before handing over to the server: setup needs no S3
-/// client and no vendor CLI. A daemon that cannot start it fails the run
-/// rather than skipping, because this is the only coverage `S3BlobStore` has.
-struct S3Fixture {
-    _container: Container<GenericImage>,
-    endpoint: String,
+/// The nonce keeps a repeated run in one worktree fresh: content-addressed blobs
+/// left under a fixed prefix would make the next run's first put dedup instead
+/// of write.
+fn prefix() -> &'static str {
+    static PREFIX: OnceLock<String> = OnceLock::new();
+    PREFIX.get_or_init(|| format!("bundle-{}", Uuid::new_v4().simple()))
 }
 
-impl S3Fixture {
-    fn start() -> Self {
-        let boot = format!(
-            "mkdir -p /data/{BUCKET} && exec /usr/local/bin/versitygw --port :{SERVER_PORT} posix /data"
-        );
-        let container = zeroship_shared_server::images::VERSITYGW
-            .generic()
-            .with_exposed_port(SERVER_PORT.tcp())
-            .with_wait_for(WaitFor::message_on_stdout(READY_MARKER))
-            .with_entrypoint("/bin/sh")
-            .with_env_var("ROOT_ACCESS_KEY_ID", ACCESS_KEY)
-            .with_env_var("ROOT_SECRET_ACCESS_KEY", SECRET_KEY)
-            .with_cmd(["-c".to_string(), boot])
-            .with_startup_timeout(Duration::from_secs(90))
-            .start()
-            .expect("S3 tests require Docker");
-        let endpoint = format!(
-            "http://{}:{}",
-            container.get_host().expect("S3 fixture host"),
-            container
-                .get_host_port_ipv4(SERVER_PORT.tcp())
-                .expect("S3 fixture mapped port"),
-        );
-        Self {
-            _container: container,
-            endpoint,
-        }
-    }
+/// `checksum=sha256` is stated rather than inherited: it makes the single-object
+/// PUT send `x-amz-checksum-sha256`, so the server verifies a digest this client
+/// computed.
+const CHECKSUM: &str = "sha256";
 
-    /// `checksum=sha256` is stated rather than inherited: it makes the
-    /// single-object PUT send `x-amz-checksum-sha256`, so the server verifies a
-    /// digest this client computed.
-    fn url(&self) -> String {
-        format!(
-            "s3://{BUCKET}/it?provider=generic&endpoint={}&region=us-east-1&style=path&dev_http=true&checksum=sha256",
-            self.endpoint,
-        )
-    }
+/// The store over the shared gateway under this suite's prefix.
+fn store(server: &S3Server) -> S3BlobStore {
+    store_with_concurrency(server, zeroship_bundle::limits::DEFAULT_UPLOAD_CONCURRENCY)
+}
 
-    fn store(&self) -> S3BlobStore {
-        self.store_with_concurrency(zeroship_bundle::limits::DEFAULT_UPLOAD_CONCURRENCY)
-    }
+/// The same store with the in-flight part-upload concurrency stated at the call
+/// site. `S3BlobStore` has taken this as a constructor argument since the crate
+/// stopped reading its own configuration, so a test that wants a specific value
+/// passes it here.
+fn store_with_concurrency(server: &S3Server, upload_concurrency: usize) -> S3BlobStore {
+    let cfg =
+        S3Config::parse_url(&server.url_with_checksum(prefix(), CHECKSUM)).expect("parse s3 url");
+    S3BlobStore::new(
+        cfg,
+        S3Credentials::new(server.access_key(), server.secret_key(), None),
+        upload_concurrency,
+    )
+}
 
-    /// The same store with the in-flight part-upload concurrency stated at the
-    /// call site. `S3BlobStore` has taken this as a constructor argument since
-    /// the crate stopped reading its own configuration, so a test that wants a
-    /// specific value passes it here.
-    fn store_with_concurrency(&self, upload_concurrency: usize) -> S3BlobStore {
-        let cfg = S3Config::parse_url(&self.url()).expect("parse s3 url");
-        S3BlobStore::new(
-            cfg,
-            S3Credentials::new(ACCESS_KEY, SECRET_KEY, None),
-            upload_concurrency,
-        )
-    }
-
-    /// A raw `S3Client` over the same bucket, for asserting low-level state
-    /// (e.g. that an aborted multipart leaves no orphaned upload).
-    fn raw_client(&self) -> S3Client {
-        let cfg = S3Config::parse_url(&self.url()).expect("parse s3 url");
-        S3Client::new(cfg, S3Credentials::new(ACCESS_KEY, SECRET_KEY, None))
-    }
+/// A raw `S3Client` over the same bucket and prefix, for asserting low-level
+/// state (e.g. that an aborted multipart leaves no orphaned upload).
+fn raw_client(server: &S3Server) -> S3Client {
+    let cfg =
+        S3Config::parse_url(&server.url_with_checksum(prefix(), CHECKSUM)).expect("parse s3 url");
+    S3Client::new(cfg, S3Credentials::new(server.access_key(), server.secret_key(), None))
 }
 
 /// A `Read` source that yields `before_err` bytes (in 64 KiB reads) and then
@@ -152,33 +105,33 @@ fn local_store() -> (LocalDiskBlobStore, std::path::PathBuf) {
 
 #[test]
 fn s3_blob_store_roundtrip_and_parity() {
-    let fixture = S3Fixture::start();
+    let server = S3Server::start();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         compio::runtime::Runtime::new()
             .expect("compio runtime")
             .block_on(async {
                 // S3 leg.
-                let s3 = fixture.store();
+                let s3 = store(&server);
                 run_contract(&s3, "s3").await;
                 // Parallel multipart: a many-part blob under concurrency > 1
                 // round-trips byte-exact AND keeps content-address integrity
                 // (parts finish out of order; the SHA-256 is over read order).
-                run_s3_parallel_many_parts(&fixture).await;
+                run_s3_parallel_many_parts(&server).await;
                 // Content-address integrity under concurrency: a hash that
                 // does not match the streamed bytes must ABORT before
                 // complete_multipart — nothing committed, no orphaned upload.
-                run_s3_parallel_hash_mismatch_aborts(&fixture).await;
+                run_s3_parallel_hash_mismatch_aborts(&server).await;
                 // Regression: an error mid-multipart-upload must abort the
                 // upload explicitly, not leak orphaned parts or abort the
                 // process.
-                run_c1_mid_upload_abort(&s3, &fixture).await;
+                run_c1_mid_upload_abort(&s3, &server).await;
                 // Local-disk leg — identical assertions for parity.
                 let (local, root) = local_store();
                 run_contract(&local, "local").await;
                 std::fs::remove_dir_all(&root).ok();
             });
     }));
-    drop(fixture);
+    drop(server);
     if let Err(e) = result {
         std::panic::resume_unwind(e);
     }
@@ -192,7 +145,7 @@ fn s3_blob_store_roundtrip_and_parity() {
 /// exist on the server before the failure; only an explicit awaited abort can
 /// reclaim them. (Pre-fix, the abort was a detached `spawn` in `Drop`, which
 /// could panic off-runtime / never be polled, leaking the upload.)
-async fn run_c1_mid_upload_abort(store: &S3BlobStore, fixture: &S3Fixture) {
+async fn run_c1_mid_upload_abort(store: &S3BlobStore, server: &S3Server) {
     // Declare a size big enough to force multipart (≥ 1 full part + more), but
     // make the reader die partway. The hash is arbitrary (we never complete).
     let declared = (PART_SIZE * 2) as u64;
@@ -210,7 +163,7 @@ async fn run_c1_mid_upload_abort(store: &S3BlobStore, fixture: &S3Fixture) {
     // Sanity-check the listing path is non-vacuous first.
     let key_prefix = format!("blobs/{fake_hash}");
     {
-        let raw = fixture.raw_client();
+        let raw = raw_client(server);
         let up = raw
             .create_multipart(&key_prefix, "application/octet-stream")
             .await
@@ -233,7 +186,7 @@ async fn run_c1_mid_upload_abort(store: &S3BlobStore, fixture: &S3Fixture) {
 
     // The fix's guarantee: the multipart upload created mid-stream was aborted
     // explicitly, so no orphaned (billed) upload remains.
-    let raw = fixture.raw_client();
+    let raw = raw_client(server);
     let uploads = raw
         .list_multipart_uploads(&key_prefix)
         .await
@@ -265,10 +218,10 @@ impl std::io::Read for VecReader {
 /// way out, so a byte-exact round-trip proves BOTH the parts were uploaded in
 /// the correct order (sorted before complete, despite finishing out of order)
 /// AND the content address held. Pre-change this path was strictly sequential.
-async fn run_s3_parallel_many_parts(fixture: &S3Fixture) {
+async fn run_s3_parallel_many_parts(server: &S3Server) {
     // Force 4-way concurrency explicitly so the test does not depend on the
     // default.
-    let store = fixture.store_with_concurrency(4);
+    let store = store_with_concurrency(server, 4);
 
     // 5 full parts + a remainder = 6 parts, past the concurrency of 4 so
     // several waves overlap and finish out of order. Bounded by MAX_BLOB_BYTES
@@ -295,8 +248,8 @@ async fn run_s3_parallel_many_parts(fixture: &S3Fixture) {
 /// order, the whole-stream SHA-256 (computed in read order) is verified BEFORE
 /// `complete_multipart`; the mismatch must abort the upload — the object must
 /// NOT materialize under the wrong key, and no orphaned multipart remains.
-async fn run_s3_parallel_hash_mismatch_aborts(fixture: &S3Fixture) {
-    let store = fixture.store_with_concurrency(4);
+async fn run_s3_parallel_hash_mismatch_aborts(server: &S3Server) {
+    let store = store_with_concurrency(server, 4);
 
     // A multipart-sized blob (≥ 1 full part so a real multipart upload runs),
     // but we lie about its hash. declared size matches the real byte count so
@@ -321,7 +274,7 @@ async fn run_s3_parallel_hash_mismatch_aborts(fixture: &S3Fixture) {
         "integrity: object materialized under the wrong content hash"
     );
     // And no orphaned multipart upload was left behind.
-    let raw = fixture.raw_client();
+    let raw = raw_client(server);
     let uploads = raw
         .list_multipart_uploads(&key_prefix)
         .await

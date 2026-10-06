@@ -12,6 +12,11 @@ pub use zeroship_shared_server::images::*;
 use zeroship_shared_server::image::Recipe;
 
 /// The recipes whose build fetches packages over the network: the `PostgreSQL`
-/// image installs `PostGIS` from the distribution, and the `MySQL` image installs
-/// the `flock` its watchdog checks for.
-pub const FETCHING: &[Recipe] = &[crate::postgres::RECIPE, crate::mysql::RECIPE];
+/// image installs `PostGIS` from the distribution, the `MySQL` image installs
+/// the `flock` its watchdog checks for, and the S3 gateway image installs
+/// util-linux's `flock`.
+pub const FETCHING: &[Recipe] = &[
+    crate::postgres::RECIPE,
+    crate::mysql::RECIPE,
+    crate::s3::RECIPE,
+];

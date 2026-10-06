@@ -180,3 +180,56 @@ async fn h1_early_cancel_is_clean(c: &S3Client) {
 
     c.delete(key).await.expect("delete stream-cancel object");
 }
+
+/// The `host:port` authority `S3Server::url` embeds in its `endpoint` query
+/// value.
+fn endpoint_authority(url: &str) -> &str {
+    url.split("endpoint=")
+        .nth(1)
+        .and_then(|rest| rest.split('&').next())
+        .and_then(|endpoint| endpoint.strip_prefix("http://"))
+        .expect("the fixture url names an http endpoint")
+}
+
+/// The shared gateway reaches the daemon-assigned loopback port, so holding the
+/// gateway's listener port on the host cannot stop it from starting or serving.
+/// The endpoint must name loopback: the daemon binds the shared server's
+/// published port there, and a wildcard bind is what collided with the host's
+/// own sockets in the failure this replaced.
+#[test]
+fn s3_fixture_serves_while_its_listener_port_is_held_on_the_host() {
+    let held = std::net::TcpListener::bind(("0.0.0.0", 7070)).expect("bind the held host port");
+
+    let server = S3Server::start();
+    let url = server.url("held-port");
+    let authority = endpoint_authority(&url);
+    assert!(
+        authority.starts_with("127.0.0.1:"),
+        "the shared gateway must name its loopback host port, got {authority}"
+    );
+
+    let client = S3Client::new(
+        compio_s3::S3Config::parse_url(&url).expect("S3 fixture configuration"),
+        compio_s3::S3Credentials::new(server.access_key(), server.secret_key(), None),
+    );
+    compio::runtime::Runtime::new()
+        .expect("compio runtime")
+        .block_on(async {
+            let key = "held-port.txt";
+            let body = b"held port";
+            client
+                .put(
+                    key,
+                    body,
+                    PutOptions { content_type: "text/plain", ..Default::default() },
+                )
+                .await
+                .expect("put while the host port is held");
+            let (got, _meta) = client
+                .get(key, 64)
+                .await
+                .expect("get while the host port is held");
+            assert_eq!(got.as_ref(), body);
+        });
+    drop(held);
+}

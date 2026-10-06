@@ -21,6 +21,8 @@
 use zeroship_testkit::s3::S3Server;
 use zeroship_storage::StorageError;
 #[cfg(feature = "s3")]
+use std::sync::OnceLock;
+#[cfg(feature = "s3")]
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -582,7 +584,18 @@ fn localfs_parity_and_large_stream() {
 #[cfg(feature = "s3")]
 /// The fixture bucket's configuration under this suite's prefix.
 fn s3_config(server: &S3Server) -> compio_s3::S3Config {
-    compio_s3::S3Config::parse_url(&server.url("it")).expect("S3 fixture configuration")
+    compio_s3::S3Config::parse_url(&server.url(s3_prefix())).expect("S3 fixture configuration")
+}
+
+/// The prefix this suite owns in the shared bucket.
+///
+/// The nonce keeps a repeated run in one worktree fresh: an upload a failed
+/// abort left behind under a fixed prefix would make every later run list it as
+/// this run's orphan and fail.
+#[cfg(feature = "s3")]
+fn s3_prefix() -> &'static str {
+    static PREFIX: OnceLock<String> = OnceLock::new();
+    PREFIX.get_or_init(|| format!("it-{}", uuid::Uuid::new_v4().simple()))
 }
 
 /// The credentials the fixture gateway accepts.
@@ -630,11 +643,66 @@ fn s3_parity_and_large_stream() {
         });
 }
 
+/// The shared gateway namespaces multipart uploads by the URL prefix each case
+/// passes: an upload left in flight under one prefix must never appear in
+/// another prefix's listing, or two parallel cases on the one gateway would see
+/// and abort each other's uploads.
+#[cfg(feature = "s3")]
+#[test]
+fn s3_shared_gateway_isolates_multipart_uploads_by_prefix() {
+    let server = S3Server::start();
+    compio::runtime::Runtime::new()
+        .expect("compio runtime")
+        .block_on(async {
+            let owner = format!("{}-owner", s3_prefix());
+            let other = format!("{}-other", s3_prefix());
+            let owner_client = s3_client_for(&server, &owner);
+            let other_client = s3_client_for(&server, &other);
+            let key = format!("{APP}/{BUCKET}/isolated.bin");
+
+            // Leave a multipart upload in flight under `owner`.
+            let upload = owner_client
+                .create_multipart(&key, "application/octet-stream")
+                .await
+                .expect("create the in-flight upload");
+
+            // A parallel case under `other` must not see it.
+            let leaked = other_client
+                .list_multipart_uploads(&key)
+                .await
+                .expect("list under the other prefix");
+            assert!(
+                leaked.is_empty(),
+                "the shared gateway leaked another prefix's multipart upload: {leaked:?}"
+            );
+
+            // Non-vacuous control: the owning prefix does list it.
+            let mine = owner_client
+                .list_multipart_uploads(&key)
+                .await
+                .expect("list under the owning prefix");
+            assert_eq!(mine.len(), 1, "the owning prefix must list its own upload");
+
+            owner_client
+                .abort_multipart(&key, &upload)
+                .await
+                .expect("abort the in-flight upload");
+        });
+}
+
 /// A raw `compio_s3::S3Client` over the same S3 bucket, for asserting that an
 /// aborted multipart leaves no orphaned upload.
 #[cfg(feature = "s3")]
 fn s3_raw_client(server: &S3Server) -> compio_s3::S3Client {
     compio_s3::S3Client::new(s3_config(server), s3_credentials(server))
+}
+
+/// A raw `compio_s3::S3Client` over the shared bucket under an explicit prefix.
+#[cfg(feature = "s3")]
+fn s3_client_for(server: &S3Server, prefix: &str) -> compio_s3::S3Client {
+    let config = compio_s3::S3Config::parse_url(&server.url(prefix))
+        .expect("S3 fixture configuration");
+    compio_s3::S3Client::new(config, s3_credentials(server))
 }
 
 /// A `ChunkSource` that yields `before_err` bytes (in 64 KiB chunks) and then

@@ -30,10 +30,9 @@ zeroship-id = { workspace = true }
 
 [dev-dependencies]
 compio = { workspace = true, features = ["fs", "macros", "runtime"] }
-# The S3 fixture starts its own server through the daemon rather than a CLI.
-testcontainers = { workspace = true }
-# The image it starts is named in the fixture images list CI restores.
-zeroship-shared-server = { workspace = true }
+# The shared S3 gateway the suite joins rather than starting a container of its
+# own.
+zeroship-testkit = { workspace = true }
 
 [[test]]
 name = "main"
