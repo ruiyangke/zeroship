@@ -112,6 +112,8 @@
             which
             zstd
             actionlint
+            # All-thread stacks of a hung test process (`gdb -p <pid> -batch -ex "thread apply all bt"`).
+            gdb
 
             # Load generators
             wrk
