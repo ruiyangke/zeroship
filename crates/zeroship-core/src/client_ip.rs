@@ -1,12 +1,11 @@
 //! One client-address resolver for every service that keys a rate-limit
 //! bucket or an audit record on the caller's IP.
 //!
-//! The gateway, the control plane and the auth service each used to answer
-//! "who is the client?" their own way, and two of the three answers
-//! disagreed. The gateway deferred to `ntex`'s `ConnectionInfo::remote()`,
-//! which reads the LEFTMOST `X-Forwarded-For` token; control and auth read
-//! the RIGHTMOST. Since a rate-limit bucket and an audit row are supposed to
-//! name the same client, at most one of those could be right.
+//! The gateway, the control plane and the auth service resolve the client
+//! address through this module, so the rate-limit bucket and the audit row for
+//! one caller name the same client. `ntex`'s own `ConnectionInfo::remote()`
+//! reads the LEFTMOST `X-Forwarded-For` token; this module reads the
+//! RIGHTMOST.
 //!
 //! # Rightmost, and why
 //!

@@ -377,7 +377,7 @@ fn npm_deserialize_accepts_our_bytes() {
 #[test]
 fn empty_meta_round_trips_as_no_meta() {
     // An envelope with explicitly empty Meta should serialize WITHOUT
-    // a meta key — that's the "common case 80%" that the npm wire elides.
+    // a meta key - the common case that the npm wire elides.
     let env = Envelope {
         json: json!(42),
         meta: Some(Meta::default()),

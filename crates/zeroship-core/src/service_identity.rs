@@ -677,8 +677,8 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                     endpoints::CONTROL_DEPLOYMENT_HOLD_ACQUIRE,
                     endpoints::CONTROL_DEPLOYMENT_HOLD_RELEASE,
                     // The policy inputs and the deletion marker the manager
-                    // used to read straight out of Control's tables. It reads
-                    // them here instead, so the service holds no grant on
+                    // reads through this endpoint rather than straight out of
+                    // Control's tables, so the service holds no grant on
                     // `zeroship.apps` policy columns or on `zeroship.plans`.
                     endpoints::CONTROL_APP_FACTS,
                     // The manifest summary a journal `deploys` row records. The

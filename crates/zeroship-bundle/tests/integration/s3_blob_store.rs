@@ -5,8 +5,8 @@
 //! MULTIPART-sized blob, manifest round-trip, dedup, `get_blob_to_file` refill,
 //! `delete_app_manifests`), then runs the SAME assertions against
 //! `LocalDiskBlobStore` for parity, and tears the container down. It **FAILS**
-//! when Docker is unavailable - it used to skip, which left the only coverage
-//! `S3BlobStore` has reporting green on every machine that could not run it.
+//! when Docker is unavailable: a skip reports green on every machine that
+//! cannot run it, leaving `S3BlobStore` without coverage.
 //!
 //! Run explicitly:
 //!   `cargo test -p zeroship-bundle --test main integration::s3_blob_store:: -- --nocapture`
@@ -118,7 +118,7 @@ impl S3Fixture {
 
 /// A `Read` source that yields `before_err` bytes (in 64 KiB reads) and then
 /// fails with an I/O error — modelling a stream that dies mid-upload, after the
-/// multipart upload + first part(s) have been created. The C1 fix must abort
+/// multipart upload + first part(s) have been created. The store must abort
 /// that multipart explicitly (awaited), leaving no orphaned upload.
 struct ErrAfter {
     remaining: usize,
@@ -168,7 +168,7 @@ fn s3_blob_store_roundtrip_and_parity() {
                 // does not match the streamed bytes must ABORT before
                 // complete_multipart — nothing committed, no orphaned upload.
                 run_s3_parallel_hash_mismatch_aborts(&fixture).await;
-                // C1 regression: an error mid-multipart-upload must abort the
+                // Regression: an error mid-multipart-upload must abort the
                 // upload explicitly, not leak orphaned parts or abort the
                 // process.
                 run_c1_mid_upload_abort(&s3, &fixture).await;
@@ -184,7 +184,7 @@ fn s3_blob_store_roundtrip_and_parity() {
     }
 }
 
-/// C1 regression: induce an error mid-multipart-upload and assert
+/// Regression: induce an error mid-multipart-upload and assert
 /// (a) `put_blob_stream` returns the error (no panic / process abort), and
 /// (b) the multipart upload was aborted — no orphaned upload remains listable.
 ///

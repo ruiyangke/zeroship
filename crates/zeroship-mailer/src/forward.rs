@@ -156,10 +156,9 @@ impl BounceReason {
 ///
 /// # The token is written but NOTHING READS IT BACK
 ///
-/// This previously claimed the `+tag` "lets the delivery webhook map a
-/// forward-bounce back to the alias for suppression". The encode half is real;
-/// the decode half does not exist. MEASURED: `bounce+` appears only here and in
-/// tests - no consumer parses it. And the one inbound entry point actively
+/// The `+tag` does not map a forward-bounce back to the alias for
+/// suppression: the encode half is real, the decode half does not exist, and
+/// nothing parses `bounce+`. And the one inbound entry point actively
 /// destroys it: `inbound::normalize_alias` does `local.split(char::from(43)).next()`,
 /// so a bounce addressed to `bounce+abc@relay` normalises to `bounce@relay`,
 /// an alias that does not exist.

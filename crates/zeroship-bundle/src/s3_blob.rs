@@ -487,7 +487,7 @@ impl BlobStore for S3BlobStore {
         // complete. If THIS future is drop-cancelled mid-flight (wall-timeout
         // cancel, client disconnect, LRU eviction), the guard's sync `Drop`
         // warns + enqueues the orphaned upload for a later async abort — the
-        // abort a `Drop` cannot itself perform (C1: no spawn/await in Drop).
+        // abort a `Drop` cannot itself perform (no spawn/await in Drop).
         let guard = compio_s3::MultipartGuard::new(key.clone());
 
         // Run the stream → parts → complete body. On ANY error we must abort

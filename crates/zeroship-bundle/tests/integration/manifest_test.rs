@@ -106,9 +106,9 @@ fn schema_path_round_trips() {
     );
 }
 
-/// `HandlerEntry` is Stage 2+ territory but the type must already
-/// round-trip so manifests opt-in early (e.g. test builds) without
-/// blowing up.
+/// `HandlerEntry` is reserved for future file-based handler discovery, but the
+/// type must already round-trip so manifests opt-in early (e.g. test builds)
+/// without blowing up.
 #[test]
 fn handler_entries_round_trip() {
     let m = Manifest {

@@ -10,7 +10,7 @@
 //!
 //! [`init_tracing`] is the entry point for everything that is NOT a server
 //! binary: the creator CLI (`crates/zeroship-cli/src/main.rs`) and the two single-tenant
-//! runtime binaries (`crates/runtime/src/core/{server,echo_server}.rs`) are its
+//! runtime binaries (`crates/zeroship-runtime/src/core/{server,echo_server}.rs`) are its
 //! only callers, and they read `RUST_LOG` / `ZEROSHIP_LOG_FORMAT` through it.
 //! Those two reads are DECLARED keys owned by [`TracingInitConsumer`]
 //! rather than raw `std::env::var` calls: `RUST_LOG` is `external` (the
@@ -131,7 +131,7 @@ crate::declare_env_consumer!(
     /// `observability.log_format` and call [`init_tracing_with`]. It is not
     /// available here: `init_tracing`'s only callers are
     /// `crates/zeroship-cli/src/main.rs` and
-    /// `crates/runtime/src/core/{server,echo_server}.rs`, none of which has a
+    /// `crates/zeroship-runtime/src/core/{server,echo_server}.rs`, none of which has a
     /// `#[zeroship_config]` declaration to resolve from, and all three sit
     /// outside this crate.
     ///

@@ -5,13 +5,10 @@
 //! `/oauth2/token` for an OIDC access token, so the row carries `client_id`,
 //! `sid` and `auth_credential_version`.
 //!
-//! [`PLATFORM_PROVIDER`] named the control plane's parallel deploy-token
-//! grant, which was deleted once `zeroship login` moved onto the OP's
-//! endpoints. The spelling survives because `zeroship.identity_links` still
-//! uses it to mark a platform-native principal (written by
-//! `zeroship_authn::platform_cli::materialize_default_grants`, which is where
-//! control's DELETED `identity_bridge` module used to do it); nothing writes a
-//! `device_grants` row with it.
+//! [`PLATFORM_PROVIDER`] is the spelling `zeroship.identity_links` uses to
+//! mark a platform-native principal (written by
+//! `zeroship_authn::platform_cli::materialize_default_grants`); nothing writes
+//! a `device_grants` row with it.
 //!
 //! The auth service also reconciles a first-party [`PLATFORM_CLI_CLIENT_ID`]
 //! registration at startup. Its OP device grants use [`OP_PROVIDER`] and may
@@ -27,13 +24,14 @@
 //! DB-backed refresh token, which reuse detection and family revocation can
 //! kill.
 //!
-//! Both spellings used to be private constants in the crate that wrote them
+//! Both spellings are defined once here so the producer and the consumer read
+//! the same constant. With a private spelling in each crate
 //! (`crates/zeroship-auth/src/oidc/device_token.rs` and
-//! `crates/zeroship-control/src/device_handlers.rs`), which is how the two flows drifted:
-//! control wrote `provider = 'platform'` rows and the only page that could
-//! approve anything filtered on `provider = 'op'`, so the code the CLI printed
-//! was invisible to the page the CLI told the human to open. The producer and
-//! the consumer now read the same constant.
+//! `crates/zeroship-control/src/device_handlers.rs`), the two flows would
+//! drift: control would write `provider = 'platform'` rows while the only page
+//! that can approve anything would filter on `provider = 'op'`, so the code
+//! the CLI would print would be invisible to the page the CLI would tell the
+//! human to open.
 //!
 //! The user code shares a definition for the same reason. Control minted an
 //! 8-character `XXXX-XXXX` code while the auth service's `/device` page
@@ -227,7 +225,7 @@ pub const PLATFORM_CLI_REGISTERED_SCOPES: [&str; 21] = [
 /// ceiling. Markers are retained for 24 hours and outlast this 12-hour maximum.
 ///
 /// This is a CEILING, not the lifetime the OP device grant issues: that grant
-/// now returns a refresh family, so its access token takes the OP's ordinary
+/// returns a refresh family, so its access token takes the OP's ordinary
 /// short lifetime (`ACCESS_TOKEN_TTL_SECS`) and the long life lives in the
 /// rotating, revocable refresh token instead. What the ceiling still bounds is
 /// `validate_registered_ttl`, which the OP applies to every mint, and the

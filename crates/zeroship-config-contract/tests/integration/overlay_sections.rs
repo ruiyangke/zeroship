@@ -13,8 +13,8 @@
 //! setting names to keep in step, because a list is exactly what drifted.
 //!
 //! Does not cover: whether a supplied overlay value REACHES the setting. That is
-//! the resolver's `Toml` read site, and `tests/linked_registry.rs` plus
-//! `contract::validate_contract` own it. This file asks only whether the parse
+//! the resolver's `Toml` read site, and `tests/integration/linked_registry.rs`
+//! plus `contract::validate_contract` own it. This file asks only whether the parse
 //! survives the key at all.
 
 use zeroship_config_contract::overlay::validate_overlay_paths;

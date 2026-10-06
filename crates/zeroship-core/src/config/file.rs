@@ -1056,7 +1056,7 @@ platform_issur = "https://typo.example"
         assert!(matches!(err, ConfigError::Parse { .. }));
     }
 
-    // M4: trusted_oauth_clients distinguishes absent / empty / populated.
+    // trusted_oauth_clients distinguishes absent / empty / populated.
     #[test]
     fn trusted_oauth_clients_absent_is_none() {
         let file = TempFile::write(

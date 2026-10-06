@@ -234,9 +234,9 @@ impl Meter {
     /// (fixed-counter `swap`s plus a `custom` take must be atomic per app
     /// relative to that app's own increments).
     ///
-    /// **Why evict.** Every increment auto-vivifies an entry and nothing used to
-    /// remove one, so the map's size tracked "every app this process has ever
-    /// touched". That is unbounded memory on a long-lived worker, and - because
+    /// **Why evict.** Every increment auto-vivifies an entry, so without
+    /// eviction the map's size tracks "every app this process has ever touched".
+    /// That is unbounded memory on a long-lived worker, and - because
     /// this scan runs under the EXCLUSIVE lock on the outbox's ten-second
     /// cadence - it is also a periodic process-wide stall on every `env.db` /
     /// `env.kv` / `env.storage` increment, whose length grows with uptime rather

@@ -1,6 +1,6 @@
 //! In-process memory stream transport.
 //!
-//! This S8 adapter proves the stream L1 seam: adding a new transport required
+//! This adapter proves the transport seam: adding a new transport requires
 //! this adapter file plus the `register_builtin` entry in `adapters/mod.rs` and
 //! a focused roundtrip test, with no `StreamTransport`, registry, forwarder, or
 //! pipeline edits.

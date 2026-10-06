@@ -267,10 +267,9 @@ fn a_group_readable_private_key_is_refused() {
 /// Fence F4's startup half, at the one function every `main` loads through.
 ///
 /// The three refusals are one case in the shape that matters - a process that
-/// cannot verify what it is told - and they are asserted TOGETHER because the
-/// defect this fence removes was a deployment distinguishing between them: an
-/// unset path used to boot into a process refusing every guarded edge, while a
-/// wrong path exited. Both are the same operator mistake and both now exit.
+/// cannot verify what it is told - and they are asserted TOGETHER because a
+/// deployment must not distinguish between them: an unset path and a wrong path
+/// are the same operator mistake and both exit.
 ///
 /// The MISSING and MALFORMED arms additionally require the message to carry the
 /// PATH. An operator reading a boot log needs the file, and the unset arm cannot
@@ -325,8 +324,9 @@ fn a_peer_document_that_is_unset_missing_or_malformed_refuses_to_load() {
 
     // Does NOT cover whether the three `main`s CALL this loader rather than
     // building a keyring some other way. That link is
-    // `crates/zeroship-worker/tests/peer_boot.rs` and
-    // `crates/zeroship-gateway/tests/peer_boot.rs`, against the real binaries.
+    // `crates/zeroship-worker/tests/e2e/peer_boot.rs` and
+    // `crates/zeroship-gateway/tests/e2e/peer_boot.rs`, against the real
+    // binaries.
 }
 
 /// The DOCUMENT-only half of the one-key refusal: whoever loads it, refuses.

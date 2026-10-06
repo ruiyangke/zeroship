@@ -12,8 +12,7 @@
 //! The encoder cannot be used to build the fixture: given small content it
 //! shrinks the window descriptor to fit, so a frame built with
 //! `CParameter::WindowLog(27)` and a five-byte payload still declares a tiny
-//! window - the first version of this test measured exactly that and concluded
-//! nothing. The frame is therefore hand-built, with Single_Segment clear and no
+//! window. The frame is therefore hand-built, with Single_Segment clear and no
 //! Frame_Content_Size, leaving the decoder nothing to clamp against.
 
 fn rss_kb() -> u64 {

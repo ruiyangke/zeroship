@@ -13,8 +13,8 @@
 //! the new server" a failure instead of a silent shrink.
 //!
 //! Does not cover: whether a linked registry declares the RIGHT names. That is
-//! `contract.rs` plus `tests/linked_registry.rs`. This file only asks which
-//! binaries are present on each side.
+//! `contract.rs` plus `tests/integration/linked_registry.rs`. This file only asks
+//! which binaries are present on each side.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -108,7 +108,7 @@ fn every_declaring_binary_actually_contributes_declarations() {
     // Mutation: delete a binary's `#[zeroship_config]` struct fields, or drop
     // its `SPECS` line from `platform_specs`.
     // Does not cover: how MANY declarations a binary owns. One field is enough
-    // here; per-name coverage is tests/linked_registry.rs.
+    // here; per-name coverage is tests/integration/linked_registry.rs.
     let specs = platform_specs();
     assert!(!specs.is_empty(), "no linked declarations at all");
     let linked = declared_binaries(&specs).into_iter().collect::<BTreeSet<_>>();

@@ -124,9 +124,7 @@ impl UsageStreamSettings {
     ///
     /// The same predicate [`build_usage_outbox`] branches on, exposed so a
     /// `--check-config` report answers from the SETTINGS rather than from a
-    /// second, independent reading of where they came from. The worker's report
-    /// used to re-read `REDPANDA_BROKERS` itself, which agreed with the
-    /// producer only for as long as the environment was the sole channel.
+    /// second, independent reading of where they came from.
     #[must_use]
     pub fn producer_enabled(&self) -> bool {
         self.effective_brokers().is_some()

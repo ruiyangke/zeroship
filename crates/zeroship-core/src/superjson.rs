@@ -132,7 +132,7 @@ pub fn decode(env: Envelope) -> Result<Value, Error> {
 /// Serialize an envelope to canonical wire bytes.
 ///
 /// Empty meta is omitted entirely, matching npm `superjson` for pure-JSON
-/// payloads (the 80% case). Field order matches npm — `json` before `meta`,
+/// payloads (the common case). Field order matches npm - `json` before `meta`,
 /// and inside `meta` it's `values` before `v` — because byte-equality with
 /// the reference implementation is the contract.
 #[must_use]

@@ -215,8 +215,7 @@ pub fn validate_stash_key(label: &str, value: &str) -> Result<(), String> {
 /// `label` is the caller's operator-facing spelling, for the same reason as
 /// [`validate_stash_key`]: this module must not bake in a name, because a name
 /// baked in here is invisible to the config contract and rots the moment the
-/// declaration is renamed. The bare `PAIRWISE_SALT` it used to interpolate had
-/// already stopped being settable.
+/// declaration is renamed.
 ///
 /// # Errors
 ///
@@ -479,7 +478,7 @@ pub fn resolve_secret(raw: &str) -> Result<String, SecretError> {
 /// host modes silently downgraded every credential in the deployment with no
 /// signal at all. Refusing is what ssh does with a private key and what the
 /// four loaders in this tree that already check do
-/// (`crates/zeroship-gateway/src/signing.rs`, `crates/auth/src/oidc/{refresh,signing}.rs`,
+/// (`crates/zeroship-gateway/src/signing.rs`, `crates/zeroship-auth/src/oidc/{refresh,signing}.rs`,
 /// `crates/zeroship-authn/src/lib.rs`, all `mode & 0o077 != 0`); a warning in a boot log
 /// is a signal nobody reads.
 ///
@@ -1012,11 +1011,9 @@ mod tests {
         // `read_secret_file` but is exercised through the generated resolver.
     }
 
-    // THE DELETED ARMS. Each of these used to PARSE: `urn:zeroship:env:` became
-    // SecretRef::Env and resolved a second environment variable, and the vault /
-    // awssm / arn forms became SecretRef::Vault / ::AwsSecretsManager and
-    // returned BackendUnavailable at boot while passing --check-config. All four
-    // are now malformed at parse, which is what makes --check-config reject them.
+    // The vault / awssm / arn / `urn:zeroship:env:` reference forms are malformed
+    // at parse, which is what makes --check-config reject them instead of
+    // resolving them or deferring a BackendUnavailable to boot.
     #[test]
     fn the_deleted_reference_schemes_are_malformed_not_recognized() {
         for deleted in [

@@ -50,7 +50,7 @@ impl ResendMailer {
 ///
 /// `reply_to` and `headers` are accepted by Resend's send API
 /// (<https://resend.com/docs/api-reference/emails/send-email>); the driver
-/// previously dropped both. Resend's HTTP API does **not** expose a
+/// honours both. Resend's HTTP API does **not** expose a
 /// per-message envelope-from override, so `Email.envelope_from` cannot be
 /// honoured here — which is why the relay forward path runs on the SMTP driver
 /// (sub-spec §3.2/§5.2), not Resend.

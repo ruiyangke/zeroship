@@ -7,28 +7,13 @@
 //! toolchain requirement today, and adding `cargo run` to a deploy path to
 //! read eight strings is a worse trade than this test.
 //!
-//! WHAT MAKES IT SAFE, which the pattern alone does not. The script's previous
-//! extraction read `crates/zeroship-cli/src/dev.rs` for ANY `"NAME",` line. That
-//! matched `ENV_KEYS`, and it matched nothing at all the moment that const was
-//! deleted on 2026-08-20 in favour of the shared table - which would have set
-//! GENERATED to empty and sent every generated secret down the "operator must
-//! supply this" arm on a fresh host, or worse, past the rename guard. The
-//! failure was SILENT: an empty `sed` and a healthy one both print nothing to
-//! stderr.
-//!
-//! So the extraction is reproduced here, character for character, and pinned
-//! to `PLATFORM_SECRETS`. If the table's spelling changes, this goes red and
-//! names the script.
-//!
-//! WHAT THIS TEST ITSELF MISSED, repaired 2026-08-28. It asserted the script
-//! contained the pattern *including the path* - as one literal, spelled
-//! `crates/zeroship-core/src/config/secrets.rs`. When the reorg renamed every crate
-//! directory to `crates/zeroship-<name>/`, that made this test a PIN ON THE
-//! BROKEN SPELLING: it required the script to keep naming a file that no longer
-//! existed, and stayed green while the roll's guard read nothing. The pattern
-//! was pinned; the path's *existence* never was. So the path is now asserted
-//! separately from the pattern, and asserted to RESOLVE - a check bound to a
-//! string is bound to the wrong thing when the string is a filename.
+//! WHAT MAKES IT SAFE, which the pattern alone does not. The script reads
+//! `PLATFORM_SECRETS` through the `env: "NAME",` line spelling, reproduced here
+//! character for character. Pinning the pattern is not enough: the pattern's
+//! target path must also RESOLVE, so the test asserts the path separately from
+//! the pattern and asserts that the two spellings name the same file. A check
+//! bound only to a string accepts a filename that is merely spelled, present
+//! or not.
 
 use std::path::Path;
 

@@ -1,10 +1,10 @@
 //! [`DatabaseId`] names one creator database: a schema inside a datastore,
 //! owned by a project.
 //!
-//! This is the identity an app id used to carry by accident. A `DatabaseId`
-//! names the physical schema, the migrator and capability roles, the apply lock
-//! and the encryption salt, which is what makes a database that outlives its
-//! app - or one two apps share - representable at all.
+//! A `DatabaseId` names the physical schema, the migrator and capability
+//! roles, the apply lock and the encryption salt, which is what makes a
+//! database that outlives its app - or one two apps share - representable at
+//! all.
 //!
 //! It is creator-visible and addressed by id everywhere. There is no
 //! `(project, name) -> DatabaseId` resolution on any wire: `databases.name` is

@@ -1,6 +1,6 @@
 //! `install_process_crypto_provider`, the step every binary runs at boot. That
 //! the service boot path runs it is tested through a real declaration in
-//! `crates/zeroship-data-cdc-server/tests/boot.rs`.
+//! `crates/zeroship-data-cdc-server/tests/e2e/boot.rs`.
 //!
 //! The process default can be installed once, so the real case is ignored in
 //! the shared run and executed alone in a child copy of this binary by its

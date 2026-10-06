@@ -8,9 +8,9 @@ use super::file::{ConfigError, FileConfig};
 /// Fixed well-known path probed when no explicit `--config` / `ZEROSHIP_CONFIG` is given.
 pub const SYSTEM_CONFIG_PATH: &str = "/etc/zeroship/zeroship.toml";
 
-/// Where the resolved overlay came from. Replaces the old
-/// `ResolvedConfig { source: Option<PathBuf>, discovered: bool }`, which could
-/// represent the impossible `{None, true}` state (M4).
+/// Where the resolved overlay came from. A `{ source: Option<PathBuf>,
+/// discovered: bool }` pair can represent the impossible `{None, true}` state;
+/// this enum cannot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigSource {
     /// No overlay applied; all-default configuration.
