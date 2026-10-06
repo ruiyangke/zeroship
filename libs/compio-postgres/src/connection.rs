@@ -2481,23 +2481,13 @@ where
                             // pool poison before the prefix can wake its
                             // borrower; the terminal error itself remains
                             // behind that prefix in the read FIFO.
-                            // NOT PEER-OBSERVABLE. This
-                            // shutdown is redundant with `ConnectionDropRelease
-                            // ::drop`: the deferred error retires the connection,
-                            // so the driver completes and drops the release
-                            // handle before any peer read can distinguish the two
-                            // closes.
                             //
-                            // It cannot be pinned by a peer-side test either:
-                            // asserting the driver was still
-                            // pending when the peer saw the close - the check
-                            // `replication.rs` uses for its release arms - fails,
-                            // because by then the driver is Ready. Keep the call
-                            // for promptness; do not read a mutation report
-                            // calling it unbound as a missing test.
+                            // The peer can be blocked writing that tail into
+                            // our full receive window, the same case the `Err`
+                            // arm aborts for, so end the session the same way.
                             read_error_status.store(READ_RETIRED_STATUS, Ordering::Release);
                             if let Some(release) = &read_error_release {
-                                release.shutdown();
+                                release.abort();
                             }
                         }
                         let (acknowledgement, acknowledged) = if acknowledge_reads {
@@ -2543,7 +2533,19 @@ where
                         // may not release its fd.
                         read_error_status.store(READ_RETIRED_STATUS, Ordering::Release);
                         if let Some(release) = &read_error_release {
-                            release.shutdown();
+                            // A local read failure can leave the server
+                            // blocked writing into our full receive window, and
+                            // `shutdown(Both)` reaches it only at whichever
+                            // zero-window probe timer fires next. Closing the
+                            // shared descriptor makes the final close reset the
+                            // blocked writer now. A clean peer EOF is the one
+                            // case that is not a blocked write, so it keeps the
+                            // graceful FIN / close_notify.
+                            if is_eof(&error) {
+                                release.shutdown();
+                            } else {
+                                release.abort();
+                            }
                         }
                         publish_reader_failure(error, &mut read_tx, &read_terminal_tx).await;
                         break;
@@ -4753,6 +4755,70 @@ mod tests {
             terminal_server_error,
             tx_status,
         )
+    }
+
+    /// A validated `ErrorResponse` prefix followed by an oversize tail is a
+    /// deferred framing failure: the peer can be blocked writing that tail into
+    /// our full receive window, so the read task must take the same abort path
+    /// the `Err` arm does.
+    ///
+    /// Driven without a live server: a scripted split stream produces the
+    /// deferred error and the connection-side guard wraps a real loopback
+    /// descriptor. `abort` takes that descriptor out of the shared slot, while a
+    /// graceful `shutdown` would leave it for the client half to close, so the
+    /// slot itself is the deterministic signal.
+    #[compio::test]
+    async fn a_deferred_read_error_aborts_the_shared_release_socket() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind deferred release listener");
+        let address = listener.local_addr().expect("deferred release address");
+        let client =
+            std::net::TcpStream::connect(address).expect("connect deferred release client");
+        let (_peer, _) = listener.accept().expect("accept deferred release peer");
+        let release = crate::release::ConnectionRelease::dup_of(&client)
+            .expect("duplicate the deferred release socket");
+        let guard = release.connection_guard();
+
+        // A valid ErrorResponse sets `saw_error_response`; the DataRow header
+        // behind it declares more than the 64 MiB ceiling, so the decoder
+        // defers that framing failure behind the prefix.
+        let mut wire = server_error_frame("ERROR", "22012", "scripted deferred refusal");
+        wire.extend_from_slice(&[b'D', 0x04, 0x00, 0x00, 0x01]);
+
+        let stream = BufStream::new(ScriptedReadSplitStream {
+            chunks: VecDeque::from([wire]),
+            eof_after: None,
+        });
+        let Ok((read_half, write_half)) = stream.try_into_split() else {
+            panic!("the deferred release fixture did not split");
+        };
+        let (_request_tx, request_rx) = mpsc::unbounded();
+        let result = compio::time::timeout(
+            Duration::from_secs(1),
+            Connection::<ScriptedReadSplitStream, ScriptedReadSplitStream>::run_multiplexed(
+                read_half,
+                write_half,
+                Arc::default(),
+                request_rx,
+                None,
+                Arc::new(AtomicU8::new(b'I')),
+                Arc::new(AtomicUsize::new(0)),
+                Arc::new(Mutex::new(None)),
+                Cell::new(false),
+                None,
+                Some(guard),
+                crate::live::LiveConnectionGuard::new(),
+            ),
+        )
+        .await
+        .expect("the deferred release fixture exceeded its watchdog");
+        assert!(
+            result.is_err(),
+            "the deferred framing failure ended the session cleanly"
+        );
+        assert!(
+            !release.shared_socket_is_open(),
+            "the deferred read error left the shared descriptor open instead of aborting"
+        );
     }
 
     /// Once `CopyInResponse` pauses the read obligation, `PostgreSQL` owes no
