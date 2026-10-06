@@ -2,7 +2,8 @@
 #
 # zeroship platform image - builds all service binaries:
 #   zeroship-control, zeroship-gate, zeroship-worker, zeroship-auth,
-#   zeroship (CLI), zeroship-migrate-server, zeroship-data-cdc-server.
+#   zeroship (CLI), zeroship-migrate-server, zeroship-data-cdc-server,
+#   zeroship-workflow-server.
 #
 # THE PLATFORM MIGRATION ONE-SHOT IS NO LONGER A RUST BINARY IN THIS IMAGE.
 # `zeroship-platform-migrate` was deleted on 2026-08-28; the platform schema is
@@ -169,36 +170,12 @@ COPY libs/ libs/
 COPY deploy/policies/ deploy/policies/
 # Carry the database facade emitted by the Node stage into native compilation.
 COPY --from=js-packages /build/crates/zeroship-data-v8/dist/ crates/zeroship-data-v8/dist/
-# NO `--bin` HERE, and that is the whole point of this comment.
-#
-# This line used to end `-p zeroship-migrate-adapter --bin
-# zeroship-platform-migrate`. `--bin` is a TARGET FILTER for the ENTIRE
-# invocation, not for the -p it trails, so cargo built that one binary and
-# ignored the other five package selections - AND EXITED 0. The image then
-# died three stages later on a COPY of a binary nothing had produced:
-#
-#   ERROR: failed to compute cache key: "/build/target/release/zeroship":
-#          not found
-#
-# MEASURED in that build's own log, which is what identifies this rather than
-# the `Finished` line: `Finished release profile ... in 2m 39s` with ZERO
-# occurrences of `Compiling zeroship-control`, `zeroship-gateway`,
-# `zeroship-worker`, `zeroship-auth` or `zeroship v0`. The target dir was
-# empty, so every crate the build needed had to print a Compiling line. Those
-# five never did. One of six binaries, reported as success.
-#
-# Dropping `--bin` builds every target of every selected package, which is the
-# seven we ship plus zeroship-control's `zeroship-mock-stripe` and
-# `dev-provision`. Two extra links against libraries already compiled, and
-# neither is COPYed into the runtime stage. The alternative - two cargo
-# invocations - is correct too but costs a second full pass over the shared
-# dependency graph, because the platform-cli feature set differs and cargo
-# fingerprints them separately.
-#
-# `-p zeroship-migrate-adapter --features .../platform-cli` used to trail this
-# list. Both went with the binary: the adapter is a library-only crate now, and
-# it still gets built because zeroship-migrate-server depends on it for
-# `CompioPgSession`.
+# NO `--bin` HERE. `--bin` is a target filter for the WHOLE cargo invocation,
+# not for the `-p` it follows, so it would build a single binary, leave every
+# other selected package's executables unbuilt, and still exit 0. Building every
+# target of the selected packages also links zeroship-control's
+# `zeroship-mock-stripe` and `dev-provision`, which the runtime stage does not
+# copy.
 RUN cargo build --release \
     -p zeroship-control \
     -p zeroship-gateway \
@@ -206,7 +183,8 @@ RUN cargo build --release \
     -p zeroship-auth \
     -p zeroship-cli \
     -p zeroship-migrate-server \
-    -p zeroship-data-cdc-server
+    -p zeroship-data-cdc-server \
+    -p zeroship-workflow-server
 
 # ---------------------------------------------------------------------------
 # Stage 3 - runtime image.
@@ -221,6 +199,7 @@ COPY --from=builder /build/target/release/zeroship-worker /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship-data-cdc-server /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship-auth /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship /usr/local/bin/
+COPY --from=builder /build/target/release/zeroship-workflow-server /usr/local/bin/
 # The CREATOR migration service. Distinct from the platform one-shot above:
 # that one applies db/migrations-ts/*.ts (the platform's own schema) once at
 # boot; this is a long-running HTTP service that applies a DEPLOYED APP's

@@ -5,6 +5,7 @@
 
 mod build_inputs;
 mod crypto_library;
+mod deploy_image;
 mod jwt_backend;
 mod shards;
 mod testkit_boundaries;
