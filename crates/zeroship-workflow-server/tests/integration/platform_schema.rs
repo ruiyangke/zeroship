@@ -71,13 +71,12 @@ async fn journal_tables_in(
 /// TRUNCATE, no REFERENCES, no TRIGGER, and no DDL, which `Coordinator::verify`
 /// separately refuses at startup. Every other role holds nothing at all.
 ///
-/// WHAT THIS NO LONGER CATCHES. The service login and the journal's grantee are
-/// now the same role, so for `zeroship_workflow` this assertion cannot tell a
-/// grant the migration made deliberately from one that arrived by accident -
-/// a stray `GRANT ... TO zeroship_workflow` somewhere else reads identically.
-/// Its green is not evidence that the grant is minimal or that it came from the
-/// intended place. That discrimination is gone, and it went the moment one
-/// login both serves the schema and owns the journal.
+/// WHAT THIS CANNOT CATCH. The service login and the journal's grantee are the
+/// same role, so for `zeroship_workflow` this assertion cannot tell a grant the
+/// migration made deliberately from one that arrived by accident - a stray
+/// `GRANT ... TO zeroship_workflow` somewhere else reads identically. Its green
+/// is not evidence that the grant is minimal or that it came from the intended
+/// place.
 ///
 /// WHAT IT STILL CATCHES, which is the half with the detection value: any OTHER
 /// role gaining reach over every app's workflow state, and this login gaining

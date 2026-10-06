@@ -1301,7 +1301,7 @@ impl WorkflowService {
 /// discards the result reports success over zero matched rows, turning a lost
 /// reservation into a `staged` row whose bytes the collector is about to delete.
 /// The count is what refuses it, so the count is not defensive tidiness: it is the
-/// half of the exclusion the lock used to provide.
+/// half of the exclusion the lock cannot provide across a request boundary.
 ///
 /// `expires_at` MUST be the deadline the reserve wrote, carried through rather
 /// than recomputed. A value derived again later can drift past the fence's and

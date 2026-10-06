@@ -656,11 +656,11 @@ async fn threads_of_one_manager_grant_from_one_observation() {
 /// AN OBSERVATION OLDER THAN THE ONE THE LEDGER ALREADY PUBLISHED FROM IS
 /// REFUSED, AND THE REFUSAL PUBLISHES NOTHING.
 ///
-/// This is the property the publication bracket used to get free from a single
-/// PostgreSQL instance: a read issued after a commit could not return state
-/// older than that commit saw. The inputs now arrive over Control's endpoint,
-/// where a lagging replica or a cache in front of the route can return exactly
-/// that, so the ledger carries a watermark and refuses a regression instead.
+/// This is the property the ledger's watermark enforces: a read issued after a
+/// commit must not return state older than that commit saw. The inputs arrive
+/// over Control's endpoint, where a lagging replica or a cache in front of the
+/// route can return exactly that, so the ledger carries a watermark and refuses
+/// a regression instead.
 ///
 /// The hazard is a stale PERMISSIVE policy: `admission`, `dispatch` and
 /// `ingress` are ANDed down when an app is disabled, so the stale answer is the

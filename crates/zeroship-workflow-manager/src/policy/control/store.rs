@@ -50,10 +50,9 @@ pub struct RolloutPolicy {
 /// policy take authority and keep it.
 ///
 /// **The argument uses one fact about the input source: a read issued after a
-/// commit cannot return state older than that commit saw.** One `PostgreSQL`
-/// instance gave that for free while the inputs were a second binding on the
-/// same server. An API call, a replicated projection and a lagging replica do
-/// not, so this store no longer assumes it: every answer carries a
+/// commit cannot return state older than that commit saw.** An API call, a
+/// replicated projection and a lagging replica do not guarantee it, so every
+/// answer carries a
 /// [`SourceWatermark`](zeroship_core::workflow_app_facts::SourceWatermark), and
 /// [`publish`] refuses one below the watermark the ledger already holds. See the
 /// comment at that comparison for what the watermark means and why the refusal
@@ -334,15 +333,14 @@ async fn publish(
     if source.app_id != *app {
         return Err(unavailable());
     }
-    // WHAT THE WATERMARK MEANS, AND WHAT IT REPLACES.
+    // WHAT THE WATERMARK MEANS.
     //
     // Control reads the facts above and this watermark in ONE statement, so it
     // is at least the write position of every change visible in that
     // statement's snapshot. Two answers from one source are therefore
     // comparable: an answer at or above an earlier one saw everything the
-    // earlier one saw. That is exactly the property the bracket used to get for
-    // free from a single PostgreSQL instance, and this comparison is where it
-    // is now paid for.
+    // earlier one saw. This comparison enforces that property, because the
+    // input source does not guarantee it.
     //
     // REFUSING IS THE SAFE DIRECTION. The hazard is a STALE PERMISSIVE policy
     // taking authority: `admission`, `dispatch` and `ingress` are ANDed down

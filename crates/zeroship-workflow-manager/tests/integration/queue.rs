@@ -991,7 +991,7 @@ async fn refused_kind_at_the_head(fixture: &Fixture) {
 /// hand-written cron row is deliverable to no claimant at all - it needs an
 /// occurrence bound to a settled activation - so its control belongs where that
 /// lifecycle is available, in `cron_left_to_the_journal_lane`
-/// (`tests/scheduling.rs`).
+/// (`tests/integration/scheduling.rs`).
 async fn journal_sweep_is_left_to_the_lane(fixture: &Fixture) {
     let queue = queue(fixture, Options::default()).await;
     let app = AppId::mint();

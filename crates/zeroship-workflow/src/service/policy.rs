@@ -709,12 +709,10 @@ fn live_deadline(validity: &Validity) -> Result<Option<Instant>, WorkflowService
 /// The policy registry cannot answer, and WHY.
 ///
 /// The reason is not decoration. A host that stops consuming reports
-/// `workflow_unavailable` and nothing else, and this one message used to stand
-/// for a poisoned lock, an app with no entry, a superseded generation, an
-/// uninstalled policy, a stale refresh ticket, a cancelled operation and THREE
-/// separate expiry paths. Chasing a consumption stall through that produced one
-/// wrong diagnosis after another: the expiry hypothesis was refuted by renaming
-/// a single expiry site while two others still answered with the shared string.
+/// `workflow_unavailable` and nothing else; the reason distinguishes it from a
+/// poisoned lock, an app with no entry, a superseded generation, an uninstalled
+/// policy, a stale refresh ticket, a cancelled operation and the separate
+/// expiry paths.
 ///
 /// Every caller names its own condition, so the log says which one fired.
 fn unavailable(reason: &'static str) -> WorkflowServiceError {

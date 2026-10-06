@@ -321,7 +321,7 @@ impl WorkflowService {
     /// a dispatch from before the restart fail `validate_live` rather than
     /// resolve a stale deployment.
     ///
-    /// NO POST-LOAD RECHECK HAPPENS HERE, because the load is no longer inside
+    /// NO POST-LOAD RECHECK HAPPENS HERE, because the load happens outside
     /// this call. The two fences this reads are returned with the pin so the
     /// settlement reporting that execution can be refused if either moved while
     /// creator code ran -- see the re-validation on the settle path, which

@@ -1117,7 +1117,7 @@ async fn selection(fixture: &Fixture) {
 /// two sweeps that write payload objects; the other is collection, and its arm
 /// of this property is
 /// `journal_sweep_is_left_to_the_claimant_owning_the_journal` in
-/// `tests/queue.rs`.
+/// `tests/integration/queue.rs`.
 ///
 /// The row here is a dispatched one rather than a hand-written spec, because a
 /// cron row is deliverable only through its own lifecycle: an occurrence bound

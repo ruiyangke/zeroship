@@ -11,7 +11,7 @@ import { table } from "../../../../packages/zero-migrate/dist/index.js";
 //
 // A column nothing can write is worse than an absent one. The closed set in
 // `journal_payload_columns_are_a_closed_set`
-// (crates/zeroship-workflow-server/tests/platform_schema.rs) reads the installed
+// (crates/zeroship-workflow-server/tests/integration/platform_schema.rs) reads the installed
 // schema and matches on a column's NAME as well as its type, so an `input`
 // column left empty still counts as a place creator payload lives. Dropping it
 // is what empties that set.

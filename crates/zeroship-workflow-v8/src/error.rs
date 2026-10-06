@@ -93,8 +93,8 @@ mod tests {
     }
 
     /// A creator branches on `error.code`, so no refusal may reach them
-    /// without one. `InvalidRequest` is the case this guards: it used to
-    /// return early as a code-less `TypeError`.
+    /// without one. `InvalidRequest` is the case this guards: without its code
+    /// it would reach the creator as a code-less `TypeError`.
     #[test]
     fn every_refusal_carries_its_code() {
         let all = refusals();
