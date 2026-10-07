@@ -8929,6 +8929,7 @@ dependencies = [
  "zeroship-data-orm",
  "zeroship-memlock",
  "zeroship-storage",
+ "zeroship-testkit",
  "zeroship-workflow",
  "zeroship-workflow-client",
  "zeroship-workflow-manager",

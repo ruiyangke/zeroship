@@ -287,7 +287,7 @@ impl Fleet {
             &[
                 "--no-config".into(),
                 "--listen".into(),
-                relay_addr.clone(),
+                relay_addr,
                 "--tls-cert-file".into(),
                 fleet.path("relay-cert.pem"),
                 "--tls-key-file".into(),
@@ -298,19 +298,24 @@ impl Fleet {
                 fleet.role_url("zeroship_cdc"),
             )],
         );
-        let deadline = Instant::now() + Duration::from_secs(60);
-        loop {
-            fleet.assert_alive();
-            if compio::net::TcpStream::connect(&relay_addr).await.is_ok() {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "CDC relay readiness; see {}",
-                fleet.logs.display()
-            );
-            compio::time::sleep(Duration::from_millis(100)).await;
-        }
+        let logs = fleet.logs.clone();
+        let relay = &mut fleet
+            .children
+            .iter_mut()
+            .find(|(name, _)| name == "relay")
+            .expect("the fleet spawned a relay")
+            .1;
+        assert!(
+            await_listening(
+                relay,
+                relay_port,
+                Instant::now() + Duration::from_secs(60),
+                &logs
+            )
+            .await,
+            "CDC relay readiness; see {}",
+            logs.display()
+        );
         let control_port = url::Url::parse(&fleet.control_url)
             .unwrap()
             .port()
@@ -407,12 +412,12 @@ impl Fleet {
             ],
             &control_env,
         );
-        fleet.ready(fleet.control_url.clone()).await;
+        fleet.ready("control", fleet.control_url.clone()).await;
         if let Some(manager_url) = fleet.manager_url.clone() {
-            fleet.ready(manager_url).await;
+            fleet.ready("workflow", manager_url).await;
         }
         fleet.spawn_worker("worker", &worker_port);
-        fleet.ready(fleet.worker_url.clone()).await;
+        fleet.ready("worker", fleet.worker_url.clone()).await;
         release(gateway_port.parse().expect("gateway port"));
         fleet.spawn(
             "gateway",
@@ -446,7 +451,7 @@ impl Fleet {
                 ("ZEROSHIP_GATEWAY_STASH_SIGNING_KEY", MASTER_KEY.into()),
             ],
         );
-        fleet.ready(fleet.gateway_url.clone()).await;
+        fleet.ready("gateway", fleet.gateway_url.clone()).await;
         let bundle = fleet.work.path().join("workflow.zship");
         let schema_work = fleet.work.path().join("schema");
         let output = Command::new("node")
@@ -692,7 +697,7 @@ impl Fleet {
             .second_worker_url
             .clone()
             .expect("the fleet reserved no deferred second worker");
-        self.ready(url).await;
+        self.ready("worker-2", url).await;
     }
 
     pub fn role_url(&self, role: &str) -> String {
@@ -830,33 +835,121 @@ impl Fleet {
         }
     }
 
-    async fn ready(&mut self, url: String) {
-        let deadline = Instant::now() + Duration::from_secs(60);
-        loop {
-            self.assert_alive();
-            let ready = async {
-                let response = cyper::Client::new()
-                    .get(format!("{url}/readyz"))
-                    .unwrap()
-                    .send()
-                    .await?;
-                let ok = response.status().is_success();
-                response.bytes().await?;
-                Ok::<_, cyper::Error>(ok)
-            };
-            if matches!(
-                compio::time::timeout(Duration::from_secs(2), ready).await,
-                Ok(Ok(true))
-            ) {
-                return;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "{url} readiness failed; see {}",
-                self.logs.display()
-            );
-            compio::time::sleep(Duration::from_millis(100)).await;
+    /// Wait until the service named `name` owns the reserved port and answers
+    /// `/readyz`.
+    ///
+    /// A readiness answer is accepted only from the child this fleet spawned:
+    /// the port was reserved and released so that child could bind it, and
+    /// another case's service can take it in between and answer `/readyz`
+    /// exactly as this child does.
+    async fn ready(&mut self, name: &str, url: String) {
+        self.assert_alive();
+        let port = url::Url::parse(&url)
+            .expect("a fleet service URL")
+            .port()
+            .expect("a fleet service URL names its port");
+        let logs = self.logs.clone();
+        let child = &mut self
+            .children
+            .iter_mut()
+            .find(|(child_name, _)| child_name == name)
+            .unwrap_or_else(|| panic!("no fleet service named {name}"))
+            .1;
+        assert!(
+            await_ready(
+                child,
+                port,
+                &url,
+                Instant::now() + Duration::from_secs(60),
+                &logs
+            )
+            .await,
+            "{url} readiness failed; see {}",
+            logs.display()
+        );
+        self.assert_alive();
+    }
+}
+
+/// Wait until `child` owns the LISTEN socket on `port` and answers `/readyz`.
+///
+/// A readiness answer is accepted only from `child`. The port was reserved and
+/// released so this child could bind it, and another case's service can take it
+/// in between and answer `/readyz` exactly as this child does; accepting that
+/// answer points every request at a service holding a different database, whose
+/// first authenticated call is refused. Returns `false` when `deadline` passes
+/// first.
+///
+/// # Panics
+/// When the child has exited, which is what a lost race for the port looks like
+/// from here.
+pub async fn await_ready(
+    child: &mut Child,
+    port: u16,
+    url: &str,
+    deadline: Instant,
+    logs: &Path,
+) -> bool {
+    loop {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "a workflow service exited before {url} was ready; see {}",
+            logs.display()
+        );
+        let ready = async {
+            let response = cyper::Client::new()
+                .get(format!("{url}/readyz"))
+                .unwrap()
+                .send()
+                .await?;
+            let ok = response.status().is_success();
+            response.bytes().await?;
+            Ok::<_, cyper::Error>(ok)
+        };
+        if matches!(
+            compio::time::timeout(Duration::from_secs(2), ready).await,
+            Ok(Ok(true))
+        ) && zeroship_testkit::listen::child_listens(child.id(), port)
+        {
+            return true;
         }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        compio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Wait until `child` owns the LISTEN socket on `port` and accepts a TCP
+/// connection.
+///
+/// The CDC relay answers no `/readyz`, so its readiness probe is a connect,
+/// but the connection is still accepted only from `child`: the port was
+/// reserved and released so the relay could bind it, and another case's
+/// service can take it in between. Returns `false` when `deadline` passes
+/// first.
+///
+/// # Panics
+/// When the child has exited, which is what a lost race for the port looks like
+/// from here.
+pub async fn await_listening(child: &mut Child, port: u16, deadline: Instant, logs: &Path) -> bool {
+    loop {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "a workflow service exited before port {port} was listening; see {}",
+            logs.display()
+        );
+        if compio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok()
+            && zeroship_testkit::listen::child_listens(child.id(), port)
+        {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        compio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 

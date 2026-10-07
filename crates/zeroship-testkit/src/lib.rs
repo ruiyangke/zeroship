@@ -12,6 +12,8 @@
 //!
 //! - [`fingerprint`] hashes the platform migration corpus a working tree would
 //!   apply.
+//! - [`listen`] tells whether a child process holds the listening socket on a
+//!   reserved port, so a readiness poll accepts only the child it spawned.
 //! - [`postgres`] is the platform and bare servers every test process of a
 //!   worktree shares, and the case databases cloned from them.
 //! - [`redpanda`] is the broker every stream test process of a worktree shares.
@@ -32,6 +34,7 @@
 
 pub mod fingerprint;
 pub mod images;
+pub mod listen;
 pub mod mysql;
 pub mod nested_cargo;
 pub mod prebuilt;
