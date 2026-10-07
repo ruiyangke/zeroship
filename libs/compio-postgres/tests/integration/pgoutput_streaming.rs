@@ -93,21 +93,7 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = u32>,
 {
-    try_collect_with_fast_keepalives(slot, streaming, publication, false, write).await
-}
-
-async fn try_collect_with_fast_keepalives<F, Fut>(
-    slot: &str,
-    streaming: Streaming,
-    publication: &str,
-    fast_keepalives: bool,
-    write: F,
-) -> Result<Vec<PgOutputMessage>, String>
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = u32>,
-{
-    let mut stream = start_stream(slot, streaming, publication, fast_keepalives).await?;
+    let mut stream = start_stream(slot, streaming, publication).await?;
 
     // The write runs while the stream is live, so the walsender decodes the
     // transaction as it is written.
@@ -124,7 +110,6 @@ async fn start_stream(
     slot: &str,
     streaming: Streaming,
     publication: &str,
-    fast_keepalives: bool,
 ) -> Result<
     compio_postgres::replication::ReplicationStream<
         compio_postgres::Socket,
@@ -133,11 +118,7 @@ async fn start_stream(
     String,
 > {
     let mut config = support::replication_config("cpg_streaming");
-    let mut options = support::STREAM_EVERY_CHANGE.to_owned();
-    if fast_keepalives {
-        options.push_str(" -c wal_sender_timeout=1s");
-    }
-    config.options(options);
+    config.options(support::STREAM_EVERY_CHANGE.to_owned());
 
     let replication =
         compio_postgres::replication::connect_replication(support::suite_tls(), &config)
@@ -250,7 +231,7 @@ impl Read {
 /// catalog changes happen to have emptied the walsender's caches.
 async fn collect_child_abort(fixture: &Fixture) -> Result<Vec<PgOutputMessage>, String> {
     let mut stream =
-        start_stream(&fixture.slot, Streaming::On, &fixture.publication, false).await?;
+        start_stream(&fixture.slot, Streaming::On, &fixture.publication).await?;
     let top = fixture.begin_and_xid().await;
     fixture
         .setup
@@ -446,21 +427,24 @@ async fn observe_abort(
     publication: &str,
     xid: u32,
 ) -> AbortOutcome {
-    // PostgreSQL 18 can remain healthily silent for this rollback, so bound the
-    // observation rather than waiting for a transaction-terminal frame. A
-    // one-second server timeout forces a demanded keepalive during the window:
-    // with correct feedback the outer observation expires normally; without
-    // it the walsender terminates and the inner future returns an error. The
-    // old test folded that transport error into an empty result and therefore
-    // mistook a dead stream for PostgreSQL 18's legitimate silence.
+    // The bound is the CALLER's, not the walsender's. A walsender owes no bytes
+    // at a frame boundary, so PostgreSQL 18 can remain healthily silent for
+    // this rollback and the observation has to give up on its own clock. A dead
+    // stream is a different condition and still surfaces: an unreadable socket
+    // returns an error here, which is a failure, while silence expires the
+    // bound. Whether the driver answers a reply-requested keepalive is pinned
+    // separately by a scripted peer with no server and no clock; this
+    // observation must not arm a server-side deadline, because a CPU-starved
+    // client that missed it would have the walsender closed and report that as
+    // a dead stream.
     //
-    // The transaction is written BEFORE this call. Starting the read first
-    // would leave the one-second walsender timeout armed across the write, and
-    // a whole-transaction `ROLLBACK` is streamed and aborted reliably from a
-    // committed WAL record, so there is nothing to gain by decoding it live.
+    // The transaction is written BEFORE this call, and the stream starts at the
+    // slot's confirmed_flush_lsn, so it replays the rollback from a committed
+    // WAL record. Starting the read first would only decode it live and buy
+    // nothing while shortening the window the bound covers.
     let messages = match compio::time::timeout(
         ABORT_OBSERVATION,
-        try_collect_with_fast_keepalives(slot, streaming, publication, true, || async { xid }),
+        try_collect(slot, streaming, publication, || async { xid }),
     )
     .await
     {

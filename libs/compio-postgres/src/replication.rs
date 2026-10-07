@@ -6614,6 +6614,188 @@ mod tests {
         );
     }
 
+    /// Every demand a walsender makes on an otherwise silent stream is answered
+    /// inline, so the stream never depends on the server's own
+    /// `wal_sender_timeout` to see the client is alive.
+    ///
+    /// `a_requested_primary_keepalive_is_answered_before_it_is_yielded` pins one
+    /// demand and the reply's bytes. This drives several demands in a row, which
+    /// pins two more things a single demand cannot: the answer is repeated
+    /// rather than one-shot, and each reply reports the `wal_end` just read as
+    /// its `write_lsn`, so the feedback advances instead of repeating the first
+    /// position. No server and no clock is involved: the peer is a byte buffer,
+    /// and the only ordering asserted is temporal within each `next` call.
+    #[compio::test]
+    async fn every_requested_keepalive_on_a_silent_stream_is_answered_inline() {
+        let keepalive = |wal_end: u64| {
+            let mut body = vec![PRIMARY_KEEPALIVE_TAG];
+            body.extend_from_slice(&wal_end.to_be_bytes());
+            body.extend_from_slice(&700_000_000_000i64.to_be_bytes());
+            body.push(1);
+
+            let mut frame = vec![COPY_DATA_TAG];
+            frame.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_be_bytes());
+            frame.extend_from_slice(&body);
+            frame
+        };
+
+        // Three demands at distinct positions, concatenated. The stream carries
+        // nothing else, so only the client's replies keep it in step.
+        let positions = [0x16B_4000u64, 0x16B_5000, 0x16B_6000];
+        let mut wire = Vec::new();
+        for wal_end in positions {
+            wire.extend_from_slice(&keepalive(wal_end));
+        }
+
+        let written = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut stream: ReplicationStream<CapturingPeer, CapturingPeer> = ReplicationStream {
+            stream: BufStream::new(MaybeTlsStream::Raw(CapturingPeer {
+                unread: wire,
+                written: std::rc::Rc::clone(&written),
+            })),
+            lsn: LsnTracker::new(0x16B_3750),
+            copy_response: Default::default(),
+            in_flight: InFlight::default(),
+            release: None,
+            cancel_token: test_cancel_token(),
+        };
+
+        for wal_end in positions {
+            match stream
+                .next()
+                .await
+                .expect("a requested keepalive decodes")
+                .expect("one keepalive")
+            {
+                ReplicationMessage::PrimaryKeepalive {
+                    wal_end: received,
+                    reply_requested,
+                    ..
+                } => {
+                    assert_eq!(received, wal_end);
+                    assert!(reply_requested);
+                }
+                other => panic!("expected a reply-requested PrimaryKeepalive, got {other:?}"),
+            }
+        }
+
+        // One status update per demand, each carrying the position it just read
+        // as its write LSN and requesting no reply of its own.
+        let frames = written.borrow();
+        assert_eq!(
+            frames.len(),
+            positions.len() * 39,
+            "expected one feedback frame per demand, got {:02x?}",
+            frames.as_slice()
+        );
+        for (index, wal_end) in positions.into_iter().enumerate() {
+            let frame = &frames[index * 39..index * 39 + 39];
+            assert_eq!(frame[0], COPY_DATA_TAG, "feedback {index} is not CopyData");
+            assert_eq!(
+                frame[5], STANDBY_STATUS_UPDATE_TAG,
+                "feedback {index} is not a StandbyStatusUpdate"
+            );
+            let write_lsn =
+                u64::from_be_bytes(frame[6..14].try_into().expect("write_lsn is eight bytes"));
+            assert_eq!(
+                write_lsn, wal_end,
+                "feedback {index} reported write_lsn {write_lsn:#x} instead of the \
+                 keepalive's {wal_end:#x}"
+            );
+            assert_eq!(
+                frame[38], 0,
+                "the inline answer to a demand must not request another reply"
+            );
+        }
+    }
+
+    /// A payload is not a demand for feedback. `next` must write nothing for an
+    /// `XLogData` frame; only the `reply_requested` keepalive that follows draws
+    /// the inline `StandbyStatusUpdate`, whose `write_lsn` is that keepalive's
+    /// `wal_end` rather than the earlier frame's. This ordered property is
+    /// pinned with a scripted peer, with no server and no clock, so the
+    /// abort-observation suite in `tests/integration/pgoutput_streaming.rs`
+    /// leaves keepalive feedback to this coverage rather than to a shortened
+    /// server deadline. A driver that answered every frame
+    /// passes the sibling test above but fails the empty-write control here.
+    #[compio::test]
+    async fn only_a_requested_keepalive_draws_inline_feedback() {
+        let xlog = |wal_start: u64, wal_end: u64| {
+            let mut body = vec![XLOG_DATA_TAG];
+            body.extend_from_slice(&wal_start.to_be_bytes());
+            body.extend_from_slice(&wal_end.to_be_bytes());
+            body.extend_from_slice(&700_000_000_000i64.to_be_bytes());
+            body.extend_from_slice(b"pgoutput");
+
+            let mut frame = vec![COPY_DATA_TAG];
+            frame.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_be_bytes());
+            frame.extend_from_slice(&body);
+            frame
+        };
+        let keepalive = |wal_end: u64| {
+            let mut body = vec![PRIMARY_KEEPALIVE_TAG];
+            body.extend_from_slice(&wal_end.to_be_bytes());
+            body.extend_from_slice(&700_000_000_000i64.to_be_bytes());
+            body.push(1);
+
+            let mut frame = vec![COPY_DATA_TAG];
+            frame.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_be_bytes());
+            frame.extend_from_slice(&body);
+            frame
+        };
+
+        let data_wal_end = 0x16B_3800;
+        let keepalive_wal_end = 0x16B_4000;
+        let mut unread = xlog(0x16B_3750, data_wal_end);
+        unread.extend_from_slice(&keepalive(keepalive_wal_end));
+        let written = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut stream: ReplicationStream<CapturingPeer, CapturingPeer> = ReplicationStream {
+            stream: BufStream::new(MaybeTlsStream::Raw(CapturingPeer {
+                unread,
+                written: std::rc::Rc::clone(&written),
+            })),
+            lsn: LsnTracker::new(0x16B_3750),
+            copy_response: Default::default(),
+            in_flight: InFlight::default(),
+            release: None,
+            cancel_token: test_cancel_token(),
+        };
+
+        match stream.next().await.expect("XLogData decodes") {
+            Some(ReplicationMessage::XLogData { wal_end, .. }) => assert_eq!(wal_end, data_wal_end),
+            other => panic!("expected XLogData, got {other:?}"),
+        }
+        assert!(
+            written.borrow().is_empty(),
+            "an XLogData frame drew unsolicited feedback"
+        );
+
+        match stream.next().await.expect("keepalive decodes") {
+            Some(ReplicationMessage::PrimaryKeepalive {
+                wal_end,
+                reply_requested,
+                ..
+            }) => {
+                assert_eq!(wal_end, keepalive_wal_end);
+                assert!(reply_requested);
+            }
+            other => panic!("expected PrimaryKeepalive, got {other:?}"),
+        }
+
+        let frame = written.borrow().clone();
+        assert_eq!(frame.len(), 39, "feedback frame was {frame:02x?}");
+        assert_eq!(frame[0], COPY_DATA_TAG);
+        assert_eq!(frame[5], STANDBY_STATUS_UPDATE_TAG);
+        let lsn = |at: usize| u64::from_be_bytes(frame[at..at + 8].try_into().expect("8 bytes"));
+        assert_eq!(
+            lsn(6),
+            keepalive_wal_end,
+            "the reply's write position must be the keepalive's wal_end, not the earlier \
+             XLogData's"
+        );
+        assert_eq!(frame[38], 0, "the reply must not request another reply");
+    }
+
     /// The bytes `send_standby_status_update` puts on the wire are the bytes
     /// PostgreSQL's protocol specifies.
     ///
