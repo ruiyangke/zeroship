@@ -1458,29 +1458,59 @@ async fn an_attempt_shorter_than_one_operation_bound_is_released_unstarted() {
 ///
 /// The lease is renewable and the attempt is not, so the guard's hard bound is
 /// the local ceiling and the attempt alone; the lease holds the guard through
-/// each renewal instead. An execution needing several leases completes while
-/// every renewal answers.
+/// each renewal instead. The manager lease the attempt starts under is shorter
+/// than the execution, and one renewal extends it past the execution, so an
+/// execution that reaches its own end under a live guard proves it was held by
+/// the renewed lease and not by the one it started under.
+///
+/// BOTH REAL-TIME EDGES ARE PLACED BY THE CASE. The short lease is stamped
+/// after the claim, so the claim's own journal I/O cannot spend it, and the
+/// first renewal is released through the fixture's gate rather than on the
+/// wall clock, so a loaded host's scheduling delay cannot let the starting
+/// lease lapse before the renewal extends it. What is asserted is the ordering
+/// and the execution state the behaviour promises, not an elapsed duration or
+/// the settlement's separate operation budget.
 #[compio::test]
 async fn a_renewed_lease_carries_an_execution_past_the_lease_it_started_under() {
-    let mut fixture = Fixture::new(AppPolicy::default()).await;
-    let lease = Duration::from_secs(2);
-    fixture.lease.expires = Instant::now() + lease;
-    fixture.metadata.renewal.set(Some(lease));
+    let fixture = Fixture::new(AppPolicy::default()).await;
     fixture.probe.mode.set(Mode::CompleteAfter);
+    let lease = Duration::from_secs(2);
+    // One renewal, longer than the execution that follows it, carries the
+    // attempt: a following renewal is left to the transport's cadence and
+    // cannot be what the execution's continuation is attributed to.
+    fixture.metadata.renewal.set(Some(lease * 3));
     fixture.probe.hold.set(lease * 5 / 2);
+    let (open, gate) = oneshot::channel();
+    *fixture.metadata.renewal_gate.borrow_mut() = Some(gate);
+    // Stamp the short manager lease after the claim: the claim is journal I/O
+    // and a loaded host can stretch it past a lease set before it.
+    let mut claim = claimed(&fixture.app, fixture.lease.clone()).await.unwrap();
+    claim.lease.expires = Instant::now() + lease;
     let mut slot = fixture.slot(Duration::from_secs(30));
-    let started = Instant::now();
-    let outcome = Box::pin(slot.run(
-        &fixture.app,
-        claimed(&fixture.app, fixture.lease.clone()).await.unwrap(),
-    ))
-    .await;
+    open.send(()).unwrap();
+    let outcome = Box::pin(slot.run(&fixture.app, claim)).await;
+    // The execution's own mode refuses to end while its budget is spent, so
+    // reaching its end at all is the guard having been extended across the
+    // lease the attempt started under.
     assert!(
-        matches!(outcome, Ok(DeliveryOutcome::Settled { .. })),
-        "a renewed execution ended at the lease it started under: {outcome:?}"
+        fixture.probe.resolved.get(),
+        "the execution did not reach its own end under a live guard"
     );
-    assert!(started.elapsed() > lease * 2);
-    assert!(fixture.metadata.renewals.get() > 1);
+    // Its settlement is bounded by the slot's operation budget, which this case
+    // does not exercise: a settlement that missed that budget is not a failure
+    // of the renewal, but any other outcome would be.
+    assert!(
+        matches!(
+            outcome,
+            Ok(DeliveryOutcome::Settled { .. }) | Err(WorkflowServiceError::Timeout)
+        ),
+        "a renewed execution failed for a reason other than its settlement budget: {outcome:?}"
+    );
+    assert!(
+        fixture.metadata.renewals_before_resolution.get() >= 1,
+        "the execution resolved before a renewal carried it past its starting lease"
+    );
+    assert_eq!(fixture.probe.starts.get(), 1);
 }
 
 /// A heartbeat reply that lands after one operation bound, but inside the lease
