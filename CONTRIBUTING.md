@@ -237,7 +237,9 @@ expands it.
 `test_support_crates_sit_in_the_layer_their_name_says` reads this rule from
 `cargo metadata`: every library-only package that classifies itself
 `test-dev-tool` must have a name in one of those layers and normal path edges
-below it.
+below it. A package that classifies itself `test-dev-tool` and ships a binary
+is placed instead by the reader's one explicit list of such dev tools, and
+every name there must ship a binary target.
 
 ### CI
 

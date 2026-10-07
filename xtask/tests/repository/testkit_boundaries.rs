@@ -30,6 +30,10 @@
 //! Fixtures are never a crate. Adapters typed by a crate whose own unit tests
 //! need them are a `macro_rules!` in its area testkit, and every crate that
 //! uses them expands it.
+//!
+//! A package that classifies itself `test-dev-tool` and ships a binary cannot
+//! be placed by that name rule, so the reader admits it only when it is named
+//! in one explicit list, and every name there must ship a binary.
 
 use crate::architecture::repo;
 use serde_json::Value;
@@ -317,12 +321,16 @@ fn testkit_layer(package: &Value) -> Option<TestkitLayer> {
 }
 
 /// Whether a package's own manifest classifies it `test-dev-tool` and it has
-/// no binary target. `zeroship-config-contract` is the tool that classifies
-/// itself this way and still ships a binary, so the layer rule does not apply
-/// to it.
+/// no binary target, so the layer rule places it by name.
 fn is_layer_testkit(package: &Value) -> bool {
     repo::self_classifies_test_dev_tool(package) && repo::bin_targets(package).is_empty()
 }
+
+/// Dev tools that classify themselves `test-dev-tool` yet ship a binary, so the
+/// layer rule cannot place them by name. The reader admits a binary-shipping
+/// `test-dev-tool` only when its name is here, and every name here must ship a
+/// binary target.
+const DEV_TOOLS_SHIPPING_A_BINARY: &[&str] = &["zeroship-config-contract"];
 
 /// The path packages `package` names on a normal edge: `[dependencies]`, under
 /// any alias or target table, filtered to the local packages `packages` holds.
@@ -351,20 +359,41 @@ fn lives_under_libs(package: &Value) -> bool {
         .is_some_and(|relative| relative.starts_with("libs"))
 }
 
-/// Every dev-only library testkit whose normal path edges reach outside the
-/// layer its name states, keyed by the offending testkit.
+/// Every self-classified `test-dev-tool` that the layer rule cannot place,
+/// keyed by the offending package.
 ///
-/// The server layer is a leaf; the platform layer may name the server layer, a
-/// `libs/` driver, or a crate with no path dependency of its own; an area
-/// testkit may name the two layers below it and nothing else that is a testkit;
-/// and a name that is none of those is not a testkit crate at all.
+/// A binary-shipping `test-dev-tool` is placed only by [`DEV_TOOLS_SHIPPING_A_BINARY`],
+/// and a name there must carry a binary target. A library testkit is placed by
+/// its name: the server layer is a leaf; the platform layer may name the server
+/// layer, a `libs/` driver, or a crate with no path dependency of its own; an
+/// area testkit may name the two layers below it and nothing else that is a
+/// testkit; and a name that is none of those is not a testkit crate at all.
 fn layer_violations(packages: &[&Value]) -> BTreeMap<String, String> {
     let mut violations = BTreeMap::new();
     for package in packages {
-        if !is_layer_testkit(package) {
+        if !repo::self_classifies_test_dev_tool(package) {
             continue;
         }
         let name = package["name"].as_str().expect("package name").to_owned();
+        let listed = DEV_TOOLS_SHIPPING_A_BINARY.contains(&name.as_str());
+        let has_binary = !repo::bin_targets(package).is_empty();
+        if listed && !has_binary {
+            violations.insert(
+                name,
+                "it is named as a binary dev tool but ships no binary target".to_owned(),
+            );
+            continue;
+        }
+        if has_binary {
+            if !listed {
+                violations.insert(
+                    name,
+                    "it ships a binary but is not a named binary dev tool".to_owned(),
+                );
+            }
+            continue;
+        }
+        // No binary: the library-testkit layer rule places it by name.
         let dependencies = normal_path_dependencies(packages, package);
         let reason = match testkit_layer(package) {
             None => Some("its name does not place it in a testkit layer".to_owned()),
@@ -435,7 +464,19 @@ fn synthetic_testkit(name: &str, dependencies: &[&str]) -> Value {
     package
 }
 
-/// Every dev-only library testkit sits in the layer its name states.
+/// [`synthetic_testkit`] that also ships a binary, the shape of a dev tool the
+/// layer rule cannot place by name.
+fn synthetic_binary_testkit(name: &str) -> Value {
+    let mut package = synthetic_testkit(name, &[]);
+    package["targets"] = serde_json::json!([
+        {"name": name, "kind": ["lib"]},
+        {"name": name, "kind": ["bin"]},
+    ]);
+    package
+}
+
+/// Every self-classified `test-dev-tool` is placed by the layer its name
+/// states, or by the named dev tools that ship a binary.
 #[test]
 fn test_support_crates_sit_in_the_layer_their_name_says() {
     let packages = repo::path_packages();
@@ -452,17 +493,32 @@ fn test_support_crates_sit_in_the_layer_their_name_says() {
                 .any(|name| name.ends_with("-testkit") && *name != "zeroship-testkit"),
         "the layer scan lost its corpus: {layer_testkits:?}"
     );
+    let binary_dev_tools: Vec<&str> = packages
+        .iter()
+        .filter(|package| {
+            repo::self_classifies_test_dev_tool(package) && !repo::bin_targets(package).is_empty()
+        })
+        .map(|package| package["name"].as_str().expect("package name"))
+        .collect();
+    assert!(
+        DEV_TOOLS_SHIPPING_A_BINARY
+            .iter()
+            .all(|name| binary_dev_tools.contains(name)),
+        "the binary dev tool list names a package that does not classify itself \
+         `test-dev-tool` with a binary target: {binary_dev_tools:?}"
+    );
     let violations = layer_violations(&packages);
     assert!(
         violations.is_empty(),
-        "a dev-only testkit's normal edges reach outside the layer its name places \
-         it in: {violations:?}"
+        "a self-classified `test-dev-tool` is placed by neither its name nor the \
+         named binary dev tools: {violations:?}"
     );
 }
 
 /// The controls for [`test_support_crates_sit_in_the_layer_their_name_says`]:
 /// one misplaced normal edge per layer, a name that is not a testkit layer at
-/// all, and a well-formed set the same reader accepts.
+/// all, a binary-shipping tool the list does and does not name, and a
+/// well-formed set the same reader accepts.
 #[test]
 fn the_layer_reader_rejects_misplaced_edges_and_names_that_are_not_layers() {
     let server = synthetic_testkit("zeroship-testkit-server", &["zeroship-stray"]);
@@ -519,6 +575,31 @@ fn the_layer_reader_rejects_misplaced_edges_and_names_that_are_not_layers() {
         BTreeMap::from([(
             "zeroship-workflow-fixtures".to_owned(),
             "its name does not place it in a testkit layer".to_owned(),
+        )])
+    );
+
+    // The same fixtures-style name shipping a binary is refused: the layer rule
+    // cannot place it and the list does not name it.
+    let fixtures = synthetic_binary_testkit("zeroship-workflow-fixtures");
+    assert_eq!(
+        layer_violations(&[&fixtures]),
+        BTreeMap::from([(
+            "zeroship-workflow-fixtures".to_owned(),
+            "it ships a binary but is not a named binary dev tool".to_owned(),
+        )])
+    );
+
+    // The one named binary dev tool is accepted with a binary target...
+    let contract = synthetic_binary_testkit("zeroship-config-contract");
+    assert!(layer_violations(&[&contract]).is_empty());
+
+    // ...and refused without one.
+    let contract = synthetic_testkit("zeroship-config-contract", &[]);
+    assert_eq!(
+        layer_violations(&[&contract]),
+        BTreeMap::from([(
+            "zeroship-config-contract".to_owned(),
+            "it is named as a binary dev tool but ships no binary target".to_owned(),
         )])
     );
 
