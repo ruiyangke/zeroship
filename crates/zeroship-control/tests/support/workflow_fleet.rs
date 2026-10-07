@@ -1027,20 +1027,16 @@ async fn declare_creator_database(
     let datastore = zeroship_core::typed_id::generate("dst");
     pg.execute(
         "INSERT INTO zeroship.datastores (id, system_identifier, execution_zone_id, status) \
-         VALUES ($1, 5566778899001122, $2, 'active') \
-         ON CONFLICT (system_identifier) DO NOTHING",
-        &[&datastore, &zone],
+         VALUES ($1, $2, $3, 'active') \
+         ON CONFLICT (id) DO NOTHING",
+        &[
+            &datastore,
+            &zeroship_testkit::postgres::fixture_system_identifier(&datastore),
+            &zone,
+        ],
     )
     .await
     .expect("register the fleet's creator cluster");
-    let datastore: String = pg
-        .query_one(
-            "SELECT id FROM zeroship.datastores WHERE system_identifier = 5566778899001122",
-            &[],
-        )
-        .await
-        .expect("the registered datastore row")
-        .get("id");
     pg.execute(
         "INSERT INTO zeroship.databases \
              (id, project_id, execution_zone_id, datastore_id, name, status) \

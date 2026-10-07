@@ -353,15 +353,37 @@ fn apply_uri(database_id: &DatabaseId) -> String {
     format!("/v1/databases/{}/migrations/apply", database_id.as_str())
 }
 
-/// The datastore every database in this target is placed on.
+/// The datastore row `database`'s case is placed on.
 ///
-/// One row, because one PostgreSQL server holds every schema these cases
-/// create: `zeroship.datastores` is keyed on a cluster's own identity, so two
-/// rows for one server would be a fiction the placement keys would then hold
-/// databases against.
-fn fixture_datastore() -> String {
-    let body = "apitestfixture";
-    format!("dst_{body}{}", "0".repeat(25 - body.len()))
+/// The migrated server is shared by every case, and
+/// `datastores_system_identifier_key` is unique across it, so each case
+/// registers a row whose id and natural key come from its own database id. A
+/// literal row shared by every case would make two parallel cases collide on
+/// the natural key, and would leave each case holding a placement the first
+/// writer chose.
+fn fixture_datastore(database: &DatabaseId) -> String {
+    let (_, uuid) = zeroship_id::typed_id::parse(database.as_str())
+        .expect("a minted database id parses as a typed id");
+    zeroship_id::typed_id::from_uuid_string("dst", &uuid.to_string())
+        .expect("a database id's uuid composes a datastore id")
+}
+
+/// Declare the fixture datastore `database`'s schema is placed on, and return
+/// its id.
+async fn declare_fixture_datastore(conn: &Client, database: &DatabaseId) -> String {
+    let datastore = fixture_datastore(database);
+    conn.execute(
+        "INSERT INTO zeroship.datastores (id, system_identifier, execution_zone_id, status) \
+         VALUES ($1, $2, $3, 'active') ON CONFLICT (id) DO NOTHING",
+        &[
+            &datastore,
+            &zeroship_testkit::postgres::fixture_system_identifier(&datastore),
+            &DEFAULT_ZONE,
+        ],
+    )
+    .await
+    .expect("declare the fixture datastore");
+    datastore
 }
 
 /// The zone the platform corpus seeds and `zeroship.projects` defaults to.
@@ -463,15 +485,8 @@ async fn seed_app(conn: &Client, app_id: &AppId, owner_id: &UserId) -> DatabaseI
     .await
     .expect("seed app owner");
 
-    let datastore = fixture_datastore();
-    conn.execute(
-        "INSERT INTO zeroship.datastores (id, system_identifier, execution_zone_id, status) \
-         VALUES ($1, 7788990011223344, $2, 'active') ON CONFLICT (id) DO NOTHING",
-        &[&datastore, &DEFAULT_ZONE],
-    )
-    .await
-    .expect("declare the fixture datastore");
     let database = DatabaseId::mint();
+    let datastore = declare_fixture_datastore(conn, &database).await;
     conn.execute(
         "INSERT INTO zeroship.databases \
              (id, project_id, execution_zone_id, datastore_id, name, status) \
@@ -1627,15 +1642,8 @@ async fn seed_unbound_database(conn: &Client, principal: &UserId, label: &str) -
     .await
     .expect("seat the principal in the organization");
 
-    let datastore = fixture_datastore();
-    conn.execute(
-        "INSERT INTO zeroship.datastores (id, system_identifier, execution_zone_id, status) \
-         VALUES ($1, 7788990011223344, $2, 'active') ON CONFLICT (id) DO NOTHING",
-        &[&datastore, &DEFAULT_ZONE],
-    )
-    .await
-    .expect("declare the fixture datastore");
     let database = DatabaseId::mint();
+    let datastore = declare_fixture_datastore(conn, &database).await;
     conn.execute(
         "INSERT INTO zeroship.databases \
              (id, project_id, execution_zone_id, datastore_id, name, status) \
@@ -3042,4 +3050,76 @@ async fn trusted_source_ip_reaches_the_authz_context_and_audit_row_pg() {
     let _ = std::fs::remove_dir_all(tmp);
     cleanup_app(&conn, &app_id).await;
     cleanup_user(&conn, &owner_id).await;
+}
+
+/// Two cases declaring their fixture datastores at once share one server, and
+/// each one's natural key is its own.
+///
+/// `datastores_system_identifier_key` is unique across every case the migrated
+/// server runs, so two cases that derived the same identifier would collide
+/// there even though each has a datastore row of its own. Each thread brings
+/// its own connection and database id, and both reach the declaration behind a
+/// barrier, so the two inserts are in flight together on every run rather than
+/// whenever the scheduler happens to interleave them. The rows are read back
+/// and removed.
+#[ntex::test]
+async fn parallel_cases_declare_datastores_with_distinct_natural_keys_pg() {
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                compio::runtime::Runtime::new()
+                    .expect("datastore declaration runtime")
+                    .block_on(async move {
+                        let conn = admin_conn().await;
+                        let database = DatabaseId::mint();
+                        barrier.wait();
+                        declare_fixture_datastore(&conn, &database).await
+                    })
+            })
+        })
+        .collect();
+    let mut datastores = Vec::new();
+    for handle in handles {
+        datastores.push(
+            handle
+                .join()
+                .expect("a datastore declaration must not collide"),
+        );
+    }
+    datastores.sort();
+    datastores.dedup();
+    assert_eq!(
+        datastores.len(),
+        2,
+        "each case derives its datastore from its own database id: {datastores:?}"
+    );
+
+    let conn = admin_conn().await;
+    let rows = conn
+        .query_one(
+            "SELECT count(*)::int8 AS rows, count(DISTINCT system_identifier)::int8 AS identities \
+               FROM zeroship.datastores WHERE id = $1 OR id = $2",
+            &[&datastores[0], &datastores[1]],
+        )
+        .await
+        .expect("read back both fixture datastores");
+    assert_eq!(
+        rows.get::<_, i64>("rows"),
+        2,
+        "both cases' datastore rows must exist"
+    );
+    assert_eq!(
+        rows.get::<_, i64>("identities"),
+        2,
+        "two cases must not share a system_identifier"
+    );
+
+    conn.execute(
+        "DELETE FROM zeroship.datastores WHERE id = $1 OR id = $2",
+        &[&datastores[0], &datastores[1]],
+    )
+    .await
+    .expect("remove both fixture datastores");
 }

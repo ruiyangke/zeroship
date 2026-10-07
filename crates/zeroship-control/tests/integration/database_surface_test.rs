@@ -157,13 +157,10 @@ impl World {
     }
 
     async fn datastore_with_id(&self, fx: &Fx, id: &str, zone_id: &str, status: &str) {
-        // `datastores_system_identifier_key` is the natural key, so every
-        // fixture cluster needs a distinct one.
-        let system_identifier: i64 = i64::from(u32::from_le_bytes(
-            Uuid::new_v4().as_bytes()[..4]
-                .try_into()
-                .expect("four bytes"),
-        )) + i64::from(std::process::id());
+        // `datastores_system_identifier_key` is the natural key, unique across
+        // every case the shared server runs. It is derived from the datastore
+        // id this case inserts.
+        let system_identifier = zeroship_testkit::postgres::fixture_system_identifier(id);
         fx.pg
             .execute(
                 "INSERT INTO zeroship.datastores \

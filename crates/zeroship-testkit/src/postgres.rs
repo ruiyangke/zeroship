@@ -269,6 +269,28 @@ pub fn migrate_server_platform() -> &'static Platform {
     })
 }
 
+/// A `system_identifier` unique to one fixture case, derived from its datastore
+/// id.
+///
+/// `zeroship.datastores.system_identifier` is unique on the migrated server
+/// every process of this worktree shares, so a fixture that registers a
+/// datastore cannot reuse the cluster's own identity: that is one value and
+/// every case needs its own row. The datastore id is a fresh UUIDv7 minted per
+/// case, and the identity is the low 63 bits of its 128-bit value, so two cases
+/// differ unless their ids agree in those 63 bits - the id's own collision
+/// bound, not a fixed literal two cases share and not a process id that a later
+/// run recycles onto the persistent server. The result is a positive `bigint`,
+/// which is the column's type.
+///
+/// # Panics
+/// When `datastore_id` is not a typed id.
+#[must_use]
+pub fn fixture_system_identifier(datastore_id: &str) -> i64 {
+    let (_, uuid) = zeroship_id::typed_id::parse(datastore_id)
+        .expect("a fixture datastore id parses as a typed id");
+    (uuid.as_u128() as u64 & 0x7fff_ffff_ffff_ffff) as i64
+}
+
 /// The recipe the shared server runs under, its identity keyed to every input
 /// that changes what a ready server contains.
 fn spec() -> Result<shared::Spec, String> {

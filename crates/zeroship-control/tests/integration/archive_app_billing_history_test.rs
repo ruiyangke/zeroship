@@ -534,7 +534,7 @@ async fn seed_live_binding(
     let datastore_id =
         zeroship_core::typed_id::from_uuid_string("dst", &Uuid::new_v4().to_string())
             .expect("mint a datastore id");
-    let system_identifier: i64 = i64::from(std::process::id()) + 1_000_000;
+    let system_identifier = zeroship_testkit::postgres::fixture_system_identifier(&datastore_id);
     client
         .execute(
             "INSERT INTO zeroship.datastores (id, system_identifier, execution_zone_id, status) \

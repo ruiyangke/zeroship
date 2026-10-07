@@ -276,6 +276,10 @@ async fn seed(client: &Client) -> PlacementGraph {
             )
             .await,
     );
+    let system_identifier =
+        zeroship_testkit::postgres::fixture_system_identifier(graph.datastore.as_str());
+    let far_system_identifier =
+        zeroship_testkit::postgres::fixture_system_identifier(graph.far_datastore.as_str());
     assert_eq!(
         client
             .execute(
@@ -284,8 +288,8 @@ async fn seed(client: &Client) -> PlacementGraph {
                 &[
                     &graph.datastore.as_str(),
                     &graph.far_datastore.as_str(),
-                    &7_403_001_i64,
-                    &7_403_002_i64,
+                    &system_identifier,
+                    &far_system_identifier,
                     &HOME_ZONE,
                     &FAR_ZONE,
                 ],

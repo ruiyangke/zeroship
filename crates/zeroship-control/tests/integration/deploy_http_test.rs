@@ -1316,9 +1316,10 @@ async fn seed_live_binding(state: &AppState, app_id: &AppId, database: &zeroship
         .expect("a project is pinned to a zone");
     let datastore_id = zeroship_core::typed_id::from_uuid_string("dst", &uuid::Uuid::new_v4().to_string())
         .expect("a fresh uuid composes a datastore id");
-    // `datastores_system_identifier_key` is the natural key, so every fixture
-    // cluster needs a distinct one.
-    let system_identifier: i64 = i64::from(std::process::id()) + rand_suffix();
+    // `datastores_system_identifier_key` is the natural key, unique across
+    // every case the shared server runs. It is derived from the datastore id
+    // this case inserts rather than from one literal every case would share.
+    let system_identifier = zeroship_testkit::postgres::fixture_system_identifier(&datastore_id);
     state
         .control_pg
         .execute(
@@ -1359,15 +1360,6 @@ async fn seed_live_binding(state: &AppState, app_id: &AppId, database: &zeroship
         )
         .await
         .expect("bind the fixture app to the fixture database");
-}
-
-/// A distinct-enough tail for a fixture cluster's natural key.
-fn rand_suffix() -> i64 {
-    i64::from(u32::from_le_bytes(
-        uuid::Uuid::new_v4().as_bytes()[..4]
-            .try_into()
-            .expect("four bytes"),
-    ))
 }
 
 /// The app pointer the gateway reads. `None` when nothing is live.

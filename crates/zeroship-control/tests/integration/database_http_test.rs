@@ -200,8 +200,7 @@ async fn the_database_routes_are_mounted_and_gate_on_the_database_resource() {
     // The operator's side of the world: a cluster registered in the project's
     // zone. Control never inserts one.
     let datastore_id = zeroship_core::typed_id::generate("dst");
-    let system_identifier =
-        i64::from(u32::from_le_bytes(Uuid::new_v4().as_bytes()[..4].try_into().expect("four bytes")));
+    let system_identifier = zeroship_testkit::postgres::fixture_system_identifier(&datastore_id);
     pg.execute(
         "INSERT INTO zeroship.datastores (id, system_identifier, execution_zone_id, status) \
          SELECT $1, $2, p.execution_zone_id, 'active' \
