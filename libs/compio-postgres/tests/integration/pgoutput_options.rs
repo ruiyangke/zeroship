@@ -38,6 +38,15 @@ async fn client() -> Client {
 }
 
 /// Read one transaction's worth of messages, stopping at its Commit.
+///
+/// Safe from a concurrent test's WAL: pgoutput emits no `Begin`/`Commit` for a
+/// transaction with no change the slot's options accept, so a foreign
+/// transaction cannot produce the `Commit` this stops at. The premise is
+/// exercised by the `OriginFilter::None` arm of
+/// `the_origin_none_option_drops_changes_replayed_from_a_peer`, whose peer
+/// transaction has its only row dropped by the origin filter: if pgoutput still
+/// emitted that transaction's `Begin`/`Commit`, `stream_until_commit` would stop
+/// on the peer's `Commit` and `first_insert` would panic on a missing Insert.
 async fn stream_until_commit(
     slot: &str,
     options: StartReplicationOptions<'_>,
@@ -67,6 +76,59 @@ async fn stream_until_commit(
                 let done = matches!(message, PgOutputMessage::Commit { .. });
                 messages.push(message);
                 if done {
+                    return messages;
+                }
+            }
+            Some(ReplicationMessage::PrimaryKeepalive { .. }) => continue,
+            None => return messages,
+        }
+    }
+}
+
+/// Read until the transaction `xid` ends, keeping only frames that carry it.
+///
+/// A logical message lives in the database's WAL rather than in a publication's
+/// tables, so a slot streaming with `messages: true` receives every session's
+/// `pg_logical_emit_message` payload: the `compio-postgres-flush` messages
+/// `pgoutput_streaming` and `pgoutput_subtransactions` emit to flush an open
+/// transaction's WAL among them. Each arrives inside its own committed
+/// transaction, and a reader that stops at the first `Commit` stops on that
+/// foreign transaction and returns before its own message. Taking ownership
+/// from `xid` is what keeps a foreign message - and the foreign `Commit` that
+/// closes it - from ending this read.
+async fn stream_transaction(
+    slot: &str,
+    options: StartReplicationOptions<'_>,
+    xid: u32,
+) -> Vec<PgOutputMessage> {
+    let replication = compio_postgres::replication::connect_replication(
+        support::suite_tls(),
+        &support::replication_config("cpg_pgoutput_options"),
+    )
+    .await
+    .expect("replication connect failed");
+
+    let mut stream = replication
+        .start_logical_replication(options)
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "START_REPLICATION on slot {slot} failed: {}",
+                support::error_chain(&error)
+            )
+        });
+
+    let mut ownership = support::StreamOwnership::new(xid);
+    let mut messages = Vec::new();
+    loop {
+        match stream.next().await.expect("replication stream failed") {
+            Some(ReplicationMessage::XLogData { body, .. }) => {
+                let message = pgoutput::decode(&body).expect("a live frame failed to decode");
+                let (keep, terminal) = ownership.classify(&message);
+                if keep {
+                    messages.push(message);
+                }
+                if terminal {
                     return messages;
                 }
             }
@@ -220,13 +282,25 @@ async fn the_messages_option_decides_whether_logical_messages_arrive() {
     compio::time::timeout(WATCHDOG, async {
         for (want_messages, expectation) in [(true, "must arrive"), (false, "must not arrive")] {
             let fixture = Fixture::create(&format!("cpg opt msg {want_messages}")).await;
+            // A prefix private to this test, so a concurrent test's message on
+            // the same stream cannot answer for this one.
+            let prefix = support::test_object_name(&format!("cpg opt msg {want_messages}"));
             // Transactional message plus a row, so there is always a Commit to
             // stop at even when the message itself is withheld.
             fixture
                 .setup
+                .batch_execute("BEGIN")
+                .await
+                .expect("begin failed");
+            let xid: i64 = fixture
+                .setup
+                .query_one_scalar("SELECT txid_current()", &[])
+                .await
+                .expect("read the transaction id");
+            fixture
+                .setup
                 .batch_execute(&format!(
-                    "BEGIN;
-                     SELECT pg_logical_emit_message(true, 'cpg_prefix', 'cpg_payload');
+                    "SELECT pg_logical_emit_message(true, '{prefix}', 'cpg_payload');
                      INSERT INTO {} VALUES (1, 'x');
                      COMMIT;",
                     fixture.table
@@ -234,7 +308,7 @@ async fn the_messages_option_decides_whether_logical_messages_arrive() {
                 .await
                 .expect("emit failed");
 
-            let messages = stream_until_commit(
+            let messages = stream_transaction(
                 &fixture.slot,
                 StartReplicationOptions {
                     slot_name: &fixture.slot,
@@ -242,13 +316,14 @@ async fn the_messages_option_decides_whether_logical_messages_arrive() {
                     messages: want_messages,
                     ..Default::default()
                 },
+                xid as u32,
             )
             .await;
             fixture.drop_all().await;
 
             let found = messages.iter().any(|message| {
-                matches!(message, PgOutputMessage::Message { prefix, content, .. }
-                    if prefix == "cpg_prefix" && content.as_ref() == b"cpg_payload")
+                matches!(message, PgOutputMessage::Message { prefix: observed, content, .. }
+                    if observed == &prefix && content.as_ref() == b"cpg_payload")
             });
             assert_eq!(
                 found, want_messages,
@@ -258,6 +333,163 @@ async fn the_messages_option_decides_whether_logical_messages_arrive() {
     })
     .await
     .expect("the messages-option test exceeded its watchdog");
+}
+
+/// A logical message another session emits reaches this slot too, because a
+/// message lives in the database's WAL rather than in a publication's tables.
+/// The foreign transaction commits FIRST, on its own session, so the ordering
+/// is fixed rather than raced: a reader that stops at the first `Commit`
+/// returns the foreign message and never reaches this test's own.
+#[compio::test]
+async fn a_foreign_logical_message_does_not_end_the_stream() {
+    compio::time::timeout(WATCHDOG, async {
+        let fixture = Fixture::create("cpg opt foreign msg").await;
+        let emitter = client().await;
+        emitter
+            .batch_execute(
+                "SELECT pg_logical_emit_message(true, 'cpg_foreign_prefix', 'cpg_foreign_payload')",
+            )
+            .await
+            .expect("the foreign message failed");
+
+        fixture
+            .setup
+            .batch_execute("BEGIN")
+            .await
+            .expect("begin failed");
+        let xid: i64 = fixture
+            .setup
+            .query_one_scalar("SELECT txid_current()", &[])
+            .await
+            .expect("read the transaction id");
+        fixture
+            .setup
+            .batch_execute(&format!(
+                "SELECT pg_logical_emit_message(true, 'cpg_prefix', 'cpg_payload');
+                 INSERT INTO {} VALUES (1, 'x');
+                 COMMIT;",
+                fixture.table
+            ))
+            .await
+            .expect("own emit failed");
+
+        let messages = stream_transaction(
+            &fixture.slot,
+            StartReplicationOptions {
+                slot_name: &fixture.slot,
+                publication_names: &[&fixture.publication],
+                messages: true,
+                ..Default::default()
+            },
+            xid as u32,
+        )
+        .await;
+        fixture.drop_all().await;
+
+        assert!(
+            messages.iter().any(|message| {
+                matches!(message, PgOutputMessage::Message { prefix, content, .. }
+                    if prefix == "cpg_prefix" && content.as_ref() == b"cpg_payload")
+            }),
+            "the foreign transaction's Commit ended the stream before this \
+             test's own message: {messages:?}"
+        );
+        assert!(
+            !messages.iter().any(|message| {
+                matches!(message, PgOutputMessage::Message { prefix, .. }
+                    if prefix == "cpg_foreign_prefix")
+            }),
+            "a foreign prefix was kept in the owned transaction's frames: {messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| matches!(message, PgOutputMessage::Insert { .. })),
+            "the owned transaction's Insert did not arrive: {messages:?}"
+        );
+    })
+    .await
+    .expect("the foreign-message test exceeded its watchdog");
+}
+
+/// A concurrent test's logical message must not end this test's read.
+///
+/// `pg_logical_emit_message` writes to the WAL of the whole database, and this
+/// suite shares one database, so a slot decodes every other test's committed
+/// messages. A read that stopped at the first `Commit` would return the foreign
+/// transaction and never reach this test's own; the per-test prefixes keep the
+/// two messages apart, and `stream_transaction` keeps the foreign transaction's
+/// frames out of the read.
+#[compio::test]
+async fn a_foreign_logical_message_does_not_end_the_read_before_this_tests_own() {
+    compio::time::timeout(WATCHDOG, async {
+        let fixture = Fixture::create("cpg opt foreign msg").await;
+        let prefix = support::test_object_name("cpg own prefix");
+        let foreign_prefix = support::test_object_name("cpg foreign prefix");
+
+        // Another session's committed transaction, earlier in the WAL than
+        // this test's. Its message carries a prefix this test never emits.
+        client()
+            .await
+            .batch_execute(&format!(
+                "SELECT pg_logical_emit_message(true, '{foreign_prefix}', 'foreign');"
+            ))
+            .await
+            .expect("the foreign logical message failed");
+
+        fixture
+            .setup
+            .batch_execute("BEGIN")
+            .await
+            .expect("begin failed");
+        let xid: i64 = fixture
+            .setup
+            .query_one_scalar("SELECT txid_current()", &[])
+            .await
+            .expect("read the transaction id");
+        fixture
+            .setup
+            .batch_execute(&format!(
+                "SELECT pg_logical_emit_message(true, '{prefix}', 'payload');
+                 INSERT INTO {} VALUES (1, 'x');
+                 COMMIT;",
+                fixture.table
+            ))
+            .await
+            .expect("this test's own emit failed");
+
+        let messages = stream_transaction(
+            &fixture.slot,
+            StartReplicationOptions {
+                slot_name: &fixture.slot,
+                publication_names: &[&fixture.publication],
+                messages: true,
+                ..Default::default()
+            },
+            xid as u32,
+        )
+        .await;
+        fixture.drop_all().await;
+
+        assert!(
+            messages.iter().any(|message| matches!(
+                message,
+                PgOutputMessage::Message { prefix: observed, content, .. }
+                    if observed == &prefix && content.as_ref() == b"payload"
+            )),
+            "this test's own logical message must be the one the read reaches: {messages:?}"
+        );
+        assert!(
+            !messages.iter().any(|message| matches!(
+                message,
+                PgOutputMessage::Message { prefix: observed, .. }
+                    if observed == &foreign_prefix
+            )),
+            "a foreign transaction's message must not be part of this test's read: {messages:?}"
+        );
+    })
+    .await
+    .expect("the foreign-message scoping test exceeded its watchdog");
 }
 
 /// `origin: None` drops changes that arrived from another replication origin

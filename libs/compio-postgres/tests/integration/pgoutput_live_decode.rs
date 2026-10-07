@@ -46,6 +46,15 @@ async fn client() -> Client {
 /// chose to send - `batch_execute` puts its statements in ONE implicit
 /// transaction, so four DML statements yield one Begin/Commit pair around
 /// them, not four - and a count that guesses high simply waits forever.
+///
+/// Safe from a concurrent test's WAL: pgoutput emits no `Begin`/`Commit` for a
+/// transaction with no change this publication accepts, so a foreign
+/// transaction cannot produce the `Commit` this stops at. The premise is
+/// exercised by the `OriginFilter::None` arm of
+/// `the_origin_none_option_drops_changes_replayed_from_a_peer`, whose peer
+/// transaction has its only row dropped by the origin filter: if pgoutput still
+/// emitted that transaction's `Begin`/`Commit`, that control would stop on the
+/// peer's `Commit` instead of the local transaction's.
 async fn decoded_stream(slot: &str, publication: &str) -> Vec<PgOutputMessage> {
     let replication = compio_postgres::replication::connect_replication(
         support::suite_tls(),
