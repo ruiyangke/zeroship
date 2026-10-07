@@ -228,6 +228,20 @@ fn send_close_notify_on(
     });
 }
 
+/// Record on the session that a release has begun ending the physical session.
+///
+/// Called BEFORE the socket's `shutdown(Both)`, whether or not the alert was
+/// serialized. `send_close_notify_on` sets `close_notify_out` only when it
+/// actually takes the alert; a lease held elsewhere, or a write in flight,
+/// makes it decline. The reader still needs to know the local side started the
+/// teardown so a reset from the shutdown reads as EOF.
+#[cfg(feature = "tls")]
+fn mark_local_teardown(session: Option<&crate::tls_sansio::SharedSession>) {
+    if let Some(session) = session {
+        session.mark_local_teardown_started();
+    }
+}
+
 /// Duplicates the descriptor behind `handle` and takes ownership of the copy.
 ///
 /// Returns `None` if the duplication fails. A connection whose socket cannot be
@@ -347,6 +361,8 @@ impl ConnectionRelease {
         let guard = self.socket.lock();
         if let Some(socket) = guard.as_ref() {
             #[cfg(feature = "tls")]
+            mark_local_teardown(self.tls_session.as_ref());
+            #[cfg(feature = "tls")]
             send_close_notify_on(socket, self.tls_session.as_ref());
 
             // A peer close or another release guard may win the race. In every
@@ -399,6 +415,8 @@ impl ConnectionDropRelease {
             // same reason as the client half: once the socket is down for
             // reading there is nothing left to write the alert through.
             #[cfg(feature = "tls")]
+            mark_local_teardown(self.tls_session.as_ref());
+            #[cfg(feature = "tls")]
             send_close_notify_on(socket, self.tls_session.as_ref());
 
             let _ = socket.shutdown(Shutdown::Both);
@@ -431,6 +449,8 @@ impl ConnectionDropRelease {
 
         let mut guard = socket_slot.lock();
         if let Some(socket) = guard.as_mut() {
+            #[cfg(feature = "tls")]
+            mark_local_teardown(self.tls_session.as_ref());
             #[cfg(feature = "tls")]
             send_close_notify_on(socket, self.tls_session.as_ref());
 

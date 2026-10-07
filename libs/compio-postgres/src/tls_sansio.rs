@@ -418,6 +418,20 @@ fn is_close_notify_sent_error(error: &io::Error) -> bool {
         .is_some_and(<dyn std::error::Error + Send + Sync + 'static>::is::<CloseNotifySent>)
 }
 
+/// Whether `error` is the reset the kernel sends when a frame arrives after the
+/// local side shut the socket down for reading.
+///
+/// `shutdown(Both)` in [`crate::release`] gives the receive side up, so a late
+/// server record stops being deliverable and the connection is reset rather
+/// than ended with a FIN. The reader turns that reset into EOF once a release
+/// has begun ending the session.
+fn is_local_teardown_reset(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+    )
+}
+
 struct SharedSessionState {
     session: Option<TlsSession>,
     owner: Option<ThreadId>,
@@ -435,6 +449,13 @@ struct SharedSessionInner {
     /// alert, which is a protocol violation. The flag lives here rather than
     /// on the session itself so `lease` can refuse WITHOUT taking it.
     close_notify_out: AtomicBool,
+    /// A release has begun ending the physical session: the socket is about to
+    /// be shut down. Distinct from `close_notify_out`, which records that the
+    /// alert was actually serialized. A release whose alert is declined - the
+    /// session lease is held elsewhere, or a write is in flight - still shuts
+    /// the socket down, and the reader still needs to know the local side
+    /// started the teardown.
+    local_teardown_started: AtomicBool,
 }
 
 /// The handle both halves share.
@@ -567,6 +588,39 @@ impl SharedSession {
         self.inner.close_notify_out.store(true, Ordering::Release);
     }
 
+    /// Record that a release has begun ending the physical session.
+    ///
+    /// Set by every release path BEFORE it shuts the socket down, whether or
+    /// not `close_notify` was serialized. A held lease or an in-flight write
+    /// makes the release decline the alert, so `close_notify_out` cannot carry
+    /// this meaning.
+    pub(crate) fn mark_local_teardown_started(&self) {
+        self.inner
+            .local_teardown_started
+            .store(true, Ordering::Release);
+    }
+
+    /// Whether a release has begun ending the physical session.
+    ///
+    /// The read half consults this after a socket read fails. Once the local
+    /// side has started shutting the socket down, a reset that arrives in that
+    /// window is the teardown the release started, not a failure the caller
+    /// needs to see. Checking the flag here, rather than only where the read
+    /// half next takes a lease, is what covers a read already parked in
+    /// `socket.read` when the release runs.
+    pub(crate) fn local_teardown_started(&self) -> bool {
+        self.inner.local_teardown_started.load(Ordering::Acquire)
+    }
+
+    /// Whether `close_notify` has been serialized out of the session.
+    ///
+    /// Test-only control: the regression for a release whose alert was declined
+    /// asserts this stayed false while the teardown flag was set.
+    #[cfg(test)]
+    pub(crate) fn close_notify_was_sent(&self) -> bool {
+        self.inner.close_notify_out.load(Ordering::Acquire)
+    }
+
     pub(crate) fn with<R>(
         &self,
         f: impl FnOnce(&mut TlsSession) -> io::Result<R>,
@@ -671,6 +725,7 @@ pub(crate) fn share(conn: ClientConnection) -> SharedSession {
             available: Condvar::new(),
             abandoned_write: AtomicBool::new(false),
             close_notify_out: AtomicBool::new(false),
+            local_teardown_started: AtomicBool::new(false),
         }),
     }
 }
@@ -840,7 +895,35 @@ where
             let buf = std::mem::take(&mut self.cipher);
             let BufResult(result, buf) = self.socket.read(buf).await;
             self.cipher = buf;
-            let read = result?;
+            let read = match result {
+                Ok(read) => read,
+                // The read half was already parked in `socket.read` when a
+                // release began ending the session and shut the socket down. A
+                // late server record then arrives after that local shutdown and
+                // the kernel answers it with RST, so this read completes with
+                // `ConnectionReset` instead of taking the typed refusal lease
+                // that `read_into` maps to EOF. The local side is closing either
+                // way, so that reset is EOF.
+                //
+                // The gate is the release's teardown flag, not `close_notify_out`:
+                // a release whose alert is declined (the session lease is held
+                // elsewhere, or a write is in flight) still shuts the socket
+                // down without serializing `close_notify`.
+                //
+                // This does NOT turn a failed request into a success. A request
+                // still awaiting a response when the local side tears down sees
+                // the connection as closed rather than as reset by the peer,
+                // which is the accurate account because the local side ended
+                // it; `classify_read_terminal` still returns an error while a
+                // response is awaited.
+                Err(error)
+                    if self.session.local_teardown_started()
+                        && is_local_teardown_reset(&error) =>
+                {
+                    return Ok(0);
+                }
+                Err(error) => return Err(error),
+            };
             if read == 0 {
                 // The socket is done, but anything rustls decrypted before the
                 // close is still owed to the caller. Only after that is this a
@@ -2051,6 +2134,135 @@ mod tests {
         assert!(
             is_close_notify_sent_error(&error),
             "wrong refusal for a post-close_notify try_lease: {error}"
+        );
+    }
+
+    /// A socket read fails with the reset the kernel sends for a frame arriving
+    /// after a local shutdown, and does so from INSIDE `socket.read`, after the
+    /// reader has already taken its `read_plaintext` lease.
+    ///
+    /// That ordering is the point. When the release's flags are set before the
+    /// reader leases, the reader's next `read_plaintext` returns the typed
+    /// refusal and `read_into` maps it to EOF with no help from this fix. A read
+    /// already parked in `socket.read` when the release runs takes no lease
+    /// afterwards, so only the reset check covers it. This peer marks the
+    /// session and then fails, which is exactly that window.
+    struct ClosingResetPeer {
+        session: SharedSession,
+    }
+
+    impl AsyncRead for ClosingResetPeer {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            self.session.mark_close_notify_sent();
+            self.session.mark_local_teardown_started();
+            BufResult(Err(io::Error::from(io::ErrorKind::ConnectionReset)), buf)
+        }
+    }
+
+    /// A reset that races the local teardown is EOF, not an error. The release
+    /// shuts the socket down synchronously from under a parked read, so a late
+    /// server frame resets the connection; the caller is closing either way and
+    /// must see a clean end rather than `ConnectionReset`.
+    #[compio::test]
+    async fn a_socket_reset_racing_local_teardown_reads_as_eof() {
+        let (client, _server) = handshaken_pair();
+        let session = share(client);
+        let mut reader = TlsReader::new(
+            ClosingResetPeer {
+                session: session.clone(),
+            },
+            session,
+        );
+
+        let BufResult(read, _buf) = reader.read_into(Vec::with_capacity(64)).await;
+        assert_eq!(
+            read.expect("a reset during local teardown was surfaced as an error"),
+            0,
+            "a reset during local teardown must read as EOF"
+        );
+    }
+
+    /// A peer whose first read fails with the reset the kernel sends when a
+    /// frame arrives after the local side shut the socket down for reading.
+    struct ResetPeer;
+
+    impl AsyncRead for ResetPeer {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            BufResult(Err(io::Error::from(io::ErrorKind::ConnectionReset)), buf)
+        }
+    }
+
+    /// A release whose `close_notify` cannot be serialized still shuts the
+    /// socket down, and a read parked in that socket then fails with the
+    /// kernel's reset. That reset must read as EOF.
+    ///
+    /// This is the lease-contention window
+    /// `tls_release_does_not_wait_for_an_in_flight_session_lease` proves the
+    /// release enters: the session lease is held, so `send_close_notify_on`
+    /// declines and `close_notify_out` stays false. Only the release's teardown
+    /// flag records that the local side ended the session, and the reader must
+    /// consult that flag rather than the alert flag.
+    #[compio::test]
+    async fn a_release_that_declines_close_notify_still_reads_a_racing_reset_as_eof() {
+        let (client, _server) = handshaken_pair();
+        let session = share(client);
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind declined-release listener");
+        let socket = TcpStream::connect(listener.local_addr().expect("declined-release address"))
+            .expect("connect declined-release socket");
+        let (_peer, _) = listener.accept().expect("accept declined-release socket");
+        let mut release = crate::release::ConnectionRelease::dup_of(&socket)
+            .expect("duplicate declined-release socket");
+        release.set_tls_session(session.clone());
+
+        // Hold the session lease so `take_close_notify` cannot run: the release
+        // declines the alert and still shuts the socket down.
+        let (held_tx, held_rx) = mpsc::channel();
+        let (allow_tx, allow_rx) = mpsc::channel();
+        let held_session = session.clone();
+        let holder = std::thread::spawn(move || {
+            held_session
+                .with(|_| {
+                    held_tx.send(()).expect("report held TLS lease");
+                    allow_rx.recv().expect("release held TLS lease");
+                    Ok(())
+                })
+                .expect("hold TLS lease");
+        });
+        held_rx.recv().expect("wait for held TLS lease");
+
+        // The flag must be set before the socket goes down: a read parked on the
+        // socket observes the reset at shutdown, so recording the teardown after
+        // the shutdown leaves that window uncovered.
+        let probe_session = session.clone();
+        crate::release::TLS_BEFORE_SHUTDOWN_PROBE.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                assert!(
+                    probe_session.local_teardown_started(),
+                    "the teardown flag was not set before the socket was shut down"
+                );
+            }));
+        });
+
+        release.shutdown();
+        assert!(
+            !session.close_notify_was_sent(),
+            "the held lease did not stop the release from serializing close_notify"
+        );
+        assert!(
+            session.local_teardown_started(),
+            "the release shut the socket down without recording the local teardown"
+        );
+
+        allow_tx.send(()).expect("allow held TLS lease to finish");
+        holder.join().expect("join TLS lease holder");
+
+        let mut reader = TlsReader::new(ResetPeer, session);
+        let BufResult(read, _buf) = reader.read_into(Vec::with_capacity(64)).await;
+        assert_eq!(
+            read.expect("a reset after a declined close_notify release was surfaced as an error"),
+            0,
+            "a reset after a declined close_notify release must read as EOF"
         );
     }
 
