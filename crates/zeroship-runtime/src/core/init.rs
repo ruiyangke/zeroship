@@ -78,6 +78,9 @@ fn init_v8_platform(single_threaded: bool) {
             std::sync::atomic::Ordering::SeqCst,
         );
 
+        #[cfg(target_os = "linux")]
+        disable_transparent_huge_pages();
+
         // Load ICU data so Intl.NumberFormat / .DateTimeFormat / .Collator
         // work — npm packages bundled by deepagents (Anthropic SDK, etc.)
         // construct these at module top-level and crash with "Internal
@@ -107,6 +110,37 @@ fn init_v8_platform(single_threaded: bool) {
         v8::V8::initialize_platform(platform);
         v8::V8::initialize();
     });
+}
+
+/// Keep huge-page compaction off the clock that limits and bills isolates.
+///
+/// A process that hosts isolates limits each V8 window on its thread's CPU
+/// clock (`crate::cpu_timer`) and bills that same clock to the app's `cpu_us`
+/// meter. The clock counts kernel time spent on the thread's behalf, and a page
+/// fault into memory advised for transparent huge pages may compact memory
+/// synchronously before it returns; mimalloc advises its arenas that way on
+/// Linux. On a host with fragmented memory one such fault can cost more thread
+/// CPU than a plan's whole CPU budget, so the timer would stop whichever request
+/// happens to be running and its app would be billed for the kernel's work.
+///
+/// Turning transparent huge pages off trades that rare, expensive compaction
+/// stall for a higher average page-fault cost paid continuously as every
+/// isolate's arenas grow: every fault becomes an ordinary page fault rather
+/// than an occasional compacting one. It does not remove every surprise on
+/// the thread clock: an ordinary page fault under memory pressure can still
+/// trigger direct reclaim on the faulting thread. And it is a process
+/// attribute, not a call-site one: a child this process later forks and
+/// execs inherits the setting too, not only the thread that made this call.
+#[cfg(target_os = "linux")]
+fn disable_transparent_huge_pages() {
+    if let Err(error) = rustix::thread::disable_transparent_huge_pages(true) {
+        tracing::warn!(
+            error = %error,
+            "transparent huge pages stay on for this process: a huge-page fault can now be \
+             charged in full to whichever request's window takes it, which can refuse that \
+             request for CPU it never spent and over-bill its cpu_us meter for the kernel's work"
+        );
+    }
 }
 
 /// Initialize V8 with the multi-threaded default platform (safe to call multiple

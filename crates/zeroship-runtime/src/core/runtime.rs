@@ -1085,6 +1085,10 @@ struct PendingRequest {
     /// Reply slot for the pending path. Fetch/RPC requests settle to
     /// `SettledFetch`; durable-workflow replay settles to `SettledWorkflow`.
     reply: PendingReply,
+    /// Thread CPU time this request's own V8 windows have taken, which
+    /// `check_cpu_limit` holds to the CPU budget. It is read from the thread
+    /// CPU clock, not from wall time, so time the thread spends preempted or
+    /// parked inside a window is not charged to the request.
     cpu_accumulated: Duration,
     wall_start: Instant,
     cancel: CancelFlag,
@@ -2248,6 +2252,7 @@ impl RuntimeInner {
         }
 
         let wall_start = Instant::now();
+        let cpu_started = crate::core::init::thread_cpu_time();
         let invocation_context =
             crate::core::invocation::InvocationContext::request(request_id, None);
         self.arm_cpu_timer();
@@ -2281,7 +2286,7 @@ impl RuntimeInner {
             };
         }
 
-        let cpu_elapsed = wall_start.elapsed();
+        let cpu_elapsed = crate::core::init::thread_cpu_time().saturating_sub(cpu_started);
         match dispatch_result {
             Ok(Ok(json)) => {
                 self.clear_executing_request();
@@ -2371,7 +2376,7 @@ impl RuntimeInner {
             return super::startup::failure_response("Request wall timeout while loading entry");
         }
         let application = self.application.as_ref().expect("ready application entry").clone();
-        let dispatch_started = Instant::now();
+        let dispatch_cpu_started = crate::core::init::thread_cpu_time();
         let request_id = self.next_direct_request_id;
         self.next_direct_request_id += 1;
         let invocation_context = crate::core::invocation::InvocationContext::request(
@@ -2665,7 +2670,7 @@ impl RuntimeInner {
             };
         }
 
-        let cpu_elapsed = dispatch_started.elapsed();
+        let cpu_elapsed = crate::core::init::thread_cpu_time().saturating_sub(dispatch_cpu_started);
 
         match dispatch_result {
             Ok(DispatchResult::HttpResponse(info)) => {
@@ -3005,7 +3010,7 @@ impl RuntimeInner {
                     s.executing_request_cancel = cancel;
                 }
 
-                let start = Instant::now();
+                let cpu_started = crate::core::init::thread_cpu_time();
 
                 self.arm_cpu_timer();
                 let settled_results = enter_v8!(self, |scope| {
@@ -3032,7 +3037,7 @@ impl RuntimeInner {
                     return;
                 }
 
-                let cpu_elapsed = start.elapsed();
+                let cpu_elapsed = crate::core::init::thread_cpu_time().saturating_sub(cpu_started);
 
                 if let Some(rid) = request_id
                     && let Some(req) = self.pending_requests.get_mut(&rid)
@@ -3068,7 +3073,7 @@ impl RuntimeInner {
                     s.executing_request_cancel = cancel;
                 }
 
-                let start = Instant::now();
+                let cpu_started = crate::core::init::thread_cpu_time();
 
                 self.arm_cpu_timer();
                 let settled_results = enter_v8!(self, |scope| {
@@ -3094,7 +3099,7 @@ impl RuntimeInner {
                     return;
                 }
 
-                let cpu_elapsed = start.elapsed();
+                let cpu_elapsed = crate::core::init::thread_cpu_time().saturating_sub(cpu_started);
 
                 if let Some(rid) = request_id
                     && let Some(req) = self.pending_requests.get_mut(&rid)
@@ -3130,7 +3135,7 @@ impl RuntimeInner {
                     s.executing_request_cancel = cancel;
                 }
 
-                let start = Instant::now();
+                let cpu_started = crate::core::init::thread_cpu_time();
 
                 self.arm_cpu_timer();
                 let settled_results = enter_v8!(self, |scope| {
@@ -3253,7 +3258,7 @@ impl RuntimeInner {
                     return;
                 }
 
-                let cpu_elapsed = start.elapsed();
+                let cpu_elapsed = crate::core::init::thread_cpu_time().saturating_sub(cpu_started);
 
                 if let Some(rid) = request_id
                     && let Some(req) = self.pending_requests.get_mut(&rid)
@@ -3457,7 +3462,7 @@ impl RuntimeInner {
             s.executing_request_cancel = cancel;
         }
 
-        let start = Instant::now();
+        let cpu_started = crate::core::init::thread_cpu_time();
 
         self.arm_cpu_timer();
         let settled_results = enter_v8!(self, |scope| {
@@ -3478,7 +3483,7 @@ impl RuntimeInner {
             return;
         }
 
-        let cpu_elapsed = start.elapsed();
+        let cpu_elapsed = crate::core::init::thread_cpu_time().saturating_sub(cpu_started);
 
         if let Some(rid) = owner_request_id
             && let Some(req) = self.pending_requests.get_mut(&rid)
@@ -3550,7 +3555,7 @@ impl RuntimeInner {
                 s.executing_request_cancel = cancel;
             }
 
-            let start = Instant::now();
+            let cpu_started = crate::core::init::thread_cpu_time();
 
             self.arm_cpu_timer();
             let settled_results = enter_v8!(self, |scope| {
@@ -3571,7 +3576,7 @@ impl RuntimeInner {
                 return;
             }
 
-            let cpu_elapsed = start.elapsed();
+            let cpu_elapsed = crate::core::init::thread_cpu_time().saturating_sub(cpu_started);
 
             if let Some(rid) = owner_request_id
                 && let Some(req) = self.pending_requests.get_mut(&rid)

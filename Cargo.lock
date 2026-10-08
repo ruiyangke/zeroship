@@ -8628,6 +8628,7 @@ dependencies = [
  "libc",
  "mimalloc",
  "rcgen",
+ "rustix 1.1.4",
  "rustls",
  "rustls-native-certs",
  "send_wrapper",

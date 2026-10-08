@@ -98,6 +98,11 @@ path = "tests/v8_fastcall_smoke.rs"
 v8 = { workspace = true }
 deno_core_icudata = { workspace = true }
 libc = { workspace = true }
+# Safe syscall wrappers. `rustix::thread::disable_transparent_huge_pages`
+# backs this crate's THP control with no `unsafe` block of our own. Already
+# resolved at this version by compio's io_uring stack; depended on directly
+# here for the one call this crate needs from it.
+rustix = { version = "1.1.4", features = ["thread"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

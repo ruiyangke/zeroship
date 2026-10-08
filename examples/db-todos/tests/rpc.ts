@@ -17,7 +17,7 @@ function id(value: unknown): string {
   assert.equal(typeof result, "string", `Missing typed id: ${JSON.stringify(value)}`);
   return result as string;
 }
-export async function call(base: string, name: string, input: Row = {}): Promise<Row> {
+async function send(base: string, name: string, input: Row): Promise<{ status: number; text: string; reply: Row }> {
   const response = await fetch(`${base}/__zeroship/v1/${name}`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ json: input }), signal: AbortSignal.timeout(30_000),
   });
@@ -26,13 +26,24 @@ export async function call(base: string, name: string, input: Row = {}): Promise
   const invalid = `${name}: invalid response ${response.status}: ${text}`;
   if (response.ok) {
     assert(Object.hasOwn(value, "json") && !Object.hasOwn(value, "error"), invalid);
-    return value;
+    return { status: response.status, text, reply: value };
   }
   assert(typeof value.message === "string" && !Object.hasOwn(value, "json") && !Object.hasOwn(value, "error"), invalid);
   for (const key of ["name", "code", "request_id"]) {
     assert(!Object.hasOwn(value, key) || typeof value[key] === "string", invalid);
   }
-  return { error: value };
+  return { status: response.status, text, reply: { error: value } };
+}
+
+export async function call(base: string, name: string, input: Row = {}): Promise<Row> {
+  return (await send(base, name, input)).reply;
+}
+
+/** A call the probe needs to succeed: a refusal fails with its status and body. */
+export async function succeed(base: string, name: string, input: Row = {}): Promise<unknown> {
+  const { status, text, reply } = await send(base, name, input);
+  assert(Object.hasOwn(reply, "json"), `${name}: expected a result, got ${status}: ${text}`);
+  return reply.json;
 }
 
 export async function capture(base: string, run: string): Promise<Capture> {
@@ -105,9 +116,9 @@ export async function capture(base: string, run: string): Promise<Capture> {
 }
 
 export async function captureScopes(base: string, run: string, out: Capture) {
-  const seeded = await call(base, "users.seed", { email: `bx-${run}@probe.test`, name: "Bx", handle: `bx_${run}` });
-  out.bxSeed = seeded;
-  const userId = id(seeded.json);
+  const seeded = await succeed(base, "users.seed", { email: `bx-${run}@probe.test`, name: "Bx", handle: `bx_${run}` });
+  out.bxSeed = { json: seeded };
+  const userId = id(seeded);
   out.txBranch = await call(base, "todos.txBranchWrites", { userId, tag: `b${run}` });
   out.txOrphan = await call(base, "todos.txOrphanedWrite", { userId, tag: `r${run}`, holdMs: 300 });
   out.bxTotal = await call(base, "todos.count", { userId });
@@ -115,19 +126,19 @@ export async function captureScopes(base: string, run: string, out: Capture) {
 
 export async function race(base: string) {
   const run = `${Date.now()}${Math.floor(Math.random() * 1e6)}`;
-  const userId = id((await call(base, "users.seed", { email: `race-${run}@probe.test`, name: "Race", handle: `race_${run}` })).json);
+  const userId = id(await succeed(base, "users.seed", { email: `race-${run}@probe.test`, name: "Race", handle: `race_${run}` }));
   const results = [];
   for (let index = 0; index < 16; index++) {
     const tag = `race-${run}-${index}`;
     const fire = async (delay: number) => {
       await sleep(delay);
-      return object((await call(base, "todos.txRaceStep", { userId, tag, holdMs: 400, level: "serializable" })).json);
+      return object(await succeed(base, "todos.txRaceStep", { userId, tag, holdMs: 400, level: "serializable" }));
     };
     const [a, b] = await Promise.all([fire(0), fire(100)]);
     for (const value of [a, b]) {
       assert.equal(typeof value.t0, "number"); assert.equal(typeof value.t1, "number");
     }
-    const count = (await call(base, "todos.countTitle", { userId, title: tag })).json;
+    const count = await succeed(base, "todos.countTitle", { userId, title: tag });
     const successes = [a, b].filter((value) => !value.threw && !value.error).length;
     results.push({ a, b, count, successes, overlap: (b.t0 as number) < (a.t1 as number) && (a.t0 as number) < (b.t1 as number) });
   }

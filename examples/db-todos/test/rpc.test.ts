@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { call } from "../tests/rpc";
+import { call, succeed } from "../tests/rpc";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -76,5 +76,20 @@ describe("acceptance RPC response parsing", () => {
     const error = new TypeError("connection refused");
     vi.stubGlobal("fetch", vi.fn(async () => { throw error; }));
     await expect(call("http://example.test", "todos.get")).rejects.toBe(error);
+  });
+});
+
+describe("a call the probe needs to succeed", () => {
+  it.each([null, 0, { t0: 1, t1: 2 }])("returns the result: %j", async (json) => {
+    respond({ json }, 200);
+    await expect(succeed("http://example.test", "todos.txRaceStep")).resolves.toEqual(json);
+  });
+
+  it("names the refusal's status and body", async () => {
+    const error = { message: "CPU time limit exceeded", name: "Error", request_id: "request_probe" };
+    respond(error, 503);
+    await expect(succeed("http://example.test", "todos.txRaceStep")).rejects.toThrow(
+      `todos.txRaceStep: expected a result, got 503: ${JSON.stringify(error)}`,
+    );
   });
 });
