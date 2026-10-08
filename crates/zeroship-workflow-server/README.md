@@ -82,12 +82,16 @@ busy app cannot starve a quiet one. It passes an app whose scope another session
 holds locked rather than waiting for it, and an app that is deleted, whose policy
 disables dispatch or that is at its concurrency cap. Native callbacks recheck the
 exact enrolled key after the queue lock and before commit. A claimed grant the
-caller cannot use is given back in the same request: a journal deferral returns
-the row to `ready` until the run is due, until the observation that switched
-dispatch off lapses, or after a pause that grows with each consecutive back-off,
-and a grant the journal work exhausted is never handed out. Every give-back the
-claim makes ends inside the caller's wait and never waits for an app's lock; one
-that cannot leaves its row to lapse. A reply holds at most
+caller cannot use is never handed out. While its lease is live it is given back
+in the same request: a journal deferral returns the row to `ready` until the run
+is due, until the observation that switched dispatch off lapses, or after a pause
+that grows with each consecutive back-off, as a journal that could not take the
+grant does. A grant whose lease is spent - by the journal work, or by the rest of
+the batch before the reply - is neither returned nor given back: its row lapses
+with any task accepted under it that was not released, and is redelivered once
+the stored deadline passes, counting no execution attempt and no back-off. Every
+give-back the claim makes ends inside the caller's wait and never waits for an
+app's lock; one that cannot leaves its row to lapse. A reply holds at most
 `ClaimJobs::MAX_REPLY_BYTES`, room for one delivery at its largest, which is the
 bound the worker accepts. Claim and heartbeat
 replies transfer remaining lease and attempt durations after commit; a worker

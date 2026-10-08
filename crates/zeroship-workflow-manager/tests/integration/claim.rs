@@ -24,7 +24,7 @@ use zeroship_core::{
         ManageRun, ManagementOperation, ManagementOutcome, RequestId, RunId, RunOperation,
         WorkerId,
     },
-    workflow_jobs::{ClaimJobs, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec},
+    workflow_jobs::{ClaimJobs, DeploymentId, JobId, JobLease, JobOperation, JobOutcome, JobSpec},
     workflow_policy::AppPolicy,
     zone_id::ZoneId,
 };
@@ -123,6 +123,11 @@ case!(
     sqlite_a_give_back_past_the_claims_give_back_deadline_leaves_its_row_to_lapse,
     postgres_a_give_back_past_the_claims_give_back_deadline_leaves_its_row_to_lapse,
     give_back_past_its_deadline
+);
+case!(
+    sqlite_a_grant_its_admission_spent_is_left_to_lapse,
+    postgres_a_grant_its_admission_spent_is_left_to_lapse,
+    spent_grant_lapses
 );
 
 /// The deadline is arithmetic over the request and the options, the same on
@@ -233,10 +238,27 @@ impl Zone {
     }
 
     async fn with(fixture: &Fixture, options: coordinator::Options) -> Self {
+        Self::build(fixture, Options::default(), options).await
+    }
+
+    /// A zone whose queue grants leases of `lease`.
+    async fn leasing(fixture: &Fixture, lease: Duration) -> Self {
+        Self::build(
+            fixture,
+            Options {
+                lease,
+                ..Options::default()
+            },
+            coordinator::Options::default(),
+        )
+        .await
+    }
+
+    async fn build(fixture: &Fixture, queue: Options, options: coordinator::Options) -> Self {
         let queue = Queue::connect(
             fixture.binding(),
             fixture.url(),
-            Options::default(),
+            queue,
             support::synthetic_holds(),
         )
         .await
@@ -1461,63 +1483,80 @@ async fn give_back_past_its_deadline(fixture: &Fixture) {
     }
 }
 
-/// A host that turns a grant away after its claim returned - a reply that found
-/// the grant exhausted - gives it back on the claim's own terms: without
-/// waiting for the app's lock, which another session holds here, and not after
-/// the claim's give-back deadline, which has passed in the second arm. Either
-/// way the row is left to lapse. The control is the same give-back with the
-/// lock free and time left, which returns the row.
-#[compio::test]
-async fn postgres_a_give_back_after_the_claim_keeps_the_claims_terms() {
-    let fixture = Fixture::new(Backend::Postgres).await;
-    let zone = Zone::new(&fixture).await;
-    let (cursor, apps) = zone.apps(1).await;
-    let app = &apps[0];
-    let job = zone.job(app).await;
+/// A grant whose lease its admission spent is not given back, even when the
+/// admission asks for a back-off: the row stays leased to lapse, counting no
+/// back-off, and once its deadline passes the next claim delivers the job at
+/// its next delivery attempt with no execution attempt counted for the one that
+/// lapsed. The control is a grant turned away with time left, which
+/// goes back under the back-off its admission named.
+///
+/// The spent grant's stored deadline is moved an hour on before its admission
+/// answers, as a slow clock read leaves the queue's deadline after the grant's
+/// own, so a give-back would certainly find the lease live rather than only
+/// when it beat the margin the anchoring leaves.
+async fn spent_grant_lapses(fixture: &Fixture) {
+    let zone = Zone::leasing(fixture, Duration::from_secs(2)).await;
+    let (cursor, apps) = zone.apps(2).await;
+    let [spent, live] = <[AppId; 2]>::try_from(apps).unwrap();
+    let lapsing = zone.job(&spent).await;
+    let returned = zone.job(&live).await;
     let worker = WorkerId::mint();
-    let ask = request(1, Some(&cursor), Vec::new());
-    let (batch, report) = zone.claim(&worker, &ask).await;
-    let [(grant, ())] = <[_; 1]>::try_from(batch.grants)
-        .unwrap_or_else(|grants| panic!("one grant: {grants:?} {report:?}"));
-    let give_back = |deadline: ClaimDeadline| {
-        let (delivery, worker) = (grant.delivery().clone(), worker.clone());
-        let (coordinator, zone_id, ask) = (zone.coordinator.clone(), zone.id.clone(), ask.clone());
-        async move {
-            let claim = ZoneClaim {
-                worker: &worker,
-                zone: &zone_id,
-                request: &ask,
-                deadline,
-            };
-            coordinator
-                .give_back_claimed(
-                    &claim,
-                    &delivery,
-                    zeroship_workflow_manager::GiveBack::Unsent,
-                    || ready(Ok(worker.clone())),
-                )
-                .await
-        }
+    let ask = request(2, Some(&cursor), Vec::new());
+    let claim = ZoneClaim {
+        worker: &worker,
+        zone: &zone.id,
+        request: &ask,
+        deadline: ClaimDeadline::at(unbounded()),
     };
-
-    hold(&fixture, &[app]).await;
-    let started = Instant::now();
-    let busy = give_back(ClaimDeadline::at(unbounded())).await;
-    let elapsed = started.elapsed();
-    release(&fixture).await;
-    assert_eq!(busy, Err(Error::Contended));
-    assert!(
-        elapsed < Options::default().transaction_timeout,
-        "the give-back waited for the app's lock: {elapsed:?}"
-    );
-    assert_eq!(
-        give_back(ClaimDeadline::at(Instant::now())).await,
-        Err(Error::Timeout)
-    );
-    assert_eq!(stored(&fixture, &job).await["state"], value!("leased"));
-
-    give_back(ClaimDeadline::at(unbounded()))
+    let (batch, report): (ClaimBatch<()>, ClaimReport) = zone
+        .coordinator
+        .claim_in_zone(
+            &claim,
+            zone.policies.as_ref(),
+            || ready(Ok(worker.clone())),
+            |grant| {
+                let outlived = grant.delivery().job.app_id == spent;
+                let (zone, lapsing) = (&zone, &lapsing);
+                async move {
+                    if outlived {
+                        let now = zone.queue.now().await.unwrap();
+                        patch(fixture, lapsing, value!({"lease_deadline": now + 3_600_000})).await;
+                        compio::time::sleep(grant.remaining().unwrap_or_default()).await;
+                        assert!(grant.lease().is_err(), "the admission outlived its grant");
+                    }
+                    Admission::GiveBack {
+                        reason: ClaimSkipReason::Refused,
+                        defer: zeroship_workflow_manager::GiveBack::Backoff,
+                    }
+                }
+            },
+        )
         .await
         .unwrap();
-    assert_eq!(stored(&fixture, &job).await["state"], value!("ready"));
+    assert!(batch.grants.is_empty(), "{batch:?}");
+    let row = stored(fixture, &lapsing).await;
+    assert_eq!(row["state"], value!("leased"), "a spent grant went back: {row:?}");
+    assert_eq!(report.lapsing, [(spent.clone(), Error::Timeout)], "{report:?}");
+    assert_eq!(row["worker_id"], value!(worker.as_str()));
+    assert_eq!(row["deferrals"], value!(0));
+    assert_eq!(row["deferred_until"], Value::Null);
+    assert_eq!(row["execution_attempts"], value!(0));
+    let row = stored(fixture, &returned).await;
+    assert_eq!(row["state"], value!("ready"));
+    assert_eq!(row["worker_id"], Value::Null);
+    assert_eq!(row["deferrals"], value!(1));
+    assert_ne!(row["deferred_until"], Value::Null);
+
+    let now = zone.queue.now().await.unwrap();
+    patch(fixture, &lapsing, value!({"lease_deadline": now})).await;
+    let (batch, report) = zone
+        .claim(&worker, &request(1, Some(&cursor), Vec::new()))
+        .await;
+    let [(grant, ())] = <[_; 1]>::try_from(batch.grants)
+        .unwrap_or_else(|grants| panic!("the lapsed job is redelivered: {grants:?} {report:?}"));
+    assert_eq!(grant.delivery().job, lapsing);
+    assert_eq!(grant.delivery().attempt.get(), 2);
+    let row = stored(fixture, &lapsing).await;
+    assert_eq!(row["execution_attempts"], value!(0), "the lapse counted an attempt");
+    assert_eq!(row["deferrals"], value!(0));
 }

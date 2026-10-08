@@ -23,9 +23,17 @@ pub struct GrantedPolicies {
     current: RefCell<Vec<PolicyObservation>>,
     /// Observations that replace an app's current one once it has been read.
     next: RefCell<Vec<PolicyObservation>>,
+    /// Apps whose observation never answers.
+    stalled: RefCell<Vec<AppId>>,
 }
 
 impl GrantedPolicies {
+    /// Never answer for `app`, so a visit to it lasts until its caller's
+    /// deadline cuts the observation.
+    pub fn stall(&self, app: &AppId) {
+        self.stalled.borrow_mut().push(app.clone());
+    }
+
     /// Answer `app` with `policy` in `zone`, replacing any earlier grant.
     pub fn grant(&self, app: &AppId, zone: &ZoneId, policy: AppPolicy) {
         install(&self.current, observation(app, zone, policy, false, 7));
@@ -117,6 +125,9 @@ fn install(slot: &RefCell<Vec<PolicyObservation>>, observation: PolicyObservatio
 impl PolicySource for GrantedPolicies {
     fn observe<'a>(&'a self, app: &'a AppId) -> LocalBoxFuture<'a, Result<PolicyObservation, Error>> {
         Box::pin(async move {
+            if self.stalled.borrow().contains(app) {
+                return std::future::pending().await;
+            }
             let answer = self.find(app).ok_or(Error::Denied)?;
             let next = self
                 .next

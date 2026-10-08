@@ -58,6 +58,9 @@ tracing = { workspace = true }
 # The recorded migration set the migrate suites pin against. The testkit owns it
 # because `zeroship-migrate-node`'s suites pin the same bytes.
 zeroship-testkit = { workspace = true }
+# A second connection to the host's SQLite files: holding the journal's write
+# lock and reading the queue row a claim leased.
+rusqlite = { workspace = true }
 
 [lints]
 workspace = true

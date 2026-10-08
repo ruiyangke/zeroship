@@ -96,8 +96,11 @@ pub struct ClaimSkip {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ClaimReport {
     pub skipped: Vec<ClaimSkip>,
-    /// Apps whose refused grant could not be given back, with why. Each row
-    /// stays leased until its lease lapses, and that lapse redelivers it.
+    /// Apps whose grant its host turned away and the claim did not return,
+    /// with why: a give-back the queue refused, under that refusal, or a grant
+    /// whose lease its admission spent, which is never offered a give-back
+    /// whatever the admission answered, as `Error::Timeout`. Each row stays
+    /// leased until its lease lapses, and that lapse redelivers it.
     pub lapsing: Vec<(AppId, Error)>,
 }
 
@@ -127,9 +130,9 @@ pub struct ClaimDeadline {
     /// policy observation, the lock-free reads, the claim transaction and the
     /// host's admission - ends by it.
     pub attempts: Instant,
-    /// Every give-back the claim makes ends by this: a grant its host turned
-    /// away, and a grant the reply found exhausted. A give-back that cannot
-    /// finish by then leaves its row to lapse, which redelivers it.
+    /// Every give-back the claim makes - of a live grant its host turned away -
+    /// ends by this. A give-back that cannot finish by then leaves its row to
+    /// lapse, which redelivers it.
     pub give_backs: Instant,
 }
 
@@ -150,14 +153,16 @@ impl ClaimDeadline {
 pub enum Admission<T> {
     /// Hand the grant to the caller, with what the host attached to it.
     Deliver(T),
-    /// Return the grant's row to the queue as `defer` says, recording `reason`.
+    /// Return the grant's row to the queue as `defer` says, recording `reason`,
+    /// while its lease is live; a spent one is left to lapse.
     GiveBack {
         reason: ClaimSkipReason,
         defer: GiveBack,
     },
     /// The host can take nothing more in this reply: return the grant's row as
-    /// [`GiveBack::Unsent`] and end the batch, with the cursor before this app
-    /// so the next claim begins with it.
+    /// [`GiveBack::Unsent`] while its lease is live, leaving a spent one to
+    /// lapse, and end the batch either way, with the cursor before this app so
+    /// the next claim begins with it.
     Full,
 }
 
@@ -302,39 +307,6 @@ impl Coordinator {
         })
     }
 
-    /// Return a grant `claim` committed, within the time the claim keeps for
-    /// its give-backs and without waiting for the app's lock: a host turning
-    /// away a grant after the claim returned, as a reply that found the grant
-    /// exhausted does. A give-back that cannot finish in time, or whose app is
-    /// busy, leaves the row to lapse.
-    ///
-    /// # Errors
-    /// Refuses a stale delivery, revoked enrollment, a busy app, a give-back
-    /// past its deadline and failed transactions.
-    pub async fn give_back_claimed<F, Fut>(
-        &self,
-        claim: &ZoneClaim<'_>,
-        delivery: &Delivery,
-        defer: GiveBack,
-        authorize: F,
-    ) -> Result<(), Error>
-    where
-        F: Fn() -> Fut,
-        Fut: Future<Output = Result<WorkerId, Error>>,
-    {
-        let worker = claim.worker;
-        self.queue
-            .give_back_within(
-                Budget::at(claim.deadline.give_backs),
-                ScopeLock::Skip,
-                worker,
-                delivery,
-                defer,
-                |_| enrolled(worker, &authorize),
-            )
-            .await
-    }
-
     /// Claim executable work across the caller's zone, at most once per app in
     /// each lap, and hand each committed grant to `admit` before the next app is
     /// tried.
@@ -369,6 +341,8 @@ impl Coordinator {
     /// lock; one that cannot leaves its row to lapse. A host whose reply has
     /// no room left answers [`Admission::Full`]: that grant goes back unsent
     /// and the batch ends before the app, so the next claim begins with it.
+    /// A grant whose lease its admission spent is never given back, whatever
+    /// the admission answered: it is reported lapsing and its row lapses.
     ///
     /// NOTHING IS SIZED FROM THE CALLER'S NUMBERS. A request above
     /// [`ClaimJobs::MAX_DELIVERIES`] or [`ClaimJobs::MAX_EXCLUDE`] is refused
@@ -522,6 +496,30 @@ impl Coordinator {
             Admission::GiveBack { reason, defer } => (reason, defer),
             Admission::Full => (ClaimSkipReason::Full, GiveBack::Unsent),
         };
+        // A SPENT GRANT IS LEFT TO LAPSE, whatever its admission answered. The
+        // grant's own clock ends before the deadline the queue stored: each
+        // clock sample anchors it at the instant the sample was requested,
+        // before the database read its clock, less the sample's resolution,
+        // and a later sample can only bring it earlier. So a give-back now
+        // would race the lease it returns - landing under the admission's
+        // deferral while the stored deadline is ahead, refused once it has
+        // passed - and a host whose admission is bounded by the grant, as a
+        // journal attempt is, ends exactly here every time it runs the lease
+        // out. The lapse decides the same way every time: claimable once the
+        // stored deadline passes, no pause, no back-off counted, and a journal
+        // task accepted under the grant, bounded by the same lease, lapses
+        // with it.
+        //
+        // A grant with lease left is given back, and that give-back is an
+        // ordinary queue transaction: like any holder's give-back near the end
+        // of its lease, it is refused if the stored deadline passes first, and
+        // the row lapses. Holding back a reserve of lease would not remove
+        // that boundary, only move it, and would lapse grants that could have
+        // gone back.
+        if let Err(error) = grant.lease() {
+            report.lapsing.push((app.clone(), error));
+            return Err(reason);
+        }
         if let Err(error) = self
             .queue
             .give_back_within(

@@ -34,7 +34,10 @@ something, until the request's slots are filled or its attempt deadline passes:
 share kept back for the reply (`REPLY_RESERVE_DIVISOR`), whichever ends first
 (`Coordinator::claim_deadline`). Every give-back the claim makes ends by half
 that reserve later and never waits for an app's lock, so the reply leaves inside
-the wait. A request above `ClaimJobs::MAX_DELIVERIES` deliveries or
+the wait. A grant whose lease its host's admission spent is not given back,
+whatever the admission answered: it is reported lapsing, and its row lapses and
+is redelivered once the stored deadline passes, counting no attempt and no
+back-off. A request above `ClaimJobs::MAX_DELIVERIES` deliveries or
 `ClaimJobs::MAX_EXCLUDE` exclusions is refused before any work, and a
 transient failure to check the caller's enrollment is that app's skip, not the
 request's failure.

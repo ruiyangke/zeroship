@@ -320,6 +320,15 @@ fn metered_database(
 /// manager's current ingress epoch, as another host would once it had
 /// established that epoch.
 async fn client(root: &Path, app: &AppId) -> AppWorkflows {
+    bound_client(root, app).await.0
+}
+
+/// [`client`], with the host policy binding it was registered under, which a
+/// case can revoke to leave the handle without authority.
+async fn bound_client(
+    root: &Path,
+    app: &AppId,
+) -> (AppWorkflows, zeroship_workflow::service::PolicyBinding) {
     let epoch = responsibility(root, app)
         .await
         .map(|current| current.ingress_epoch);
@@ -332,7 +341,7 @@ async fn client(root: &Path, app: &AppId) -> AppWorkflows {
         )?;
         let service =
             WorkflowService::open(Rc::new(test_storage(root).open().await?), policies).await?;
-        service.register_app(&binding).await
+        Ok((service.register_app(&binding).await?, binding))
     })
     .await
 }
@@ -1387,4 +1396,222 @@ async fn an_interrupted_local_attempt_returns_its_row_at_once() {
         "the run reached its wait without the failed start being retried"
     );
     drop(host);
+}
+
+/// Record a deployment of `app` in the platform catalog and put `job` - an
+/// `advance` of that deployment - in the app's queue, through a second binding
+/// to the platform file: a row this host's worker claim takes.
+async fn submit_advance(root: &Path, app: &AppId) -> JobSpec {
+    let mut manifest = serde_json::to_value(zeroship_bundle::Manifest::default()).unwrap();
+    let hash =
+        zeroship_bundle::deployment_manifest_hash(&serde_json::to_vec(&manifest).unwrap()).unwrap();
+    manifest["deploy_hash"] = json!(hash);
+    let manifest = manifest.to_string();
+    let (id, run) = (JobId::mint(), zeroship_core::workflow_coordination::RunId::mint());
+    Box::pin(retry(async || {
+        let platform = LocalPlatform::open(&root.join(".zeroship/platform/metadata.sqlite"))
+            .await
+            .map_err(manager::catalog_error)?;
+        let deployment = platform
+            .deployments()
+            .record_deployment(app, &hash, &manifest)
+            .await
+            .map_err(manager::catalog_error)?;
+        let queue = platform
+            .queue(QueueOptions::default())
+            .await
+            .map_err(manager::manager_error)?;
+        queue
+            .register_scope(app, &zeroship_core::ZoneId::default_zone())
+            .await
+            .map_err(manager::manager_error)?;
+        let job = JobSpec {
+            id: id.clone(),
+            app_id: app.clone(),
+            operation: JobOperation::Advance {
+                deployment_id: zeroship_core::workflow_jobs::DeploymentId::parse(&deployment)
+                    .unwrap(),
+                run_id: run.clone(),
+                generation: 0,
+                revision: 1.try_into().unwrap(),
+            },
+            available_at: 1.try_into().unwrap(),
+        };
+        queue.submit(&job).await.map_err(manager::manager_error)
+    }))
+    .await
+}
+
+/// The queue row of `job`: state, holder, back-off count, deferral and counted
+/// execution attempts.
+type QueueRow = (String, Option<String>, i64, Option<i64>, i64);
+
+fn queue_row(metadata: &rusqlite::Connection, job: &JobSpec) -> QueueRow {
+    metadata
+        .query_row(
+            "SELECT state, worker_id, deferrals, deferred_until, execution_attempts \
+             FROM jobs WHERE app_id = ?1 AND id = ?2",
+            [job.app_id.as_str(), job.id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        )
+        .unwrap()
+}
+
+/// The local manager on its own thread over a fresh platform file under
+/// `root`, leasing for `lease_ms`, with the journal's file initialized beside
+/// it: the two halves a local claim spans. The path is the platform file's.
+async fn local_halves(
+    root: &Path,
+    app: &AppId,
+    lease_ms: u64,
+) -> (manager::ManagerClient, manager::ManagerThread, PathBuf) {
+    std::fs::create_dir_all(root.join(".zeroship/platform")).unwrap();
+    let config = LocalConfig {
+        manager: ManagerConfig {
+            lease_ms,
+            recovery_interval_ms: 3_600_000,
+            ..ManagerConfig::default()
+        },
+        ..LocalConfig::default()
+    }
+    .validate()
+    .unwrap();
+    let platform_file = root.join(".zeroship/platform/metadata.sqlite");
+    let (manager, thread) = manager::spawn(
+        platform_file.clone(),
+        app.clone(),
+        AppPolicy::default(),
+        config.manager_options(),
+    )
+    .await
+    .unwrap();
+    zeroship_workflow::service::schema::initialize_local(&test_storage(root).open().await.unwrap())
+        .await
+        .unwrap();
+    (manager, thread, platform_file)
+}
+
+/// A claim for one delivery.
+fn one_delivery() -> ClaimJobs {
+    ClaimJobs {
+        max: 1.try_into().unwrap(),
+        wait_ms: 5_000.try_into().unwrap(),
+        after: None,
+        exclude: Vec::new(),
+    }
+}
+
+/// A grant whose lease the journal's acceptance ran out is neither handed to
+/// the consumer nor given back, and it fails nothing else the claim committed:
+/// the claim answers, its row stays leased to lapse, counting no back-off and
+/// no attempt, and once the stored deadline passes the next claim delivers the
+/// job again with the journal's acceptance. The control for a grant the
+/// journal refuses with lease left is
+/// `a_local_grant_the_journal_refuses_with_lease_left_goes_back_with_a_back_off`.
+///
+/// Another connection holds the journal's write lock, so the acceptance waits
+/// out the whole lease. While it waits the row's stored deadline is moved an
+/// hour on, as a slow clock read leaves the queue's deadline after the grant's
+/// own, so a give-back would certainly find the lease live and land.
+#[compio::test]
+async fn a_local_grant_its_journal_acceptance_spent_is_left_to_lapse() {
+    let root = tempfile::tempdir().unwrap();
+    let app = AppId::mint();
+    let (manager, thread, platform_file) = local_halves(root.path(), &app, 2_000).await;
+    let transport = manager.transport(client(root.path(), &app).await);
+    let job = submit_advance(root.path(), &app).await;
+    let journal_file = root.path().join(".zeroship/zs-workflow_manager.sqlite");
+    assert!(journal_file.is_file(), "the journal is attached at {}", journal_file.display());
+    let blocker = rusqlite::Connection::open(&journal_file).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let metadata = rusqlite::Connection::open(&platform_file).unwrap();
+    metadata.busy_timeout(Duration::from_secs(10)).unwrap();
+    let request = one_delivery();
+
+    let moved = async {
+        compio::time::timeout(Duration::from_secs(10), async {
+            while queue_row(&metadata, &job).0 != "leased" {
+                compio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the claim leases the row");
+        let moved = metadata
+            .execute(
+                "UPDATE jobs SET lease_deadline = lease_deadline + 3600000 \
+                 WHERE app_id = ?1 AND id = ?2",
+                [job.app_id.as_str(), job.id.as_str()],
+            )
+            .unwrap();
+        assert_eq!(moved, 1, "the leased row's deadline moved");
+    };
+    let (claimed, ()) = futures::join!(transport.claim(&request), moved);
+    let batch = claimed.expect("a grant the journal could not take fails only itself");
+    assert!(
+        batch.deliveries.is_empty(),
+        "a spent grant was handed over: {:?}",
+        batch.deliveries.len()
+    );
+    assert_eq!(
+        queue_row(&metadata, &job),
+        ("leased".to_owned(), Some(manager.worker().as_str().to_owned()), 0, None, 0),
+        "a spent grant is left to lapse, not given back"
+    );
+
+    blocker.execute_batch("ROLLBACK").unwrap();
+    metadata
+        .execute(
+            "UPDATE jobs SET lease_deadline = 1 WHERE app_id = ?1 AND id = ?2",
+            [job.app_id.as_str(), job.id.as_str()],
+        )
+        .unwrap();
+    let batch = transport.claim(&request).await.unwrap();
+    let [redelivered] = <[_; 1]>::try_from(batch.deliveries)
+        .unwrap_or_else(|deliveries| panic!("the job is redelivered: {}", deliveries.len()));
+    assert_eq!(redelivered.lease.delivery().job, job);
+    assert_eq!(redelivered.lease.delivery().attempt.get(), 2);
+    assert!(redelivered.accepted.is_some(), "the journal accepts the redelivery");
+    assert_eq!(queue_row(&metadata, &job).4, 0, "the lapse counted an attempt");
+    drop(transport);
+    drop(thread);
+}
+
+/// A grant the journal refuses while its lease still has time left is not
+/// handed to the consumer and goes back in the same claim, waiting out a
+/// back-off - the control for the spent grant, which lapses instead - and the
+/// refusal fails nothing else the claim committed.
+///
+/// The journal handle's host policy is revoked before the claim, so its
+/// acceptance is refused at once, with the whole lease still ahead of the
+/// grant.
+#[compio::test]
+async fn a_local_grant_the_journal_refuses_with_lease_left_goes_back_with_a_back_off() {
+    let root = tempfile::tempdir().unwrap();
+    let app = AppId::mint();
+    let (manager, thread, platform_file) = local_halves(root.path(), &app, 120_000).await;
+    let (journal, policy) = bound_client(root.path(), &app).await;
+    let transport = manager.transport(journal);
+    let job = submit_advance(root.path(), &app).await;
+    policy.revoke().unwrap();
+    let metadata = rusqlite::Connection::open(&platform_file).unwrap();
+    metadata.busy_timeout(Duration::from_secs(10)).unwrap();
+
+    let batch = transport
+        .claim(&one_delivery())
+        .await
+        .expect("a grant the journal refused fails only itself");
+    assert!(
+        batch.deliveries.is_empty(),
+        "a refused grant was handed over: {:?}",
+        batch.deliveries.len()
+    );
+    let (state, worker, deferrals, deferred_until, attempts) = queue_row(&metadata, &job);
+    assert_eq!(
+        (state.as_str(), worker, deferrals, attempts),
+        ("ready", None, 1, 0),
+        "a grant refused with lease left goes back under a back-off"
+    );
+    assert!(deferred_until.is_some(), "the back-off holds the row back");
+    drop(transport);
+    drop(thread);
 }

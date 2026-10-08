@@ -247,22 +247,23 @@ async fn revalidate(state: &SharedState, actor: &VerifiedWorker) -> Result<Worke
 /// work, so the authority the caller receives is what is actually left rather
 /// than what was left before this service did its own I/O.
 ///
-/// A GRANT THE CALLER CANNOT USE IS GIVEN BACK IN THE SAME REQUEST. A journal
-/// deferral, a journal that could not be reached for that app, and a grant the
-/// journal work exhausted each return the row rather than reaching the caller,
-/// and none of them fails the batch: they are per-app outcomes, and an error
-/// reply would strand every delivery this request already committed. A row the
-/// give-back cannot return - its lease already lapsed, its app is busy, or the
-/// claim's give-back deadline passed - is redelivered by that lapse, which is
-/// the recovery an unreachable worker gets.
+/// A GRANT THE CALLER CANNOT USE NEVER REACHES IT, and none of them fails the
+/// batch: each is a per-app outcome, and an error reply would strand every
+/// delivery this request already committed. A journal deferral and a journal
+/// that could not take a live grant return the row in the same request. A grant
+/// whose lease is spent - by its own journal work, or by the rest of the batch
+/// before the reply - is neither returned nor given back: its row lapses, with
+/// any task accepted under it that was not released, and is redelivered once
+/// the stored deadline passes. So does a row the give-back cannot return - its
+/// lease lapsed first, its app is busy, or the claim's give-back deadline
+/// passed - which is the recovery an unreachable worker gets.
 ///
 /// THE BUDGET STARTS AT ARRIVAL and every step is inside it. The deadlines are
 /// taken once, from the instant this request arrived, so authentication and
 /// the body read are spent from them. Each grant's journal acceptance runs
-/// inside the claim, before the next app is tried, and every give-back, here
-/// and in the claim, ends by the claim's give-back deadline without waiting
-/// for an app's lock, so no reply leaves after the caller has stopped waiting
-/// for it.
+/// inside the claim, before the next app is tried, and every give-back the
+/// claim makes ends by its give-back deadline without waiting for an app's
+/// lock, so no reply leaves after the caller has stopped waiting for it.
 async fn claim(
     request: web::HttpRequest,
     state: State<SharedState>,
@@ -309,7 +310,11 @@ async fn claim(
             for (grant, accepted) in batch.grants {
                 match grant.lease() {
                     Ok(lease) => deliveries.push(ClaimedDelivery { lease, accepted }),
-                    Err(_) => give_back(&state, &actor, &claim, &grant).await,
+                    Err(error) => tracing::debug!(
+                        app_id = %grant.delivery().job.app_id.as_str(),
+                        ?error,
+                        "workflow claim left a spent delivery to lapse"
+                    ),
                 }
             }
             Ok(ClaimedJobs {
@@ -401,7 +406,9 @@ async fn admit(
     admitted
 }
 
-/// A grant the journal could not take: back with a growing pause.
+/// A grant the journal could not take: back with a growing pause. A grant whose
+/// lease the journal's attempt spent is not given back at all; the claim leaves
+/// it to lapse whatever this answers.
 fn refused(app: &AppId, error: Error) -> Admission<Option<AcceptedJob>> {
     tracing::warn!(
         app_id = %app.as_str(),
@@ -465,10 +472,14 @@ impl ReplyRoom {
         grant: &DeliveryGrant,
         accepted: Option<AcceptedJob>,
     ) -> Admission<Option<AcceptedJob>> {
+        // A spent grant. The claim leaves every spent grant to lapse whatever
+        // its admission answers, so no deferral named here is ever applied;
+        // `Unsent` names what the lapse leaves: no back-off counted, and no
+        // wait past the stored deadline.
         let Ok(lease) = grant.lease() else {
             return Admission::GiveBack {
                 reason: ClaimSkipReason::Unavailable,
-                defer: GiveBack::Backoff,
+                defer: GiveBack::Unsent,
             };
         };
         let delivery = ClaimedDelivery { lease, accepted };
@@ -510,30 +521,6 @@ async fn deferral(state: &SharedState, grant: &DeliveryGrant, reason: &DeferredR
                 .map_or(GiveBack::Backoff, GiveBack::After)
         }
         DeferredReason::DeploymentUnavailable => GiveBack::Backoff,
-    }
-}
-
-/// Return a grant the reply found exhausted, never failing the batch it came
-/// from, within the time the claim keeps for its give-backs.
-async fn give_back(
-    state: &SharedState,
-    actor: &VerifiedWorker,
-    claim: &ZoneClaim<'_>,
-    grant: &DeliveryGrant,
-) {
-    if let Err(error) = state
-        .service
-        .manager
-        .give_back_claimed(claim, grant.delivery(), GiveBack::Backoff, || {
-            revalidate(state, actor)
-        })
-        .await
-    {
-        tracing::debug!(
-            app_id = %grant.delivery().job.app_id.as_str(),
-            ?error,
-            "workflow claim left an unusable delivery to lapse"
-        );
     }
 }
 

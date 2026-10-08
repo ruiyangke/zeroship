@@ -713,45 +713,9 @@ impl JobTransport for LocalTransport {
             .await?;
         let mut deliveries = Vec::with_capacity(batch.grants.len());
         for (lease, ()) in batch.grants {
-            let accepted = if lease.delivery().job.operation.accepts_execution() {
-                Some(self.journal.accept_job(&lease).await?)
-            } else {
-                None
-            };
-            if let Some(zeroship_workflow::service::delivery::JobAcceptance::Deferred {
-                reason,
-            }) = &accepted
-            {
-                let defer = match reason {
-                    zeroship_workflow::service::delivery::DeferredReason::NotDue { until } => {
-                        zeroship_workflow_manager::GiveBack::Exact(until.get())
-                    }
-                    zeroship_workflow::service::delivery::DeferredReason::PolicyOff
-                    | zeroship_workflow::service::delivery::DeferredReason::AtCap => {
-                        zeroship_workflow_manager::GiveBack::After(Duration::from_millis(100))
-                    }
-                    zeroship_workflow::service::delivery::DeferredReason::DeploymentUnavailable => {
-                        zeroship_workflow_manager::GiveBack::Backoff
-                    }
-                };
-                let delivery = lease.delivery().clone();
-                self.client
-                    .call(move |manager| {
-                        async move {
-                            manager
-                                .coordinator
-                                .give_back_job(&manager.worker, &delivery, defer, || {
-                                    ready(Ok(manager.worker.clone()))
-                                })
-                                .await
-                                .map_err(manager_error)
-                        }
-                        .boxed_local()
-                    })
-                    .await?;
-                continue;
+            if let Some(claimed) = self.admit(lease).await {
+                deliveries.push(claimed);
             }
-            deliveries.push(Claimed { lease, accepted });
         }
         Ok(ClaimedBatch {
             deliveries,
@@ -863,6 +827,71 @@ impl JobTransport for LocalTransport {
 }
 
 impl LocalTransport {
+    /// This host's half of one grant its claim committed: the journal's
+    /// acceptance, and the grant handed to the consumer, given back, or left
+    /// to lapse.
+    ///
+    /// EACH GRANT IS ITS OWN OUTCOME, as the workflow service's claim makes it:
+    /// a journal that refuses one grant, or a give-back the queue refuses,
+    /// strands none of the grants the same claim committed beside it. A journal
+    /// that could not take a live grant gives it back with a growing pause, and
+    /// a deferral gives it back until the deferral ends.
+    ///
+    /// A SPENT GRANT IS NEITHER HANDED OVER NOR GIVEN BACK. Its monotonic
+    /// expiry ends before the deadline the queue stored, so a give-back now
+    /// would land or be refused by how far behind that deadline it ran; the
+    /// row lapses instead, with any task accepted under it, and is redelivered
+    /// once the stored deadline passes, counting no attempt and no back-off.
+    async fn admit(&self, lease: DeliveryGrant) -> Option<Claimed<DeliveryGrant>> {
+        use zeroship_workflow::service::delivery::{DeferredReason, JobAcceptance};
+        use zeroship_workflow_manager::GiveBack;
+        let app = lease.delivery().job.app_id.clone();
+        let (accepted, defer) = if lease.delivery().job.operation.accepts_execution() {
+            match self.journal.accept_job(&lease).await {
+                Ok(JobAcceptance::Deferred { reason }) => (
+                    None,
+                    Some(match reason {
+                        DeferredReason::NotDue { until } => GiveBack::Exact(until.get()),
+                        DeferredReason::PolicyOff | DeferredReason::AtCap => {
+                            GiveBack::After(Duration::from_millis(100))
+                        }
+                        DeferredReason::DeploymentUnavailable => GiveBack::Backoff,
+                    }),
+                ),
+                Ok(accepted) => (Some(accepted), None),
+                Err(error) => {
+                    tracing::warn!(
+                        app_id = %app.as_str(),
+                        code = error.code(),
+                        "local workflow claim could not accept a delivery into the journal"
+                    );
+                    (None, Some(GiveBack::Backoff))
+                }
+            }
+        } else {
+            (None, None)
+        };
+        if let Err(error) = lease.lease() {
+            tracing::debug!(
+                app_id = %app.as_str(),
+                ?error,
+                "local workflow claim left a spent delivery to lapse"
+            );
+            return None;
+        }
+        let Some(defer) = defer else {
+            return Some(Claimed { lease, accepted });
+        };
+        if let Err(error) = self.return_row(&lease, defer).await {
+            tracing::debug!(
+                app_id = %app.as_str(),
+                code = error.code(),
+                "local workflow claim left an unusable delivery to lapse"
+            );
+        }
+        None
+    }
+
     /// Return `lease`'s row to this host's queue as `defer` says.
     async fn return_row(
         &self,

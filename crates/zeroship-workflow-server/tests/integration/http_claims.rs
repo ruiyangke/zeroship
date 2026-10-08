@@ -125,13 +125,29 @@ impl Fixture {
     /// lifecycle publication creates, and an observed default policy.
     async fn app(&self) -> AppId {
         let app = AppId::mint();
-        self.platform
-            .seed_app_in(&app, Some(self.zone.as_str()))
-            .await;
-        self.platform.seed_scope(&app, self.zone.as_str()).await;
-        self.policies
-            .grant(&app, &self.zone, AppPolicy::default());
+        self.seed(&app).await;
         app
+    }
+
+    /// A cursor that sorts before `count` apps of this case's zone, and the
+    /// apps in the order a lap from that cursor visits them.
+    async fn apps(&self, count: usize) -> (AppId, Vec<AppId>) {
+        let mut minted: Vec<AppId> = (0..=count).map(|_| AppId::mint()).collect();
+        minted.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        let cursor = minted.remove(0);
+        for app in &minted {
+            self.seed(app).await;
+        }
+        (cursor, minted)
+    }
+
+    async fn seed(&self, app: &AppId) {
+        self.platform
+            .seed_app_in(app, Some(self.zone.as_str()))
+            .await;
+        self.platform.seed_scope(app, self.zone.as_str()).await;
+        self.policies
+            .grant(app, &self.zone, AppPolicy::default());
     }
 
     /// A runnable run in `app`'s journal and the advance job for it, submitted
@@ -605,6 +621,76 @@ async fn a_grant_exhausted_before_the_reply_is_not_returned() {
     assert_eq!(redelivered.lease.delivery.job, job);
     assert_eq!(redelivered.lease.delivery.attempt.get(), 2);
     task(redelivered.accepted.as_ref());
+}
+
+/// A grant the rest of its batch outlasted is neither handed to the caller nor
+/// given back: the reply finds its lease spent and leaves the row leased to
+/// lapse, counting no back-off, with the journal task accepted under it.
+///
+/// The batch's second app never has its policy answered, so its visit lasts
+/// until the claim's deadline, past the first app's lease. While it waits, the
+/// first row's stored deadline is moved an hour on, as a slow clock read leaves
+/// the queue's deadline after the grant's own, so a give-back would certainly
+/// find the lease live. The journal's task for the first run is the control
+/// that its grant was admitted before the batch outlasted it.
+#[ntex::test]
+async fn a_grant_the_batch_outlasted_is_left_to_lapse() {
+    let fixture = Box::pin(Fixture::with_options(Options {
+        lease: Duration::from_secs(2),
+        ..Options::default()
+    }))
+    .await;
+    let (cursor, apps) = fixture.apps(2).await;
+    let [served, stalled] = <[AppId; 2]>::try_from(apps).unwrap();
+    let (run, job) = fixture.executable(&served).await;
+    fixture.executable(&stalled).await;
+    fixture.policies.stall(&stalled);
+    let app = fixture.service().await;
+    let request = ClaimJobs {
+        after: Some(cursor),
+        ..claim(2)
+    };
+
+    let moved = async {
+        compio::time::timeout(Duration::from_secs(10), async {
+            while fixture.row(&job).await.state != "leased" {
+                compio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the claim leases the first app's row");
+        let moved = fixture
+            .platform
+            .admin
+            .execute(
+                "UPDATE workflow_manager.jobs SET lease_deadline = lease_deadline + 3600000 \
+                 WHERE app_id=$1 AND id=$2",
+                &[&job.app_id.as_str(), &job.id.as_str()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(moved, 1, "the leased row's deadline moved");
+    };
+    let authorization = fixture.enrolled.authorization();
+    let ((status, body), ()) = futures::join!(
+        post(
+            &app,
+            &authorization,
+            endpoints::WORKFLOW_JOB_CLAIM,
+            &request,
+        ),
+        moved
+    );
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let batch: ClaimedJobs<AcceptedJob> = serde_json::from_value(body).unwrap();
+    assert!(batch.deliveries.is_empty(), "a spent grant reached the caller: {batch:?}");
+    assert_eq!(fixture.tasks(&run).await, 1, "the grant was admitted with its task");
+    let row = fixture.row(&job).await;
+    assert_eq!(
+        (row.state.as_str(), row.worker.as_deref(), row.deferrals, row.deferred_until),
+        ("leased", Some(fixture.enrolled.instance.as_str()), 0, None),
+        "a spent grant is left to lapse, not given back"
+    );
 }
 
 /// A claim whose journal half finds dispatch switched off gives the row back

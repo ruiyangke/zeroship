@@ -1113,7 +1113,7 @@ bounded, authenticated metadata transport (`crates/zeroship-workflow-server/src/
 
 | Operation | Request metadata | Authority and reply checks |
 | --- | --- | --- |
-| `POST /v1/jobs/claim` | `ClaimJobs`: free slots, the caller's wait, cursor and exclusions; no app. | The verified instance's frozen zone decides the apps paged; enrollment is rechecked after each app's lock and before commit. Each delivery names the caller, carries remaining lease and attempt durations measured at reply time, and an acceptance exactly for `advance`. Unusable grants are given back, never returned. |
+| `POST /v1/jobs/claim` | `ClaimJobs`: free slots, the caller's wait, cursor and exclusions; no app. | The verified instance's frozen zone decides the apps paged; enrollment is rechecked after each app's lock and before commit. Each delivery names the caller, carries remaining lease and attempt durations measured at reply time, and an acceptance exactly for `advance`. A grant the caller cannot use is never returned: one with lease left is given back, and a spent one lapses. |
 | `POST /v1/jobs/heartbeat` | Delivery identity and, for a task, the journal task. | Fence `(job, worker, attempt)` on a live lease plus enrollment; the new lease never passes the attempt cap; the journal extends nothing when policy has admission or dispatch off. |
 | `POST /v1/jobs/settle` | Delivery, and the execution to commit when the holder has one; never an outcome or successors. | The signing worker must be the delivery's and the delivery the queue's latest for the job. The journal decides the outcome, from the execution it commits or, with no execution, from the receipt it already holds. Active delivery authority for writes, or original-worker enrollment for an exact stored receipt; reply matches app, job and attempt, and its outcome is a family the operation admits. |
 | `POST /v1/jobs/release` | Delivery, the journal task when there is one, and a closed `GiveBackReason`. | The signing worker must be the delivery's and the delivery the queue's latest. The journal releases the task and the queue returns the row to `ready` with the growing back-off. |
@@ -1160,10 +1160,10 @@ Manager job:
 
   durable ready -- available, not backed off + zone claim --> leased
        ^      ^                                            /   |   \
-       |      |      give-back: deferral, exhausted grant,     |    \
+       |      |      give-back: deferral, journal refusal,     |    \
        |      +------ preparation failure, release ----+       |     |
        |                                                       |     |
-       +------------- lease lapse (no heartbeat) -------------+      |
+       +------ lease lapse (no heartbeat, spent grant) -------+      |
                                                       exact settle   |
                                                                      v
                                                                   settled
@@ -2943,7 +2943,7 @@ publication.
 | Register/activate/disable deployment schedules | Control to the workflow service. | Idempotent immutable schedule metadata and monotonic activation state for the app's scope in its zone; dispatch readiness remains distinct. |
 | Apply capacity target | Driver's capacity lane to the injected zone capacity provider. | `Accepted`, or a durable, retryable refusal for that target revision. |
 | Establish/close ingress scope | The workflow service's own run path, or the local host, through the manager's recovery ledger. | Durable recovery responsibility or an explicit fenced drain result. A worker cannot create authority for an app. |
-| Claim jobs | Enrolled worker to the workflow service's zone claim. | Up to its free slots of leased `advance` deliveries of its own zone with their journal acceptances, the next cursor and whether the zone was exhausted; unusable grants given back. |
+| Claim jobs | Enrolled worker to the workflow service's zone claim. | Up to its free slots of leased `advance` deliveries of its own zone with their journal acceptances, the next cursor and whether the zone was exhausted; an unusable grant with lease left is given back, and a spent one lapses. |
 | Heartbeat delivery | Its worker. | Current bounded lease, never past the attempt cap, and the journal task renewed, or no extension when policy withholds dispatch; cannot revive a replaced attempt, expired execution or elapsed execution budget. |
 | Settle delivery | Its worker. | The journal commits the reported execution, or answers from its receipt, and the queue settles with that outcome atomically with its scheduling and barrier changes; or replay of the matching receipt. |
 | Release delivery | Its worker. | The journal task released and the row returned to `ready` with a growing back-off. |
@@ -3167,14 +3167,24 @@ claims, heartbeats and settlements contend on its scope row: claims skip that
 contention, heartbeats and settlements wait as any lock does.
 
 **Work that cannot run now goes back instead of sitting leased.** A journal
-deferral, an exhausted grant and a preparation failure each give the row back
-in the same request, with `deferred_until` set: exactly the instant a run is due,
-the remaining validity of a policy observation that switched dispatch off, a
-short pause at the concurrency cap, or a back-off that doubles with each
-consecutive back-off up to a ceiling. Only a back-off counts toward the next
-one's length, and the count resets when an attempt is counted: on its first
-renewal or its interrupted release. A give-back never counts toward
+deferral, a journal that could not take a live grant and a preparation failure
+each give the row back in the same request, with `deferred_until` set: exactly
+the instant a run is due, the remaining validity of a policy observation that
+switched dispatch off, a short pause at the concurrency cap, or a back-off that
+doubles with each consecutive back-off up to a ceiling. Only a back-off counts
+toward the next one's length, and the count resets when an attempt is counted:
+on its first renewal or its interrupted release. A give-back never counts toward
 `max_delivery_attempts`, so pressure cannot exhaust a job's budget.
+
+**A spent grant is neither returned nor given back.** A grant whose lease the
+claim's own work used up - the journal's acceptance, or the rest of the batch
+before the reply - stays leased, and its row lapses together with any task
+accepted under it that was not released. It is redelivered once the stored
+deadline passes, counting no execution attempt and no back-off. The grant's
+monotonic expiry is anchored before the clock read its stored deadline came
+from, so it ends first; a give-back at that point would land or be refused
+depending on how far behind the stored deadline it ran, and the lapse is the
+outcome that does not depend on it.
 
 **Work that will never deliver stays durable and is excluded, never deleted.**
 Rows exhausted by `max_delivery_attempts` stay unsettled and are never claimed
@@ -3278,7 +3288,7 @@ or another holder's platform authority.
 | The journal defers a claimed job | The claim gives the row back in the same request with a `deferred_until` matching the reason; the attempt counts nothing. |
 | The worker cannot prepare a claimed app | The delivery is given back with a back-off that grows per consecutive back-off, and the worker excludes the app from its own claims until a local expiry; the row counts toward no attempt and no capacity demand while it backs off. |
 | Another session holds an app's scope locked during a claim | On PostgreSQL the claim skips the app as contended and serves the next one inside the same batch; on SQLite the database-wide write lock serializes the claim. |
-| A claim's grant is exhausted by the journal work before the reply | The grant is given back, not returned. |
+| A claim's grant is exhausted by the journal work before the reply | The grant is neither returned nor given back: its row lapses with any unreleased task accepted under it and is redelivered once the stored deadline passes, counting no attempt and no back-off. |
 | An execution runs toward its attempt cap | Heartbeats never extend the lease past `leased_at` plus the cap, and the worker's hard bound is the smaller of its local ceiling and the delivered attempt remainder. |
 | Dispatch is switched off while an execution runs | Its next heartbeat extends nothing and the execution is interrupted at that renewal; its delivery is released back to the queue. An attempt that renewed before the interruption was counted at that renewal. |
 | The last holder of an app on a worker drops | The app's project key, bindings and environment are withdrawn from the worker under the residency lock; a holder still executing keeps them. |
@@ -3351,8 +3361,9 @@ drives batch claim, heartbeat and settle through real authentication
 (`a_batch_claim_heartbeat_and_settle_round_trip`), gives a deferred claim's row
 back in the same request, backs a preparation failure off further with each
 give-back, passes an app whose scope another session holds locked, passes a
-deleted app, keeps an exhausted grant out of the reply, and waits out the
-observation that switched dispatch off. `tests/integration/http_runs.rs` pins
+deleted app, keeps an exhausted grant out of the reply and leaves its row to
+lapse, and waits out the observation that switched dispatch off.
+`tests/integration/http_runs.rs` pins
 the zone rule (`a_worker_that_never_claimed_the_app_serves_its_zones_apps`,
 `a_run_call_from_another_zone_is_refused`,
 `a_deleted_app_is_refused_to_every_worker`, `a_retired_instance_is_unauthenticated`,
