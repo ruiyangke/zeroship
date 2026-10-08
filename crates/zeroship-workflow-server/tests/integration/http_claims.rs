@@ -798,46 +798,177 @@ async fn an_interrupted_release_returns_the_row_at_once_with_the_attempt_counted
     task(again.accepted.as_ref());
 }
 
-/// A claim whose journal half stalls still replies inside the wait its caller
-/// stated: the journal step runs inside the batch's deadline, the grant it
-/// could not accept goes back, and the journal holds no task for it.
+/// A grant whose journal half stalls is cut by the batch's deadline and goes
+/// back in the same request under a back-off, even when storage holds that
+/// give-back back for half a queue transaction's budget: it is not handed out,
+/// and the journal holds no task for it.
 ///
 /// The journal's app state is held locked for the whole claim, on a database of
 /// the case's own because every app's journal work queues behind that lock.
+/// The claim budget ends the journal step, well inside the journal attempt's
+/// own I/O ceiling. The give-back is one queue transaction, which the fixture
+/// bounds by its command timeout, so the request's wait is the shortest
+/// multiple of that budget whose give-back window, as this coordinator derives
+/// it, holds a whole one. Once the journal half is seen waiting - the queue
+/// half committed - another session locks the queue's job table; once the
+/// give-back is itself seen waiting on that lock, the session holds it for
+/// half the give-back window the coordinator computed, so the give-back
+/// answers well after it starts and still inside its window.
+///
+/// A give-back that misses its window leaves its row to lapse; that order is
+/// `a_give_back_past_the_claims_give_back_deadline_leaves_its_row_to_lapse` in
+/// the manager. This order also asserts that its own reply still leaves by
+/// the give-back deadline the coordinator computed for it, even though the
+/// give-back genuinely blocks on a real lock first. The sibling order
+/// `a_give_back_never_holds_the_reply_past_the_callers_wait` covers a
+/// different give-back, one refused at once because it cannot take its scope
+/// lock, so it never blocks for real time.
 #[ntex::test]
-async fn a_claim_replies_inside_its_wait_when_the_journal_stalls() {
-    let fixture = Box::pin(Fixture::new()).await;
+async fn a_grant_the_batch_deadline_cuts_from_a_stalled_journal_goes_back() {
+    let options = Options {
+        claim_budget: Duration::from_secs(1),
+        ..Options::default()
+    };
+    let fixture = Box::pin(Fixture::with_options(options)).await;
     let owner = fixture.app().await;
     let (run, job) = fixture.executable(&owner).await;
     let app = fixture.service().await;
+    let transaction = options.command_timeout;
+    let arrival = std::time::Instant::now();
+    let (request, deadline) = (1..=64)
+        .map(|multiple| {
+            let wait = u64::try_from((transaction * multiple).as_millis()).unwrap();
+            let request = ClaimJobs {
+                wait_ms: NonZeroU64::new(wait).unwrap(),
+                ..claim(1)
+            };
+            let deadline = fixture
+                .state
+                .service
+                .manager
+                .claim_deadline(arrival, &request)
+                .unwrap();
+            (request, deadline)
+        })
+        .find(|(_, deadline)| deadline.give_backs - deadline.attempts >= transaction)
+        .expect("some wait leaves a give-back a whole queue transaction");
+    assert_eq!(
+        deadline.attempts - arrival,
+        options.claim_budget,
+        "the claim budget, not the wait, ends the journal step"
+    );
     let mut blocker = platform::connect(fixture.platform.admin_url.as_str()).await;
+    let pid: i32 = blocker
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .unwrap()
+        .get(0);
     let lock = blocker.transaction().await.unwrap();
     lock.batch_execute(
         "LOCK TABLE workflow_manager.__zeroship_workflow_app_state IN ACCESS EXCLUSIVE MODE",
     )
     .await
     .unwrap();
+    let mut rows_blocker = platform::connect(fixture.platform.admin_url.as_str()).await;
+    let rows_pid: i32 = rows_blocker
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .unwrap()
+        .get(0);
 
-    let wait = Duration::from_secs(2);
-    let request = ClaimJobs {
-        wait_ms: NonZeroU64::new(u64::try_from(wait.as_millis()).unwrap()).unwrap(),
-        ..claim(1)
+    let held = async {
+        compio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let waiting: bool = fixture
+                    .platform
+                    .admin
+                    .query_one(
+                        "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
+                         WHERE usename='zeroship_workflow' AND datname=current_database() \
+                         AND $1=ANY(pg_blocking_pids(pid)))",
+                        &[&pid],
+                    )
+                    .await
+                    .unwrap()
+                    .get(0);
+                if waiting {
+                    break;
+                }
+                compio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the claim's journal half must reach the locked app state");
+        let rows = rows_blocker.transaction().await.unwrap();
+        rows.batch_execute("LOCK TABLE workflow_manager.jobs IN ACCESS EXCLUSIVE MODE")
+            .await
+            .unwrap();
+        compio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let waiting: bool = fixture
+                    .platform
+                    .admin
+                    .query_one(
+                        "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
+                         WHERE usename='zeroship_workflow' AND datname=current_database() \
+                         AND $1=ANY(pg_blocking_pids(pid)))",
+                        &[&rows_pid],
+                    )
+                    .await
+                    .unwrap()
+                    .get(0);
+                if waiting {
+                    break;
+                }
+                compio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the claim's give-back must reach the locked job row");
+        // The give-back is now genuinely blocked on this lock, an observed
+        // signal rather than a wall-clock instant computed from the test's own
+        // early `arrival`. Hold it for half the give-back window the
+        // coordinator actually computed (the search above only accepted a
+        // wait whose window covers a whole queue transaction), counted from
+        // this observation: the other half of the window still remains for
+        // the give-back's own write once released, inside the server's own
+        // `deadline.give_backs`.
+        compio::time::sleep((deadline.give_backs - deadline.attempts) / 2).await;
+        rows.commit().await.unwrap();
     };
+    let authorization = fixture.enrolled.authorization();
+    // The give-back deadline below is anchored at `started`, taken right
+    // before the request is sent rather than the early `arrival` the window
+    // search used: the server's own arrival can only be later than this, by
+    // no more than the dispatch through the test's HTTP client, so this
+    // deadline cannot be later than the real one the server computes, and a
+    // reply observed after it proves the give-back held the reply too long.
     let started = std::time::Instant::now();
-    let (status, body) = post(
-        &app,
-        &fixture.enrolled.authorization(),
-        endpoints::WORKFLOW_JOB_CLAIM,
-        &request,
-    )
-    .await;
-    let elapsed = started.elapsed();
+    let reply_deadline = fixture
+        .state
+        .service
+        .manager
+        .claim_deadline(started, &request)
+        .unwrap()
+        .give_backs;
+    let ((status, body), ()) = futures::join!(
+        post(&app, &authorization, endpoints::WORKFLOW_JOB_CLAIM, &request),
+        held
+    );
+    assert!(
+        std::time::Instant::now() <= reply_deadline,
+        "the reply left after the give-back deadline the coordinator computed for it"
+    );
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(elapsed < wait, "the reply took {elapsed:?} of a {wait:?} wait");
     let batch: ClaimedJobs<AcceptedJob> = serde_json::from_value(body).unwrap();
     assert!(batch.deliveries.is_empty(), "{batch:?}");
     let row = fixture.row(&job).await;
-    assert_eq!((row.state.as_str(), row.worker), ("ready", None), "the grant went back");
+    assert_eq!(
+        (row.state.as_str(), row.worker, row.deferrals),
+        ("ready", None, 1),
+        "the grant went back under a back-off"
+    );
+    assert!(row.deferred_until.is_some(), "the back-off holds the row back");
     lock.commit().await.unwrap();
     assert_eq!(fixture.tasks(&run).await, 0, "the journal accepted nothing");
 }
