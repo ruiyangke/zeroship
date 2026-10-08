@@ -91,9 +91,11 @@ impl Worker {
 }
 
 struct Fixture {
+    /// Declared before `platform` so it drops first: a failing case reports the
+    /// server's log before the platform removes the work directory holding it.
+    server: server_process::ServerProcess,
     platform: platform::Platform,
     http: Client,
-    server: server_process::ServerProcess,
     worker: Worker,
     /// The app this case's jobs belong to, in the deployment's one zone, which
     /// is the zone the fixture's worker enrolled in.
@@ -169,9 +171,9 @@ impl Fixture {
         .unwrap();
         let lane = MaintenanceAuthority::new(app.clone(), worker.id.clone());
         Self {
+            server,
             platform,
             http,
-            server,
             worker,
             app,
             control,

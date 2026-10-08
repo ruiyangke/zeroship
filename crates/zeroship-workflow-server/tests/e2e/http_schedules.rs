@@ -50,9 +50,11 @@ impl Signer {
 }
 
 struct Fixture {
+    /// Declared before `platform` so it drops first: a failing case reports the
+    /// server's log before the platform removes the work directory holding it.
+    server: server_process::ServerProcess,
     platform: platform::Platform,
     http: Client,
-    server: server_process::ServerProcess,
     control: Arc<ServiceAuth>,
     client: ControlCoordinator,
     rejected: Vec<Signer>,
@@ -99,9 +101,9 @@ impl Fixture {
         let client =
             ControlCoordinator::new(&server.url, control.clone(), Options::default()).unwrap();
         Self {
+            server,
             platform,
             http,
-            server,
             control,
             client,
             rejected,

@@ -61,9 +61,12 @@ use zeroship_workflow_manager::{Options as QueueOptions, Queue};
 use zeroship_workflow_server::coordinator::{Coordinator, Options};
 
 struct Fixture {
-    platform: platform::Platform,
     /// Held for the lifetime of the case: dropping it kills the service.
+    ///
+    /// Declared before `platform` so it drops first: a failing case reports the
+    /// server's log before the platform removes the work directory holding it.
     _server: server_process::ServerProcess,
+    platform: platform::Platform,
     client: WorkerCoordinator,
     app: AppId,
     /// The service's queue, open in this process so a case can publish a
@@ -144,8 +147,8 @@ impl Fixture {
         .await
         .unwrap();
         Self {
-            platform,
             _server: server,
+            platform,
             client,
             app,
             queue,

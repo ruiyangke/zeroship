@@ -6,6 +6,7 @@
 use ntex::{client::Client, http::StatusCode};
 mod queue_control;
 use std::{
+    io::{Read as _, Seek as _, SeekFrom, Write as _},
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -17,11 +18,61 @@ use std::{
 /// body, and a route that answers to a larger one has to say so.
 pub const MAX_REQUEST_BYTES: usize = 1024;
 
+/// How much of a server's log a failing case reports, from the tail.
+///
+/// A process that ran long enough to fail has its startup chatter far behind
+/// the entries that explain the failure, so the tail holds what a reader came
+/// for; the bound keeps one server from burying the failure it is meant to
+/// explain under the whole of what it ever wrote. Signed, because a seek from
+/// the end takes an `i64` and this runs on the unwinding path, where a fallible
+/// conversion could not be reported.
+const REPORTED_LOG_BYTES: i64 = 64 * 1024;
+
+/// The header a failing case prints before the server log it attaches.
+///
+/// Named, so a reader who sees several servers' output in one run knows which
+/// process each block came from.
+fn log_header(name: &str) -> String {
+    format!("===== zeroship-workflow-server {name} log =====")
+}
+
+/// Print the tail of a server's stdout-and-stderr log to stderr.
+///
+/// Called only while this thread unwinds, so a passing case stays quiet, and
+/// nothing here may panic: a second panic during unwinding aborts the process
+/// and hides the failure this report exists to explain. Every I/O error is
+/// dropped rather than unwrapped, and the tail begins after any continuation
+/// bytes a cut through a multi-byte character left at the front.
+fn report_log(name: &str, log: &Path) {
+    let mut stderr = std::io::stderr();
+    let mut file = match std::fs::File::open(log) {
+        Ok(file) => file,
+        Err(error) => {
+            let _ = writeln!(stderr, "{} (unreadable: {error})", log_header(name));
+            return;
+        }
+    };
+    let len = file.metadata().map_or(0, |meta| meta.len());
+    let bound = u64::try_from(REPORTED_LOG_BYTES).unwrap_or(u64::MAX);
+    if len > bound {
+        let _ = file.seek(SeekFrom::End(-REPORTED_LOG_BYTES));
+    }
+    let mut bytes = Vec::new();
+    let _ = file.read_to_end(&mut bytes);
+    let start = bytes
+        .iter()
+        .position(|&byte| byte & 0b1100_0000 != 0b1000_0000)
+        .unwrap_or(bytes.len());
+    let _ = writeln!(stderr, "{}", log_header(name));
+    let _ = stderr.write_all(&bytes[start..]);
+}
+
 pub struct ServerProcess {
     child: Child,
     _control: queue_control::Control,
     config: PathBuf,
     log: PathBuf,
+    name: String,
     pub url: String,
     pub address: std::net::SocketAddr,
 }
@@ -29,6 +80,9 @@ impl Drop for ServerProcess {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if std::thread::panicking() {
+            report_log(&self.name, &self.log);
+        }
     }
 }
 impl ServerProcess {
@@ -129,6 +183,7 @@ impl ServerProcess {
                         _control: control.take().unwrap(),
                         config,
                         log,
+                        name: name.to_owned(),
                         url,
                         address,
                     }
@@ -177,6 +232,7 @@ impl ServerProcess {
                 _control: control.take().unwrap(),
                 config,
                 log,
+                name: name.to_owned(),
                 url,
                 address,
             }),
@@ -390,5 +446,117 @@ mod tests {
             spawned.is_none(),
             "the readiness wait adopted a server that does not own the address"
         );
+    }
+
+    /// A server over a fresh database, with the platform that owns its work
+    /// directory held BESIDE it.
+    ///
+    /// The server comes first in the tuple so it drops first: a failing case
+    /// reaches `ServerProcess`'s drop while the log is still on disk, and only
+    /// afterwards does the platform remove the work directory that holds it.
+    async fn live_server(name: &str) -> (ServerProcess, super::super::platform::Platform) {
+        let platform = super::super::platform::Platform::fresh_database().await;
+        let control = service_issuer(CONTROL_SERVICE_NAME).unwrap();
+        let control_key = ServiceSigningKey::generate();
+        let peers = platform.work.path().join(format!("{name}-peers.json"));
+        super::super::platform::write_private(
+            &peers,
+            serde_json::to_vec(&json!({"keys":[{
+                "iss":control.as_str(),"x":control_key.public_jwk_x()
+            }]}))
+            .unwrap(),
+        );
+        let http = Client::new().await;
+        let server = ServerProcess::without_maintenance_sweeps(
+            &platform,
+            &peers,
+            platform.work.path(),
+            name,
+            &http,
+        )
+        .await;
+        (server, platform)
+    }
+
+    /// The child half of
+    /// `a_failing_case_reports_its_server_log_and_a_passing_case_does_not`:
+    /// start a server, then fail, so the server is dropped while the thread
+    /// unwinds and its log is reported.
+    #[ntex::test]
+    #[ignore = "run by a_failing_case_reports_its_server_log_and_a_passing_case_does_not"]
+    async fn panics_after_starting_a_server() {
+        let _live = live_server("panics").await;
+        panic!("this case fails on purpose");
+    }
+
+    /// The control for that helper: start a server, then pass, so nothing is
+    /// reported on the way down.
+    #[ntex::test]
+    #[ignore = "run by a_failing_case_reports_its_server_log_and_a_passing_case_does_not"]
+    async fn passes_after_starting_a_server() {
+        let _live = live_server("passes").await;
+    }
+
+    /// A case that unwinds with a live server prints that server's log; a case
+    /// that passes prints nothing.
+    ///
+    /// The trigger is this process's own unwind, so the arms run as children
+    /// of this test binary: a panic cannot be caught here without changing what
+    /// the drop observes. Each child waits for its server to answer `/readyz`
+    /// before it fails or passes, so the log is known to hold the startup line
+    /// before the drop reads it and the assertion races nothing.
+    #[test]
+    fn a_failing_case_reports_its_server_log_and_a_passing_case_does_not() {
+        let failed = run_ignored_helper("panics_after_starting_a_server");
+        assert!(
+            !failed.status.success(),
+            "the failing helper must fail, so its drop runs while unwinding"
+        );
+        let stderr = String::from_utf8_lossy(&failed.stderr);
+        assert!(
+            stderr.contains(&log_header("panics")),
+            "a failing case did not report its server log:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("workflow coordinator listening"),
+            "the reported log did not carry the server's startup line:\n{stderr}"
+        );
+
+        let passed = run_ignored_helper("passes_after_starting_a_server");
+        assert!(
+            passed.status.success(),
+            "the passing helper must pass: {}",
+            String::from_utf8_lossy(&passed.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&passed.stderr);
+        assert!(
+            !stderr.contains(&log_header("passes")),
+            "a passing case printed its server log:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("workflow coordinator listening"),
+            "a passing case printed the server's startup line:\n{stderr}"
+        );
+    }
+
+    /// Run one ignored helper of this test binary to completion, capturing both
+    /// streams. The child fails or passes on its own; the caller reads what it
+    /// reported on stderr.
+    fn run_ignored_helper(name: &str) -> std::process::Output {
+        let exe = std::env::current_exe().expect("this test binary");
+        let test = format!(
+            "{}::{name}",
+            module_path!().split_once("::").expect("crate prefix").1
+        );
+        Command::new(exe)
+            .args([
+                "--exact",
+                test.as_str(),
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .output()
+            .expect("run the helper in a child of this test binary")
     }
 }
