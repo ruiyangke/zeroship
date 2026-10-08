@@ -14,33 +14,10 @@ use crate::state::{NextTickCallback, TimerCallback};
 // V8 platform init
 // ===========================================================================
 
-// V8's platform is a PROCESS-GLOBAL installed exactly once. `init_v8` (multi-threaded
-// default platform) and `init_v8_single_threaded` (single-threaded platform) are
-// mutually exclusive — a process commits to ONE. They share this single `Once` so the
-// FIRST caller's choice wins and any later call of EITHER variant is a no-op (rather
-// than a second `initialize_platform` that panics with "Invalid global state").
+// V8's platform is a PROCESS-GLOBAL installed exactly once, by `init_v8`. The single
+// `Once` makes every later call a no-op rather than a second `initialize_platform`,
+// which panics with "Invalid global state".
 static V8_INIT: std::sync::Once = std::sync::Once::new();
-
-/// Records WHICH platform flavor the `V8_INIT` `Once` actually committed, so a later
-/// caller can verify the flavor it needs is the one that won (the `Once` is
-/// first-caller-wins; a second call of EITHER variant no-ops silently). `0` = not yet
-/// initialized, `1` = multi-threaded default platform, `2` = single-threaded platform.
-///
-/// This exists for the build-time recorder child's FAIL-CLOSED single-threaded check:
-/// the recorder's whole-process landlock coverage depends on the single-threaded
-/// platform being the one installed (landlock has no TSYNC). If any future code path
-/// in the recorder process called the multi-threaded `init_v8` before
-/// `init_v8_single_threaded`, the recorder would otherwise come up MULTI-THREADED with
-/// NO error, silently re-opening the thread-scope gap. [`v8_platform_flavor`] lets the
-/// recorder detect that and REFUSE TO RUN rather than silently degrade.
-static V8_FLAVOR: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-
-/// The committed V8 platform flavor (see [`V8_FLAVOR`]): `0` = uninitialized, `1` =
-/// multi-threaded default platform, `2` = single-threaded platform. Used by the
-/// recorder child to fail closed if the multi-threaded platform won the `Once` race.
-pub fn v8_platform_flavor() -> u8 {
-    V8_FLAVOR.load(std::sync::atomic::Ordering::SeqCst)
-}
 
 /// The `--stack-size` this build asks V8 for, as a flag fragment to append.
 ///
@@ -67,17 +44,9 @@ fn js_stack_flag() -> &'static str {
     }
 }
 
-/// Shared one-time V8 setup. `single_threaded` selects the platform flavor.
-fn init_v8_platform(single_threaded: bool) {
+/// One-time V8 platform setup, safe to call from any entry point.
+fn init_v8_platform() {
     V8_INIT.call_once(|| {
-        // Record the flavor the FIRST caller committed (first-caller-wins). Stored
-        // inside `call_once` so it reflects the platform actually installed, not a
-        // later no-op call's argument.
-        V8_FLAVOR.store(
-            if single_threaded { 2 } else { 1 },
-            std::sync::atomic::Ordering::SeqCst,
-        );
-
         #[cfg(target_os = "linux")]
         disable_transparent_huge_pages();
 
@@ -90,23 +59,12 @@ fn init_v8_platform(single_threaded: bool) {
         // `--expose-gc` makes `request_garbage_collection_for_testing`
         // available so memory-pressure tests can force a GC pass
         // mid-run instead of waiting for isolate teardown. The flag
-        // only enables a test entry point — it doesn't affect
+        // only enables a test entry point - it doesn't affect
         // production behavior.
-        //
-        // `--single_threaded` keeps V8's GC/compiler work on the calling thread;
-        // the single-threaded platform spawns NO worker-thread pool. Both inits
-        // set `--expose-gc`, so memory-pressure handling is identical either way.
         let mut flags = String::from("--expose-gc");
-        if single_threaded {
-            flags.push_str(" --single_threaded");
-        }
         flags.push_str(js_stack_flag());
         v8::V8::set_flags_from_string(&flags);
-        let platform = if single_threaded {
-            v8::new_single_threaded_default_platform(false).make_shared()
-        } else {
-            v8::new_default_platform(0, false).make_shared()
-        };
+        let platform = v8::new_default_platform(0, false).make_shared();
         v8::V8::initialize_platform(platform);
         v8::V8::initialize();
     });
@@ -143,35 +101,10 @@ fn disable_transparent_huge_pages() {
     }
 }
 
-/// Initialize V8 with the multi-threaded default platform (safe to call multiple
-/// times). The standard worker/gateway/dev init.
+/// Initialize V8 with its default platform (safe to call multiple times). The
+/// standard worker/gateway/dev init.
 pub fn init_v8() {
-    init_v8_platform(false);
-}
-
-/// Initialize V8 with a **single-threaded** platform (no GC/compiler/platform
-/// worker-thread pool). Same one-time setup as [`init_v8`] (rustls provider, ICU data,
-/// `--expose-gc`) plus `--single_threaded` and `new_single_threaded_default_platform`,
-/// so V8 runs all of its own background work inline on the calling thread.
-///
-/// This exists for the build-time kernel-sandboxed migrate recorder child:
-/// seccomp's calling-thread-only `apply_filter` and
-/// landlock's calling-thread-only `restrict_self` cannot reach a thread that already
-/// exists when the lockdown runs. The multi-threaded default platform spawns such
-/// threads at init; a single-threaded platform spawns NONE, so the in-process
-/// lockdown covers the only thread (landlock has no TSYNC equivalent, so this is the
-/// sound way to give it full coverage).
-///
-/// The contract for any such caller: apply the kernel lockdown on the SAME thread
-/// that will run V8, and get here before a single V8 background thread has been
-/// spawned. That ordering is the whole reason this variant exists.
-///
-/// MUST be chosen INSTEAD of [`init_v8`] for the whole process: both share one `Once`,
-/// so a process must call this BEFORE any path that calls `init_v8` (e.g.
-/// `Runtime::build`) for the single-threaded platform to win. Safe to call multiple
-/// times; a no-op once either variant has run.
-pub fn init_v8_single_threaded() {
-    init_v8_platform(true);
+    init_v8_platform();
 }
 
 // ===========================================================================
