@@ -80,14 +80,6 @@ fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
     }
 }
 
-/// A free-ish TCP port. `zeroship serve` refuses a taken port and exits, so a
-/// clash would look like a dead runtime; the boot assertion below quotes the
-/// runtime's own log, which names the clash if it happens.
-fn free_port() -> u16 {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    l.local_addr().expect("local_addr").port()
-}
-
 /// Kills anything left behind, on the panic path as well as the happy one. A
 /// leaked orphan from THIS test is the very thing under test, and it would hold
 /// its temp dir's redb file until the machine is rebooted.
@@ -135,9 +127,11 @@ fn spawn_under_shell(dir: &Path, guard: Guard) -> Spawned {
         Guard::RealParent => "export ZEROSHIP_DIE_WITH_PARENT=$$\n".to_string(),
         Guard::WrongPid(pid) => format!("export ZEROSHIP_DIE_WITH_PARENT={pid}\n"),
     };
-    let port = free_port();
+    // `--port=0`: the kernel picks the port at bind, so no port is reserved and
+    // released for another process to take before this runtime binds it. The
+    // test never connects to the port, so it does not need to know which one.
     let script = format!(
-        "{export}\"$1\" serve app.js --port={port} --workers=1 >runtime.log 2>&1 &\n\
+        "{export}\"$1\" serve app.js --port=0 --workers=1 >runtime.log 2>&1 &\n\
          echo $! > runtime.pid\n\
          wait\n"
     );

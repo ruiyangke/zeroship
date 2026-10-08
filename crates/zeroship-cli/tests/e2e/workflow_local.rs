@@ -27,6 +27,34 @@ struct Host {
     port: u16,
     log: tempfile::NamedTempFile,
 }
+
+/// How a launched CLI's readiness wait ended.
+enum Started {
+    Ready,
+    /// The child exited because another process already owns the reserved
+    /// port, so the caller reserves a different one.
+    AddressInUse,
+}
+
+/// An ephemeral loopback port, released immediately so the child can bind it.
+fn reserve_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// Whether a stopped CLI's log names a port it could not bind.
+///
+/// One line must carry both halves, so the same phrase about a database alias
+/// (`zeroship-data-orm` `backend/sqlite/mod.rs`) or a slug
+/// (`zeroship-control` `organizations.rs`) is not read as a taken port.
+fn names_a_taken_port(log: &str) -> bool {
+    log.lines()
+        .any(|line| line.contains("port ") && line.contains(" is already in use"))
+}
+
 impl Host {
     fn start(root: &Path, app: Option<&AppId>, native_dev: bool) -> Self {
         Self::launch(root, app, native_dev, None, None)
@@ -43,66 +71,90 @@ impl Host {
         config: Option<&Path>,
         descriptor: Option<&str>,
     ) -> Self {
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let log = tempfile::NamedTempFile::new().unwrap();
-        let mut command = Command::new(env!("CARGO_BIN_EXE_zeroship"));
-        command
-            .current_dir(root)
-            .args(["serve", "app.zship", "--workers=1"])
-            .arg(format!("--port={port}"))
-            .env_remove("APP_ID")
-            .env("ZEROSHIP_WORKFLOW_SQLITE_PATH", root.join("unused.sqlite"))
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(log.reopen().unwrap()))
-            .stderr(Stdio::from(log.reopen().unwrap()));
-        if let Some(app) = app {
-            command.env("APP_ID", app.as_str());
-        }
-        if let Some(config) = config {
-            command.arg(format!("--workflow-config={}", config.display()));
-        }
-        for key in [
-            "DATABASE_URL",
-            "ZEROSHIP_KV_CONFIG_FILE",
-            "ZEROSHIP_KV_PATH",
-            "ZEROSHIP_STORAGE_URL",
-            "ZEROSHIP_DEV",
-            "ZEROSHIP_DIE_WITH_PARENT",
-            "ZEROSHIP_RUNTIME_DESCRIPTOR",
-        ] {
-            command.env_remove(key);
-        }
-        if let Some(descriptor) = descriptor {
-            command.env("ZEROSHIP_RUNTIME_DESCRIPTOR", descriptor);
-        }
-        if native_dev {
-            command
-                .args([
-                    "--dev-bootstrap=dev-entry.mjs",
-                    "--dev-entry-loader=createDevEntryLoader",
-                ])
-                .env("ZEROSHIP_DEV", "1");
-        }
-        let mut host = Self {
-            child: command.spawn().unwrap(),
-            port,
-            log,
-        };
-        host.until("/ping", |reply| reply == &json!({"ready": true}));
-        host
+        Self::launch_reserving(root, app, native_dev, config, descriptor, None)
     }
 
-    fn request(&mut self, path: &str) -> Result<Value, String> {
-        if let Some(status) = self.child.try_wait().unwrap() {
-            panic!(
-                "CLI exited {status}: {}",
-                std::fs::read_to_string(self.log.path()).unwrap()
-            );
+    /// Launch the host, re-reserving when a taken port keeps the child from
+    /// binding.
+    ///
+    /// The OS hands out an ephemeral port, and a parallel test process can be
+    /// handed the same one before this child binds it: this fixture releases
+    /// the reservation before spawning the child, so another process can take
+    /// the port in between. A child that exits because its reserved address is
+    /// taken is relaunched on a fresh reservation, and readiness is accepted
+    /// only from a child that owns the socket.
+    ///
+    /// `first` pins the port the first attempt tries, so a case can force the
+    /// collision deterministically; every later attempt reserves its own port.
+    fn launch_reserving(
+        root: &Path,
+        app: Option<&AppId>,
+        native_dev: bool,
+        config: Option<&Path>,
+        descriptor: Option<&str>,
+        first: Option<u16>,
+    ) -> Self {
+        for attempt in 0..16 {
+            let port = if attempt == 0 { first } else { None }.unwrap_or_else(reserve_port);
+            let log = tempfile::NamedTempFile::new().unwrap();
+            let mut command = Command::new(env!("CARGO_BIN_EXE_zeroship"));
+            command
+                .current_dir(root)
+                .args(["serve", "app.zship", "--workers=1"])
+                .arg(format!("--port={port}"))
+                .env_remove("APP_ID")
+                .env("ZEROSHIP_WORKFLOW_SQLITE_PATH", root.join("unused.sqlite"))
+                .stdin(Stdio::null())
+                .stdout(Stdio::from(log.reopen().unwrap()))
+                .stderr(Stdio::from(log.reopen().unwrap()));
+            if let Some(app) = app {
+                command.env("APP_ID", app.as_str());
+            }
+            if let Some(config) = config {
+                command.arg(format!("--workflow-config={}", config.display()));
+            }
+            for key in [
+                "DATABASE_URL",
+                "ZEROSHIP_KV_CONFIG_FILE",
+                "ZEROSHIP_KV_PATH",
+                "ZEROSHIP_STORAGE_URL",
+                "ZEROSHIP_DEV",
+                "ZEROSHIP_DIE_WITH_PARENT",
+                "ZEROSHIP_RUNTIME_DESCRIPTOR",
+            ] {
+                command.env_remove(key);
+            }
+            if let Some(descriptor) = descriptor {
+                command.env("ZEROSHIP_RUNTIME_DESCRIPTOR", descriptor);
+            }
+            if native_dev {
+                command
+                    .args([
+                        "--dev-bootstrap=dev-entry.mjs",
+                        "--dev-entry-loader=createDevEntryLoader",
+                    ])
+                    .env("ZEROSHIP_DEV", "1");
+            }
+            let mut host = Self {
+                child: command.spawn().unwrap(),
+                port,
+                log,
+            };
+            match host.wait_started() {
+                Started::Ready => return host,
+                Started::AddressInUse => {
+                    let _ = host.child.kill();
+                    let _ = host.child.wait();
+                }
+            }
         }
+        panic!("could not reserve a listening port for the CLI after repeated collisions");
+    }
+
+    /// Make one request without reading the child's exit status: a launch
+    /// readiness wait has to observe the exit itself to tell a collision from a
+    /// crash.
+    fn try_request(&self, path: &str) -> Result<Value, String> {
         let mut socket = TcpStream::connect_timeout(
             &format!("127.0.0.1:{}", self.port).parse().unwrap(),
             Duration::from_millis(250),
@@ -155,12 +207,71 @@ impl Host {
         serde_json::from_slice(&body).map_err(|error| error.to_string())
     }
 
+    fn request(&mut self, path: &str) -> Result<Value, String> {
+        if let Some(status) = self.child.try_wait().unwrap() {
+            panic!(
+                "CLI exited {status}: {}",
+                std::fs::read_to_string(self.log.path()).unwrap()
+            );
+        }
+        self.try_request(path)
+    }
+
+    /// Wait for the child to answer `/ping` ready, accepting a reply only from
+    /// THIS child's listening socket.
+    ///
+    /// The reserved port is released before the child binds it, so another
+    /// process can take the port and answer `/ping` first; accepting that
+    /// answer points the case at a host it does not own.
+    fn wait_started(&mut self) -> Started {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if self.child.try_wait().unwrap().is_some() {
+                return self.child_stopped();
+            }
+            if let Ok(reply) = self.try_request("/ping") {
+                if reply == json!({"ready": true})
+                    && zeroship_testkit::listen::child_listens(self.child.id(), self.port)
+                {
+                    // The child that owns the socket can still have exited
+                    // since, freeing the address for another process.
+                    if self.child.try_wait().unwrap().is_some() {
+                        return self.child_stopped();
+                    }
+                    return Started::Ready;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "CLI did not converge: {}",
+                std::fs::read_to_string(self.log.path()).unwrap()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// How a stopped child's log names the reason it stopped.
+    fn child_stopped(&self) -> Started {
+        let text = std::fs::read_to_string(self.log.path()).unwrap_or_default();
+        // `zeroship serve` prints it from its pre-bind probe
+        // (`src/main.rs::cmd_serve`) and from the runtime's worker bind
+        // (`zeroship-runtime` `core/serve.rs::bind_error_message`); either means
+        // another process owns the reserved port.
+        if names_a_taken_port(&text) {
+            Started::AddressInUse
+        } else {
+            panic!("{text}")
+        }
+    }
+
     fn until(&mut self, path: &str, predicate: impl Fn(&Value) -> bool) -> Value {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             let reply = self.request(path);
             if let Ok(reply) = &reply {
-                if predicate(reply) {
+                if predicate(reply)
+                    && zeroship_testkit::listen::child_listens(self.child.id(), self.port)
+                {
                     return reply.clone();
                 }
             }
@@ -195,6 +306,76 @@ impl Drop for Host {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// A port already taken before the child binds it must not fail the launch: the
+/// host relaunches on a fresh reservation, and its readiness answer comes from
+/// its own child rather than from whatever answers the first port.
+///
+/// The first attempt is pinned to a port this test holds. The holder answers
+/// `/ping` ready, the way a foreign zeroship on the reserved port would, so a
+/// readiness wait that trusted the address alone would adopt it; the host must
+/// instead reject it, observe the child's address-in-use exit, and come up on
+/// another port that its own child owns.
+#[test]
+fn a_reserved_port_taken_before_the_child_binds_is_relaunched() {
+    let root = tempfile::tempdir().unwrap();
+    compile(root.path(), "original", "1h");
+    let foreign = TcpListener::bind("0.0.0.0:0").unwrap();
+    let foreign_port = foreign.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in foreign.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut head = Vec::new();
+            let mut chunk = [0_u8; 256];
+            while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => head.extend_from_slice(&chunk[..read]),
+                }
+            }
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-length: 14\r\nconnection: close\r\n\r\n{\"ready\":true}",
+            );
+            let _ = stream.flush();
+        }
+    });
+    let mut host = Host::launch_reserving(root.path(), None, false, None, None, Some(foreign_port));
+    assert_ne!(
+        host.port, foreign_port,
+        "the host adopted the foreign listener holding its first reserved port"
+    );
+    assert!(
+        zeroship_testkit::listen::child_listens(host.child.id(), host.port),
+        "the readiness answer did not come from the host's own child"
+    );
+    assert_eq!(
+        host.request("/version").unwrap(),
+        json!({"version": "original:lazy"})
+    );
+}
+
+/// The address-in-use matcher accepts a line only when it is about a PORT, so
+/// the same phrase about a database alias or a slug is not read as a taken
+/// reserved port, and the two halves on separate lines are not one message.
+#[test]
+fn a_taken_port_is_named_only_by_a_port_line() {
+    // The CLI's pre-bind probe (`src/main.rs::cmd_serve`).
+    assert!(names_a_taken_port(
+        "zeroship serve: port 45035 is already in use"
+    ));
+    // The runtime's worker bind
+    // (`zeroship-runtime` `core/serve.rs::bind_error_message`).
+    assert!(names_a_taken_port(
+        "[zeroship] error: port 45035 is already in use. Stop the process using it or pass a different --port."
+    ));
+    // A database alias that is "already in use"
+    // (`zeroship-data-orm` `backend/sqlite/mod.rs`).
+    assert!(!names_a_taken_port("database app is already in use"));
+    // A slug that is "already in use" (`zeroship-control` `organizations.rs`).
+    assert!(!names_a_taken_port(r#"the slug "acme" is already in use"#));
+    // The two halves on separate lines are not one port message.
+    assert!(!names_a_taken_port("port 45035\nis already in use"));
 }
 
 #[test]

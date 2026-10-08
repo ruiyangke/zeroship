@@ -7,40 +7,50 @@
 //! alone points a case at another case's database. Ownership is what tells the
 //! two apart, and [`child_listens`] is the one place the question is answered.
 
-/// Whether `pid` holds the LISTEN socket on `127.0.0.1:port`.
+/// Whether `pid` holds the LISTEN socket on IPv4 `port`, bound to the loopback
+/// address or the wildcard.
 ///
 /// Read from `/proc`, because the answer is about one process's open
 /// descriptors and not about what the kernel has bound: another case's server
-/// bound to the same address answers `/readyz` exactly as this child does, and
-/// only ownership tells the two apart. Scope is IPv4 loopback, which is what
-/// the fixtures bind; any other bind fails every start loudly rather than
+/// bound to the same address answers the readiness route exactly as this child
+/// does, and only ownership tells the two apart. Two local addresses serve
+/// loopback: `127.0.0.1`, which the fixtures bind, and the `0.0.0.0` wildcard,
+/// which `zeroship serve` binds at `core/serve.rs::run_single_worker`. Both
+/// answer on `127.0.0.1:port`, so a wildcard LISTEN is that port's socket just
+/// as a loopback one is; any other bind fails every start loudly rather than
 /// misreading an address.
 #[must_use]
 pub fn child_listens(pid: u32, port: u16) -> bool {
     let Ok(table) = std::fs::read_to_string("/proc/net/tcp") else {
         return false;
     };
-    let local = format!("0100007F:{port:04X}");
-    let Some(inode) = table.lines().skip(1).find_map(|line| {
-        let mut fields = line.split_whitespace();
-        let _slot = fields.next()?;
-        let bound = fields.next()?;
-        let _remote = fields.next()?;
-        let state = fields.next()?;
-        if bound != local || state != "0A" {
-            return None;
-        }
-        fields.nth(5)
-    }) else {
-        return false;
-    };
-    let socket = format!("socket:[{inode}]");
+    let loopback = format!("0100007F:{port:04X}");
+    let wildcard = format!("00000000:{port:04X}");
+    let inodes: Vec<String> = table
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let _slot = fields.next()?;
+            let bound = fields.next()?;
+            let _remote = fields.next()?;
+            let state = fields.next()?;
+            if (bound != loopback.as_str() && bound != wildcard.as_str()) || state != "0A" {
+                return None;
+            }
+            fields.nth(5).map(str::to_owned)
+        })
+        .collect();
     let Ok(entries) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
         return false;
     };
     entries.flatten().any(|entry| {
-        std::fs::read_link(entry.path())
-            .is_ok_and(|target| target.to_string_lossy() == socket)
+        std::fs::read_link(entry.path()).is_ok_and(|target| {
+            let target = target.to_string_lossy();
+            inodes
+                .iter()
+                .any(|inode| target == format!("socket:[{inode}]"))
+        })
     })
 }
 
@@ -65,11 +75,68 @@ mod tests {
             "this process holds a listener on {mine_port}"
         );
 
-        let mut child = run_ignored_helper("holds_a_listener_and_reports_its_port");
-        // The helper's port is the first line of its output that is exactly a
-        // port: the harness prints its own `test <name> ... ` prefix on the
-        // same stream. A helper that never reports fails this test rather than
-        // hanging it.
+        let (mut child, held_port) =
+            run_helper_reporting_a_port("holds_a_listener_and_reports_its_port");
+        assert!(
+            child_listens(child.id(), held_port),
+            "the child holds a listener on {held_port}"
+        );
+        assert!(
+            !child_listens(std::process::id(), held_port),
+            "this process does not hold the child's listener on {held_port}"
+        );
+
+        // Closing the helper's stdin ends its read and lets it exit.
+        drop(child.stdin.take());
+        let status = child.wait().expect("wait for the helper");
+        assert!(status.success(), "the helper exited with {status}");
+    }
+
+    /// A wildcard listener is this port's socket for the same reason a loopback
+    /// one is: it answers on `127.0.0.1:port`. `zeroship serve` binds the
+    /// wildcard, so a predicate that required the loopback local address would
+    /// never recognize the CLI host that owns it.
+    #[test]
+    fn the_ownership_predicate_covers_a_wildcard_listener() {
+        let wildcard = TcpListener::bind("0.0.0.0:0").unwrap();
+        let port = wildcard.local_addr().unwrap().port();
+        assert!(
+            child_listens(std::process::id(), port),
+            "this process holds a wildcard listener on {port}"
+        );
+    }
+
+    /// The wildcard match is about the process that holds the socket, not the
+    /// address alone: a wildcard listener a child of this test binary holds is
+    /// not owned by this process.
+    #[test]
+    fn a_wildcard_listener_held_by_another_process_is_not_owned_by_this_one() {
+        let (mut child, held_port) =
+            run_helper_reporting_a_port("holds_a_wildcard_listener_and_reports_its_port");
+        assert!(
+            child_listens(child.id(), held_port),
+            "the child holds a wildcard listener on {held_port}"
+        );
+        assert!(
+            !child_listens(std::process::id(), held_port),
+            "this process does not hold the child's wildcard listener on {held_port}"
+        );
+
+        // Closing the helper's stdin ends its read and lets it exit.
+        drop(child.stdin.take());
+        let status = child.wait().expect("wait for the helper");
+        assert!(status.success(), "the helper exited with {status}");
+    }
+
+    /// Run an ignored helper that reports the port it holds, and return the
+    /// child with that port.
+    ///
+    /// The helper's port is the first line of its output that is exactly a
+    /// port: the harness prints its own `test <name> ... ` prefix on the same
+    /// stream. A helper that never reports fails the calling test rather than
+    /// hanging it.
+    fn run_helper_reporting_a_port(name: &str) -> (Child, u16) {
+        let mut child = run_ignored_helper(name);
         let (sender, receiver) = std::sync::mpsc::channel();
         let stdout = child.stdout.take().expect("the helper's stdout");
         std::thread::spawn(move || {
@@ -104,29 +171,15 @@ mod tests {
                 }
             }
         });
-        let held_port = match receiver.recv_timeout(Duration::from_secs(30)) {
-            Ok(Ok(port)) => port,
+        match receiver.recv_timeout(Duration::from_secs(30)) {
+            Ok(Ok(port)) => (child, port),
             Ok(Err(error)) => panic!("{error}"),
             Err(_) => {
                 let _ = child.kill();
                 let _ = child.wait();
                 panic!("the helper reported no port");
             }
-        };
-
-        assert!(
-            child_listens(child.id(), held_port),
-            "the child holds a listener on {held_port}"
-        );
-        assert!(
-            !child_listens(std::process::id(), held_port),
-            "this process does not hold the child's listener on {held_port}"
-        );
-
-        // Closing the helper's stdin ends its read and lets it exit.
-        drop(child.stdin.take());
-        let status = child.wait().expect("wait for the helper");
-        assert!(status.success(), "the helper exited with {status}");
+        }
     }
 
     /// Run one ignored helper of this test binary, with stdin and stdout piped
@@ -160,6 +213,22 @@ mod tests {
     #[ignore = "run by the_ownership_predicate_follows_the_process_that_holds_the_socket"]
     fn holds_a_listener_and_reports_its_port() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral listener");
+        let port = listener.local_addr().expect("the bound address").port();
+        let mut stdout = std::io::stdout();
+        writeln!(stdout, "\n{port}").expect("report the port");
+        stdout.flush().expect("flush the port");
+        let mut ignored = String::new();
+        let _ = std::io::stdin().read_to_string(&mut ignored);
+    }
+
+    /// The child half of
+    /// `a_wildcard_listener_held_by_another_process_is_not_owned_by_this_one`:
+    /// bind a wildcard listener, report the port the kernel gave it, then hold
+    /// the socket until this process's stdin closes.
+    #[test]
+    #[ignore = "run by a_wildcard_listener_held_by_another_process_is_not_owned_by_this_one"]
+    fn holds_a_wildcard_listener_and_reports_its_port() {
+        let listener = TcpListener::bind("0.0.0.0:0").expect("bind an ephemeral wildcard listener");
         let port = listener.local_addr().expect("the bound address").port();
         let mut stdout = std::io::stdout();
         writeln!(stdout, "\n{port}").expect("report the port");
