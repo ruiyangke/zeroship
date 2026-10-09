@@ -1080,10 +1080,7 @@ async fn handle_request(
                     .await
                 }
                 Some(Err(e)) => {
-                    let body = format!(
-                        r#"{{"message":"{}","name":"Error"}}"#,
-                        e.message.replace('"', "\\\"")
-                    );
+                    let body = e.body().to_string();
                     let mut headers = Vec::new();
                     append_dev_runtime_state(runtime, &mut headers);
                     let resp = build_http_response(e.status, &headers, body.as_bytes());

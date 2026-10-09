@@ -78,6 +78,34 @@ impl DbPlugin {
     }
 }
 
+/// The host's options for `installSchema`: the request each read is made
+/// for, so the adapter batches a request's reads only with that request's.
+fn install_options<'s>(scope: &v8::PinScope<'s, '_>) -> Result<v8::Local<'s, v8::Object>, String> {
+    let options = v8::Object::new(scope);
+    let invocation_key = zeroship_runtime::callback::function_builder(invocation_key)
+        .build(scope)
+        .ok_or("could not allocate the invocation key function")?;
+    let name = v8::String::new(scope, "invocationKey").ok_or("could not allocate an option name")?;
+    options
+        .create_data_property(scope, name.into(), invocation_key.into())
+        .filter(|created| *created)
+        .ok_or("could not set the invocation key option")?;
+    Ok(options)
+}
+
+/// `invocationKey()`: the object naming the request the calling code belongs
+/// to, or `undefined` for code that belongs to no request.
+fn invocation_key(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    match zeroship_runtime::state::invocation_key(scope) {
+        Some(key) => rv.set(key.into()),
+        None => rv.set_undefined(),
+    }
+}
+
 impl NativePlugin for DbPlugin {
     fn namespace(&self) -> &str {
         "db"
@@ -128,11 +156,12 @@ impl NativePlugin for DbPlugin {
             let json = serde_json::to_string(&projection).map_err(|error| error.to_string())?;
             let json = v8::String::new(scope, &json).ok_or("could not allocate DB descriptor")?;
             let projected = v8::json::parse(scope, json).ok_or("could not parse DB descriptor")?;
+            let options = install_options(scope)?;
             settled = zeroship_runtime::modules::invoke_module_export(
                 scope,
                 "zeroship:db/adapter",
                 "installSchema",
-                &[handle.into(), projected],
+                &[handle.into(), projected, options.into()],
             )
             .map(Some)?;
         }

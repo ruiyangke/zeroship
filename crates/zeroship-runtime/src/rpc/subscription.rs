@@ -584,17 +584,17 @@ fn wake_subscription_callback(
 }
 
 fn schedule_advance(state: &SharedState, ws_id: u32) {
-    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+    state.borrow_mut().spawn_event(async move {
         OpResult::SubscriptionAdvance { ws_id }
-    }));
+    });
     state.borrow().notify_pump();
 }
 
 fn schedule_timer(state: &SharedState, delay: Duration, timer: Timer) {
-    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+    state.borrow_mut().spawn_event(async move {
         compio::time::sleep(delay).await;
         OpResult::SubscriptionTimer(timer)
-    }));
+    });
     state.borrow().notify_pump();
 }
 

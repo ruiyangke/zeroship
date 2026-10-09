@@ -189,9 +189,10 @@ pub(crate) fn gen_setter_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenSt
 }
 
 /// Codegen for `#[v8_async_method]` — emits a sync V8 callback that
-/// allocates a Promise, spawns the user's async body via
-/// `state.spawned_ops`, and returns the Promise immediately. The pump
-/// resolves (or rejects) the promise when the future settles.
+/// allocates a Promise, queues the user's async body through the runtime's
+/// op gate (`admit_op`, then `spawn_op`), and returns the Promise
+/// immediately. The pump resolves (or rejects) the promise when the future
+/// settles.
 ///
 /// Shape of the emitted callback:
 /// ```ignore
@@ -207,7 +208,8 @@ pub(crate) fn gen_setter_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenSt
 ///     let wrapper_global = v8::Global::new(scope, args.this());
 ///     // 4. Pull SharedState off the isolate slot.
 ///     let state = scope.get_slot::<SharedState>().unwrap().clone();
-///     let request_id = state.borrow().executing_request_id;
+///     // 4b. The op gate: reject the promise if the request has ended.
+///     let owner = match admit_op(scope) { Ok(o) => o, Err(e) => { /* reject, return */ } };
 ///     // 5. Build the future.
 ///     let fut = async move {
 ///         let _keepalive = wrapper_global; // pin Box<Foo> across .await
@@ -217,11 +219,10 @@ pub(crate) fn gen_setter_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenSt
 ///         OpResult::JsValue {
 ///             resolver: resolver_global,
 ///             value: result.into_resolve_value(),
-///             request_id,
 ///         }
 ///     };
-///     // 6. Push to spawned_ops + wake pump.
-///     state.borrow_mut().spawned_ops.push(Box::pin(fut));
+///     // 6. Queue for the pump under its owner + wake pump.
+///     state.borrow_mut().spawn_op(owner, fut);
 ///     if let Some(mut tx) = state.borrow().pump_notify_tx.clone() {
 ///         let _ = tx.try_send(());
 ///     }
@@ -335,7 +336,17 @@ pub(crate) fn gen_async_method_callback(cfg: &ClassConfig, m: &ClassMethod) -> T
                         return;
                     }
                 };
-            let __request_id = __state.borrow().executing_request_id;
+            // 4b. The op gate: a method called for a request that has
+            //     ended is refused, and its body never runs.
+            let __owner = match ::zeroship_runtime::macro_runtime::state::admit_op(scope) {
+                Ok(__owner) => __owner,
+                Err(__error) => {
+                    let __exc = __error.to_exception(scope);
+                    __resolver.reject(scope, __exc);
+                    rv.set(__promise.into());
+                    return;
+                }
+            };
 
             // 5. Build the future. The block keeps `wrapper_global`
             //    alive for the future's full lifetime (as the
@@ -360,15 +371,14 @@ pub(crate) fn gen_async_method_callback(cfg: &ClassConfig, m: &ClassMethod) -> T
                 ::zeroship_runtime::macro_runtime::state::OpResult::JsValue {
                     resolver: __resolver_global,
                     value: __value,
-                    request_id: __request_id,
                 }
             };
 
-            // 6. Push to the runtime's spawned_ops queue. The pump
-            //    polls these futures on every event-loop tick;
-            //    settling produces the OpResult::JsValue that the
-            //    pump matches into `r.resolve(scope, …)`.
-            __state.borrow_mut().spawned_ops.push(::std::boxed::Box::pin(__fut));
+            // 6. Queue the op for the pump, for the request it was
+            //    admitted for. The pump polls these futures on every
+            //    event-loop tick; settling produces the OpResult::JsValue
+            //    that the pump matches into `r.resolve(scope, ...)`.
+            __state.borrow_mut().spawn_op(__owner, __fut);
             // Wake the pump so streaming / cross-task spawns settle
             // promptly. Mirrors `fetch_native::fetch_callback`'s
             // notify shape.

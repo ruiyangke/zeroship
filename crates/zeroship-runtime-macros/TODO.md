@@ -38,7 +38,7 @@ Consumer-side migrations: `crates/zeroship-runtime/TODO.md`.
   paired install as one accessor descriptor. Codegen landed
   incrementally (`020a545`, `0dbb753`, `3806341`); smoke test only — `ce68f10`.
 - **`#[v8_async_method]`** — async methods compile to a sync V8 callback
-  + `PromiseResolver` + spawn via `state.spawned_ops`. `&mut self`
+  + `PromiseResolver` + spawn via `state.spawn_op`. `&mut self`
   rejected — `0a26d45b`, `17b2e880`, `caa4f450`.
 - **`#[v8_static_method]` / `#[v8_static_getter]`** — WebIDL §3.7.4
   static operations / attributes installed on the constructor template

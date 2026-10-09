@@ -3,7 +3,7 @@
 //! Each `#[v8_async_method]`-marked method on a `#[v8_class]` impl
 //! produces a sync V8 callback that:
 //!   1. allocates a `v8::PromiseResolver`,
-//!   2. spawns the user's async body via `state.spawned_ops`,
+//!   2. queues the user's async body through the op gate (`state.spawn_op`),
 //!   3. returns the Promise immediately.
 //!
 //! When the future settles the runtime pump materialises the value

@@ -31,7 +31,11 @@ export type ErrorCode =
   | "TIMEOUT"
   | "CANCELLED"
   | "OUT_OF_RANGE"
-  | "UNIMPLEMENTED";
+  | "UNIMPLEMENTED"
+  // A commit the request asked for was still in flight when the platform
+  // ended it, so whether it applied is unknown. Not a generic unavailability:
+  // retrying blindly can re-apply a commit that already landed.
+  | "COMMIT_FAILED_INDETERMINATE";
 
 /** Static enum-like alias users can import as `ErrorCode.NOT_FOUND`. */
 export const ErrorCode: Readonly<Record<ErrorCode, ErrorCode>> = Object.freeze({
@@ -49,6 +53,7 @@ export const ErrorCode: Readonly<Record<ErrorCode, ErrorCode>> = Object.freeze({
   CANCELLED: "CANCELLED",
   OUT_OF_RANGE: "OUT_OF_RANGE",
   UNIMPLEMENTED: "UNIMPLEMENTED",
+  COMMIT_FAILED_INDETERMINATE: "COMMIT_FAILED_INDETERMINATE",
 });
 
 /** Default retryability per error code. */
@@ -67,6 +72,18 @@ const RETRYABLE_BY_CODE: Readonly<Record<ErrorCode, boolean>> = Object.freeze({
   CANCELLED: false,
   OUT_OF_RANGE: false,
   UNIMPLEMENTED: false,
+  COMMIT_FAILED_INDETERMINATE: false,
+});
+
+/**
+ * The platform answers a stopped request's caller in lower_snake - the same
+ * spelling every binding (fetch, KV, storage, workflow) uses for a refused
+ * call - not in this set's own UPPER_SNAKE convention. This is the one
+ * mapping between that plain-fetch wire spelling and this closed set; every
+ * other wire code is lifted verbatim. See docs/reference/rpc.md.
+ */
+const WIRE_CODE_TO_RPC_CODE: Readonly<Record<string, ErrorCode>> = Object.freeze({
+  commit_failed_indeterminate: "COMMIT_FAILED_INDETERMINATE",
 });
 
 /** Map HTTP status to the canonical RPC code. */
@@ -168,7 +185,7 @@ export async function parseErrorResponse(res: Response): Promise<RpcError> {
       // Lift only the keys we know about — don't trust the server to
       // omit accidental properties.
       if (typeof parsed.code === "string") {
-        envelope.code = parsed.code as ErrorCode;
+        envelope.code = WIRE_CODE_TO_RPC_CODE[parsed.code] ?? (parsed.code as ErrorCode);
       }
       if (typeof parsed.message === "string") envelope.message = parsed.message;
       if ("details" in parsed) envelope.details = parsed.details;

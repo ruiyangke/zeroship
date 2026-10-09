@@ -1,12 +1,15 @@
 //! V8 callbacks for `zeroship.storage.*` methods.
 //!
-//! Each callback mirrors the plugin-db pattern: parse args, allocate a
-//! promise, push an async op into the runtime pump's spawned-ops queue,
-//! return the promise. The pump resolves/rejects via OpResult.
+//! Each callback mirrors the plugin-db pattern: parse args, pass the
+//! runtime's op gate and allocate a promise, queue an async op for the
+//! pump under the request it was admitted for, return the promise. The
+//! pump resolves/rejects via `OpResult`.
 
 use base64::Engine;
 use serde_json::json;
-use zeroship_runtime::state::{NativeValue, OpError, OpResult, ResolveValue, SharedState};
+use zeroship_runtime::state::{
+    NativeValue, OpError, OpOwner, OpResult, ResolveValue, SharedState, admit_op, rejected_promise,
+};
 use zeroship_runtime::streams::stream_forwarder::{self, ChunkPolicy, UploadOptions, UploadReader};
 
 use zeroship_storage::backend::{ChunkResult, ChunkSource, ObjectMeta};
@@ -95,10 +98,14 @@ fn throw_type(scope: &mut v8::PinScope, arg_name: &str) -> Option<String> {
 }
 
 
+/// Admit the call for the request it is made for and register its promise
+/// under a fresh op id. Returns `(op_id, owner, promise)`, or the already
+/// rejected promise the call answers with when the gate refuses it.
 fn setup_promise<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     state: &SharedState,
-) -> (u32, Option<u64>, v8::Local<'s, v8::Promise>) {
+) -> Result<(u32, OpOwner<'s>, v8::Local<'s, v8::Promise>), v8::Local<'s, v8::Promise>> {
+    let owner = admit_op(scope).map_err(|error| rejected_promise(scope, &error))?;
     let resolver = v8::PromiseResolver::new(scope).unwrap();
     let promise = resolver.get_promise(scope);
     let global_resolver = v8::Global::new(scope, resolver);
@@ -107,9 +114,8 @@ fn setup_promise<'s>(
     let op_id = s.next_op_id;
     s.next_op_id += 1;
     s.pending_resolvers.insert(op_id, global_resolver);
-    let request_id = s.executing_request_id;
 
-    (op_id, request_id, promise)
+    Ok((op_id, owner, promise))
 }
 
 fn current_context(scope: &mut v8::PinScope<'_, '_>) -> Option<StorageContext> {
@@ -143,17 +149,19 @@ pub fn put(
     let b64 = args.get(2).to_rust_string_lossy(scope);
     let content_type = optional_string_arg(scope, &args, 3);
 
-    let (op_id, request_id, promise) = setup_promise(scope, &state);
+    let (op_id, owner, promise) = match setup_promise(scope, &state) {
+        Ok(admitted) => admitted,
+        Err(refused) => return rv.set(refused.into()),
+    };
 
     let max_encoded = context.storage.max_buffered_bytes().div_ceil(3).saturating_mul(4);
     if b64.len() as u64 > max_encoded {
-        state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        state.borrow_mut().spawn_op(owner, async move {
             OpResult::Failed {
                 op_id,
                 error: "storage: buffered object exceeds size limit; use putStream".into(),
-                request_id,
             }
-        }));
+        });
         rv.set(promise.into());
         return;
     }
@@ -161,13 +169,12 @@ pub fn put(
     let bytes = match base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) {
         Ok(b) => b,
         Err(e) => {
-            state.borrow_mut().spawned_ops.push(Box::pin(async move {
+            state.borrow_mut().spawn_op(owner, async move {
                 OpResult::Failed {
                     op_id,
                     error: format!("storage: invalid base64: {e}"),
-                    request_id,
                 }
-            }));
+            });
             rv.set(promise.into());
             return;
         }
@@ -175,7 +182,7 @@ pub fn put(
 
 
     let meter = context.meter.clone();
-    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+    state.borrow_mut().spawn_op(owner, async move {
         match context.storage.put(&bucket, &key, &bytes, content_type.as_deref()).await {
             Ok(size) => {
                 // Success arm only: one op + bytes written. Unforgeable.
@@ -186,12 +193,11 @@ pub fn put(
                 OpResult::Completed {
                     op_id,
                     value: json!({ "bucket": bucket, "key": key, "size": size }).to_string(),
-                    request_id,
                 }
             }
-            Err(e) => OpResult::Failed { op_id, error: e.to_string(), request_id },
+            Err(e) => OpResult::Failed { op_id, error: e.to_string() },
         }
-    }));
+    });
 
     rv.set(promise.into());
 }
@@ -211,11 +217,14 @@ pub fn get(
     let Some(bucket) = require_string_arg(scope, &args, 0, "bucket") else { return };
     let Some(key) = require_string_arg(scope, &args, 1, "key") else { return };
 
-    let (op_id, request_id, promise) = setup_promise(scope, &state);
+    let (op_id, owner, promise) = match setup_promise(scope, &state) {
+        Ok(admitted) => admitted,
+        Err(refused) => return rv.set(refused.into()),
+    };
 
 
     let meter = context.meter.clone();
-    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+    state.borrow_mut().spawn_op(owner, async move {
         match context.storage.get(&bucket, &key).await {
             Ok(None) => {
                 // A miss is still a successful read op (one storage op,
@@ -226,7 +235,6 @@ pub fn get(
                 OpResult::Completed {
                     op_id,
                     value: "null".into(),
-                    request_id,
                 }
             }
             Ok(Some((bytes, meta))) => {
@@ -241,11 +249,11 @@ pub fn get(
                     "contentType": meta.content_type,
                     "size": meta.size,
                 });
-                OpResult::Completed { op_id, value: out.to_string(), request_id }
+                OpResult::Completed { op_id, value: out.to_string() }
             }
-            Err(e) => OpResult::Failed { op_id, error: e.to_string(), request_id },
+            Err(e) => OpResult::Failed { op_id, error: e.to_string() },
         }
-    }));
+    });
 
     rv.set(promise.into());
 }
@@ -265,11 +273,14 @@ pub fn delete(
     let Some(bucket) = require_string_arg(scope, &args, 0, "bucket") else { return };
     let Some(key) = require_string_arg(scope, &args, 1, "key") else { return };
 
-    let (op_id, request_id, promise) = setup_promise(scope, &state);
+    let (op_id, owner, promise) = match setup_promise(scope, &state) {
+        Ok(admitted) => admitted,
+        Err(refused) => return rv.set(refused.into()),
+    };
 
 
     let meter = context.meter.clone();
-    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+    state.borrow_mut().spawn_op(owner, async move {
         match context.storage.delete(&bucket, &key).await {
             Ok(deleted) => {
                 // Success arm only: one storage op (whether or not a key
@@ -280,12 +291,11 @@ pub fn delete(
                 OpResult::Completed {
                     op_id,
                     value: json!({ "deleted": deleted }).to_string(),
-                    request_id,
                 }
             }
-            Err(e) => OpResult::Failed { op_id, error: e.to_string(), request_id },
+            Err(e) => OpResult::Failed { op_id, error: e.to_string() },
         }
-    }));
+    });
 
     rv.set(promise.into());
 }
@@ -309,11 +319,14 @@ pub fn list(
     let cursor = opt_string_field(scope, opts, "cursor");
     let limit = zeroship_storage::limits::resolve_list_limit(opt_number_field(scope, opts, "limit"));
 
-    let (op_id, request_id, promise) = setup_promise(scope, &state);
+    let (op_id, owner, promise) = match setup_promise(scope, &state) {
+        Ok(admitted) => admitted,
+        Err(refused) => return rv.set(refused.into()),
+    };
 
 
     let meter = context.meter.clone();
-    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+    state.borrow_mut().spawn_op(owner, async move {
         let req = zeroship_storage::backend::ListRequest {
             prefix: &prefix,
             cursor: cursor.as_deref(),
@@ -343,12 +356,11 @@ pub fn list(
                 OpResult::Completed {
                     op_id,
                     value: json!({ "entries": arr, "cursor": cursor_v }).to_string(),
-                    request_id,
                 }
             }
-            Err(e) => OpResult::Failed { op_id, error: e.to_string(), request_id },
+            Err(e) => OpResult::Failed { op_id, error: e.to_string() },
         }
-    }));
+    });
 
     rv.set(promise.into());
 }
@@ -377,20 +389,19 @@ impl ChunkSource for UploadSource {
 }
 
 /// Promise plumbing for the `OpResult::JsValue` path (real JS values like a
-/// `Uint8Array` chunk) — mirrors plugin-db's `setup_js_promise`.
+/// `Uint8Array` chunk), mirroring plugin-db's `setup_js_promise`, gate
+/// included.
 fn setup_js_promise<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    state: &SharedState,
-) -> (
-    v8::Global<v8::PromiseResolver>,
-    Option<u64>,
+) -> Result<
+    (v8::Global<v8::PromiseResolver>, OpOwner<'s>, v8::Local<'s, v8::Promise>),
     v8::Local<'s, v8::Promise>,
-) {
+> {
+    let owner = admit_op(scope).map_err(|error| rejected_promise(scope, &error))?;
     let resolver = v8::PromiseResolver::new(scope).unwrap();
     let promise = resolver.get_promise(scope);
     let global_resolver = v8::Global::new(scope, resolver);
-    let request_id = state.borrow().executing_request_id;
-    (global_resolver, request_id, promise)
+    Ok((global_resolver, owner, promise))
 }
 
 fn require_u32_arg(
@@ -446,7 +457,10 @@ pub fn put_stream(
     };
     let content_type = optional_string_arg(scope, &args, 3);
 
-    let (op_id, request_id, promise) = setup_promise(scope, &state);
+    let (op_id, owner, promise) = match setup_promise(scope, &state) {
+        Ok(admitted) => admitted,
+        Err(refused) => return rv.set(refused.into()),
+    };
 
 
     // Lock the app's ReadableStream and start the read-loop pump into a
@@ -457,25 +471,24 @@ pub fn put_stream(
         buffer_cap: crate::limits::UPLOAD_STREAM_BUFFER_CAP,
         chunk_policy: ChunkPolicy::Coerce,
         abort_signal: None,
-        owner_request: request_id,
+        owner_request: owner.request_id(),
     };
     let upload = match stream_forwarder::forward_upload(scope, stream_obj, options) {
         Ok(upload) => upload,
         Err(e) => {
-            state.borrow_mut().spawned_ops.push(Box::pin(async move {
+            state.borrow_mut().spawn_op(owner, async move {
                 OpResult::Failed {
                     op_id,
                     error: format!("storage: put stream: {e}"),
-                    request_id,
                 }
-            }));
+            });
             rv.set(promise.into());
             return;
         }
     };
     let source = UploadSource(upload);
     let meter = context.meter.clone();
-    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+    state.borrow_mut().spawn_op(owner, async move {
         match context.storage
             .put_stream(&bucket, &key, Box::new(source), content_type.as_deref())
             .await
@@ -489,12 +502,11 @@ pub fn put_stream(
                 OpResult::Completed {
                     op_id,
                     value: json!({ "bucket": bucket, "key": key, "size": size }).to_string(),
-                    request_id,
                 }
             }
-            Err(e) => OpResult::Failed { op_id, error: e.to_string(), request_id },
+            Err(e) => OpResult::Failed { op_id, error: e.to_string() },
         }
-    }));
+    });
 
     rv.set(promise.into());
 }
@@ -514,26 +526,32 @@ pub fn get_stream(
     let Some(bucket) = require_string_arg(scope, &args, 0, "bucket") else { return };
     let Some(key) = require_string_arg(scope, &args, 1, "key") else { return };
 
-    let (op_id, request_id, promise) = setup_promise(scope, &state);
+    let (op_id, owner, promise) = match setup_promise(scope, &state) {
+        Ok(admitted) => admitted,
+        Err(refused) => return rv.set(refused.into()),
+    };
 
 
     let meter = context.meter.clone();
-    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+    let link = owner.retain();
+    state.borrow_mut().spawn_op(owner, async move {
         match context.storage.get_stream(&bucket, &key).await {
             Ok(None) => {
                 // A miss is a successful read op (zero egress).
                 if let Some(m) = &meter {
                     m.record(STORAGE_OPS, 1);
                 }
-                OpResult::Completed { op_id, value: "null".into(), request_id }
+                OpResult::Completed { op_id, value: "null".into() }
             }
             Ok(Some((meta, source))) => {
-                // Park the source in this isolate. A refusal here means
-                // the app is over its live-stream cap; the source is dropped
-                // (releasing its fd / HTTP body) and the op fails.
-                let stream_id = match context.streams.open(Download::new(source, meta.size)) {
+                // Park the source in this isolate, for the request that asked
+                // for it: the download is released if that request ends
+                // early. A refusal here means the app is over its live-stream
+                // cap; the source is dropped (releasing its fd / HTTP body)
+                // and the op fails.
+                let stream_id = match context.streams.open_for(Download::new(source, meta.size), &link) {
                     Ok(id) => id,
-                    Err(e) => return OpResult::Failed { op_id, error: e.to_string(), request_id },
+                    Err(e) => return OpResult::Failed { op_id, error: e },
                 };
                 // Success arm only, and only once the handle is actually
                 // live: one op + the object's full byte count as egress.
@@ -547,12 +565,11 @@ pub fn get_stream(
                 OpResult::Completed {
                     op_id,
                     value: get_stream_handle_json(stream_id, &meta),
-                    request_id,
                 }
             }
-            Err(e) => OpResult::Failed { op_id, error: e.to_string(), request_id },
+            Err(e) => OpResult::Failed { op_id, error: e.to_string() },
         }
-    }));
+    });
 
     rv.set(promise.into());
 }
@@ -581,7 +598,10 @@ pub fn read_chunk(
     let Some(stream_id) = require_u32_arg(scope, &args, 0, "streamId") else { return };
     // The server-injected APP_ID, not anything the app can choose. A stream
     // owned by a co-resident app is simply not found.
-    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
+    let (resolver, owner, promise) = match setup_js_promise(scope) {
+        Ok(admitted) => admitted,
+        Err(refused) => return rv.set(refused.into()),
+    };
 
     let slot = context.streams.slot(stream_id);
     let Some(slot) = slot else {
@@ -589,19 +609,19 @@ pub fn read_chunk(
         // (undefined) so the SDK's pull loop closes cleanly rather than
         // rejecting. A stream belonging to another app is deliberately
         // indistinguishable from one that never existed.
-        state.borrow_mut().spawned_ops.push(Box::pin(async move {
-            OpResult::JsValue { resolver, value: ResolveValue::Undefined, request_id }
-        }));
+        state.borrow_mut().spawn_op(owner, async move {
+            OpResult::JsValue { resolver, value: ResolveValue::Undefined }
+        });
         rv.set(promise.into());
         return;
     };
 
-    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+    state.borrow_mut().spawn_op(owner, async move {
         // Take the download out for the pull, then put it back. compio is
         // single-threaded and the SDK pulls sequentially, so no two
         // `readChunk`s for the same id overlap.
         let Some(mut download) = slot.borrow_mut().download.take() else {
-            return OpResult::JsValue { resolver, value: ResolveValue::Undefined, request_id };
+            return OpResult::JsValue { resolver, value: ResolveValue::Undefined };
         };
         let gathered = download
             .gather(
@@ -634,8 +654,8 @@ pub fn read_chunk(
             // resolves EOF and the download drops here with its source.
             Gathered::Closed => ResolveValue::Undefined,
         };
-        OpResult::JsValue { resolver, value, request_id }
-    }));
+        OpResult::JsValue { resolver, value }
+    });
 
     rv.set(promise.into());
 }
@@ -667,15 +687,17 @@ pub fn cancel_stream(
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let state: SharedState = scope.get_slot::<SharedState>().expect("state").clone();
     let Some(context) = current_context(scope) else { return };
     let Some(stream_id) = require_u32_arg(scope, &args, 0, "streamId") else { return };
     // Scoped to the caller's own app: cancelling a co-resident app's stream
     // is a no-op, not a reclaim.
-    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
+    //
+    // Cancelling only releases the download, so it is done here and queues no
+    // host op: a request that has ended can still let go of what it opened.
     context.streams.close(stream_id);
-    state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        OpResult::JsValue { resolver, value: ResolveValue::Undefined, request_id }
-    }));
+    let resolver = v8::PromiseResolver::new(scope).unwrap();
+    let promise = resolver.get_promise(scope);
+    let undefined = v8::undefined(scope).into();
+    resolver.resolve(scope, undefined);
     rv.set(promise.into());
 }

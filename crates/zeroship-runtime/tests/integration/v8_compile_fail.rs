@@ -40,6 +40,12 @@ fn v8_binding_misuse_does_not_compile() {
     cases.compile_fail("tests/compile_fail_async_method/v8_async_method_mut_self.rs");
     cases.compile_fail("tests/compile_fail_async_method/v8_async_method_not_async.rs");
 
+    // The op gate's admission (`OpOwner`): it lives only as long as the callback
+    // that was admitted, so no queued op's future can keep it to queue a later
+    // op unchecked, and it is not `Clone`, so one admission queues one op.
+    cases.compile_fail("tests/compile_fail_op_owner/op_owner_outlives_its_callback.rs");
+    cases.compile_fail("tests/compile_fail_op_owner/op_owner_is_not_clone.rs");
+
     // The strict marker-attribute grammar: each malformed shape is a
     // span-pinned error rather than a silent `None`. `#[v8_name(foo)]` and
     // `#[v8_name = 42]`; `#[v8_to_string_tag(Foo)]` in list form; a non-string

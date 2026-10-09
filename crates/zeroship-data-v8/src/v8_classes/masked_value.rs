@@ -281,7 +281,10 @@ impl MaskedValue {
         probe: bool,
     ) -> v8::Local<'s, v8::Promise> {
         let state = runtime_state(scope);
-        let (resolver, request_id, promise) = setup_js_promise(scope, &state);
+        let (resolver, owner, promise) = match setup_js_promise(scope) {
+            Ok(admitted) => admitted,
+            Err(refused) => return refused,
+        };
 
         // DB-3: app JS must not be able to claim the reserved `auto` system
         // actor — strip it so an app handler cannot impersonate the platform.
@@ -310,7 +313,7 @@ impl MaskedValue {
         let route = crate::startup_policy::require_finalized(scope)
             .and_then(|()| crate::tx_scope::capture_route(scope, &binding));
 
-        state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        state.borrow_mut().spawn_op(owner, async move {
             // A failure here folds into the SAME error arm below rather than
             // returning early, so the `probe` branch keeps deciding what a
             // rejection means: `not_configured` is not `unmask_not_permitted`,
@@ -329,7 +332,6 @@ impl MaskedValue {
                         OpResult::JsValue {
                             resolver,
                             value: ResolveValue::Bool(true),
-                            request_id,
                         }
                     } else {
                         // The native method implements unmask(): Promise<T>;
@@ -337,7 +339,6 @@ impl MaskedValue {
                         OpResult::JsValue {
                             resolver,
                             value: crate::v8_values::resolve(result.plaintext, binding),
-                            request_id,
                         }
                     }
                 }
@@ -353,25 +354,22 @@ impl MaskedValue {
                             OpResult::JsValue {
                                 resolver,
                                 value: ResolveValue::Bool(false),
-                                request_id,
                             }
                         } else {
                             OpResult::JsValue {
                                 resolver,
                                 value: ResolveValue::RejectError(e.to_op_error()),
-                                request_id,
                             }
                         }
                     } else {
                         OpResult::JsValue {
                             resolver,
                             value: ResolveValue::RejectError(e.to_op_error()),
-                            request_id,
                         }
                     }
                 }
             }
-        }));
+        });
 
         promise
     }
@@ -391,7 +389,10 @@ impl MaskedValue {
         opts_v: Value,
     ) -> v8::Local<'s, v8::Promise> {
         let state = runtime_state(scope);
-        let (resolver, request_id, promise) = setup_js_promise(scope, &state);
+        let (resolver, owner, promise) = match setup_js_promise(scope) {
+            Ok(admitted) => admitted,
+            Err(refused) => return refused,
+        };
 
         let cols: Vec<String> = cols_v
             .as_array()
@@ -429,7 +430,7 @@ impl MaskedValue {
         let route = crate::startup_policy::require_finalized(scope)
             .and_then(|()| crate::tx_scope::capture_route(scope, &binding));
 
-        state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        state.borrow_mut().spawn_op(owner, async move {
             // Bound adapter-side and folded into the error arm, exactly as
             // in [`MaskedValue::dispatch_unmask_single`] above.
             let outcome = match route {
@@ -453,16 +454,14 @@ impl MaskedValue {
                     OpResult::JsValue {
                         resolver,
                         value: crate::v8_values::resolve(Value::Object(payload), binding),
-                        request_id,
                     }
                 }
                 Err(e) => OpResult::JsValue {
                     resolver,
                     value: ResolveValue::RejectError(e.to_op_error()),
-                    request_id,
                 },
             }
-        }));
+        });
 
         promise
     }

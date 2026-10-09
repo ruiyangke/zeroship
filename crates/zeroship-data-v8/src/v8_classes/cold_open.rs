@@ -49,15 +49,15 @@ fn run<F: std::future::Future>(f: F) -> F::Output {
 
 /// Drain the ops the dispatch queued and settle them off the V8 stack.
 ///
-/// This is what the runtime pump does with `spawned_ops`, minus the part that
+/// This is what the runtime pump does with the queued ops, minus the part that
 /// needs a live scope: the futures resolve to an `OpResult` without touching
 /// V8, and only the pump's `resolve`/`reject` step would.
 fn settle_pushed_ops(state: &SharedState) -> Vec<ResolveValue> {
-    let ops: Vec<_> = state.borrow_mut().spawned_ops.drain(..).collect();
+    let ops: Vec<_> = state.borrow_mut().take_queued_ops();
     run(async move {
         let mut settled = Vec::with_capacity(ops.len());
         for op in ops {
-            match op.await {
+            match op.into_work().await {
                 OpResult::JsValue { value, .. } => settled.push(value),
                 _ => panic!("a db dispatch must settle through OpResult::JsValue"),
             }

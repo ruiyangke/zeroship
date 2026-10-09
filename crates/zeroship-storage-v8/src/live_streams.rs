@@ -1,10 +1,14 @@
 //! Isolate-owned download sources. Only quota counters are shared across
 //! isolates of the same app on a worker thread. Dropping an isolate releases
 //! its sources and permits; a new deploy cannot inherit old stream handles.
+//! A download opened for a request is released when that request ends early,
+//! since nothing it left running may read it any more.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
+
+use zeroship_runtime::state::{EndListener, RequestLink};
 
 use crate::download::Download;
 
@@ -13,6 +17,9 @@ pub(crate) type StreamSlot = Rc<RefCell<StreamEntry>>;
 pub(crate) struct StreamEntry {
     pub download: Option<Download>,
     _permit: Permit,
+    /// Closes the download when the request it was opened for ends early.
+    /// Withdrawn with the entry once the download closes on its own.
+    _release_on_end: Option<EndListener>,
 }
 
 struct Budget {
@@ -69,7 +76,31 @@ impl LiveStreams {
         }
     }
 
-    pub fn open(&self, download: Download) -> Result<u32, String> {
+    /// Open a download for the request `link` names, closing it when that
+    /// request ends early, or at once if it already has.
+    pub fn open_for(self: &Rc<Self>, download: Download, link: &RequestLink) -> Result<u32, String> {
+        let streams = Rc::downgrade(self);
+        let id = self.open_with(download, |id, entry| {
+            let entry = entry.clone();
+            link.on_end(move || {
+                if let (Some(streams), Some(entry)) = (streams.upgrade(), entry.upgrade()) {
+                    streams.close_slot(id, &entry);
+                }
+            })
+        })?;
+        // A request that had already ended ran its release before the
+        // download was live, so it is closed here instead.
+        if link.has_ended() {
+            self.close(id);
+        }
+        Ok(id)
+    }
+
+    fn open_with(
+        &self,
+        download: Download,
+        release_on_end: impl FnOnce(u32, &Weak<RefCell<StreamEntry>>) -> Option<EndListener>,
+    ) -> Result<u32, String> {
         if self.budget.live.get() >= self.cap {
             return Err(format!(
                 "storage: too many live download streams ({} max per app); read one to the end, or cancel it",
@@ -86,10 +117,13 @@ impl LiveStreams {
         self.budget.live.set(self.budget.live.get() + 1);
         streams.insert(
             id,
-            Rc::new(RefCell::new(StreamEntry {
-                download: Some(download),
-                _permit: Permit(Rc::clone(&self.budget)),
-            })),
+            Rc::new_cyclic(|entry| {
+                RefCell::new(StreamEntry {
+                    download: Some(download),
+                    _permit: Permit(Rc::clone(&self.budget)),
+                    _release_on_end: release_on_end(id, entry),
+                })
+            }),
         );
         Ok(id)
     }
@@ -137,6 +171,13 @@ mod tests {
 
     fn idle() -> Download {
         Download::new(Box::new(Idle), 0)
+    }
+
+    impl LiveStreams {
+        /// Open a download for no request, which nothing releases early.
+        fn open(&self, download: Download) -> Result<u32, String> {
+            self.open_with(download, |_, _| None)
+        }
     }
 
     #[test]

@@ -66,27 +66,25 @@ fn enqueue_turn_result(
     let promise = resolver.get_promise(scope);
     let resolver = v8::Global::new(scope, resolver);
 
+    let owner = zeroship_runtime::state::admit_op(scope).expect("the turn's request is live");
     let mut state_mut = state.borrow_mut();
     let op_id = state_mut.next_op_id;
     state_mut.next_op_id += 1;
     state_mut.pending_resolvers.insert(op_id, resolver);
-    let request_id = state_mut.executing_request_id;
-    state_mut.spawned_ops.push(Box::pin(async move {
+    state_mut.spawn_op(owner, async move {
         compio::time::sleep(Duration::from_millis(1)).await;
         if reject {
             OpResult::Failed {
                 op_id,
                 error: "turn rejected".to_string(),
-                request_id,
             }
         } else {
             OpResult::Completed {
                 op_id,
                 value: "turn fulfilled".to_string(),
-                request_id,
             }
         }
-    }));
+    });
     drop(state_mut);
 
     rv.set(promise.into());

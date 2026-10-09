@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::plugin::{JavaScriptModule, NativePlugin, NativeRegistrar};
-use zeroship_runtime::state::{OpResult, ResolveValue, SharedState};
+use zeroship_runtime::state::{OpResult, ResolveValue, SharedState, admit_op, rejected_promise};
 use zeroship_runtime::{
     init_v8, EnvSnapshot, FetchOutcome, RequestCtx, Runtime, SettledFetch, WorkflowOutcome,
     WORKFLOW_DISPATCH_MODULE,
@@ -304,6 +304,10 @@ fn park_completed_callback(
         .get_slot::<SharedState>()
         .expect("RuntimeState not in isolate slot")
         .clone();
+    let owner = match admit_op(scope) {
+        Ok(owner) => owner,
+        Err(error) => return rv.set(rejected_promise(scope, &error).into()),
+    };
     let resolver = v8::PromiseResolver::new(scope).expect("promise resolver");
     let promise = resolver.get_promise(scope);
     let resolver = v8::Global::new(scope, resolver);
@@ -312,11 +316,10 @@ fn park_completed_callback(
     let op_id = s.next_op_id;
     s.next_op_id += 1;
     s.pending_resolvers.insert(op_id, resolver);
-    let request_id = s.executing_request_id;
-    s.spawned_ops.push(Box::pin(async move {
+    s.spawn_op(owner, async move {
         compio::time::sleep(Duration::from_millis(1)).await;
-        OpResult::Completed { op_id, value: "park-completed".to_string(), request_id }
-    }));
+        OpResult::Completed { op_id, value: "park-completed".to_string() }
+    });
     drop(s);
 
     rv.set(promise.into());
@@ -331,6 +334,10 @@ fn park_failed_callback(
         .get_slot::<SharedState>()
         .expect("RuntimeState not in isolate slot")
         .clone();
+    let owner = match admit_op(scope) {
+        Ok(owner) => owner,
+        Err(error) => return rv.set(rejected_promise(scope, &error).into()),
+    };
     let resolver = v8::PromiseResolver::new(scope).expect("promise resolver");
     let promise = resolver.get_promise(scope);
     let resolver = v8::Global::new(scope, resolver);
@@ -339,14 +346,102 @@ fn park_failed_callback(
     let op_id = s.next_op_id;
     s.next_op_id += 1;
     s.pending_resolvers.insert(op_id, resolver);
-    let request_id = s.executing_request_id;
-    s.spawned_ops.push(Box::pin(async move {
+    s.spawn_op(owner, async move {
         compio::time::sleep(Duration::from_millis(1)).await;
-        OpResult::Failed { op_id, error: "park-failed".to_string(), request_id }
-    }));
+        OpResult::Failed { op_id, error: "park-failed".to_string() }
+    });
     drop(s);
 
     rv.set(promise.into());
+}
+
+thread_local! {
+    /// The release of the one `env.park.latch()` in flight.
+    static LATCH: std::cell::RefCell<Option<futures::channel::oneshot::Sender<()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// `env.park.latch()`: a host op the test settles with [`release_latch`], so a
+/// continuation waiting on it runs exactly when the test says.
+fn park_latch_callback(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+    let owner = match admit_op(scope) {
+        Ok(owner) => owner,
+        Err(error) => return rv.set(rejected_promise(scope, &error).into()),
+    };
+    let resolver = v8::PromiseResolver::new(scope).expect("promise resolver");
+    let promise = resolver.get_promise(scope);
+    let resolver = v8::Global::new(scope, resolver);
+    let (release, released) = futures::channel::oneshot::channel();
+    LATCH.with_borrow_mut(|latch| {
+        assert!(latch.replace(release).is_none(), "one latch at a time");
+    });
+    state.borrow_mut().spawn_op(owner, async move {
+        released.await.expect("the test releases the latch");
+        OpResult::JsValue { resolver, value: ResolveValue::Undefined }
+    });
+    rv.set(promise.into());
+}
+
+fn release_latch() {
+    LATCH
+        .with_borrow_mut(Option::take)
+        .expect("a continuation waits on the latch")
+        .send(())
+        .expect("the latch's op is still queued");
+}
+
+/// `env.park.keyInSettlement()`: an op whose settlement reads the invocation
+/// key itself, in the settlement's own context, the way a transaction's begin
+/// calls its callback there, and resolves with it.
+fn park_key_in_settlement_callback(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+    let owner = match admit_op(scope) {
+        Ok(owner) => owner,
+        Err(error) => return rv.set(rejected_promise(scope, &error).into()),
+    };
+    let resolver = v8::PromiseResolver::new(scope).expect("promise resolver");
+    let promise = resolver.get_promise(scope);
+    let resolver = v8::Global::new(scope, resolver);
+    let settle_with = resolver.clone();
+    state.borrow_mut().spawn_op(owner, async move {
+        OpResult::JsValue {
+            resolver,
+            value: ResolveValue::Continuation(Box::new(move |scope, _state| {
+                let key: v8::Local<v8::Value> = zeroship_runtime::state::invocation_key(scope)
+                    .map_or_else(|| v8::undefined(scope).into(), Into::into);
+                v8::Local::new(scope, &settle_with).resolve(scope, key);
+            })),
+        }
+    });
+    rv.set(promise.into());
+}
+
+/// `env.park.key()`: the object naming the request the calling code belongs
+/// to, or `undefined` outside any request.
+fn park_key_callback(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    match zeroship_runtime::state::invocation_key(scope) {
+        Some(key) => rv.set(key.into()),
+        None => rv.set_undefined(),
+    }
 }
 
 fn park_js_value_callback(
@@ -358,14 +453,17 @@ fn park_js_value_callback(
         .get_slot::<SharedState>()
         .expect("RuntimeState not in isolate slot")
         .clone();
+    let owner = match admit_op(scope) {
+        Ok(owner) => owner,
+        Err(error) => return rv.set(rejected_promise(scope, &error).into()),
+    };
     let resolver = v8::PromiseResolver::new(scope).expect("promise resolver");
     let promise = resolver.get_promise(scope);
     let resolver = v8::Global::new(scope, resolver);
-    let request_id = state.borrow().executing_request_id;
-    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+    state.borrow_mut().spawn_op(owner, async move {
         compio::time::sleep(Duration::from_millis(1)).await;
-        OpResult::JsValue { resolver, value: ResolveValue::Undefined, request_id }
-    }));
+        OpResult::JsValue { resolver, value: ResolveValue::Undefined }
+    });
 
     rv.set(promise.into());
 }
@@ -380,6 +478,9 @@ impl NativePlugin for ParkPlugin {
         r.add("completed", park_completed_callback);
         r.add("failed", park_failed_callback);
         r.add("jsValue", park_js_value_callback);
+        r.add("key", park_key_callback);
+        r.add("latch", park_latch_callback);
+        r.add("keyInSettlement", park_key_in_settlement_callback);
     }
 }
 
@@ -591,4 +692,363 @@ fn cpu_spent_across_turns_is_charged_to_the_cpu_budget() {
         "a request that spent its budget across turns returned {status}; body: {body}",
     );
     assert!(body.contains("CPU time limit exceeded"), "status {status}; body: {body}");
+}
+
+// ===========================================================================
+// A request stopped for CPU makes no more platform calls
+// ===========================================================================
+
+/// The app the tests below stop. A request to `/dispatch`, `/ready-timer` or
+/// `/delayed-timer` sets a timer, issues an op whose continuation will try
+/// platform calls, and then burns CPU past the limit: in its synchronous
+/// dispatch, in a zero-delay timer's turn, or in a delayed timer's turn. The
+/// continuation reports what it saw to a module-level promise, which a request
+/// to `/outcome` returns.
+///
+/// From the stop on, every platform call the continuation makes is refused
+/// rather than run: a `fetch` of a `data:` URL, which needs no network and
+/// would otherwise resolve, a plugin op, and a `#[v8_async_method]`. The timer
+/// set before the stop is cleared and never fires. A timer set after the stop
+/// is not a platform call: it schedules only the request's own JavaScript,
+/// which may run on, and cleanup code that runs after a cancellation relies on
+/// it. Its callback still runs as the stopped request, so a `fetch` made there
+/// is refused too.
+///
+/// `/answered` and `/cancelled` leave the same kind of continuation behind a
+/// request that is not stopped for CPU: one answered at once, and one left
+/// pending for its host to cancel.
+const STOPPED_APP: &str = r#"
+    import { env } from "zeroship";
+    let report;
+    const outcome = new Promise((resolve) => { report = resolve; });
+    async function attempt(call) {
+        try {
+            return await call();
+        } catch (error) {
+            return error.code ?? String(error);
+        }
+    }
+    const fetchData = async () => (await fetch("data:text/plain,reached")).text();
+    globalThis.__zsWorkflowBody = async function () {
+        env.park.latch().then(async () => report({ fetch: await attempt(fetchData) }));
+        return { answered: true };
+    };
+    export default {
+        async fetch(request, env) {
+            const where = new URL(request.url).pathname;
+            if (where === "/outcome") {
+                return Response.json(await outcome);
+            }
+            if (where === "/answered" || where === "/answered-later" || where === "/cancelled") {
+                if (where === "/answered-later") await env.park.jsValue();
+                env.park.latch().then(async () => report({ fetch: await attempt(fetchData) }));
+                if (where !== "/cancelled") return Response.json({ answered: true });
+                await new Promise(() => {});
+            }
+            if (where === "/ready-timer") {
+                await new Promise((resolve) => setTimeout(resolve, 0));
+            }
+            if (where === "/delayed-timer") {
+                await new Promise((resolve) => setTimeout(resolve, 5));
+            }
+            const seen = { timerFired: false };
+            setTimeout(() => { seen.timerFired = true; }, 0);
+            env.park.jsValue().then(async () => {
+                seen.fetch = await attempt(fetchData);
+                seen.op = await attempt(() => env.park.completed());
+                seen.asyncMethod = await attempt(() => new AsyncTest().double(2));
+                seen.fetchFromALaterTimer = await new Promise((resolve) => {
+                    setTimeout(() => resolve(attempt(fetchData)), 0);
+                });
+                report(seen);
+            });
+            let x = 0;
+            for (let i = 0; i < 300000000; i++) { x = (x + 1) % 2147483647; }
+            return Response.json({ completed: true, x });
+        }
+    };
+"#;
+
+fn stopped_app() -> Runtime {
+    init_v8();
+    Runtime::builder()
+        .modules(m(STOPPED_APP))
+        .plugin(ParkPlugin)
+        .plugin(WorkflowDispatchBridgePlugin)
+        .plugin(super::v8_async_method_smoke::AsyncTestPlugin)
+        .cpu_limit(Duration::from_millis(200))
+        .build()
+}
+
+fn request(rt: &Runtime, path: &str, cancel: CancelFlag) -> FetchOutcome {
+    rt.call_fetch_handler(
+        "GET",
+        &format!("http://localhost{path}"),
+        &[],
+        "",
+        &EnvSnapshot::empty(),
+        RequestCtx::new(cancel),
+    )
+}
+
+/// Ask `/outcome` for what the continuation reported. Asked after the request
+/// it reports on was answered, on the same pump, so it is answered only once
+/// that request's continuation has run.
+fn ask_outcome(
+    rt: &Runtime,
+) -> zeroship_runtime::channel::ResultReceiver<
+    Result<SettledFetch, zeroship_runtime::runtime::DispatchError>,
+> {
+    let FetchOutcome::Pending { rx, .. } = request(rt, "/outcome", CancelFlag::new()) else {
+        panic!("the outcome waits for the continuation");
+    };
+    rx
+}
+
+/// What the continuation reported, from `/outcome`'s answer.
+fn reported(
+    answer: Result<
+        Result<SettledFetch, zeroship_runtime::runtime::DispatchError>,
+        compio::time::Elapsed,
+    >,
+) -> serde_json::Value {
+    let outcome = answer.expect("the isolate keeps serving").expect("the outcome request completes");
+    let SettledFetch::Response { status, body, .. } = outcome else {
+        panic!("the outcome is a buffered response");
+    };
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    serde_json::from_slice(&body).expect("the outcome is JSON")
+}
+
+/// Stop a request to `path` for CPU, then return its status and the outcome
+/// its continuation reported. Both requests run on one pump, so the second is
+/// answered only after the stopped request's continuation has run.
+fn stop_then_observe(path: &str) -> (u16, serde_json::Value) {
+    let rt = stopped_app();
+    let heap_before = zeroship_runtime::heap_limit_callback_hits();
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        rt.start_pump();
+        let status = match request(&rt, path, CancelFlag::new()) {
+            FetchOutcome::Response { status, .. } => status,
+            FetchOutcome::Pending { rx, .. } => {
+                match compio::time::timeout(Duration::from_secs(30), rx.recv())
+                    .await
+                    .expect("the stopped request is answered")
+                {
+                    Ok(SettledFetch::Response { status, .. }) => status,
+                    Ok(_) => panic!("the stopped request answers with a buffered response"),
+                    Err(error) => {
+                        assert!(
+                            error.message.contains("CPU time limit exceeded"),
+                            "the request must be stopped for CPU: {error:?}"
+                        );
+                        error.status
+                    }
+                }
+            }
+            _ => panic!("the stopped request answers with a buffered response"),
+        };
+        // A synchronous stop answers 503 with its message blanked, as a heap
+        // kill would, so the heap callback's silence is the witness that this
+        // is the CPU limit (see `cpu_limit_terminates_a_runaway_handler`).
+        assert_eq!(
+            zeroship_runtime::heap_limit_callback_hits() - heap_before,
+            0,
+            "the heap callback fired, so the stop may be a memory kill",
+        );
+        (status, reported(compio::time::timeout(Duration::from_secs(30), ask_outcome(&rt).recv()).await))
+    })
+}
+
+fn assert_refused(seen: &serde_json::Value) {
+    assert_eq!(
+        seen,
+        &serde_json::json!({
+            "timerFired": false,
+            "fetch": "request_cancelled",
+            "op": "request_cancelled",
+            "asyncMethod": "request_cancelled",
+            "fetchFromALaterTimer": "request_cancelled",
+        }),
+        "the stopped request's timer must not fire, and its platform calls must be refused",
+    );
+}
+
+/// Stopped in its synchronous dispatch, so never pending: answered 503 there.
+#[test]
+fn a_request_stopped_in_its_dispatch_is_refused_its_platform_calls() {
+    let (status, seen) = stop_then_observe("/dispatch");
+    assert_eq!(status, 503);
+    assert_refused(&seen);
+}
+
+/// Stopped in a zero-delay timer's turn, while pending.
+#[test]
+fn a_request_stopped_in_a_zero_delay_timer_is_refused_its_platform_calls() {
+    let (status, seen) = stop_then_observe("/ready-timer");
+    assert_eq!(status, 500);
+    assert_refused(&seen);
+}
+
+/// Stopped in a delayed timer's turn, while pending.
+#[test]
+fn a_request_stopped_in_a_delayed_timer_is_refused_its_platform_calls() {
+    let (status, seen) = stop_then_observe("/delayed-timer");
+    assert_eq!(status, 500);
+    assert_refused(&seen);
+}
+
+/// A request its host cancels while it is still pending, as the host does at
+/// the wall timeout, ends early the way a stopped one does: it is answered
+/// with the cancellation, and the platform calls its continuation makes
+/// afterwards are refused. The shipped worker cancels only at the wall
+/// timeout - nothing cancels a request because its client
+/// disconnected - but this test drives the shared cancellation primitive
+/// directly, not that one trigger.
+#[test]
+fn a_request_its_host_cancels_is_refused_its_platform_calls() {
+    let rt = stopped_app();
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        rt.start_pump();
+        let cancel = CancelFlag::new();
+        let FetchOutcome::Pending { rx, .. } = request(&rt, "/cancelled", cancel.clone()) else {
+            panic!("the request waits for its host");
+        };
+        cancel.cancel();
+        rt.notify_pump();
+        let answer = compio::time::timeout(Duration::from_secs(30), rx.recv())
+            .await
+            .expect("the cancelled request is answered");
+        assert!(answer.is_err(), "the cancelled request is answered with the cancellation");
+        release_latch();
+        assert_eq!(
+            reported(compio::time::timeout(Duration::from_secs(30), ask_outcome(&rt).recv()).await),
+            serde_json::json!({ "fetch": "request_cancelled" }),
+            "the continuation of a request its host cancelled is refused its platform calls",
+        );
+    });
+}
+
+/// How a request that is not stopped is answered with its own result.
+#[derive(Clone, Copy)]
+enum Answered {
+    /// A fetch answered in its dispatch.
+    InItsDispatch,
+    /// A fetch answered on a later turn, once an op it awaited settled.
+    OnALaterTurn,
+    /// A workflow dispatch, answered in its dispatch.
+    AsAWorkflow,
+}
+
+/// Answer a request that leaves a continuation waiting on the latch, then set
+/// the request's cancellation flag the way a host's late cancel would, then
+/// let the continuation run, and return what it reported.
+fn after_a_late_cancel(answered: Answered) -> serde_json::Value {
+    let rt = stopped_app();
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        rt.start_pump();
+        let cancel = CancelFlag::new();
+        match answered {
+            Answered::InItsDispatch => {
+                let FetchOutcome::Response { status, .. } = request(&rt, "/answered", cancel.clone())
+                else {
+                    panic!("the request is answered in its dispatch");
+                };
+                assert_eq!(status, 200);
+            }
+            Answered::OnALaterTurn => {
+                let FetchOutcome::Pending { rx, .. } = request(&rt, "/answered-later", cancel.clone())
+                else {
+                    panic!("the request awaits an op before it answers");
+                };
+                let answer = compio::time::timeout(Duration::from_secs(30), rx.recv())
+                    .await
+                    .expect("the request is answered");
+                assert!(matches!(answer, Ok(SettledFetch::Response { status: 200, .. })));
+            }
+            Answered::AsAWorkflow => {
+                let outcome =
+                    rt.call_workflow_dispatch("{}", &EnvSnapshot::empty(), RequestCtx::new(cancel.clone()));
+                let WorkflowOutcome::Response { json, .. } = outcome else {
+                    panic!("the workflow is answered in its dispatch");
+                };
+                assert!(json.contains(r#""answered":true"#), "json: {json}");
+            }
+        }
+        cancel.cancel();
+        rt.notify_pump();
+        release_latch();
+        reported(compio::time::timeout(Duration::from_secs(30), ask_outcome(&rt).recv()).await)
+    })
+}
+
+/// A request answered with its own result is never treated as ended early:
+/// code it left running keeps every platform call, even when its host sets the
+/// request's cancellation flag after the answer. The same holds whichever way
+/// it was answered.
+#[test]
+fn code_a_request_left_running_after_its_answer_keeps_its_platform_calls() {
+    for answered in [Answered::InItsDispatch, Answered::OnALaterTurn, Answered::AsAWorkflow] {
+        assert_eq!(
+            after_a_late_cancel(answered),
+            serde_json::json!({ "fetch": "reached" }),
+            "code left running after a normal answer is never refused",
+        );
+    }
+}
+
+/// Every turn of one request runs under one token: the object naming its
+/// invocation is the same in its dispatch, after one of its ops settles, in a
+/// timer it set, and in code an op's settlement runs itself. Another request is
+/// named by another object.
+const KEYED_APP: &str = r#"
+    let firstRequestKey;
+    export default {
+        async fetch(request, env) {
+            const atDispatch = env.park.key();
+            await env.park.jsValue();
+            const afterAnOp = env.park.key();
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            const afterATimer = env.park.key();
+            const inASettlement = await env.park.keyInSettlement();
+            const earlier = firstRequestKey;
+            firstRequestKey ??= atDispatch;
+            return Response.json({
+                keyed: typeof atDispatch === "object" && atDispatch !== null,
+                sameAcrossTurns: atDispatch === afterAnOp && afterAnOp === afterATimer
+                    && afterATimer === inASettlement,
+                sameAsTheFirstRequest: earlier === undefined ? null : earlier === atDispatch,
+            });
+        }
+    };
+"#;
+
+#[test]
+fn every_turn_of_a_request_runs_under_one_token_and_each_request_under_its_own() {
+    init_v8();
+    let rt = Runtime::builder().modules(m(KEYED_APP)).plugin(ParkPlugin).build();
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        rt.start_pump();
+        let mut answers = Vec::new();
+        for _ in 0..2 {
+            let FetchOutcome::Pending { rx, .. } = request(&rt, "/", CancelFlag::new()) else {
+                panic!("the request awaits its op");
+            };
+            let Ok(SettledFetch::Response { body, .. }) =
+                compio::time::timeout(Duration::from_secs(30), rx.recv())
+                    .await
+                    .expect("the request is answered")
+            else {
+                panic!("the request answers with a buffered response");
+            };
+            answers.push(serde_json::from_slice::<serde_json::Value>(&body).expect("JSON"));
+        }
+        assert_eq!(
+            answers,
+            [
+                serde_json::json!({"keyed": true, "sameAcrossTurns": true, "sameAsTheFirstRequest": null}),
+                serde_json::json!({"keyed": true, "sameAcrossTurns": true, "sameAsTheFirstRequest": false}),
+            ],
+        );
+    });
 }

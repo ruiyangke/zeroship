@@ -50,9 +50,7 @@ where
 }
 
 pub fn schedule_event_op(state: &SharedState, op: OpResult) {
-    let fut: std::pin::Pin<Box<dyn std::future::Future<Output = OpResult>>> =
-        Box::pin(async move { op });
-    state.borrow_mut().spawned_ops.push(fut);
+    state.borrow_mut().spawn_event(async move { op });
     state.borrow().notify_pump();
 }
 

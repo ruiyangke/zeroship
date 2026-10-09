@@ -64,7 +64,7 @@ pub(super) fn assemble_tokens(cfg: &ClassConfig, stripped_impl: &ItemImpl) -> To
     let register = install::gen_register(cfg);
 
     // Per-method callback fns. Async methods take a different codegen
-    // path (spawn a future via `state.spawned_ops` and return a Promise
+    // path (spawn a future via `state.spawn_op` and return a Promise
     // immediately) but install on the prototype identically — async vs
     // sync is opaque to V8. SameObject getters have their own codegen
     // path that wraps the user method with private-symbol caching.

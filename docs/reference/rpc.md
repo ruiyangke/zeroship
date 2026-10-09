@@ -383,6 +383,17 @@ enum-like object. Branch on `error.code`, not on the message.
 | `CANCELLED` | no |
 | `OUT_OF_RANGE` | no |
 | `UNIMPLEMENTED` | no |
+| `COMMIT_FAILED_INDETERMINATE` | no |
+
+`COMMIT_FAILED_INDETERMINATE` means a transaction commit the request asked for
+was still in flight when the platform ended it, so whether it applied is
+unknown; see [Runtime limits](runtime-limits.md#what-a-stopped-request-can-still-do).
+Treat the write as possibly applied and make the retry safe, rather than
+retrying blindly - this is why the default is `no`, unlike most transient
+faults. The server spells this one `commit_failed_indeterminate` on the wire,
+the same lower_snake spelling every binding uses for a request the platform
+ended; the client maps it to this member rather than lifting the wire
+spelling verbatim.
 
 Database constraint faults sit outside that set. They keep the backend's
 classification instead of being mapped onto it: a duplicate key arrives as

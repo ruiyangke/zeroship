@@ -4,8 +4,9 @@ Every request an app serves runs inside a budget defined by its plan: a CPU
 budget, a wall-clock timeout, and a JavaScript-heap cap. This page states the
 built-in tiers, what each limit counts, and the error a caller sees when one
 fires. Where a CPU, wall, or heap limit fires the platform answers a JSON error
-of the form `{"message": "<text>", "name": "Error"}`; the request-size refusals
-below use a different, shorter body.
+of the form `{"message": "<text>", "name": "Error"}`, with a `"code"` only where
+a section below names one; the request-size refusals below use a different,
+shorter body.
 
 ## Effective limits per plan
 
@@ -62,10 +63,59 @@ A synchronous overrun — a handler that returns a response without ever
 503  {"message":"internal error","name":"Error","request_id":"<id>"}
 ```
 
-There is no `code`, and the `name` is always `"Error"`. Treat "non-2xx" as the
+The `name` is always `"Error"`, and there is no `code` unless a commit of the
+request was in flight when it was stopped (see below). Treat "non-2xx" as the
 contract and let the `message` text (when present) tell you the cause; a
 `"message":"internal error"` at 5xx is the same kind of stop with the detail
 removed.
+
+### What a stopped request can still do
+
+Stopping a request answers it; it does not unschedule the code the request
+already started. A promise it was awaiting can settle afterwards, and the code
+after that `await` still runs. What that code can still reach:
+
+- **New platform calls are refused.** Every database query or transaction,
+  `fetch`, KV, storage and workflow call it makes from the stop on fails with
+  an error whose `code` is `request_cancelled`, spelled the same way whichever
+  of them raised it. That includes a database read the client batches with
+  other reads: reads are batched only with reads of the same request, so a
+  stopped request's read is never answered through another request's batch,
+  and another request's read never fails because it shared a batch with a
+  stopped one.
+- **Calls already in flight are not aborted.** A call it made before the stop
+  runs to completion: a `fetch` already sent still reaches its server, and a
+  KV write, a storage write or a workflow start already under way can still
+  land. Its result is delivered to the stopped request's code, which may run
+  on from it.
+- **A transaction it has open is rolled back at the stop,** and the app's
+  other requests can begin their own transactions at once. Code still waiting
+  on that transaction sees it fail with `request_cancelled`, and a commit it
+  asks for after the stop is refused and rolled back instead.
+- **A commit already sent when it was stopped can still complete.** The
+  request's caller is then answered with the error above and
+  `"code":"commit_failed_indeterminate"`: whether the commit applied is
+  unknown. A generated RPC client surfaces the same code as
+  `error.code === "COMMIT_FAILED_INDETERMINATE"` (see
+  [RPC](rpc.md#errors-and-retries)); a caller reading the raw response body
+  sees the lowercase spelling above.
+- **What it holds is released.** Downloads it opened are closed, uploads it
+  started are cancelled, and timers it had set are cleared.
+- **Timers it sets after the stop still fire.** Their callbacks run as the
+  stopped request, so their platform calls are refused too.
+- **Connections are not covered.** A socket it opens or already holds through
+  `node:net`, and every client built on one (`pg`, Node `http` clients), an
+  outbound WebSocket, and a subscription keep working for a stopped request,
+  writes included.
+
+Treat a stopped request's writes as possibly applied, and make them safe to
+retry.
+
+A request that reaches its wall timeout is treated the same way. A client
+that disconnects before the answer does not stop anything: the request
+keeps running, billed and answered as if the client had stayed connected. A
+request answered with its own response is never treated this way: code it
+left running after that keeps every platform call.
 
 ## Pump CPU share, on every plan
 

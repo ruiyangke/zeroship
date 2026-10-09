@@ -1,0 +1,5 @@
+error[E0277]: the trait bound `OpOwner<'_>: Clone` is not satisfied
+  --> tests/compile_fail_op_owner/op_owner_is_not_clone.rs:10:18
+   |
+10 |     let second = OpOwner::clone(&owner);
+   |                  ^^^^^^^ the trait `Clone` is not implemented for `OpOwner<'_>`

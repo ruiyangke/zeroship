@@ -7,7 +7,7 @@
 pub(crate) enum MethodKind {
     Method,
     /// An async method — emits a callback that spawns a future via
-    /// `state.spawned_ops` and returns a Promise. The user writes
+    /// `state.spawn_op` and returns a Promise. The user writes
     /// `async fn foo(&self, ...) -> T` (or `Result<T, OpError>`) and
     /// the macro hides the resolver/spawn dance. Rejected at compile
     /// time if the receiver is `&mut self` (borrow across .await is

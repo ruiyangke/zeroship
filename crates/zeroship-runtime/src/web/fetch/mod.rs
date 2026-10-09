@@ -37,7 +37,6 @@ pub mod redirect;
 pub mod request;
 pub mod response;
 
-use std::pin::Pin;
 use std::rc::Rc;
 
 use crate::channel::CancelFlag;
@@ -259,6 +258,16 @@ fn fetch_callback(
         return;
     };
 
+    // A fetch made for a request that has ended is refused before anything
+    // about it is read.
+    let owner = match crate::state::admit_op(scope) {
+        Ok(owner) => owner,
+        Err(error) => {
+            rv.set(crate::state::rejected_promise(scope, &error).into());
+            return;
+        }
+    };
+
     let resolver = v8::PromiseResolver::new(scope).unwrap();
     let promise = resolver.get_promise(scope);
 
@@ -388,7 +397,7 @@ fn fetch_callback(
     // always the same admission gate.
     {
         let s = state.borrow();
-        let in_flight_ops = s.pending_resolvers.len() + s.spawned_ops.len();
+        let in_flight_ops = s.pending_resolvers.len() + s.queued_op_count();
         if in_flight_ops >= MAX_PENDING_OPS {
             drop(s);
             let exc = cached_admission_error(scope, AdmissionLimit::Ops);
@@ -441,7 +450,7 @@ fn fetch_callback(
         );
     }
 
-    let request_id = crate::core::invocation::current_request_id(scope, &state);
+    let request_id = owner.request_id();
 
     // A ReadableStream body: lock it and start reading it into the upload
     // channel the HTTP client consumes. This is the last step that can
@@ -501,7 +510,7 @@ fn fetch_callback(
     let signal_global: Option<v8::Global<v8::Object>> = signal_obj_opt
         .map(|o| v8::Global::new(scope, o));
 
-    let fut: Pin<Box<dyn std::future::Future<Output = OpResult>>> = Box::pin(async move {
+    let fut = async move {
         let result = main_fetch(alg_req).await;
         drop(slot);
 
@@ -512,14 +521,10 @@ fn fetch_callback(
         OpResult::JsValue {
             resolver: global_resolver,
             value: ResolveValue::Fetch(FetchSettlement(outcome)),
-            request_id,
         }
-    });
+    };
 
-    {
-        let mut s = state.borrow_mut();
-        s.spawned_ops.push(fut);
-    }
+    state.borrow_mut().spawn_op(owner, fut);
 
     let notify = state.borrow().pump_notify_tx.clone();
     if let Some(mut tx) = notify {

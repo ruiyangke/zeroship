@@ -20,7 +20,7 @@
 //!     fn set(&mut self, name: String, value: String) -> Result<(), OpError> { ... }
 //!
 //!     // Async methods compile to a Promise-returning sync V8 callback
-//!     // that spawns the body via state.spawned_ops. &mut self is
+//!     // that spawns the body via state.spawn_op. &mut self is
 //!     // rejected at compile time — use &self + Cell/RefCell for state
 //!     // that needs to mutate inside the body.
 //!     #[v8_async_method]
@@ -99,7 +99,7 @@ pub fn v8_method(_attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// The macro emits a sync V8 callback that:
 ///   1. Allocates a `v8::PromiseResolver`
-///   2. Spawns the user's `async fn` body via `state.spawned_ops`
+///   2. Spawns the user's `async fn` body via `state.spawn_op`
 ///   3. Returns the Promise immediately
 ///
 /// When the future settles, the runtime pump dequeues an

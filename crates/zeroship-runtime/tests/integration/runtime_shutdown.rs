@@ -1,5 +1,7 @@
 use futures::FutureExt;
-use std::{cell::Cell, rc::Rc, time::Duration};
+use std::{cell::{Cell, RefCell}, rc::Rc, time::Duration};
+use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
+use zeroship_runtime::state::{SharedState, admit_op};
 use zeroship_runtime::{
     CancelFlag, EnvSnapshot, FetchOutcome, ModuleEntry, OpResult, RequestCtx, Runtime,
     SettledFetch, runtime::InnerProbe,
@@ -7,6 +9,7 @@ use zeroship_runtime::{
 
 struct NativeOperation {
     dropped: Rc<Cell<bool>>,
+    started: Rc<Cell<bool>>,
     isolate: Rc<InnerProbe>,
 }
 impl Drop for NativeOperation {
@@ -19,14 +22,56 @@ impl Drop for NativeOperation {
     }
 }
 
+thread_local! {
+    /// The operation the next `env.probe.hang()` queues.
+    static NEXT_OPERATION: RefCell<Option<NativeOperation>> = const { RefCell::new(None) };
+}
+
+/// `env.probe.hang()` queues the thread's next [`NativeOperation`] as a host
+/// op that never settles, the way any binding queues one.
+struct ProbePlugin;
+
+impl NativePlugin for ProbePlugin {
+    fn namespace(&self) -> &'static str {
+        "probe"
+    }
+
+    fn register(&self, r: &mut NativeRegistrar) {
+        r.add("hang", hang_callback);
+    }
+}
+
+fn hang_callback(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+    let owner = admit_op(scope).expect("the hanging request is live");
+    let operation = NEXT_OPERATION
+        .with_borrow_mut(Option::take)
+        .expect("the test supplied the operation to queue");
+    state.borrow_mut().spawn_op(owner, async move {
+        operation.started.set(true);
+        let _operation = operation;
+        std::future::pending::<OpResult>().await
+    });
+}
+
 fn runtime() -> Runtime {
     zeroship_runtime::init_v8();
     Runtime::builder()
         .modules(vec![ModuleEntry {
             specifier: "index.js".into(),
-            source: "export default { async fetch() { return await new Promise(() => {}); } };"
+            source: "export default { async fetch(request, env) { \
+                     if (new URL(request.url).pathname === '/hang') env.probe.hang(); \
+                     return await new Promise(() => {}); } };"
                 .into(),
         }])
+        .plugin(ProbePlugin)
         .build()
 }
 
@@ -113,24 +158,37 @@ async fn quarantine_releases_pending_initialization_and_startup_requests() {
     .expect("quarantine must wake readiness waiters and finish native teardown");
 }
 
+/// Queue a host op that never settles, through a request whose handler calls
+/// `env.probe.hang()`, and wait for the pump to start it.
 async fn native_operation(runtime: &Runtime) -> (Rc<Cell<bool>>, Rc<InnerProbe>) {
     let started = Rc::new(Cell::new(false));
-    let ready = started.clone();
     let dropped = Rc::new(Cell::new(false));
     let isolate = Rc::new(runtime.clone().into_inner_probe_for_test());
-    let operation = NativeOperation {
-        dropped: dropped.clone(),
-        isolate: isolate.clone(),
-    };
-    runtime
-        .state()
-        .borrow_mut()
-        .spawned_ops
-        .push(Box::pin(async move {
-            let _operation = operation;
-            ready.set(true);
-            std::future::pending::<OpResult>().await
-        }));
+    NEXT_OPERATION.with_borrow_mut(|next| {
+        *next = Some(NativeOperation {
+            dropped: dropped.clone(),
+            started: started.clone(),
+            isolate: isolate.clone(),
+        });
+    });
+    runtime.enter_isolate();
+    let outcome = runtime.call_fetch_handler(
+        "GET",
+        "http://local/hang",
+        &[],
+        [],
+        &EnvSnapshot::empty(),
+        RequestCtx::new(CancelFlag::new()),
+    );
+    runtime.exit_isolate();
+    assert!(
+        matches!(outcome, FetchOutcome::Pending { .. }),
+        "the hanging request must be pending"
+    );
+    assert!(
+        NEXT_OPERATION.with_borrow(Option::is_none),
+        "the handler must have queued the operation"
+    );
     runtime.notify_pump();
     compio::time::timeout(Duration::from_secs(5), async {
         while !started.get() {

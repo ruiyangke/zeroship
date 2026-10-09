@@ -12,7 +12,7 @@ use std::future::Future;
 use std::rc::Rc;
 
 use serde_json::{Map, Value};
-use zeroship_runtime::state::{NativeValue, OpError, OpResult, ResolveValue, SharedState};
+use zeroship_runtime::state::{NativeValue, OpError, OpOwner, OpResult, ResolveValue, SharedState};
 use zeroship_runtime_macros::v8_class;
 
 use zeroship_workflow::backend::SharedWorkflowBackend;
@@ -340,19 +340,21 @@ fn runtime_state(scope: &mut v8::PinScope<'_, '_>) -> SharedState {
         .clone()
 }
 
+/// Admit the call for the request it is made for and build its promise.
+/// Returns `(resolver_global, owner, promise)`, or the already rejected
+/// promise the call answers with when the gate refuses it.
 fn setup_promise<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    state: &SharedState,
-) -> (
-    v8::Global<v8::PromiseResolver>,
-    Option<u64>,
+) -> Result<
+    (v8::Global<v8::PromiseResolver>, OpOwner<'s>, v8::Local<'s, v8::Promise>),
     v8::Local<'s, v8::Promise>,
-) {
+> {
+    let owner = zeroship_runtime::state::admit_op(scope)
+        .map_err(|error| zeroship_runtime::state::rejected_promise(scope, &error))?;
     let resolver = v8::PromiseResolver::new(scope).unwrap();
     let promise = resolver.get_promise(scope);
     let global_resolver = v8::Global::new(scope, resolver);
-    let request_id = state.borrow().executing_request_id;
-    (global_resolver, request_id, promise)
+    Ok((global_resolver, owner, promise))
 }
 
 fn dispatch_json<'s, T: serde::Serialize + 'static>(
@@ -360,8 +362,11 @@ fn dispatch_json<'s, T: serde::Serialize + 'static>(
     op: impl Future<Output = Result<T, WorkflowServiceError>> + 'static,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
-    let (resolver, request_id, promise) = setup_promise(scope, &state);
-    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+    let (resolver, owner, promise) = match setup_promise(scope) {
+        Ok(admitted) => admitted,
+        Err(refused) => return refused,
+    };
+    state.borrow_mut().spawn_op(owner, async move {
         let value = match op.await {
             Ok(value) => match serde_json::to_string(&value) {
                 Ok(json) => ResolveValue::Json(json),
@@ -372,9 +377,8 @@ fn dispatch_json<'s, T: serde::Serialize + 'static>(
         OpResult::JsValue {
             resolver,
             value,
-            request_id,
         }
-    }));
+    });
     promise
 }
 
@@ -410,8 +414,11 @@ fn dispatch_run_handle<'s>(
     operation: impl Future<Output = Result<String, WorkflowServiceError>> + 'static,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
-    let (resolver, request_id, promise) = setup_promise(scope, &state);
-    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+    let (resolver, owner, promise) = match setup_promise(scope) {
+        Ok(admitted) => admitted,
+        Err(refused) => return refused,
+    };
+    state.borrow_mut().spawn_op(owner, async move {
         let value = match operation.await {
             Ok(run_id) => {
                 let resolver_for_continuation = resolver.clone();
@@ -434,9 +441,8 @@ fn dispatch_run_handle<'s>(
         OpResult::JsValue {
             resolver,
             value,
-            request_id,
         }
-    }));
+    });
     promise
 }
 
@@ -525,14 +531,17 @@ impl WorkflowRun {
             ));
         }
         let state = runtime_state(scope);
-        let (resolver, request_id, promise) = setup_promise(scope, &state);
+        let (resolver, owner, promise) = match setup_promise(scope) {
+            Ok(admitted) => admitted,
+            Err(refused) => return Ok(refused.into()),
+        };
         let backend = self.backend.clone();
         let run_id = self.run_id.clone();
         let task_reader = scope
             .get_slot::<TaskOutputReader>()
             .filter(|reader| reader.reader.run_id() == run_id)
             .cloned();
-        state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        state.borrow_mut().spawn_op(owner, async move {
             let read = if let Some(reader) = task_reader {
                 let result = reader.reader.read_step_output(&name, occurrence as u32).await;
                 if reader.reader.check().is_err() {
@@ -553,9 +562,8 @@ impl WorkflowRun {
             OpResult::JsValue {
                 resolver,
                 value,
-                request_id,
             }
-        }));
+        });
         Ok(promise.into())
     }
 
@@ -584,14 +592,17 @@ impl WorkflowRun {
             ));
         }
         let state = runtime_state(scope);
-        let (resolver, request_id, promise) = setup_promise(scope, &state);
+        let (resolver, owner, promise) = match setup_promise(scope) {
+            Ok(admitted) => admitted,
+            Err(refused) => return Ok(refused.into()),
+        };
         let backend = self.backend.clone();
         let run_id = self.run_id.clone();
         let task_reader = scope
             .get_slot::<TaskOutputReader>()
             .filter(|reader| reader.reader.run_id() == run_id)
             .cloned();
-        state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        state.borrow_mut().spawn_op(owner, async move {
             let read = if let Some(reader) = task_reader {
                 let result = reader.reader.read_child_output(&name, occurrence as u32).await;
                 if reader.reader.check().is_err() {
@@ -620,9 +631,8 @@ impl WorkflowRun {
             OpResult::JsValue {
                 resolver,
                 value,
-                request_id,
             }
-        }));
+        });
         Ok(promise.into())
     }
 
@@ -637,10 +647,13 @@ impl WorkflowRun {
         scope: &mut v8::PinScope<'s, '_>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
         let state = runtime_state(scope);
-        let (resolver, request_id, promise) = setup_promise(scope, &state);
+        let (resolver, owner, promise) = match setup_promise(scope) {
+            Ok(admitted) => admitted,
+            Err(refused) => return Ok(refused.into()),
+        };
         let backend = self.backend.clone();
         let run_id = self.run_id.clone();
-        state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        state.borrow_mut().spawn_op(owner, async move {
             let value = match backend.read_output(run_id).await {
                 Ok(bytes) => ResolveValue::Bytes(bytes),
                 Err(error) => ResolveValue::RejectError(crate::error::to_op_error(error)),
@@ -648,9 +661,8 @@ impl WorkflowRun {
             OpResult::JsValue {
                 resolver,
                 value,
-                request_id,
             }
-        }));
+        });
         Ok(promise.into())
     }
 

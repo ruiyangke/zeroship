@@ -12,12 +12,12 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
-use zeroship_runtime::state::{OpError, OpResult, ResolveValue, SharedState};
+use zeroship_runtime::state::{EndListener, OpError, OpResult, RequestLink, ResolveValue, SharedState};
 use zeroship_runtime_macros::v8_class;
 
 use crate::op_error::ToOpError;
 use crate::transaction::{
-    SettleOutcome, TxAdmission, exec_begin_or_savepoint, exec_settle, reducer,
+    SettleOutcome, TxAdmission, exec_begin_or_savepoint, exec_settle, exec_settle_checked, reducer,
 };
 use crate::v8_bridge::runtime_state;
 use crate::v8_classes::db::cached_collection;
@@ -192,9 +192,18 @@ struct TxFinalizer {
     /// resolves it with the body result (commit) or rejects it with the
     /// body error (rollback).
     outer: v8::Global<v8::PromiseResolver>,
-    /// Owning request id — routes the follow-up commit/rollback op's
-    /// logs + cancellation to the request that opened the tx.
-    request_id: Option<u64>,
+    /// The request that opened the transaction, as the op gate admitted it.
+    /// The follow-up commit/rollback op is queued for it as a follow-up
+    /// rather than through the gate, because a rollback must still run after
+    /// that request has ended; a commit is refused then instead (see
+    /// [`settle_after_body`]).
+    link: RequestLink,
+    /// Rolls a top-level transaction back as soon as the request that opened
+    /// it ends early, so its lane is released then rather than when its
+    /// execution deadline expires: a callback stopped mid-way never settles,
+    /// and nothing else would end it. Withdrawn once the callback settles,
+    /// after which the settle itself decides the commit.
+    abandon_on_end: Option<EndListener>,
     /// `None` ⇒ this `transaction()` opened the outermost `BEGIN`
     /// (settle = `COMMIT` / `ROLLBACK`, then dispose of the session).
     /// `Some(frame)` ⇒ this `transaction()` opened a nested `SAVEPOINT`
@@ -247,12 +256,18 @@ pub fn transaction_dispatch<'s>(
     let route = binding.route();
     let state = runtime_state(scope);
 
+    // A transaction started for a request that has ended is refused before
+    // it claims anything, like every other host op.
+    let owner = match zeroship_runtime::state::admit_op(scope) {
+        Ok(owner) => owner,
+        Err(error) => return zeroship_runtime::state::rejected_promise(scope, &error),
+    };
+
     // Outer promise — returned to JS now; settled by the commit/rollback
     // handler after the creator callback runs.
     let outer_resolver = v8::PromiseResolver::new(scope).unwrap();
     let outer_promise = outer_resolver.get_promise(scope);
     let outer_global = v8::Global::new(scope, outer_resolver);
-    let request_id = state.borrow().executing_request_id;
 
     // Capture the creator callback so the continuation can call it inside
     // the pump scope.
@@ -297,7 +312,8 @@ pub fn transaction_dispatch<'s>(
     // machine produces. A second copy of the rule beside the state machine
     // is a copy that can disagree with it.
 
-    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+    let link = owner.retain();
+    state.borrow_mut().spawn_op(owner, async move {
         // Drain note: the JS-side DataLoader queues are flushed by the DB
         // facade *before* it calls this native method (those
         // microtask queues are pure-JS state with no Rust counterpart).
@@ -332,7 +348,6 @@ pub fn transaction_dispatch<'s>(
                     return OpResult::JsValue {
                         resolver: outer_global,
                         value: ResolveValue::RejectError(error.to_op_error()),
-                        request_id,
                     };
                 }
             }
@@ -366,15 +381,17 @@ pub fn transaction_dispatch<'s>(
                 // release is now the protocol's rather than this future's - and
                 // an unsettling callback is bounded by the execution deadline
                 // rather than by nothing.
-                if let Some(admission) = admission {
-                    admission.handed_to_reducer();
-                }
+                let abandon_on_end = admission.and_then(|admission| {
+                    let abandon = admission.handed_to_reducer_abandonable();
+                    link.on_end(move || abandon.abandon())
+                });
                 // Hand back a continuation that mints the tx-view, calls
                 // the creator callback, and attaches commit/rollback
                 // handlers — all inside the pump's V8 scope.
                 let finalizer = TxFinalizer {
                     outer: outer_global,
-                    request_id,
+                    link,
+                    abandon_on_end,
                     frame,
                     route: route.clone(),
                     parent_claim,
@@ -390,7 +407,6 @@ pub fn transaction_dispatch<'s>(
                     value: ResolveValue::Continuation(Box::new(move |scope, state| {
                         run_begin_continuation(scope, state, user_fn_global, finalizer, binding);
                     })),
-                    request_id,
                 }
             }
             Err(e) => {
@@ -403,11 +419,10 @@ pub fn transaction_dispatch<'s>(
                 OpResult::JsValue {
                     resolver: outer_global,
                     value: ResolveValue::RejectError(e.to_op_error()),
-                    request_id,
                 }
             }
         }
-    }));
+    });
 
     outer_promise
 }
@@ -641,12 +656,14 @@ fn settle_after_body(
 
     let TxFinalizer {
         outer,
-        request_id,
+        link,
+        abandon_on_end,
         frame,
         route,
         parent_claim,
         ..
     } = *finalizer;
+    drop(abandon_on_end);
 
     let success = body_ok.is_some();
     let body = if success { body_ok } else { body_err };
@@ -654,18 +671,54 @@ fn settle_after_body(
     // settled: the settle samples the frame's outstanding calls now, before the
     // pump can run one of them to completion and make unfinished work look
     // finished.
-    let settle = exec_settle(&route, success, frame);
+    //
+    // A commit is the transaction's platform call, so it is refused, and the
+    // frame rolled back, when the request that opened it has ended by the time
+    // the statement would be sent. The rollback itself always runs. A commit
+    // that is sent holds the request's commit guard until its outcome is
+    // known, so a request that ends meanwhile is answered that the outcome is
+    // unknown.
+    let opener = link.clone();
+    let settle = exec_settle_checked(&route, success, frame, move || {
+        opener.commit_guard().ok_or_else(request_cancelled)
+    });
 
-    state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let settle_result = settle.await;
+    let opener = link.clone();
+    state.borrow_mut().spawn_follow_up(&link, async move {
+        let settle_result = ended_request_outcome(&opener, settle.await);
         drop(parent_claim);
         let value = build_settle_resolve_value(settle_result, success, body);
         OpResult::JsValue {
             resolver: outer,
             value,
-            request_id,
         }
-    }));
+    });
+}
+
+/// A transaction whose request ended early is rolled back, by the end itself
+/// or by its refused commit, and it fails the way every other call of that
+/// request does from then on: with [`request_cancelled`], not with whatever
+/// the rollback recorded. An outcome the database left unknown is kept, since
+/// it says something the refusal does not.
+fn ended_request_outcome(opener: &RequestLink, outcome: SettleOutcome) -> SettleOutcome {
+    match outcome {
+        SettleOutcome::SettleErr(_) if opener.has_ended() => {
+            SettleOutcome::SettleErr(request_cancelled())
+        }
+        outcome => outcome,
+    }
+}
+
+/// The error a commit refused for an ended request settles with: the code the
+/// runtime's op gate refuses every other call of that request with.
+fn request_cancelled() -> DbError {
+    DbError::Coded {
+        code: zeroship_runtime::state::REQUEST_CANCELLED.to_string(),
+        message: "the request this transaction was opened for has ended, so it was rolled back \
+                  instead of committed"
+            .to_string(),
+        hint: None,
+    }
 }
 /// Settle the outer promise directly (no body promise was created — the
 /// callback threw synchronously or the tx-view mint failed). Rolls the tx
@@ -681,12 +734,14 @@ fn settle_failed_before_body(
     }
     let TxFinalizer {
         outer,
-        request_id,
+        link,
+        abandon_on_end,
         frame,
         route,
         parent_claim,
         ..
     } = finalizer;
+    drop(abandon_on_end);
     let err_global = {
         // Materialise the JS exception now, while we have a scope, so the
         // async settle op can reject with the real value.
@@ -695,15 +750,15 @@ fn settle_failed_before_body(
     };
     // Sampled now, as in `settle_after_body`.
     let settle = exec_settle(&route, false, frame);
-    state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let settle_result = settle.await;
+    let opener = link.clone();
+    state.borrow_mut().spawn_follow_up(&link, async move {
+        let settle_result = ended_request_outcome(&opener, settle.await);
         drop(parent_claim);
         OpResult::JsValue {
             resolver: outer,
             value: build_settle_resolve_value(settle_result, false, Some(err_global)),
-            request_id,
         }
-    }));
+    });
 }
 /// Lower the settle outcome + body value into the `ResolveValue` that
 /// settles the outer promise.

@@ -416,8 +416,10 @@ pub struct RuntimeState {
     /// entry is evaluating. Finalization and failure close this authority.
     pub(crate) startup_declarations_open: bool,
 
-    /// Futures for in-flight async ops (fetch, kv, ...).
-    pub spawned_ops: Vec<Pin<Box<dyn Future<Output = OpResult>>>>,
+    /// Async ops (fetch, kv, ...) waiting for the pump, each with the request
+    /// it is for. Queued through [`Self::spawn_op`] or, for the runtime's own
+    /// events, [`Self::spawn_event`].
+    pub(crate) spawned_ops: Vec<QueuedOp>,
     /// Native task lifetime boundary used when an isolate is quarantined.
     pub(crate) tasks: crate::core::tasks::RuntimeTasks,
     /// Timers queued to be armed on the next event-loop iteration.
@@ -442,11 +444,6 @@ pub struct RuntimeState {
 
     /// The request currently being executed (None between requests).
     pub executing_request_id: Option<u64>,
-    /// Cancellation flag for the request currently being executed. Captured
-    /// by V8 callbacks (e.g. `fetch_native::fetch_callback`) so that async
-    /// ops they spawn inherit the same flag and abort early if the handler
-    /// gives up.
-    pub executing_request_cancel: Option<crate::channel::CancelFlag>,
 
     /// Per-request log lines accumulated during execution.
     pub per_request_logs: HashMap<u64, Vec<String>>,
@@ -724,7 +721,6 @@ impl RuntimeState {
             upload_share: crate::channel::StreamShare::new(MAX_UPLOAD_BUFFER_BYTES),
 
             executing_request_id: None,
-            executing_request_cancel: None,
 
             per_request_logs: HashMap::new(),
             per_request_user: HashMap::new(),
@@ -771,6 +767,52 @@ impl RuntimeState {
     /// The host identity used to bind native namespaces for this isolate.
     pub fn app_id(&self) -> Option<&str> {
         self.app_id.as_deref()
+    }
+
+    /// Queue a host op for the pump, for the request [`admit_op`] admitted it
+    /// for.
+    pub fn spawn_op(&mut self, owner: OpOwner<'_>, work: impl Future<Output = OpResult> + 'static) {
+        self.spawned_ops.push(QueuedOp {
+            owner: owner.request,
+            work: Box::pin(work),
+        });
+    }
+
+    /// Queue an op that finishes what an admitted op started, such as a
+    /// transaction's commit or rollback, for that op's request. It is queued
+    /// whether or not the request has ended since: it is not a new call of the
+    /// request's, and what it releases has to be released either way. Any
+    /// check it owes the request's end is its own (see
+    /// [`RequestLink::commit_guard`]).
+    pub fn spawn_follow_up(
+        &mut self,
+        link: &RequestLink,
+        work: impl Future<Output = OpResult> + 'static,
+    ) {
+        self.spawned_ops.push(QueuedOp {
+            owner: link.request.clone(),
+            work: Box::pin(work),
+        });
+    }
+
+    /// Queue one of the runtime's own events, which belongs to no request.
+    pub(crate) fn spawn_event(&mut self, work: impl Future<Output = OpResult> + 'static) {
+        self.spawned_ops.push(QueuedOp {
+            owner: None,
+            work: Box::pin(work),
+        });
+    }
+
+    /// How many ops wait for the pump.
+    #[must_use]
+    pub const fn queued_op_count(&self) -> usize {
+        self.spawned_ops.len()
+    }
+
+    /// Take every op waiting for the pump, for a host that settles them
+    /// itself.
+    pub fn take_queued_ops(&mut self) -> Vec<QueuedOp> {
+        std::mem::take(&mut self.spawned_ops)
     }
 
     pub fn set_net_policy(&mut self, policy: crate::transport::net_policy::NetPolicy) {
@@ -1072,21 +1114,19 @@ impl<T: IntoResolveValue> IntoResolveValue for Result<T, OpError> {
     }
 }
 
-/// Result produced by a spawned async op future.
+/// Result produced by a spawned async op future. The request it settles for
+/// is the one the op was queued for.
 #[allow(missing_debug_implementations)]
 pub enum OpResult {
     /// A regular async op finished — resolve its promise with `value`.
     Completed {
         op_id: u32,
         value: String,
-        /// The request that owns this op (used to route logs / cancellation).
-        request_id: Option<u64>,
     },
     /// An async op failed — reject its promise with the error message.
     Failed {
         op_id: u32,
         error: String,
-        request_id: Option<u64>,
     },
     /// A class-method async op finished — resolve/reject with a V8 value.
     ///
@@ -1098,7 +1138,6 @@ pub enum OpResult {
     JsValue {
         resolver: v8::Global<v8::PromiseResolver>,
         value: ResolveValue,
-        request_id: Option<u64>,
     },
     /// The op was cancelled (e.g. request was killed).
     Cancelled,
@@ -1118,6 +1157,187 @@ pub enum OpResult {
     /// dispatch on the V8 thread. Payload is queued under
     /// `RuntimeState::native_sockets[socket_id].events`.
     SocketEvent { socket_id: u32 },
+}
+
+// ---------------------------------------------------------------------------
+// Host ops: the request each one is for, and the gate that admits it
+// ---------------------------------------------------------------------------
+
+/// The gate's admission of one host op, for the request the running code
+/// belongs to.
+///
+/// [`admit_op`] is the only way to obtain one, and [`RuntimeState::spawn_op`]
+/// consumes it, so one admission queues at most one op. It is not `Clone`,
+/// and its lifetime is the handle scope of the callback that was admitted, so
+/// it cannot be kept in a queued op's future or in any state that outlives
+/// that callback: an op is queued by the callback whose call the gate
+/// admitted, or as an explicit follow-up ([`RuntimeState::spawn_follow_up`]).
+///
+/// The pump settles the op for its request: the settlement's CPU is that
+/// request's, and the code it runs enters that request's invocation context,
+/// whether or not the request is still pending by then.
+#[derive(Debug)]
+pub struct OpOwner<'s> {
+    request: Option<crate::core::invocation::RequestToken>,
+    scope: std::marker::PhantomData<&'s ()>,
+}
+
+impl OpOwner<'_> {
+    /// The request the op was admitted for, if it was made under one.
+    #[must_use]
+    pub fn request_id(&self) -> Option<u64> {
+        self.request.as_ref().map(crate::core::invocation::RequestToken::id)
+    }
+
+    /// The request this op is for, kept for what has to happen after the
+    /// callback: an op that finishes what this one starts, or an action on the
+    /// request's early end.
+    #[must_use]
+    pub fn retain(&self) -> RequestLink {
+        RequestLink {
+            request: self.request.clone(),
+        }
+    }
+}
+
+/// The request an admitted op was for, kept past its callback.
+///
+/// Made by [`OpOwner::retain`]. It cannot queue an op through the gate's
+/// path; it queues only a follow-up ([`RuntimeState::spawn_follow_up`]).
+#[derive(Clone, Debug)]
+pub struct RequestLink {
+    request: Option<crate::core::invocation::RequestToken>,
+}
+
+impl RequestLink {
+    /// The request, if the op was made under one.
+    #[must_use]
+    pub fn request_id(&self) -> Option<u64> {
+        self.request.as_ref().map(crate::core::invocation::RequestToken::id)
+    }
+
+    /// Whether the request has ended early: the runtime stopped it, or its
+    /// host cancelled it before it was answered. An op made for no request,
+    /// and one made for a request answered with its own result, never has.
+    #[must_use]
+    pub fn has_ended(&self) -> bool {
+        self.request.as_ref().is_some_and(|token| token.control().has_ended())
+    }
+
+    /// Run `action` when the request ends early, or now if it already has.
+    /// Dropping the returned listener withdraws the action. A request that is
+    /// answered with its own result never ends early, and an op made for no
+    /// request has none to end, so neither runs `action`.
+    #[must_use]
+    pub fn on_end(&self, action: impl FnOnce() + 'static) -> Option<EndListener> {
+        self.request
+            .as_ref()
+            .and_then(|token| token.control().on_end(Box::new(action)))
+    }
+
+    /// Admit a commit the op asked for: `None` once the request has ended,
+    /// and otherwise the guard the commit holds until its outcome is known.
+    /// A request that ends while a guard is held is answered that whether its
+    /// commit applied is unknown. An op made for no request is admitted with
+    /// no guard to hold.
+    #[must_use]
+    pub fn commit_guard(&self) -> Option<CommitGuard> {
+        self.request
+            .as_ref()
+            .map_or_else(|| Some(CommitGuard::unowned()), |token| token.control().commit_guard())
+    }
+}
+
+pub use crate::core::invocation::{CommitGuard, EndListener};
+
+/// The `e.code` of the error a host op is refused with when the request it is
+/// made for has ended early.
+pub const REQUEST_CANCELLED: &str = "request_cancelled";
+
+/// The error a host op made for a request that has ended early is refused with.
+#[must_use]
+pub fn request_cancelled_error() -> OpError {
+    OpError::coded(
+        REQUEST_CANCELLED,
+        "the request this call was made for has ended, so the call was refused",
+        None::<String>,
+    )
+}
+
+/// The gate every request-owned host op passes where it is issued.
+///
+/// Resolves the request the running code belongs to from its invocation
+/// context, which V8 carries across `await`, and refuses the op when that
+/// request has ended early: the runtime stopped it, or its host cancelled it
+/// before it was answered. Code that belongs to no request, such as module
+/// evaluation or a connection's event handler, is admitted, and so is code a
+/// request left running after it was answered with its own result. A context
+/// the runtime did not encode is refused.
+///
+/// # Errors
+/// [`request_cancelled_error`] when the request has ended early.
+pub fn admit_op<'s>(scope: &mut v8::PinScope<'s, '_>) -> Result<OpOwner<'s>, OpError> {
+    use crate::core::invocation::RequestRead;
+    let request = match crate::core::invocation::current_request(scope) {
+        RequestRead::NoFrame | RequestRead::Anonymous => None,
+        RequestRead::Malformed => return Err(request_cancelled_error()),
+        RequestRead::Request(request) => {
+            if request.control().has_ended() {
+                return Err(request_cancelled_error());
+            }
+            Some(request.token(scope))
+        }
+    };
+    Ok(OpOwner {
+        request,
+        scope: std::marker::PhantomData,
+    })
+}
+
+/// An opaque object naming the request the running code belongs to: the same
+/// object for every turn of one request, and a different one for each request.
+/// `None` for code that belongs to no request.
+///
+/// Platform JavaScript that batches calls made by different code uses it to
+/// keep one request's calls out of another's batch.
+pub fn invocation_key<'s>(scope: &mut v8::PinScope<'s, '_>) -> Option<v8::Local<'s, v8::Object>> {
+    match crate::core::invocation::current_request(scope) {
+        crate::core::invocation::RequestRead::Request(request) => Some(request.object()),
+        _ => None,
+    }
+}
+
+/// A promise already rejected with `error`, for a promise-returning host op
+/// the gate refused.
+///
+/// # Panics
+/// When V8 cannot allocate the promise, which happens only with an exception
+/// or a termination already pending; the callback's panic boundary then
+/// quarantines the isolate.
+pub fn rejected_promise<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    error: &OpError,
+) -> v8::Local<'s, v8::Promise> {
+    let resolver = v8::PromiseResolver::new(scope).expect("allocate a promise resolver");
+    let promise = resolver.get_promise(scope);
+    let exception = error.to_exception(scope);
+    resolver.reject(scope, exception);
+    promise
+}
+
+/// An op waiting for the pump: the request it is for, and the work that
+/// settles it.
+pub struct QueuedOp {
+    pub(crate) owner: Option<crate::core::invocation::RequestToken>,
+    pub(crate) work: Pin<Box<dyn Future<Output = OpResult>>>,
+}
+
+impl QueuedOp {
+    /// The op's work, for a host that settles queued ops without a pump.
+    #[must_use]
+    pub fn into_work(self) -> Pin<Box<dyn Future<Output = OpResult>>> {
+        self.work
+    }
 }
 
 // ---------------------------------------------------------------------------

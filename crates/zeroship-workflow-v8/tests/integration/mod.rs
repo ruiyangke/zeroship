@@ -11,3 +11,4 @@ mod binding;
 mod dispatch;
 mod runner;
 mod service_binding;
+mod stopped_requests;

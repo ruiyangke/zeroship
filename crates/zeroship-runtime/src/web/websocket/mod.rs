@@ -773,12 +773,9 @@ impl WebSocketImpl {
                 }
                 // Push a one-shot future to drain the event.
                 let id = ws_id;
-                let fut: std::pin::Pin<
-                    Box<dyn std::future::Future<Output = crate::state::OpResult>>,
-                > = Box::pin(async move {
+                state.borrow_mut().spawn_event(async move {
                     crate::state::OpResult::WebSocketEvent { ws_id: id }
                 });
-                state.borrow_mut().spawned_ops.push(fut);
                 let notify = state.borrow().pump_notify_tx.clone();
                 if let Some(mut tx) = notify {
                     let _ = tx.try_send(());

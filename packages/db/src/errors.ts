@@ -24,7 +24,15 @@ function hasErrorBrand(value: unknown, brand: symbol, name: string): boolean {
   );
 }
 
+/**
+ * Codes the runtime refuses a call with for every binding, not only the
+ * database. They keep the runtime's spelling here, so each is spelled one way
+ * whichever binding raised it.
+ */
+const RUNTIME_CODES: ReadonlySet<string> = new Set(["request_cancelled"]);
+
 export function canonicalErrorCode(code: string): string {
+  if (RUNTIME_CODES.has(code)) return code;
   const overrides = CANONICAL_CODE_OVERRIDES as Readonly<Record<string, string>>;
   const overridden = overrides[code] ?? code;
   if (/^[A-Z0-9_]+$/.test(overridden)) return overridden;

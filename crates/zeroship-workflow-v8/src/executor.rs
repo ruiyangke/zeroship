@@ -3,7 +3,10 @@
 use async_trait::async_trait;
 use std::{cell::RefCell, future::Future, rc::Rc, task::Poll, time::Duration};
 use zeroship_bundle::LoadedWorker;
-use zeroship_runtime::{CancelFlag, EnvSnapshot, RequestCtx, Runtime, WorkflowOutcome};
+use zeroship_runtime::{
+    CancelFlag, EnvSnapshot, RequestCtx, Runtime, WorkflowOutcome,
+    runtime::{COMMIT_FAILED_INDETERMINATE, DispatchError},
+};
 use zeroship_workflow_runner::{
     ExecutionBudget, PreparedExecution, TaskExecution, TaskExecutor, TaskPayloadLimits,
     TaskPayloadReader, TaskPayloads,
@@ -110,6 +113,23 @@ impl TaskExecutor for V8TaskExecutor {
     }
 }
 
+/// Turn the dispatch's own error into the execution's outcome.
+///
+/// A commit the request asked for may have been in flight at the stop, so its
+/// wire code (`error.code`) is kept, not folded into a generic unavailability:
+/// unlike every other dispatch failure here, re-running the task could
+/// re-apply a commit that already landed. `Internal` is never retried by the
+/// delivery loop (`zeroship_workflow_runner::delivery::retryable`), where
+/// `Unavailable` is.
+fn dispatch_wait_error(error: DispatchError) -> WorkflowServiceError {
+    match error.code {
+        Some(code) if code == COMMIT_FAILED_INDETERMINATE => {
+            WorkflowServiceError::Internal(format!("{code}: {}", error.message))
+        }
+        _ => WorkflowServiceError::Unavailable(error.message),
+    }
+}
+
 struct V8Execution {
     loader: (Rc<dyn WorkflowRuntimeLoader>, TaskAssignment),
     loaded: Option<LoadedWorkflow>,
@@ -176,9 +196,7 @@ impl TaskExecution for V8Execution {
                     if let Poll::Ready(error) = failed.as_mut().poll(cx) {
                         return Poll::Ready(Err(error));
                     }
-                    received.as_mut().poll(cx).map(|result| {
-                        result.map_err(|error| WorkflowServiceError::Unavailable(error.message))
-                    })
+                    received.as_mut().poll(cx).map(|result| result.map_err(dispatch_wait_error))
                 })
                 .await;
                 self.budget.check()?;
@@ -245,5 +263,40 @@ impl TaskExecution for V8Execution {
 impl Drop for V8Execution {
     fn drop(&mut self) {
         self.cancel();
+    }
+}
+
+#[cfg(test)]
+mod dispatch_wait_error_tests {
+    use super::{COMMIT_FAILED_INDETERMINATE, DispatchError, WorkflowServiceError, dispatch_wait_error};
+
+    /// The guard this test fails without: a commit left in flight at the stop
+    /// must not come back as the retried-by-default `Unavailable` - the
+    /// delivery loop would re-run the task over a commit that may have
+    /// already landed.
+    #[test]
+    fn an_indeterminate_commit_is_reported_opaquely_and_is_not_retried() {
+        let error = DispatchError::coded(
+            "CPU time limit exceeded; a transaction commit was in flight, so whether \
+             it applied is unknown",
+            500,
+            COMMIT_FAILED_INDETERMINATE,
+        );
+        let mapped = dispatch_wait_error(error);
+        assert!(
+            matches!(mapped, WorkflowServiceError::Internal(ref message) if message.contains(COMMIT_FAILED_INDETERMINATE)),
+            "the code must survive in the execution's error, not be dropped: {mapped:?}"
+        );
+    }
+
+    /// The control beside it: a dispatch error with no code - a plain stop or
+    /// host cancellation - keeps its retryable classification.
+    #[test]
+    fn an_uncoded_dispatch_error_stays_a_retryable_unavailability() {
+        let error = DispatchError::new("request timed out", 504);
+        assert_eq!(
+            dispatch_wait_error(error),
+            WorkflowServiceError::Unavailable("request timed out".to_string())
+        );
     }
 }

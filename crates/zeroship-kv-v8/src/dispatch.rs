@@ -4,11 +4,12 @@
 //! then calls one of the `dispatch_*` helpers here. Every helper
 //! follows the same shape, mirroring `plugin-db`'s `crud::dispatch_*`:
 //!
-//! 1. Build a `PromiseResolver` + capture the `request_id` off the
-//!    runtime state slot ([`setup_kv_promise`]).
-//! 2. Push a `spawned_ops` future that runs the backend call and packs
-//!    the result into an `OpResult::JsValue` carrying a typed
-//!    [`ResolveValue`].
+//! 1. Pass the runtime's op gate, which refuses the call when the request
+//!    it is made for has ended, and build a `PromiseResolver`
+//!    ([`setup_kv_promise`]).
+//! 2. Queue a future for that request (`spawn_op`) that runs the backend
+//!    call and packs the result into an `OpResult::JsValue` carrying a
+//!    typed [`ResolveValue`].
 //! 3. Return the `Promise` immediately.
 //!
 //! Errors resolve via the typed `OpError` channel
@@ -18,7 +19,7 @@
 
 use serde_json::json;
 use zeroship_metering::MeterHandle;
-use zeroship_runtime::state::{OpResult, ResolveValue, SharedState};
+use zeroship_runtime::state::{OpOwner, OpResult, ResolveValue, SharedState};
 
 use zeroship_kv::{Kv, TtlState};
 
@@ -36,21 +37,21 @@ const KV_WRITES: &str = "kv_writes";
 /// beyond it, as a `BigInt` to avoid silent precision loss.
 const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 
-/// Build the promise + resolver and capture the owning request id.
-/// Returns `(resolver_global, request_id, promise)`.
+/// Admit the call for the request it is made for and build its promise.
+/// Returns `(resolver_global, owner, promise)`, or the already rejected
+/// promise the call answers with when the gate refuses it.
 fn setup_kv_promise<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    state: &SharedState,
-) -> (
-    v8::Global<v8::PromiseResolver>,
-    Option<u64>,
+) -> Result<
+    (v8::Global<v8::PromiseResolver>, OpOwner<'s>, v8::Local<'s, v8::Promise>),
     v8::Local<'s, v8::Promise>,
-) {
+> {
+    let owner = zeroship_runtime::state::admit_op(scope)
+        .map_err(|error| zeroship_runtime::state::rejected_promise(scope, &error))?;
     let resolver = v8::PromiseResolver::new(scope).unwrap();
     let promise = resolver.get_promise(scope);
     let global_resolver = v8::Global::new(scope, resolver);
-    let request_id = state.borrow().executing_request_id;
-    (global_resolver, request_id, promise)
+    Ok((global_resolver, owner, promise))
 }
 
 /// Get the runtime state slot off the isolate.
@@ -85,11 +86,14 @@ fn incr_resolve(n: i64) -> ResolveValue {
 macro_rules! spawn_kv_op {
     ($scope:expr, $backend:expr, $meter:expr, $metric:expr, |$b:ident| $call:expr, $resolve:expr) => {{
         let state = runtime_state($scope);
-        let (resolver, request_id, promise) = setup_kv_promise($scope, &state);
+        let (resolver, owner, promise) = match setup_kv_promise($scope) {
+            Ok(admitted) => admitted,
+            Err(refused) => return refused,
+        };
         let $b = $backend;
         let meter: Option<MeterHandle> = $meter;
         let metric: &'static str = $metric;
-        state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        state.borrow_mut().spawn_op(owner, async move {
             let value = match $call.await {
                 Ok(v) => {
                     // Success arm only: bill exactly one op. Unforgeable —
@@ -104,9 +108,8 @@ macro_rules! spawn_kv_op {
             OpResult::JsValue {
                 resolver,
                 value,
-                request_id,
             }
-        }));
+        });
         promise
     }};
 }

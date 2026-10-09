@@ -139,4 +139,25 @@ describe("parseErrorResponse", () => {
     const err = await parseErrorResponse(res);
     assert.equal(err.retryable, true);
   });
+
+  // A request the platform stopped with a commit in flight answers
+  // `code: "commit_failed_indeterminate"` on the wire (the same lower_snake
+  // spelling every binding uses), not this closed set's own UPPER_SNAKE. The
+  // client maps it to its own member rather than lifting the wire spelling
+  // verbatim, so `error.code` stays inside the closed set and defaults to
+  // not-retryable.
+  test("maps the plain-fetch indeterminate-commit code to the closed set", async () => {
+    const res = new Response(
+      JSON.stringify({
+        message: "CPU time limit exceeded; a transaction commit was in flight, so " +
+          "whether it applied is unknown",
+        name: "Error",
+        code: "commit_failed_indeterminate",
+      }),
+      { status: 500, headers: { "Content-Type": "application/json" } },
+    );
+    const err = await parseErrorResponse(res);
+    assert.equal(err.code, "COMMIT_FAILED_INDETERMINATE");
+    assert.equal(err.retryable, false);
+  });
 });

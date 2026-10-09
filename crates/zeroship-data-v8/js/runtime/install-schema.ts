@@ -7,6 +7,7 @@
  * is not an npm package entry.
  */
 import { Collection } from "./collection";
+import type { InvocationKey } from "./loader";
 import { TRANSACTION_READ } from "./crud";
 import { captureNativeTransaction, type NativeDb, type NativeTransactionFn } from "../../../../packages/db/src/native";
 import { Query } from "./query";
@@ -281,6 +282,13 @@ function createTxQuery<S>(
 export interface InstallSchemaOptions {
   /** Defaults to the descriptor's field spelling, without case conversion. */
   naming?: NamingStrategy;
+  /**
+   * The host's name for the request the calling code belongs to. Reads are
+   * batched only with reads made for the same request. Without it every read
+   * is taken as made for the one request there is, which a host that runs
+   * many requests must not leave it to assume.
+   */
+  invocationKey?: InvocationKey;
 }
 
 const RESERVED_ENV_DB_NAMES = new Set<string>([
@@ -363,6 +371,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
         naming: namingStrategy,
         indexes: projected[name]?.indexes ?? [],
         schemas,
+        invocationKey: options?.invocationKey,
       }) as Collection<unknown, string, T>;
   }
 

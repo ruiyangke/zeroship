@@ -9,6 +9,7 @@ mod metering;
 mod parity;
 mod read_capture;
 mod relations;
+mod stopped_requests;
 mod transactions;
 mod updates;
 mod upsert;

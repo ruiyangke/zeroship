@@ -93,8 +93,9 @@ use crate::plugin::NativePlugin;
 use super::startup::{StartupState, WaitingRequest};
 
 mod startup;
+use crate::core::invocation::{InvocationContext, RequestControl, RequestToken};
 use crate::state::{
-    DispatchResult, OpResult, ResolveValue, RuntimeState, SharedState, SpawnedTimer,
+    DispatchResult, OpResult, QueuedOp, ResolveValue, RuntimeState, SharedState, SpawnedTimer,
     TimerResult,
 };
 use crate::transport::net_policy::NetPolicy;
@@ -156,23 +157,39 @@ pub fn heap_used_and_limit(runtime: &Runtime) -> (usize, usize) {
 pub struct DispatchError {
     pub message: String,
     pub status: u16,
+    /// A code the caller can branch on, for the few errors that carry one.
+    pub code: Option<&'static str>,
 }
 
 impl DispatchError {
     pub fn new(message: impl Into<String>, status: u16) -> Self {
-        Self { message: message.into(), status }
+        Self { message: message.into(), status, code: None }
+    }
+
+    pub fn coded(message: impl Into<String>, status: u16, code: &'static str) -> Self {
+        Self { message: message.into(), status, code: Some(code) }
+    }
+
+    /// The JSON body a caller is answered with: `{"message","name"}`, and
+    /// `"code"` for an error that carries one.
+    #[must_use]
+    pub fn body(&self) -> serde_json::Value {
+        self.code.map_or_else(
+            || serde_json::json!({ "message": self.message, "name": "Error" }),
+            |code| serde_json::json!({ "message": self.message, "name": "Error", "code": code }),
+        )
     }
 }
 
 impl From<String> for DispatchError {
     fn from(s: String) -> Self {
-        Self { message: s, status: 500 }
+        Self::new(s, 500)
     }
 }
 
 impl From<&str> for DispatchError {
     fn from(s: &str) -> Self {
-        Self { message: s.into(), status: 500 }
+        Self::new(s, 500)
     }
 }
 
@@ -202,7 +219,7 @@ impl RuntimeInterrupt {
 /// Async futures extracted from Runtime so the pump task can poll them
 /// without holding a RefCell borrow on Runtime across await points.
 pub struct AsyncWork {
-    pub pending_ops: FuturesUnordered<Pin<Box<dyn Future<Output = OpResult>>>>,
+    pub pending_ops: FuturesUnordered<Pin<Box<dyn Future<Output = SettledOp>>>>,
     pub pending_timers: FuturesUnordered<Pin<Box<dyn Future<Output = TimerResult>>>>,
 }
 
@@ -219,6 +236,22 @@ impl AsyncWork {
             pending_timers: FuturesUnordered::new(),
         }
     }
+
+    /// Take the ops and timers `state` queued since the last call. Each op
+    /// settles with the owner it was queued for.
+    fn take_queued(&self, state: &mut RuntimeState) {
+        for QueuedOp { owner, work } in state.spawned_ops.drain(..) {
+            self.pending_ops.push(Box::pin(async move {
+                SettledOp { owner, result: work.await }
+            }));
+        }
+        for SpawnedTimer { id, delay, interval } in state.spawned_timers.drain(..) {
+            self.pending_timers.push(Box::pin(async move {
+                compio::time::sleep(delay).await;
+                TimerResult { id, interval }
+            }));
+        }
+    }
 }
 
 /// A development runtime that can no longer load its entry, as its dev host
@@ -233,9 +266,15 @@ pub(crate) enum DevRuntimeState {
     Superseded,
 }
 
+/// An op the pump finished, with the request it was queued for.
+pub struct SettledOp {
+    pub(crate) owner: Option<RequestToken>,
+    pub(crate) result: OpResult,
+}
+
 /// Event from AsyncWork that the pump delivers to Runtime for V8 processing.
 pub enum AsyncEvent {
-    Op(OpResult),
+    Op(SettledOp),
     Timer(TimerResult),
 }
 
@@ -1091,7 +1130,15 @@ struct PendingRequest {
     /// parked inside a window is not charged to the request.
     cpu_accumulated: Duration,
     wall_start: Instant,
-    cancel: CancelFlag,
+    /// The request's token, which every turn of it enters. Its control ends
+    /// with the request: early, by its host (its wall deadline) or
+    /// by the runtime itself ([`RuntimeInner::stop_request`]), from which
+    /// moment [`crate::state::admit_op`] refuses the request's host ops; or
+    /// with its own answer, after which nothing it left running is refused.
+    token: RequestToken,
+    /// Why the runtime ended this request itself, when it did: the answer
+    /// `cleanup_cancelled_requests` gives it in place of a cancellation.
+    stop_cause: Option<&'static str>,
     origin: PendingOrigin,
     rpc_call: Option<crate::rpc::dispatch::RpcCall>,
     /// Host cancellation and eviction ownership until settlement or transfer
@@ -1113,6 +1160,36 @@ const HOST_INTERRUPT_CAUSE: &str = "runtime execution interrupted";
 
 /// What an isolate whose heap reached its cap answers its requests with.
 const HEAP_CAP_CAUSE: &str = "memory limit exceeded";
+
+/// What a request is answered with when its dispatch could not start its
+/// JavaScript at all.
+const REQUEST_NOT_STARTED: &str = "the request could not be started";
+
+/// The code a request ended early is answered with when a commit it asked for
+/// was in flight at that moment, so whether that commit applied is unknown.
+///
+/// `pub` so an in-process consumer of a [`DispatchError`] - the
+/// workflow executor (`zeroship-workflow-v8::executor`) - can recognize this
+/// one wire code without duplicating its spelling. The RPC client
+/// (`packages/rpc/src/error.ts`) maps this same plain-fetch spelling to its
+/// own closed set's `COMMIT_FAILED_INDETERMINATE`; see docs/reference/rpc.md.
+pub const COMMIT_FAILED_INDETERMINATE: &str = "commit_failed_indeterminate";
+
+/// What a request the runtime ended early, for `cause`, is answered with. A
+/// commit it asked for that was in flight at that moment may or may not have
+/// applied, so the answer then says the outcome is unknown, under the code a
+/// transaction reports for the same uncertainty.
+fn early_end_error(cause: &str, mid_commit: bool) -> DispatchError {
+    if mid_commit {
+        DispatchError::coded(
+            format!("{cause}; a transaction commit was in flight, so whether it applied is unknown"),
+            500,
+            COMMIT_FAILED_INDETERMINATE,
+        )
+    } else {
+        DispatchError::from(cause)
+    }
+}
 
 fn send_pending_error(req: PendingRequest, error: impl Into<DispatchError>) {
     let error = error.into();
@@ -1533,7 +1610,7 @@ impl RuntimeInner {
             inner.fail_startup(reason.into());
             inner.advance_startup();
             for request in inner.pending_requests.values() {
-                request.cancel.cancel();
+                request.token.control().cancel_flag().cancel();
             }
             inner.cleanup_cancelled_requests();
             let state = inner.state.clone();
@@ -1852,8 +1929,9 @@ impl RuntimeInner {
                     }
                 }
                 for request in rt.pending_requests.values() {
-                    request.cancel.register_waker(cx.waker());
-                    if request.cancel.is_cancelled() { return std::task::Poll::Ready(()); }
+                    let cancel = request.token.control().cancel_flag();
+                    cancel.register_waker(cx.waker());
+                    if cancel.is_cancelled() { return std::task::Poll::Ready(()); }
                 }
                 if crate::streams::stream_forwarder::poll_cancellation(&rt.state, cx) {
                     return std::task::Poll::Ready(());
@@ -2245,19 +2323,20 @@ impl RuntimeInner {
 
         let request_id = self.next_direct_request_id;
         self.next_direct_request_id += 1;
-        {
-            let mut s = self.state.borrow_mut();
-            s.executing_request_id = Some(request_id);
-            s.executing_request_cancel = Some(ctx.cancel.clone());
-        }
+        self.state.borrow_mut().executing_request_id = Some(request_id);
+        let control = RequestControl::new(request_id, ctx.cancel.clone());
+        let mut token = None;
 
         let wall_start = Instant::now();
         let cpu_started = crate::core::init::thread_cpu_time();
-        let invocation_context =
-            crate::core::invocation::InvocationContext::request(request_id, None);
         self.arm_cpu_timer();
         let dispatch_result: Result<Result<String, DispatchError>, v8::Global<v8::Promise>> =
-            enter_v8!(self, |scope| {
+            enter_v8!(self, |scope| 'dispatch: {
+                let Some(minted) = RequestToken::mint(scope, Rc::clone(&control)) else {
+                    break 'dispatch Ok(Err(DispatchError::from(REQUEST_NOT_STARTED)));
+                };
+                token = Some(minted.clone());
+                let invocation_context = InvocationContext::request(minted, None);
                 crate::core::invocation::with_context(scope, &invocation_context, |scope| {
                     let creator = v8::Local::new(scope, self.creator_namespace.as_ref().unwrap());
                     match parse_workflow_envelope(scope, envelope_json) {
@@ -2280,6 +2359,7 @@ impl RuntimeInner {
         if self.check_v8_terminated() {
             self.clear_executing_request();
             self.discard_request_state(request_id);
+            self.stop_unpending_request(request_id, &control);
             return crate::WorkflowOutcome::Response {
                 json: workflow_failure_json(self.termination_message()),
                 logs: vec![],
@@ -2287,6 +2367,10 @@ impl RuntimeInner {
         }
 
         let cpu_elapsed = crate::core::init::thread_cpu_time().saturating_sub(cpu_started);
+        // Answered in its dispatch: nothing it left running is refused.
+        if dispatch_result.is_ok() {
+            control.answer();
+        }
         match dispatch_result {
             Ok(Ok(json)) => {
                 self.clear_executing_request();
@@ -2303,7 +2387,8 @@ impl RuntimeInner {
             }
             Err(promise) => {
                 self.clear_executing_request();
-                self.store_workflow_pending(request_id, promise, ctx, cpu_elapsed, wall_start)
+                let token = token.expect("a pending workflow was dispatched under its token");
+                self.store_workflow_pending(request_id, promise, token, ctx, cpu_elapsed, wall_start)
             }
         }
     }
@@ -2379,22 +2464,15 @@ impl RuntimeInner {
         let dispatch_cpu_started = crate::core::init::thread_cpu_time();
         let request_id = self.next_direct_request_id;
         self.next_direct_request_id += 1;
-        let invocation_context = crate::core::invocation::InvocationContext::request(
-            request_id,
-            user_json.clone(),
-        );
+        let control = RequestControl::new(request_id, ctx.cancel.clone());
+        let mut token = None;
+        let context_user = user_json.clone();
 
         if user_json.is_some() {
             crate::auth::set_request_user(&self.state, request_id, user_json);
         }
 
-        // Mark the request as executing, and wire the cancel flag through so
-        // native ops spawned inside the handler can observe cancellation.
-        {
-            let mut s = self.state.borrow_mut();
-            s.executing_request_id = Some(request_id);
-            s.executing_request_cancel = Some(ctx.cancel.clone());
-        }
+        self.state.borrow_mut().executing_request_id = Some(request_id);
 
         // Native RPC resolves a retained procedure and owns its eventual result.
         // Other requests try fetchFast before the ordinary fetch handler.
@@ -2437,7 +2515,12 @@ impl RuntimeInner {
         let mut pending_rpc_lifetime: Option<crate::rpc::lifetime::RequestLifetime> = None;
         let mut subscriptions = std::mem::take(&mut self.subscriptions);
         let dispatch_result: Result<DispatchResult, v8::Global<v8::Promise>> =
-            enter_v8!(self, |scope| {
+            enter_v8!(self, |scope| 'start: {
+                let Some(minted) = RequestToken::mint(scope, Rc::clone(&control)) else {
+                    break 'start Ok(DispatchResult::Error(REQUEST_NOT_STARTED.to_string()));
+                };
+                token = Some(minted.clone());
+                let invocation_context = InvocationContext::request(minted, context_user);
                 crate::core::invocation::with_context(scope, &invocation_context, |scope| 'dispatch: {
 
                 if let Some(rpc_id) = subscription_id_str {
@@ -2655,6 +2738,7 @@ impl RuntimeInner {
         if self.check_v8_terminated() {
             self.clear_executing_request();
             self.discard_request_state(request_id);
+            self.stop_unpending_request(request_id, &control);
             return crate::FetchOutcome::Response {
                 status: 503,
                 headers: vec![("content-type".into(), "application/json".into())],
@@ -2672,6 +2756,10 @@ impl RuntimeInner {
 
         let cpu_elapsed = crate::core::init::thread_cpu_time().saturating_sub(dispatch_cpu_started);
 
+        // Answered in its dispatch: nothing it left running is refused.
+        if dispatch_result.is_ok() {
+            control.answer();
+        }
         match dispatch_result {
             Ok(DispatchResult::HttpResponse(info)) => {
                 self.clear_executing_request();
@@ -2743,8 +2831,9 @@ impl RuntimeInner {
                 // `discard_request_state` here — only after settle.
                 //
                 self.clear_executing_request();
+                let token = token.expect("a pending request was dispatched under its token");
                 self.store_fetch_pending(
-                    request_id, promise, ctx, cpu_elapsed, request_started, pending_origin,
+                    request_id, promise, token, ctx, cpu_elapsed, request_started, pending_origin,
                     pending_rpc_call, pending_rpc_lifetime,
                 )
             }
@@ -2761,6 +2850,7 @@ impl RuntimeInner {
         &mut self,
         request_id: u64,
         promise: v8::Global<v8::Promise>,
+        token: RequestToken,
         ctx: crate::RequestCtx,
         cpu_accumulated: Duration,
         wall_start: Instant,
@@ -2775,7 +2865,8 @@ impl RuntimeInner {
             reply: PendingReply::Fetch(tx),
             cpu_accumulated,
             wall_start,
-            cancel: ctx.cancel.clone(),
+            token,
+            stop_cause: None,
             origin,
             rpc_call,
             rpc_lifetime,
@@ -2792,6 +2883,7 @@ impl RuntimeInner {
         &mut self,
         request_id: u64,
         promise: v8::Global<v8::Promise>,
+        token: RequestToken,
         ctx: crate::RequestCtx,
         cpu_accumulated: Duration,
         wall_start: Instant,
@@ -2803,7 +2895,8 @@ impl RuntimeInner {
             reply: PendingReply::Workflow(tx),
             cpu_accumulated,
             wall_start,
-            cancel: ctx.cancel.clone(),
+            token,
+            stop_cause: None,
             origin: PendingOrigin::Workflow,
             rpc_call: None,
             rpc_lifetime: None,
@@ -2881,21 +2974,7 @@ impl RuntimeInner {
             }
         }
 
-        {
-            let mut s = self.state.borrow_mut();
-
-            for op_future in s.spawned_ops.drain(..) {
-                work.pending_ops.push(op_future);
-            }
-
-            for timer in s.spawned_timers.drain(..) {
-                let SpawnedTimer { id, delay, interval } = timer;
-                work.pending_timers.push(Box::pin(async move {
-                    compio::time::sleep(delay).await;
-                    TimerResult { id, interval }
-                }));
-            }
-        }
+        work.take_queued(&mut self.state.borrow_mut());
 
         // Fire zero-delay timers inline
         self.fire_ready_timers_pump(work);
@@ -2919,7 +2998,6 @@ impl RuntimeInner {
             |state| {
                 let mut state = state.borrow_mut();
                 state.executing_request_id = None;
-                state.executing_request_cancel = None;
             },
             move |scope, state| {
                 for stream_id in pending {
@@ -2993,290 +3071,26 @@ impl RuntimeInner {
 
     /// Handle a completed op result (pump path). Enters V8 to resolve the
     /// promise, then checks if any pending requests settled.
-    fn handle_op_result_pump(&mut self, result: OpResult, work: &mut AsyncWork) {
+    fn handle_op_result_pump(&mut self, settled: SettledOp, work: &mut AsyncWork) {
+        let SettledOp { owner, result } = settled;
         match result {
-            OpResult::Completed { op_id, value, request_id } => {
-                let invocation_context =
-                    crate::core::invocation::InvocationContext::from_request_id(
-                        &self.state,
-                        request_id,
-                    );
-                if let Some(rid) = request_id {
-                    // Restore the owning request's cancel flag so any new fetches
-                    // spawned by the V8 callback inherit the same cancellation.
-                    let cancel = self.pending_requests.get(&rid).map(|r| r.cancel.clone());
-                    let mut s = self.state.borrow_mut();
-                    s.executing_request_id = Some(rid);
-                    s.executing_request_cancel = cancel;
-                }
-
-                let cpu_started = crate::core::init::thread_cpu_time();
-
-                self.arm_cpu_timer();
-                let settled_results = enter_v8!(self, |scope| {
-                    crate::core::invocation::with_context(scope, &invocation_context, |scope| {
-                        crate::dispatch::resolve_op(scope, &self.state, op_id, &value);
-                        collect_settled_promises(
-                            scope,
-                            &mut self.pending_requests,
-                            &self.state,
-                        )
-                    })
+            OpResult::Completed { op_id, value } => {
+                self.settle_op(owner.as_ref(), work, move |scope, state| {
+                    crate::dispatch::resolve_op(scope, state, op_id, &value);
                 });
-                self.disarm_cpu_timer();
-
-                if self.check_v8_terminated() {
-                    // Only error the request whose JS was executing when the timer fired
-                    if let Some(rid) = request_id
-                        && let Some(req) = self.pending_requests.remove(&rid)
-                    {
-                        send_pending_error(req, self.termination_message());
-                    }
-                    self.clear_executing_request();
-                    self.drain_new_tasks_into(work);
-                    return;
-                }
-
-                let cpu_elapsed = crate::core::init::thread_cpu_time().saturating_sub(cpu_started);
-
-                if let Some(rid) = request_id
-                    && let Some(req) = self.pending_requests.get_mut(&rid)
-                {
-                    req.cpu_accumulated += cpu_elapsed;
-                }
-
-                for (id, req, settled) in settled_results {
-                    self.send_settled_reply_any(id, req, settled, cpu_elapsed);
-                }
-
-                // CPU limit check for the owning request
-                if let Some(rid) = request_id {
-                    self.check_cpu_limit(rid);
-                }
-
-                self.cleanup_cancelled_requests();
-                self.clear_executing_request();
-
-                // Drain new tasks spawned by the V8 callback
-                self.drain_new_tasks_into(work);
             }
-            OpResult::Failed { op_id, error, request_id } => {
-                let invocation_context =
-                    crate::core::invocation::InvocationContext::from_request_id(
-                        &self.state,
-                        request_id,
-                    );
-                if let Some(rid) = request_id {
-                    let cancel = self.pending_requests.get(&rid).map(|r| r.cancel.clone());
-                    let mut s = self.state.borrow_mut();
-                    s.executing_request_id = Some(rid);
-                    s.executing_request_cancel = cancel;
-                }
-
-                let cpu_started = crate::core::init::thread_cpu_time();
-
-                self.arm_cpu_timer();
-                let settled_results = enter_v8!(self, |scope| {
-                    crate::core::invocation::with_context(scope, &invocation_context, |scope| {
-                        crate::dispatch::reject_op(scope, &self.state, op_id, &error);
-                        collect_settled_promises(
-                            scope,
-                            &mut self.pending_requests,
-                            &self.state,
-                        )
-                    })
+            OpResult::Failed { op_id, error } => {
+                self.settle_op(owner.as_ref(), work, move |scope, state| {
+                    crate::dispatch::reject_op(scope, state, op_id, &error);
                 });
-                self.disarm_cpu_timer();
-
-                if self.check_v8_terminated() {
-                    if let Some(rid) = request_id
-                        && let Some(req) = self.pending_requests.remove(&rid)
-                    {
-                        send_pending_error(req, self.termination_message());
-                    }
-                    self.clear_executing_request();
-                    self.drain_new_tasks_into(work);
-                    return;
-                }
-
-                let cpu_elapsed = crate::core::init::thread_cpu_time().saturating_sub(cpu_started);
-
-                if let Some(rid) = request_id
-                    && let Some(req) = self.pending_requests.get_mut(&rid)
-                {
-                    req.cpu_accumulated += cpu_elapsed;
-                }
-
-                for (id, req, settled) in settled_results {
-                    self.send_settled_reply_any(id, req, settled, cpu_elapsed);
-                }
-
-                if let Some(rid) = request_id {
-                    self.check_cpu_limit(rid);
-                }
-
-                self.cleanup_cancelled_requests();
-                self.clear_executing_request();
-
-                self.drain_new_tasks_into(work);
             }
-            OpResult::JsValue { resolver, value, request_id } => {
-                let invocation_context =
-                    crate::core::invocation::InvocationContext::from_request_id(
-                        &self.state,
-                        request_id,
-                    );
+            OpResult::JsValue { resolver, value } => {
                 // Class-method async result: resolve/reject the bound
                 // resolver with a real V8 value.
-                if let Some(rid) = request_id {
-                    let cancel = self.pending_requests.get(&rid).map(|r| r.cancel.clone());
-                    let mut s = self.state.borrow_mut();
-                    s.executing_request_id = Some(rid);
-                    s.executing_request_cancel = cancel;
-                }
-
-                let cpu_started = crate::core::init::thread_cpu_time();
-
-                self.arm_cpu_timer();
-                let settled_results = enter_v8!(self, |scope| {
-                    crate::core::invocation::with_context(scope, &invocation_context, |scope| {
-                    let r = v8::Local::new(scope, &resolver);
-                    match value {
-                        ResolveValue::Undefined => {
-                            r.resolve(scope, v8::undefined(scope).into());
-                        }
-                        ResolveValue::JsGlobal(g) => {
-                            let v = v8::Local::new(scope, &g);
-                            r.resolve(scope, v);
-                        }
-                        ResolveValue::Bytes(bytes) => {
-                            let len = bytes.len();
-                            let ab = v8::ArrayBuffer::new(scope, len);
-                            let store = ab.get_backing_store();
-                            for (i, &b) in bytes.iter().enumerate() {
-                                store[i].set(b);
-                            }
-                            let u8a = v8::Uint8Array::new(scope, ab, 0, len).unwrap();
-                            r.resolve(scope, u8a.into());
-                        }
-                        ResolveValue::Fetch(settlement) => match settlement.settle(scope) {
-                            Ok(v) => {
-                                r.resolve(scope, v);
-                            }
-                            Err(v) => {
-                                r.reject(scope, v);
-                            }
-                        },
-                        ResolveValue::Reject(g) => {
-                            let v = v8::Local::new(scope, &g);
-                            r.reject(scope, v);
-                        }
-                        ResolveValue::String(s) => {
-                            crate::strings::resolve_text(scope, r, &s);
-                        }
-                        ResolveValue::Json(s) => {
-                            let v = v8::String::new(scope, &s)
-                                .and_then(|js| v8::json::parse(scope, js))
-                                .unwrap_or_else(|| v8::null(scope).into());
-                            r.resolve(scope, v);
-                        }
-                        ResolveValue::Native(value) => match value.into_v8(scope) {
-                            Ok(value) => {
-                                r.resolve(scope, value);
-                            }
-                            Err(error) => {
-                                let exception = error.to_exception(scope);
-                                r.reject(scope, exception);
-                            }
-                        },
-                        ResolveValue::Bool(b) => {
-                            let v = v8::Boolean::new(scope, b);
-                            r.resolve(scope, v.into());
-                        }
-                        ResolveValue::U32(n) => {
-                            let v = v8::Integer::new_from_unsigned(scope, n);
-                            r.resolve(scope, v.into());
-                        }
-                        ResolveValue::I32(n) => {
-                            let v = v8::Integer::new(scope, n);
-                            r.resolve(scope, v.into());
-                        }
-                        ResolveValue::F64(n) => {
-                            let v = v8::Number::new(scope, n);
-                            r.resolve(scope, v.into());
-                        }
-                        ResolveValue::BigInt(n) => {
-                            let v = v8::BigInt::new_from_i64(scope, n);
-                            r.resolve(scope, v.into());
-                        }
-                        ResolveValue::RejectError(e) => {
-                            // Materialise the typed exception per
-                            // OpError::kind via the shared lowering (the
-                            // same one plugin-db's native tx orchestrator
-                            // uses to reject directly) so a throw and a
-                            // Promise rejection produce identical error
-                            // objects. Includes the JsValue passthrough
-                            // that re-throws the captured user exception
-                            // verbatim.
-                            let exc = e.to_exception(scope);
-                            r.reject(scope, exc);
-                        }
-                        ResolveValue::Continuation(run) => {
-                            // The orchestrator's begin/savepoint
-                            // step finished; run the plugin-supplied
-                            // continuation in this live scope. It owns
-                            // whichever resolver it settles (it does NOT
-                            // touch `r`, the throwaway resolver on this
-                            // envelope) — typically it mints the tx-view,
-                            // calls the creator callback, and attaches
-                            // commit/rollback handlers to the returned
-                            // promise. `state` is the SharedState the
-                            // continuation needs to push the follow-up
-                            // commit/rollback `spawned_ops`.
-                            let state = self.state.clone();
-                            run(scope, &state);
-                        }
-                    }
+                self.settle_op(owner.as_ref(), work, move |scope, state| {
+                    settle_js_value(scope, state, &resolver, value);
                     crate::core::init::perform_microtask_checkpoint(scope);
-                    collect_settled_promises(
-                        scope,
-                        &mut self.pending_requests,
-                        &self.state,
-                    )
-                    })
                 });
-                self.disarm_cpu_timer();
-
-                if self.check_v8_terminated() {
-                    if let Some(rid) = request_id
-                        && let Some(req) = self.pending_requests.remove(&rid)
-                    {
-                        send_pending_error(req, self.termination_message());
-                    }
-                    self.clear_executing_request();
-                    self.drain_new_tasks_into(work);
-                    return;
-                }
-
-                let cpu_elapsed = crate::core::init::thread_cpu_time().saturating_sub(cpu_started);
-
-                if let Some(rid) = request_id
-                    && let Some(req) = self.pending_requests.get_mut(&rid)
-                {
-                    req.cpu_accumulated += cpu_elapsed;
-                }
-
-                for (id, req, settled) in settled_results {
-                    self.send_settled_reply_any(id, req, settled, cpu_elapsed);
-                }
-
-                if let Some(rid) = request_id {
-                    self.check_cpu_limit(rid);
-                }
-
-                self.cleanup_cancelled_requests();
-                self.clear_executing_request();
-                self.drain_new_tasks_into(work);
             }
             OpResult::Cancelled => {}
             OpResult::WebSocketEvent { ws_id } => {
@@ -3320,7 +3134,6 @@ impl RuntimeInner {
                     |state| {
                         let mut s = state.borrow_mut();
                         s.executing_request_id = None;
-                        s.executing_request_cancel = None;
                         s.executing_ws_user = s.ws_user.get(&ws_id).cloned();
                     },
                     |scope, state| {
@@ -3362,7 +3175,6 @@ impl RuntimeInner {
                     |state| {
                         let mut s = state.borrow_mut();
                         s.executing_request_id = None;
-                        s.executing_request_cancel = None;
                         s.executing_ws_user = None;
                     },
                     |scope, state| {
@@ -3373,6 +3185,70 @@ impl RuntimeInner {
                 );
             }
         }
+    }
+
+    /// Settle one finished op in the context of the request it was admitted
+    /// for, whether or not that request is still pending: its CPU is that
+    /// request's, and the code the settlement runs is that request's code, so
+    /// a host op it makes passes the gate for that request.
+    fn settle_op(
+        &mut self,
+        owner: Option<&RequestToken>,
+        work: &mut AsyncWork,
+        settle: impl FnOnce(&mut v8::PinScope, &SharedState),
+    ) {
+        let request_id = owner.map(RequestToken::id);
+        let invocation_context = owner.map_or_else(InvocationContext::default, |token| {
+            InvocationContext::of_request(&self.state, token)
+        });
+        self.state.borrow_mut().executing_request_id = request_id;
+
+        let cpu_started = crate::core::init::thread_cpu_time();
+
+        self.arm_cpu_timer();
+        let state = self.state.clone();
+        let settled_results = enter_v8!(self, |scope| {
+            crate::core::invocation::with_context(scope, &invocation_context, |scope| {
+                settle(scope, &state);
+                collect_settled_promises(scope, &mut self.pending_requests, &self.state)
+            })
+        });
+        self.disarm_cpu_timer();
+
+        if self.check_v8_terminated() {
+            // Only stop the request whose JS was executing when the timer fired.
+            // The pump answers it at the top of its next iteration, after it has
+            // taken any stop the termination left the isolate due.
+            if let Some(rid) = request_id {
+                self.stop_request(rid, self.termination_message());
+            }
+            self.clear_executing_request();
+            self.drain_new_tasks_into(work);
+            return;
+        }
+
+        let cpu_elapsed = crate::core::init::thread_cpu_time().saturating_sub(cpu_started);
+
+        if let Some(rid) = request_id
+            && let Some(req) = self.pending_requests.get_mut(&rid)
+        {
+            req.cpu_accumulated += cpu_elapsed;
+        }
+
+        for (id, req, settled) in settled_results {
+            self.send_settled_reply_any(id, req, settled, cpu_elapsed);
+        }
+
+        // CPU limit check for the owning request
+        if let Some(rid) = request_id {
+            self.check_cpu_limit(rid);
+        }
+
+        self.cleanup_cancelled_requests();
+        self.clear_executing_request();
+
+        // Drain new tasks spawned by the V8 callback
+        self.drain_new_tasks_into(work);
     }
 
     fn dispatch_native_turn<Prep, Dispatch>(
@@ -3440,7 +3316,6 @@ impl RuntimeInner {
             |state| {
                 let mut state = state.borrow_mut();
                 state.executing_request_id = None;
-                state.executing_request_cancel = None;
                 state.executing_ws_user = state.ws_user.get(&ws_id).cloned();
             },
             |scope, state| dispatch(&mut subscriptions, scope, state),
@@ -3456,10 +3331,7 @@ impl RuntimeInner {
         let owner_request_id = self.state.borrow().timer_owner.get(&id).copied();
 
         if let Some(rid) = owner_request_id {
-            let cancel = self.pending_requests.get(&rid).map(|r| r.cancel.clone());
-            let mut s = self.state.borrow_mut();
-            s.executing_request_id = Some(rid);
-            s.executing_request_cancel = cancel;
+            self.state.borrow_mut().executing_request_id = Some(rid);
         }
 
         let cpu_started = crate::core::init::thread_cpu_time();
@@ -3472,11 +3344,10 @@ impl RuntimeInner {
         self.disarm_cpu_timer();
 
         if self.check_v8_terminated() {
-            // Only error the request whose timer callback was executing
-            if let Some(rid) = owner_request_id
-                && let Some(req) = self.pending_requests.remove(&rid)
-            {
-                send_pending_error(req, self.termination_message());
+            // Only stop the request whose timer callback was executing; the
+            // pump answers it as it does in `settle_op`.
+            if let Some(rid) = owner_request_id {
+                self.stop_request(rid, self.termination_message());
             }
             self.clear_executing_request();
             self.drain_new_tasks_into(work);
@@ -3549,10 +3420,7 @@ impl RuntimeInner {
             let owner_request_id = self.state.borrow().timer_owner.get(&timer_id).copied();
 
             if let Some(rid) = owner_request_id {
-                let cancel = self.pending_requests.get(&rid).map(|r| r.cancel.clone());
-                let mut s = self.state.borrow_mut();
-                s.executing_request_id = Some(rid);
-                s.executing_request_cancel = cancel;
+                self.state.borrow_mut().executing_request_id = Some(rid);
             }
 
             let cpu_started = crate::core::init::thread_cpu_time();
@@ -3565,11 +3433,10 @@ impl RuntimeInner {
             self.disarm_cpu_timer();
 
             if self.check_v8_terminated() {
-                // Only error the request whose timer callback was executing
-                if let Some(rid) = owner_request_id
-                    && let Some(req) = self.pending_requests.remove(&rid)
-                {
-                    send_pending_error(req, self.termination_message());
+                // Only stop the request whose timer callback was executing;
+                // the pump answers it as it does in `settle_op`.
+                if let Some(rid) = owner_request_id {
+                    self.stop_request(rid, self.termination_message());
                 }
                 self.clear_executing_request();
                 self.drain_new_tasks_into(work);
@@ -3599,19 +3466,7 @@ impl RuntimeInner {
             self.clear_executing_request();
 
             // Drain new spawned ops/timers from the callback
-            {
-                let mut s = self.state.borrow_mut();
-                for op_future in s.spawned_ops.drain(..) {
-                    work.pending_ops.push(op_future);
-                }
-                for timer in s.spawned_timers.drain(..) {
-                    let SpawnedTimer { id, delay, interval } = timer;
-                    work.pending_timers.push(Box::pin(async move {
-                        compio::time::sleep(delay).await;
-                        TimerResult { id, interval }
-                    }));
-                }
-            }
+            work.take_queued(&mut self.state.borrow_mut());
         }
     }
 
@@ -3709,7 +3564,6 @@ impl RuntimeInner {
     fn clear_executing_request(&self) {
         let mut s = self.state.borrow_mut();
         s.executing_request_id = None;
-        s.executing_request_cancel = None;
     }
 
     /// Drop all per-request state (user, bound ctx, logs) for `request_id`.
@@ -3724,16 +3578,59 @@ impl RuntimeInner {
         s.per_request_logs.remove(&request_id);
     }
 
-    /// Check if a pending request has exceeded its CPU limit. If so, remove
-    /// it and send an error via the reply slot.
+    /// Check if a pending request has exceeded its CPU limit. If so, stop it
+    /// ([`Self::stop_request`]); the caller's `cleanup_cancelled_requests`
+    /// answers it.
     fn check_cpu_limit(&mut self, request_id: u64) {
         let Some(cpu_limit) = self.cpu_limit else { return };
-        let Some(req) = self.pending_requests.get(&request_id) else { return };
-        if req.cpu_accumulated > cpu_limit {
-            let req = self.pending_requests.remove(&request_id).unwrap();
-            let _logs = self.drain_request_logs(request_id);
-            send_pending_error(req, self.termination_message());
+        if self
+            .pending_requests
+            .get(&request_id)
+            .is_some_and(|req| req.cpu_accumulated > cpu_limit)
+        {
+            self.stop_request(request_id, self.termination_message());
         }
+    }
+
+    /// End a pending request the runtime stops itself, for `cause`.
+    ///
+    /// The stop is recorded on the request's control at once
+    /// ([`RequestControl::stop`]): from now on [`crate::state::admit_op`]
+    /// refuses every host op its continuations make, what waits on its end
+    /// (the rollback of a transaction it has open, the release of its
+    /// downloads) runs now, and whether a commit of its is in flight is
+    /// recorded as of this moment. The stop then takes the path a host
+    /// cancellation takes: `cleanup_cancelled_requests` answers it (with
+    /// `cause`, not a cancellation), aborts its signal and releases its uploads
+    /// and timers. The isolate keeps serving its other requests.
+    fn stop_request(&mut self, request_id: u64, cause: &'static str) {
+        if let Some(req) = self.pending_requests.get_mut(&request_id) {
+            req.stop_cause.get_or_insert(cause);
+            req.token.control().stop();
+            // A stop lands in the middle of a pump pass, and the pass still
+            // fires the zero-delay timers queued so far before the cleanup
+            // runs. None of them may be this request's.
+            self.drop_timers_owned_by(request_id);
+        }
+    }
+
+    /// End a request the runtime stopped before it became pending: its
+    /// synchronous dispatch was terminated, so it was answered there. What the
+    /// pending path does in `stop_request` and `cleanup_cancelled_requests`
+    /// happens here: the stop is recorded on its control, so its
+    /// continuations are refused their host ops, and its uploads and timers
+    /// are released.
+    fn stop_unpending_request(&mut self, request_id: u64, control: &RequestControl) {
+        control.stop();
+        self.release_request(request_id, crate::rpc::lifetime::Cancellation::Cancelled);
+    }
+
+    /// Release what an ended request holds: the uploads it started end with
+    /// it, their sources cancelled and their bodies stopped, and its timers
+    /// never fire.
+    fn release_request(&mut self, request_id: u64, reason: crate::rpc::lifetime::Cancellation) {
+        crate::streams::stream_forwarder::cancel_uploads_owned_by(&self.state, request_id, reason);
+        self.drop_timers_owned_by(request_id);
     }
 
     /// Record `elapsed` wall time the pump spent running this isolate's
@@ -3994,17 +3891,24 @@ impl RuntimeInner {
         );
     }
 
+    /// The one path every early end of a pending request takes: its host
+    /// cancelled it, its RPC deadline passed, or the runtime stopped it
+    /// ([`Self::stop_request`]). Each such request is removed and answered, an
+    /// RPC's signal is aborted, and what it holds is released. Its flag is set
+    /// by then, so [`crate::state::admit_op`] refuses the host ops its
+    /// remaining continuations make.
     fn cleanup_cancelled_requests(&mut self) {
         use crate::rpc::lifetime::Cancellation;
         let now = self.state.borrow().deadline_now();
         let cancelled: Vec<_> = self.pending_requests.iter().filter_map(|(&id, request)| {
             request.rpc_lifetime.as_ref().and_then(|request| request.cancellation(now))
-                .or_else(|| request.cancel.is_cancelled().then_some(Cancellation::Cancelled))
+                .or_else(|| request.token.control().has_ended().then_some(Cancellation::Cancelled))
                 .map(|reason| (id, reason))
         }).collect();
 
         for (id, reason) in cancelled {
             let Some(req) = self.pending_requests.remove(&id) else { continue; };
+            let mid_commit = req.token.control().stop();
             if let Some(request) = &req.rpc_lifetime {
                 request.cancel.cancel();
                 self.enter_isolate();
@@ -4026,16 +3930,20 @@ impl RuntimeInner {
                 for (id, req, result) in settled {
                     self.send_settled_reply_any(id, req, result, Duration::ZERO);
                 }
-                let response = crate::rpc::dispatch::response::into_http(reason.response(), id);
-                self.send_settled_reply_any(id, req, SettledResult::Http(response), Duration::ZERO);
+                if mid_commit || req.stop_cause.is_some() {
+                    let _logs = self.drain_request_logs(id);
+                    let cause = req.stop_cause.unwrap_or_else(|| reason.message());
+                    send_pending_error(req, early_end_error(cause, mid_commit));
+                } else {
+                    let response = crate::rpc::dispatch::response::into_http(reason.response(), id);
+                    self.send_settled_reply_any(id, req, SettledResult::Http(response), Duration::ZERO);
+                }
             } else {
-                send_pending_error(req, "Request timed out");
+                let cause = req.stop_cause.unwrap_or("Request timed out");
+                send_pending_error(req, early_end_error(cause, mid_commit));
                 let _logs = self.drain_request_logs(id);
             }
-            // Uploads the request started end with it: their sources are
-            // cancelled and their bodies stop.
-            crate::streams::stream_forwarder::cancel_uploads_owned_by(&self.state, id, reason);
-            self.drop_timers_owned_by(id);
+            self.release_request(id, reason);
         }
     }
 
@@ -4059,6 +3967,111 @@ impl RuntimeInner {
     }
 }
 
+/// Settle `resolver` with an op's [`ResolveValue`], in the pump's scope.
+fn settle_js_value(
+    scope: &mut v8::PinScope,
+    state: &SharedState,
+    resolver: &v8::Global<v8::PromiseResolver>,
+    value: ResolveValue,
+) {
+    let r = v8::Local::new(scope, resolver);
+    match value {
+        ResolveValue::Undefined => {
+            r.resolve(scope, v8::undefined(scope).into());
+        }
+        ResolveValue::JsGlobal(g) => {
+            let v = v8::Local::new(scope, &g);
+            r.resolve(scope, v);
+        }
+        ResolveValue::Bytes(bytes) => {
+            let len = bytes.len();
+            let ab = v8::ArrayBuffer::new(scope, len);
+            let store = ab.get_backing_store();
+            for (i, &b) in bytes.iter().enumerate() {
+                store[i].set(b);
+            }
+            let u8a = v8::Uint8Array::new(scope, ab, 0, len).unwrap();
+            r.resolve(scope, u8a.into());
+        }
+        ResolveValue::Fetch(settlement) => match settlement.settle(scope) {
+            Ok(v) => {
+                r.resolve(scope, v);
+            }
+            Err(v) => {
+                r.reject(scope, v);
+            }
+        },
+        ResolveValue::Reject(g) => {
+            let v = v8::Local::new(scope, &g);
+            r.reject(scope, v);
+        }
+        ResolveValue::String(s) => {
+            crate::strings::resolve_text(scope, r, &s);
+        }
+        ResolveValue::Json(s) => {
+            let v = v8::String::new(scope, &s)
+                .and_then(|js| v8::json::parse(scope, js))
+                .unwrap_or_else(|| v8::null(scope).into());
+            r.resolve(scope, v);
+        }
+        ResolveValue::Native(value) => match value.into_v8(scope) {
+            Ok(value) => {
+                r.resolve(scope, value);
+            }
+            Err(error) => {
+                let exception = error.to_exception(scope);
+                r.reject(scope, exception);
+            }
+        },
+        ResolveValue::Bool(b) => {
+            let v = v8::Boolean::new(scope, b);
+            r.resolve(scope, v.into());
+        }
+        ResolveValue::U32(n) => {
+            let v = v8::Integer::new_from_unsigned(scope, n);
+            r.resolve(scope, v.into());
+        }
+        ResolveValue::I32(n) => {
+            let v = v8::Integer::new(scope, n);
+            r.resolve(scope, v.into());
+        }
+        ResolveValue::F64(n) => {
+            let v = v8::Number::new(scope, n);
+            r.resolve(scope, v.into());
+        }
+        ResolveValue::BigInt(n) => {
+            let v = v8::BigInt::new_from_i64(scope, n);
+            r.resolve(scope, v.into());
+        }
+        ResolveValue::RejectError(e) => {
+            // Materialise the typed exception per
+            // OpError::kind via the shared lowering (the
+            // same one plugin-db's native tx orchestrator
+            // uses to reject directly) so a throw and a
+            // Promise rejection produce identical error
+            // objects. Includes the JsValue passthrough
+            // that re-throws the captured user exception
+            // verbatim.
+            let exc = e.to_exception(scope);
+            r.reject(scope, exc);
+        }
+        ResolveValue::Continuation(run) => {
+            // The orchestrator's begin/savepoint
+            // step finished; run the plugin-supplied
+            // continuation in this live scope. It owns
+            // whichever resolver it settles (it does NOT
+            // touch `r`, the throwaway resolver on this
+            // envelope); typically it mints the tx-view,
+            // calls the creator callback, and attaches
+            // commit/rollback handlers to the returned
+            // promise. `state` is the SharedState the
+            // continuation needs to queue the follow-up
+            // commit or rollback.
+            run(scope, state);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Free function: collect settled promises (avoids double-borrow in enter_v8!)
 // ---------------------------------------------------------------------------
@@ -4074,7 +4087,7 @@ fn collect_settled_promises(
     let settled_ids: Vec<u64> = pending_requests
         .iter()
         .filter_map(|(&id, req)| {
-            if req.cancel.is_cancelled() || req.rpc_lifetime.as_ref()
+            if req.token.control().has_ended() || req.rpc_lifetime.as_ref()
                 .is_some_and(|request| request.cancellation(state.borrow().deadline_now()).is_some())
             { return None; }
             let p = v8::Local::new(scope, &req.promise);
@@ -4090,8 +4103,7 @@ fn collect_settled_promises(
         .into_iter()
         .filter_map(|id| {
             let mut req = pending_requests.remove(&id)?;
-            let invocation_context =
-                crate::core::invocation::InvocationContext::from_request_id(state, Some(id));
+            let invocation_context = InvocationContext::of_request(state, &req.token);
             let result = crate::core::invocation::with_context(
                 scope,
                 &invocation_context,
@@ -4113,7 +4125,12 @@ fn collect_settled_promises(
                 },
             );
             match result {
-                Ok(result) => Some((id, req, result)),
+                Ok(result) => {
+                    // Answered with its own result: nothing it left running is
+                    // refused from now on.
+                    req.token.control().answer();
+                    Some((id, req, result))
+                }
                 Err(promise) => {
                     req.promise = promise;
                     pending_requests.insert(id, req);
@@ -4975,5 +4992,24 @@ mod pump_cpu_budget_tests {
                 "pump_cpu_budget({window:?}, {max_fraction}) must be accepted"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod dispatch_error_tests {
+    use super::DispatchError;
+
+    /// An error that carries a code puts it on the wire beside the message, so
+    /// a caller can branch on it; one without a code keeps the plain
+    /// `{"message","name"}` body.
+    #[test]
+    fn a_coded_dispatch_error_carries_its_code_on_the_wire() {
+        let coded = DispatchError::coded("stopped", 500, "commit_failed_indeterminate");
+        assert_eq!(
+            coded.body(),
+            serde_json::json!({"message": "stopped", "name": "Error", "code": "commit_failed_indeterminate"})
+        );
+        let plain = DispatchError::new("stopped", 500);
+        assert_eq!(plain.body(), serde_json::json!({"message": "stopped", "name": "Error"}));
     }
 }

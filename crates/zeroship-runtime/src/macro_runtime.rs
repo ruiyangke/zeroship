@@ -40,9 +40,12 @@
 // resolver tail. `SharedState` is emitted as the slot type the
 // async-method body fetches off the isolate. `IntoResolveValue` is
 // the trait whose `into_resolve_value` async-method emit calls on
-// the user's return value.
+// the user's return value. `admit_op` is the op gate the async-method
+// body passes before it queues its future.
 pub mod state {
-    pub use crate::state::{IntoResolveValue, OpError, OpErrorKind, OpResult, SharedState};
+    pub use crate::state::{
+        IntoResolveValue, OpError, OpErrorKind, OpResult, SharedState, admit_op,
+    };
 }
 
 // ----- byte_string (WebIDL ByteString) -----

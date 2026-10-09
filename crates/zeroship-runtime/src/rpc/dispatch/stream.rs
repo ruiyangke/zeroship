@@ -114,7 +114,7 @@ fn error_result<'s>(
 ) -> Option<v8::Local<'s, v8::Value>> {
     finish(scope, data);
     let request_id = crate::core::invocation::current_context(scope)
-        .and_then(|context| context.request_id)
+        .and_then(|context| context.request.map(|request| request.id()))
         .unwrap_or_default();
     let error = super::response::exception(scope, &error);
     let bytes = terminal_error(error, request_id).ok()?;

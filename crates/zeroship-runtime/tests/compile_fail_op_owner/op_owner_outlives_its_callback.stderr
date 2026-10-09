@@ -1,0 +1,35 @@
+error[E0521]: borrowed data escapes outside of function
+  --> tests/compile_fail_op_owner/op_owner_outlives_its_callback.rs:13:5
+   |
+10 |   fn callback(scope: &mut v8::PinScope, state: &SharedState) {
+   |               -----
+   |               |
+   |               `scope` is a reference that is only valid in the function body
+   |               has type `&mut PinnedRef<'1, HandleScope<'_>>`
+...
+13 | /     state.borrow_mut().spawn_op(owner, async move {
+14 | |         let _later = kept;
+15 | |         OpResult::Cancelled
+16 | |     });
+   | |      ^
+   | |      |
+   | |______`scope` escapes the function body here
+   |        argument requires that `'1` must outlive `'static`
+
+error[E0521]: borrowed data escapes outside of function
+  --> tests/compile_fail_op_owner/op_owner_outlives_its_callback.rs:13:5
+   |
+10 |   fn callback(scope: &mut v8::PinScope, state: &SharedState) {
+   |               -----
+   |               |
+   |               `scope` is a reference that is only valid in the function body
+   |               has type `&mut PinnedRef<'_, HandleScope<'2>>`
+...
+13 | /     state.borrow_mut().spawn_op(owner, async move {
+14 | |         let _later = kept;
+15 | |         OpResult::Cancelled
+16 | |     });
+   | |      ^
+   | |      |
+   | |______`scope` escapes the function body here
+   |        argument requires that `'2` must outlive `'static`

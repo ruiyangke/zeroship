@@ -707,10 +707,10 @@ fn buffered_response_body_len(response: &HttpResponse) -> u64 {
 }
 
 fn make_error(err: &DispatchError) -> HttpResponse {
-    // Wire: `{"message","name"}` body. Status comes from DispatchError so
-    // JS-thrown errors with `err.status` (e.g. 400 for bad input) reach
-    // the client instead of being flattened to 500.
-    let body = serde_json::json!({ "message": err.message, "name": "Error" });
+    // Wire: `DispatchError::body`. Status comes from DispatchError so
+    // JS-thrown errors with `err.status` (e.g. 400 for bad input) reach the
+    // client instead of being flattened to 500.
+    let body = err.body();
     let status = ntex::http::StatusCode::from_u16(err.status)
         .unwrap_or(ntex::http::StatusCode::INTERNAL_SERVER_ERROR);
     HttpResponse::build(status)

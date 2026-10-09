@@ -349,7 +349,12 @@ mod dispatch {
     fn queued(
         state: &SharedState,
     ) -> Vec<std::pin::Pin<Box<dyn std::future::Future<Output = OpResult>>>> {
-        state.borrow_mut().spawned_ops.drain(..).collect()
+        state
+            .borrow_mut()
+            .take_queued_ops()
+            .into_iter()
+            .map(zeroship_runtime::state::QueuedOp::into_work)
+            .collect()
     }
 
     /// Two inserts issued in one synchronous turn inside a transaction, with

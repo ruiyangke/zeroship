@@ -18,6 +18,41 @@ use zeroship_data_orm::{
 
 thread_local! {
     static QUERIES: RefCell<Vec<RecordedQuery>> = const { RefCell::new(Vec::new()) };
+    static ENDINGS: RefCell<Vec<Ending>> = const { RefCell::new(Vec::new()) };
+    static COMMIT_GATE: RefCell<Option<CommitGate>> = const { RefCell::new(None) };
+}
+
+/// How a transaction session on this thread was ended: the terminal statement
+/// its settle sent, or the cleanup a forced end ran instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ending {
+    Settled(SettleIntent),
+    CleanedUp,
+}
+
+/// Every session ending recorded on this thread, in order.
+pub fn endings() -> Vec<Ending> {
+    ENDINGS.with_borrow(Clone::clone)
+}
+
+struct CommitGate {
+    parked: futures::channel::oneshot::Sender<()>,
+    release: futures::channel::oneshot::Receiver<()>,
+}
+
+/// Hold the next COMMIT a session on this thread sends until the returned
+/// sender fires. The returned receiver fires once the COMMIT is held, which is
+/// the moment its outcome becomes the database's to decide.
+pub fn hold_next_commit() -> (
+    futures::channel::oneshot::Receiver<()>,
+    futures::channel::oneshot::Sender<()>,
+) {
+    let (parked, parked_rx) = futures::channel::oneshot::channel();
+    let (release_tx, release) = futures::channel::oneshot::channel();
+    COMMIT_GATE.with_borrow_mut(|gate| {
+        assert!(gate.replace(CommitGate { parked, release }).is_none(), "one held commit at a time");
+    });
+    (parked_rx, release_tx)
 }
 
 #[derive(Clone, Debug)]
@@ -34,8 +69,13 @@ fn record(sql: &str, params: &[Value]) {
         })
     });
 }
+/// Every query recorded on this thread, in order.
+pub fn queries() -> Vec<RecordedQuery> {
+    QUERIES.with_borrow(Clone::clone)
+}
 pub(crate) fn clear() {
     QUERIES.with_borrow_mut(Vec::clear);
+    ENDINGS.with_borrow_mut(Vec::clear);
 }
 pub(crate) fn bulk_statements() -> Vec<String> {
     QUERIES.with_borrow(|queries| {
@@ -208,9 +248,18 @@ impl DriverSession for RecordingSession {
         self.0.exec(sql, params).await
     }
     async fn settle(&self, intent: SettleIntent) -> (TerminalResult, Option<DbError>) {
+        ENDINGS.with_borrow_mut(|endings| endings.push(Ending::Settled(intent)));
+        let gate = (intent == SettleIntent::Commit)
+            .then(|| COMMIT_GATE.with_borrow_mut(Option::take))
+            .flatten();
+        if let Some(CommitGate { parked, release }) = gate {
+            let _ = parked.send(());
+            release.await.expect("the test releases the held commit");
+        }
         self.0.settle(intent).await
     }
     async fn cleanup(&self) -> CleanupAck {
+        ENDINGS.with_borrow_mut(|endings| endings.push(Ending::CleanedUp));
         self.0.cleanup().await
     }
     fn canceller(&self) -> Option<CancellationHandle> {

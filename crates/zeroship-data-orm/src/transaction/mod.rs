@@ -162,6 +162,45 @@ impl TxAdmission {
     pub fn handed_to_reducer(mut self) {
         self.armed = false;
     }
+
+    /// [`Self::handed_to_reducer`], keeping what can still end this
+    /// transaction early.
+    #[must_use]
+    pub fn handed_to_reducer_abandonable(mut self) -> TxAbandon {
+        self.armed = false;
+        TxAbandon {
+            route: self.route.clone(),
+            owner: self.owner.clone(),
+            completion: self.completion.clone(),
+        }
+    }
+}
+
+/// What can still end an admitted top-level transaction early.
+///
+/// It is for a caller whose reason to end the transaction arrives from outside
+/// it once its reducer owns its release: the request it was opened for has
+/// ended.
+#[derive(Debug)]
+pub struct TxAbandon {
+    route: DbRoute,
+    owner: crate::OrmContext,
+    completion: driver::Completion,
+}
+
+impl TxAbandon {
+    /// Roll the transaction back now, and release its lane, if it is still
+    /// the transaction this was issued for. A transaction that has settled is
+    /// left as it is, and so is one whose commit is already under way: the
+    /// reducer's single cleanup gate refuses a cancellation after a terminal
+    /// statement is promised, so a commit already sent completes.
+    pub fn abandon(&self) {
+        self.owner.with(|| {
+            if crate::tx_lanes::with(|l| self.completion.is_current_in(l, &self.route)) {
+                driver::cancel_admission(&self.route, self.completion.clone());
+            }
+        });
+    }
 }
 
 impl Drop for TxAdmission {
@@ -513,6 +552,32 @@ pub fn exec_settle(
     success: bool,
     frame: Option<reducer::frames::FrameId>,
 ) -> impl std::future::Future<Output = SettleOutcome> + use<> {
+    exec_settle_checked(route, success, frame, || Ok(()))
+}
+
+/// [`exec_settle`] with a last check on a commit.
+///
+/// `commit_check` runs once nothing the callback started still holds the
+/// frame, right before the terminal statement is chosen, and only when that
+/// statement would commit (or release). An `Err` rolls the frame back instead,
+/// and the settle fails with that error, as it does for unfinished work. An
+/// `Ok` carries what the caller holds while the commit is in flight; it is
+/// dropped once the commit's outcome is known. A statement already sent is not
+/// recalled: the check decides only one that has not been.
+#[expect(
+    clippy::future_not_send,
+    reason = "settlement drives this thread's compio transaction lane"
+)]
+pub fn exec_settle_checked<Check, Held>(
+    route: &DbRoute,
+    success: bool,
+    frame: Option<reducer::frames::FrameId>,
+    commit_check: Check,
+) -> impl std::future::Future<Output = SettleOutcome> + use<Check, Held>
+where
+    Check: FnOnce() -> Result<Held, DbError> + 'static,
+    Held: 'static,
+{
     let outstanding = scope::OutstandingWork::sample(route, frame);
     let route = route.clone();
     async move {
@@ -523,9 +588,20 @@ pub fn exec_settle(
             }
             None => false,
         };
-        let outcome = settle_frame(&route, success && !unfinished, frame).await;
+        let (held, refused) = if success && !unfinished {
+            match commit_check() {
+                Ok(held) => (Some(held), None),
+                Err(error) => (None, Some(error)),
+            }
+        } else {
+            (None, None)
+        };
+        let outcome =
+            settle_frame(&route, success && !unfinished && refused.is_none(), frame).await;
+        drop(held);
         match outcome {
             SettleOutcome::Ok if unfinished => SettleOutcome::SettleErr(scope::work_unfinished()),
+            SettleOutcome::Ok => refused.map_or(SettleOutcome::Ok, SettleOutcome::SettleErr),
             outcome => outcome,
         }
     }
@@ -924,6 +1000,54 @@ mod tests {
                 .expect("count notes after commit");
             assert_eq!(rows[0][0].as_deref(), Some("1"));
             assert!(!crate::tx_lanes::with(|l| l.has_tx_for(&crate::tests::fixtures::harness_route("app_sqlite"))));
+        });
+    }
+
+    /// A commit its check refuses is rolled back, and the settle fails with the
+    /// check's error rather than reporting a commit. The control beside it is
+    /// the commit above, which the same table keeps.
+    #[test]
+    fn sqlite_commit_refused_by_its_check_rolls_back_and_fails_with_the_check() {
+        run(async {
+            let (backend, _dir, _reset) = install_sqlite_backend_for_test();
+            let probe = backend.autocommit_client();
+            backend
+                .execute_fixture_on(
+                    &probe,
+                    "CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT)",
+                    &[],
+                )
+                .await
+                .expect("create table");
+            let route = crate::tests::fixtures::harness_route("app_sqlite");
+
+            exec_begin_or_savepoint(false, None, &test_binding(), test_backend())
+                .await
+                .expect("begin sqlite tx");
+            run_on_tx_conn(&route, "INSERT INTO notes (title) VALUES ('refused')")
+                .await
+                .expect("insert inside sqlite tx");
+
+            let refusal = || -> Result<(), DbError> {
+                Err(DbError::Coded {
+                    code: "commit_check_refused".to_string(),
+                    message: "the check refused the commit".to_string(),
+                    hint: None,
+                })
+            };
+            match exec_settle_checked(&route, true, None, refusal).await {
+                SettleOutcome::SettleErr(DbError::Coded { code, .. }) => {
+                    assert_eq!(code, "commit_check_refused");
+                }
+                other => panic!("expected the check's error, got {other:?}"),
+            }
+
+            let rows = probe
+                .query("SELECT COUNT(*) FROM notes", &[])
+                .await
+                .expect("count notes after the refused commit");
+            assert_eq!(rows[0][0].as_deref(), Some("0"), "the refused commit's row is rolled back");
+            assert!(!crate::tx_lanes::with(|l| l.has_tx_for(&route)));
         });
     }
 

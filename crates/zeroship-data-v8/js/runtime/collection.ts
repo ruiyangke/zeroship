@@ -3,7 +3,7 @@
  * Each method validates inputs against the schema, maps field names to the native
  * format, calls the native driver, and maps results back to the user-facing shape.
  */
-import type { IdLoader } from "./loader";
+import { soleInvocation, type IdLoader, type InvocationKey } from "./loader";
 import { AliasedCollection } from "./read";
 import {
   requireNativeCollection,
@@ -156,6 +156,8 @@ export class Collection<
   private _indexes: readonly NamedIndexSpec[];
   /** Per-collection DataLoader, lazily constructed on first batchable `get(id)`. */
   private _idLoader: IdLoader<Row<S>, IdValue> | null;
+  /** The request each call is made for, which keeps one request's reads out of another's batch. */
+  private _invocationKey: InvocationKey;
   private _mapReadResult: ReadResultMapper;
   declare readonly Id: Id<N, RowId<S>>;
   declare readonly RowInput: RowInput<S>;
@@ -172,6 +174,7 @@ export class Collection<
       naming?: NamingStrategy;
       indexes?: readonly NamedIndexSpec[];
       schemas?: Readonly<Record<string, NormalizedSchema>>;
+      invocationKey?: InvocationKey;
     },
   ) {
     validateCollectionIdentity(schema);
@@ -180,6 +183,7 @@ export class Collection<
     this._native = native;
     this._nativeCol = null;
     this._idLoader = null;
+    this._invocationKey = options?.invocationKey ?? soleInvocation;
 
     const strategy = options?.naming ?? naming.asIs;
     const fieldToCol: Record<string, string> = {};

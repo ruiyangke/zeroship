@@ -1430,9 +1430,22 @@ uppercased:
 
 Every other code uppercases as-is (`unique_violation` → `UNIQUE_VIOLATION`). A
 transaction-lifecycle error is passed through as the platform raised it, so it
-keeps the platform's lowercase spelling. That is why one rule has to cover both
+keeps the platform's lowercase spelling. One code is never uppercased:
+`request_cancelled`, which refuses every call a request makes after it has
+ended early, not only database calls (see [Runtime
+limits](runtime-limits.md#what-a-stopped-request-can-still-do)), keeps that
+spelling on every path. That is why one rule has to cover both
 paths: compare `error.code` case-insensitively instead of matching a single
 spelling.
+
+A commit already sent when a request ended early is a different code in a
+different place: it answers the whole request, not a `db.<table>.*` or
+`db.transaction()` call, so it never reaches you as `error.code` here. The
+platform spells it `commit_failed_indeterminate`, lowercase on every path the
+same way `request_cancelled` is, but a generated RPC client remaps it to its
+own closed set as `COMMIT_FAILED_INDETERMINATE` - see [Runtime
+limits](runtime-limits.md#what-a-stopped-request-can-still-do) and
+[RPC](rpc.md#errors-and-retries).
 
 ```ts
 const { data, error } = await db.users.update({ id, version: 5 }, { name });

@@ -6,7 +6,7 @@ import {
 } from "../../../../packages/db/src/errors";
 import { mapOptimisticConcurrencyError } from "./errors";
 import { trackCollectionAccess } from "./live";
-import { IdLoader } from "./loader";
+import { IdLoader, type InvocationKey } from "./loader";
 import { inTransactionCallback } from "./tx-state";
 import type { NativeCollection } from "../../../../packages/db/src/native";
 import { Query } from "./query";
@@ -61,6 +61,7 @@ export interface CrudCollectionInternals<
   _indexes: readonly NamedIndexSpec[];
   _knownFields: Set<string>;
   _idLoader: IdLoader<Row<S>, IdValue> | null;
+  _invocationKey: InvocationKey;
   _run<T>(fn: () => Promise<T>): Promise<Result<T>>;
   _toResultError(e: unknown): Error;
   _loadById(id: IdValue): Promise<Row<S> | null>;
@@ -280,6 +281,8 @@ export async function loadByIdCollection<
         }
         return map;
       },
+      undefined,
+      self._invocationKey,
     );
   }
   return self._idLoader.load(id);

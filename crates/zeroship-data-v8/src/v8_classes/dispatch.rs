@@ -50,6 +50,10 @@ pub(super) fn dispatch_operation<'s>(
     // database's column metadata out of the other.
     let result_binding = binding.clone();
     let state = runtime_state(scope);
+    let (resolver, owner, promise) = match setup_js_promise(scope) {
+        Ok(admitted) => admitted,
+        Err(refused) => return refused,
+    };
     let policy_ready = match &operation {
         Operation::Find { options, .. }
             if options.get("unmask").and_then(Value::as_array)
@@ -74,10 +78,8 @@ pub(super) fn dispatch_operation<'s>(
         });
         (capture, prepared)
     });
-    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
-    state.borrow_mut().spawned_ops.push(Box::pin(settle(
+    state.borrow_mut().spawn_op(owner, settle(
         resolver,
-        request_id,
         async move {
             let (capture, prepared) = prepared?;
             capture
@@ -99,7 +101,7 @@ pub(super) fn dispatch_operation<'s>(
             ),
             Output::Rows(rows) => crate::v8_values::resolve(Value::Array(rows), result_binding),
         },
-    )));
+    ));
     promise
 }
 
@@ -420,7 +422,6 @@ pub(crate) fn dispatch_near<'s>(
 /// Settle ORM work into the originating V8 promise.
 pub(crate) async fn settle<R, Fut, Resolve>(
     resolver: v8::Global<v8::PromiseResolver>,
-    request_id: Option<u64>,
     work: Fut,
     resolve: Resolve,
 ) -> OpResult
@@ -432,21 +433,15 @@ where
         Ok(v) => OpResult::JsValue {
             resolver,
             value: resolve(v),
-            request_id,
         },
-        Err(e) => reject_op(resolver, request_id, e),
+        Err(e) => reject_op(resolver, e),
     }
 }
 
-pub(crate) fn reject_op(
-    resolver: v8::Global<v8::PromiseResolver>,
-    request_id: Option<u64>,
-    err: DbError,
-) -> OpResult {
+pub(crate) fn reject_op(resolver: v8::Global<v8::PromiseResolver>, err: DbError) -> OpResult {
     OpResult::JsValue {
         resolver,
         value: ResolveValue::RejectError(err.to_op_error()),
-        request_id,
     }
 }
 
@@ -473,7 +468,10 @@ pub(crate) fn dispatch_unmask_field<'s>(
     args_v: Value,
 ) -> v8::Local<'s, v8::Promise> {
     let state = crate::v8_bridge::runtime_state(scope);
-    let (resolver, request_id, promise) = crate::v8_bridge::setup_js_promise(scope, &state);
+    let (resolver, owner, promise) = match crate::v8_bridge::setup_js_promise(scope) {
+        Ok(admitted) => admitted,
+        Err(refused) => return refused,
+    };
 
     // Parse the args eagerly, off the V8 stack, so a malformed shape is decided
     // before anything is spawned and cannot race the spawn.
@@ -491,10 +489,8 @@ pub(crate) fn dispatch_unmask_field<'s>(
     // `reject_op` call the hand-rolled arm here did.
     state
         .borrow_mut()
-        .spawned_ops
-        .push(Box::pin(crate::v8_classes::dispatch::settle(
+        .spawn_op(owner, crate::v8_classes::dispatch::settle(
             resolver,
-            request_id,
             async move {
                 // `parsed?` is taken BEFORE the first await, so a malformed payload
                 // rejects with its own typed parse error rather than whatever
@@ -516,7 +512,7 @@ pub(crate) fn dispatch_unmask_field<'s>(
                     result_binding,
                 )
             },
-        )));
+        ));
 
     promise
 }
@@ -533,7 +529,10 @@ pub(crate) fn dispatch_bulk_unmask_field<'s>(
     args_v: Value,
 ) -> v8::Local<'s, v8::Promise> {
     let state = crate::v8_bridge::runtime_state(scope);
-    let (resolver, request_id, promise) = crate::v8_bridge::setup_js_promise(scope, &state);
+    let (resolver, owner, promise) = match crate::v8_bridge::setup_js_promise(scope) {
+        Ok(admitted) => admitted,
+        Err(refused) => return refused,
+    };
 
     let parsed = crate::startup_policy::require_finalized(scope).and_then(|()| parse_bulk_args(&args_v));
     let binding = binding.clone();
@@ -543,10 +542,8 @@ pub(crate) fn dispatch_bulk_unmask_field<'s>(
 
     state
         .borrow_mut()
-        .spawned_ops
-        .push(Box::pin(crate::v8_classes::dispatch::settle(
+        .spawn_op(owner, crate::v8_classes::dispatch::settle(
             resolver,
-            request_id,
             async move {
                 // Ahead of the await, for the reason spelled out in
                 // [`dispatch_unmask_field`]: the parse error must win over a
@@ -577,7 +574,7 @@ pub(crate) fn dispatch_bulk_unmask_field<'s>(
                     result_binding,
                 )
             },
-        )));
+        ));
 
     promise
 }

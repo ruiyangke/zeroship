@@ -22,8 +22,11 @@
 //! state type too, which is what lets the base class's callbacks accept them.
 //! `#[v8_inherit]` proves that layout at compile time through [`ClassState`].
 
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
+use std::rc::Rc;
 
 /// The native state type the wrappers of a class hold.
 ///
@@ -75,6 +78,48 @@ pub fn mark<T: 'static>(
     obj.set_private(scope, key, state.into());
 }
 
+/// The weak handles whose finalizers free what [`wrap`] boxed, one per live
+/// wrapper.
+///
+/// A finalizer runs only while its handle is alive, so the handle has to be
+/// kept somewhere, and forgetting it instead leaks what `rusty_v8` allocates for
+/// it: that is freed only when the handle is dropped. Each finalizer records
+/// its entry as collected, and the next [`wrap`] drops the collected entries'
+/// handles, which by then have nothing left to run.
+#[derive(Default)]
+struct Finalizers {
+    live: RefCell<HashMap<u64, v8::Weak<v8::Object>>>,
+    next: Cell<u64>,
+    collected: Rc<RefCell<Vec<u64>>>,
+}
+
+impl Finalizers {
+    fn of(scope: &mut v8::PinScope) -> Rc<Self> {
+        if let Some(finalizers) = scope.get_slot::<Rc<Self>>() {
+            return Rc::clone(finalizers);
+        }
+        let finalizers = Rc::new(Self::default());
+        scope.set_slot(Rc::clone(&finalizers));
+        finalizers
+    }
+
+    /// Keep `weak` until its finalizer has run, and drop the handles of the
+    /// entries collected since the last call.
+    fn keep(&self, id: u64, weak: v8::Weak<v8::Object>) {
+        let collected = std::mem::take(&mut *self.collected.borrow_mut());
+        let mut live = self.live.borrow_mut();
+        for id in collected {
+            live.remove(&id);
+        }
+        live.insert(id, weak);
+    }
+
+    #[cfg(test)]
+    fn live(&self) -> usize {
+        self.live.borrow().len()
+    }
+}
+
 /// Box `state` into a wrapper and brand it as a `T` wrapper.
 ///
 /// The box goes into internal field 0 of `obj` and is dropped when V8
@@ -90,6 +135,10 @@ pub fn wrap<'s, T: 'static>(
     let ext = v8::External::new(scope, raw.cast());
     obj.set_internal_field(0, ext.into());
     mark::<T>(scope, obj, ext);
+    let finalizers = Finalizers::of(scope);
+    let id = finalizers.next.get();
+    finalizers.next.set(id + 1);
+    let collected = Rc::clone(&finalizers.collected);
     let weak = v8::Weak::with_guaranteed_finalizer(
         scope,
         obj,
@@ -98,11 +147,12 @@ pub fn wrap<'s, T: 'static>(
             // above, and this finalizer is the only code that frees it,
             // once, when V8 reclaims `obj`.
             drop(unsafe { Box::from_raw(raw_addr as *mut T) });
+            // A guaranteed finalizer may run while the isolate is disposed,
+            // so it touches nothing of the isolate's, only this list.
+            collected.borrow_mut().push(id);
         }),
     );
-    // Dropping the handle would cancel the finalizer; the guaranteed
-    // variant fires on collection or isolate disposal either way.
-    std::mem::forget(weak);
+    finalizers.keep(id, weak);
     ext
 }
 
@@ -183,5 +233,53 @@ mod tests {
         let plain = v8::Object::new(scope);
         mark::<First>(scope, plain, first);
         assert!(state::<First>(scope, plain).is_none(), "an object without internal fields is no wrapper");
+    }
+
+    /// Collecting a wrapper frees the state [`wrap`] boxed into it, and the
+    /// weak handle whose finalizer freed it is dropped by the next wrap
+    /// rather than kept, or forgotten, for the life of the isolate.
+    #[test]
+    fn a_collected_wrapper_frees_its_state_and_its_finalizer_handle() {
+        struct Counted(Rc<Cell<usize>>);
+        impl Drop for Counted {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+        const WRAPPED: usize = 64;
+
+        crate::init_v8();
+        let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+        let context = {
+            v8::scope!(let handles, &mut isolate);
+            let context = v8::Context::new(handles, v8::ContextOptions::default());
+            v8::Global::new(handles, context)
+        };
+        let dropped = Rc::new(Cell::new(0));
+        let wrap_in_turn = |isolate: &mut v8::OwnedIsolate, count: usize| {
+            v8::scope!(let handles, isolate);
+            let context = v8::Local::new(handles, &context);
+            let scope = &mut v8::ContextScope::new(handles, context);
+            let template = v8::ObjectTemplate::new(scope);
+            template.set_internal_field_count(1);
+            for _ in 0..count {
+                let wrapper = template.new_instance(scope).expect("wrapper allocates");
+                wrap(scope, wrapper, Counted(Rc::clone(&dropped)));
+            }
+        };
+        let live = |isolate: &v8::OwnedIsolate| {
+            isolate.get_slot::<Rc<Finalizers>>().expect("wrap keeps its finalizers").live()
+        };
+
+        wrap_in_turn(&mut isolate, WRAPPED);
+        assert_eq!(live(&isolate), WRAPPED, "every wrapper keeps the handle that will free it");
+        isolate.low_memory_notification();
+        assert_eq!(dropped.get(), WRAPPED, "collecting the wrappers frees every state they hold");
+        wrap_in_turn(&mut isolate, 1);
+        assert_eq!(
+            live(&isolate),
+            1,
+            "the next wrap drops the collected wrappers' handles and keeps only its own",
+        );
     }
 }

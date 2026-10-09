@@ -20,7 +20,7 @@
 //!
 //! Async-marked methods compile to a sync V8 callback that allocates a
 //! `v8::PromiseResolver`, spawns the user's `async fn` body via
-//! `state.spawned_ops`, and returns the Promise immediately. The pump
+//! `state.spawn_op`, and returns the Promise immediately. The pump
 //! resolves (or rejects) the bound resolver from `OpResult::JsValue`
 //! when the future settles. `&mut self` async methods are rejected at
 //! compile time — borrow across `.await` is unsound under V8 re-entry.

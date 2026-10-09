@@ -5,7 +5,7 @@
 //! result resolvers materialize V8 values when the runtime re-enters the isolate.
 
 use zeroship_data_orm::value::Value;
-use zeroship_runtime::state::SharedState;
+use zeroship_runtime::state::{OpOwner, SharedState};
 
 // ---------------------------------------------------------------------------
 // State accessors
@@ -326,23 +326,23 @@ pub(crate) fn throw_decode_error<'s>(
 // Promise plumbing
 // ---------------------------------------------------------------------------
 
-/// Create a promise for the `OpResult::JsValue` resolution path —
-/// returns `(resolver_global, request_id, promise)`. Use when the
-/// dispatch helper resolves with a real JS value (number, object,
-/// `null`, `undefined`) rather than a JSON string.
+/// Admit a database call for the request it is made for and create its
+/// promise for the `OpResult::JsValue` resolution path. Returns
+/// `(resolver_global, owner, promise)`, or the already rejected promise the
+/// call answers with when the runtime's op gate refuses it because that
+/// request has ended.
 pub(crate) fn setup_js_promise<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    state: &SharedState,
-) -> (
-    v8::Global<v8::PromiseResolver>,
-    Option<u64>,
+) -> Result<
+    (v8::Global<v8::PromiseResolver>, OpOwner<'s>, v8::Local<'s, v8::Promise>),
     v8::Local<'s, v8::Promise>,
-) {
+> {
+    let owner = zeroship_runtime::state::admit_op(scope)
+        .map_err(|error| zeroship_runtime::state::rejected_promise(scope, &error))?;
     let resolver = v8::PromiseResolver::new(scope).unwrap();
     let promise = resolver.get_promise(scope);
     let global_resolver = v8::Global::new(scope, resolver);
-    let request_id = state.borrow().executing_request_id;
-    (global_resolver, request_id, promise)
+    Ok((global_resolver, owner, promise))
 }
 
 #[cfg(test)]
