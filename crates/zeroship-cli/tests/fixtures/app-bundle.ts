@@ -84,9 +84,10 @@ export default {
 `);
 /**
  * What the build's resolver answered for `@zeroship/workflows`, recorded by a
- * plugin that asks it the same question with the same importer. An answer of
- * `null` is an import the resolver could not find; the bundler then leaves it
- * unbundled without saying why.
+ * plugin that asks it the same question with the same importer, and again
+ * from a module of the vite-plugin itself, with the resolve settings of the
+ * environment that asked. An answer of `null` is an import the resolver could
+ * not find; the bundler then leaves it unbundled without saying why.
  */
 // Vite's plugin type, as the dev bundle's inline config takes it; this file
 // sits outside the package that depends on Vite.
@@ -99,7 +100,16 @@ const resolutionProbe: Plugin = {
     async handler(source, importer, options) {
       if (source !== "@zeroship/workflows") return null;
       const resolved = await this.resolve(source, importer, { ...options, skipSelf: true });
-      resolutions.push(`from ${importer}: ${JSON.stringify(resolved)}`);
+      resolutions.push(`the resolver answered from ${importer}: ${JSON.stringify(resolved)}`);
+      const inside = join(dependencies, "..", "src", "index.ts");
+      const fromInside = await this.resolve(source, inside, { ...options, skipSelf: true });
+      resolutions.push(`the resolver answered from ${inside}: ${JSON.stringify(fromInside)}`);
+      const { name, config } = this.environment;
+      resolutions.push(
+        `the ${name} environment resolves with root ${config.root}, conditions ${JSON.stringify(config.resolve.conditions)}, ` +
+          `mainFields ${JSON.stringify(config.resolve.mainFields)}, preserveSymlinks ${config.resolve.preserveSymlinks}, ` +
+          `noExternal ${JSON.stringify(config.resolve.noExternal)}`,
+      );
       return null;
     },
   },
@@ -112,7 +122,7 @@ const resolutionProbe: Plugin = {
  */
 async function describeLinkedWorkflows(): Promise<string> {
   const lines: string[] = [];
-  for (const resolution of resolutions) lines.push(`[fixture] the resolver answered ${resolution}`);
+  for (const resolution of resolutions) lines.push(`[fixture] ${resolution}`);
   const probe = async (label: string, read: () => Promise<string>) => {
     try {
       lines.push(`[fixture] ${label}: ${await read()}`);
@@ -131,6 +141,10 @@ async function describeLinkedWorkflows(): Promise<string> {
   const scope = join(dependencies, "@zeroship");
   await probe(`entries of ${scope}`, async () => (await fs.readdir(scope)).join(", "));
   await describe("the installed @zeroship/workflows", join(scope, "workflows"));
+  await probe("the built entry of @zeroship/workflows", async () => {
+    const built = join(await fs.realpath(join(scope, "workflows")), "dist", "index.js");
+    return `${built}, ${(await fs.stat(built)).size} bytes`;
+  });
   const workflows = join(linked, "@zeroship", "workflows");
   await describe("the project's @zeroship/workflows", workflows);
   await probe("exports of @zeroship/workflows", async () =>

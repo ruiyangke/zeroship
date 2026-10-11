@@ -55,6 +55,12 @@ impl ControlStub {
                         Err(error) => panic!("accept control request: {error}"),
                     }
                 };
+                // Windows and macOS hand the accepted stream the listener's
+                // non-blocking mode, so a read that comes before the request
+                // would fail rather than wait for it.
+                stream
+                    .set_nonblocking(false)
+                    .expect("make the control request stream blocking");
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .expect("bound control request read");
