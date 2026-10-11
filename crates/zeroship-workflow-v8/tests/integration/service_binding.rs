@@ -443,6 +443,11 @@ async fn remote_workflows_serves_the_runtimes_own_app() {
     );
 }
 
+/// How long [`Recorder`] holds its reply: longer than the fail-fast bound
+/// `unreachable_workflows` gives a client, and far inside the client default
+/// that `workflows_at` uses.
+const SLOW_PEER_REPLY: Duration = Duration::from_millis(500);
+
 /// A listener that records the app one creator call names.
 struct Recorder {
     url: String,
@@ -461,6 +466,10 @@ impl Recorder {
                 if let Some(body) = read_request(&mut stream).await {
                     *recorded.borrow_mut() = body["appId"].as_str().map(str::to_owned);
                 }
+                // A live but slow peer: the reply comes later than a fail-fast
+                // client bound would wait, so the outcome shows the client
+                // waited for this peer's answer instead of racing a deadline.
+                compio::time::sleep(SLOW_PEER_REPLY).await;
                 let reply = br#"{"code":"unavailable"}"#;
                 let mut response = format!(
                     "HTTP/1.1 503 Test\r\nContent-Type: application/json\r\n\
