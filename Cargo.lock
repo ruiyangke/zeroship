@@ -7850,7 +7850,6 @@ dependencies = [
  "zeroship-core",
  "zeroship-data-orm",
  "zeroship-mailer",
- "zeroship-memlock",
  "zeroship-testkit",
 ]
 
@@ -7939,7 +7938,6 @@ dependencies = [
  "zeroship-data-v8",
  "zeroship-kv",
  "zeroship-kv-v8",
- "zeroship-memlock",
  "zeroship-metering",
  "zeroship-runtime",
  "zeroship-storage",
@@ -8028,7 +8026,6 @@ dependencies = [
  "zeroship-data-orm",
  "zeroship-data-v8",
  "zeroship-mailer",
- "zeroship-memlock",
  "zeroship-metering",
  "zeroship-migrate-server",
  "zeroship-runtime",
@@ -8099,7 +8096,6 @@ dependencies = [
  "compio-ws",
  "flume 0.11.1",
  "futures",
- "libc",
  "rcgen",
  "rustls",
  "tempfile",
@@ -8111,7 +8107,6 @@ dependencies = [
  "zeroship-data-cdc-wire",
  "zeroship-data-orm",
  "zeroship-data-testkit",
- "zeroship-memlock",
  "zeroship-testkit",
 ]
 
@@ -8269,7 +8264,6 @@ dependencies = [
  "zeroship-authz",
  "zeroship-bundle",
  "zeroship-core",
- "zeroship-memlock",
  "zeroship-metering",
  "zeroship-testkit",
 ]
@@ -8343,14 +8337,6 @@ dependencies = [
  "x509-parser",
  "zeroship-testkit",
  "zeroship-testkit-server",
-]
-
-[[package]]
-name = "zeroship-memlock"
-version = "0.1.0"
-dependencies = [
- "compio",
- "nix",
 ]
 
 [[package]]
@@ -8549,7 +8535,6 @@ dependencies = [
  "compio-postgres",
  "ed25519-dalek",
  "jsonwebtoken",
- "libc",
  "mimalloc",
  "ntex",
  "serde",
@@ -8566,7 +8551,6 @@ dependencies = [
  "zeroship-authz",
  "zeroship-core",
  "zeroship-id",
- "zeroship-memlock",
  "zeroship-migrate",
  "zeroship-migrate-backend",
  "zeroship-migrate-ir",
@@ -8643,7 +8627,6 @@ dependencies = [
  "uuid",
  "v8",
  "zeroship-core",
- "zeroship-memlock",
  "zeroship-metering",
  "zeroship-runtime-macros",
  "zeroship-testkit",
@@ -8775,7 +8758,6 @@ dependencies = [
  "zeroship-data-v8",
  "zeroship-kv",
  "zeroship-kv-v8",
- "zeroship-memlock",
  "zeroship-metering",
  "zeroship-runtime",
  "zeroship-storage",
@@ -8929,7 +8911,6 @@ dependencies = [
  "zeroship-authn",
  "zeroship-core",
  "zeroship-data-orm",
- "zeroship-memlock",
  "zeroship-storage",
  "zeroship-testkit",
  "zeroship-workflow",

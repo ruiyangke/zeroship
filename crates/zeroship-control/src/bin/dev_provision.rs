@@ -100,10 +100,7 @@ fn err(msg: impl Into<String>) -> DevProvisionError {
 }
 
 fn main() -> ExitCode {
-    // Probe at the boundary that the kernel grants a ring; the runtime this
-    // tool runs on is still mapped through `explain` below.
-    zeroship_memlock::prepare_or_exit("dev-provision");
-    let runtime = match compio::runtime::Runtime::new().map_err(zeroship_memlock::explain) {
+    let runtime = match compio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("dev-provision: {error}");

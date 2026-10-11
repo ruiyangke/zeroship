@@ -113,16 +113,15 @@ pub async fn spawn(
     let thread = std::thread::Builder::new()
         .name("workflow-manager".into())
         .spawn(move || {
-            let runtime =
-                match compio::runtime::Runtime::new().map_err(zeroship_memlock::explain) {
-                    Ok(runtime) => runtime,
-                    Err(error) => {
-                        let _ = started.send(Err(WorkflowServiceError::Unavailable(format!(
-                            "local workflow manager is unavailable: {error}"
-                        ))));
-                        return;
-                    }
-                };
+            let runtime = match compio::runtime::Runtime::new() {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = started.send(Err(WorkflowServiceError::Unavailable(format!(
+                        "local workflow manager is unavailable: {error}"
+                    ))));
+                    return;
+                }
+            };
             runtime.block_on(async move {
                 let manager = match LocalManager::open(&platform, app, policy, options).await {
                     Ok(manager) => Rc::new(manager),

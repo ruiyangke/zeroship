@@ -6,7 +6,6 @@ use zeroship_workflow_server::{
 };
 
 fn main() {
-    zeroship_memlock::prepare_or_exit("workflow");
     let (settings, boot) = bootstrap_or_exit::<WorkflowSettings>(
         WorkflowSettingsSources::parse(),
         DEFAULT_LOG_FILTER,

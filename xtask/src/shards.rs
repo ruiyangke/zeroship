@@ -316,7 +316,6 @@ pub const SHARDS: &[Shard] = &[
         packages: &[
             "zeroship-testkit-server",
             "zeroship-testkit",
-            "zeroship-memlock",
             "zeroship-core",
             "zeroship-id",
             "zeroship-bundle",

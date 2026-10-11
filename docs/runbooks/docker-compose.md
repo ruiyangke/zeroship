@@ -195,12 +195,10 @@ x-memlock-ulimits: &memlock-ulimits
     hard: -1
 ```
 
-A binary checks at start that the kernel grants it an io_uring ring and exits
-naming `RLIMIT_MEMLOCK`, the values it read and the remedy if not, instead of
-panicking with `Os { code: 12, kind: OutOfMemory }`. An override that replaces
-`ulimits` on a service removes the unlimited setting; keep the anchor's value,
-or raise the limit on the host with `LimitMEMLOCK=infinity` (systemd) or
-`ulimit -l unlimited`.
+A limit too low for a ring makes a service fail at startup with an out-of-memory
+error (`ENOMEM`). An override that replaces `ulimits` on a service removes the
+unlimited setting; keep the anchor's value, or raise the limit on the host with
+`LimitMEMLOCK=infinity` (systemd) or `ulimit -l unlimited`.
 
 ### Auth service
 

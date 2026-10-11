@@ -73,9 +73,6 @@ struct MockState {
 }
 
 fn main() -> std::io::Result<()> {
-    // Probe at the boundary that the kernel grants a ring; the runtime this
-    // mock serves on is still mapped through `explain` below.
-    zeroship_memlock::prepare_or_exit("zeroship-mock-stripe");
     let port = std::env::args()
         .collect::<Vec<_>>()
         .windows(2)
@@ -84,7 +81,7 @@ fn main() -> std::io::Result<()> {
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(9555);
 
-    let rt = match compio::runtime::Runtime::new().map_err(zeroship_memlock::explain) {
+    let rt = match compio::runtime::Runtime::new() {
         Ok(rt) => rt,
         Err(error) => {
             eprintln!("zeroship-mock-stripe: {error}");

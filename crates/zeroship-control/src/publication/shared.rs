@@ -330,7 +330,7 @@ fn host(
     opened: oneshot::Sender<Result<(), CatalogError>>,
 ) {
     LANE.set(true);
-    let runtime = match compio::runtime::Runtime::new().map_err(zeroship_memlock::explain) {
+    let runtime = match compio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
         Err(error) => {
             tracing::error!(%error, "a control catalog runtime could not start");

@@ -599,9 +599,8 @@ file sets
         hard: -1
 ```
 
-on every service that runs one. A binary checks at start that the kernel grants
-it an io_uring ring and exits naming `RLIMIT_MEMLOCK`, the values it read and the
-remedy if not, rather than panicking with `Os { code: 12, kind: OutOfMemory }`.
+on every service that runs one. A limit too low for a ring makes a service fail
+at startup with an out-of-memory error (`ENOMEM`).
 See [the compose runbook](docker-compose.md#locked-memory-io_uring) for the full
 section.
 

@@ -70,9 +70,8 @@ x-compose-subnet: &compose-subnet "${ZEROSHIP_COMPOSE_SUBNET:-172.30.0.0/16}"
 # Every compio runtime opens an io_uring, and the kernel charges each ring to the
 # user's locked-memory budget (`RLIMIT_MEMLOCK`). The container default is sized
 # for a desktop session, not a platform of services, so a busy stack can exhaust
-# it; a binary checks at start that the kernel grants it an io_uring ring and
-# exits naming `RLIMIT_MEMLOCK`, the values it read and the remedy if not
-# (`crates/zeroship-memlock`). `-1` is Compose's "unlimited".
+# it and a service fails at startup with an out-of-memory error (`ENOMEM`).
+# `-1` is Compose's "unlimited".
 x-memlock-ulimits: &memlock-ulimits
   memlock:
     soft: -1

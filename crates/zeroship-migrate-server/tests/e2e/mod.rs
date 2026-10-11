@@ -5,4 +5,3 @@
 //! test target.
 
 mod check_config;
-mod low_memlock;
