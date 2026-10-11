@@ -1256,27 +1256,23 @@ async fn sweepable(root: &Path) -> Vec<AppId> {
 /// Both halves of one exchange are asserted, because either alone is satisfied
 /// by a broken lane. The journal receipt says a claimant ran the operation and
 /// committed its outcome; a lane that claimed and never settled would still
-/// leave that receipt behind. So the queue row is read afterwards - but only
-/// once the host has stopped and a lease short enough to have lapsed by then
-/// has: a settled row is no longer a candidate for any maintenance claimant,
-/// while a row a live lane keeps re-leasing and never settles is one the moment
-/// that lane goes away. Reading it while the host still runs measures whichever
-/// lease happened to be live, which is why the host is dropped first.
+/// leave that receipt behind. The receipt is committed before the queue row is
+/// settled, so it cannot stand in for the settlement either: the test waits on
+/// the queue row's own state reaching `settled`, which is the condition the
+/// assertion needs. A settled row is never a candidate for any maintenance
+/// claimant, so once the host is stopped the app's absence from the queue is
+/// the settlement itself, not a lease that happened to be live.
 ///
-/// A second app's sweep row is the probe's nonempty control, and it does not
-/// race the lane the way reading this app's row before the lane wakes would.
-/// This host sweeps the one app it holds, so that row stays claimable for as
-/// long as the test runs - which is what makes the hosted app's absence from
-/// the same answer mean something.
+/// A second app's sweep row is the probe's nonempty control: this host sweeps
+/// the one app it holds, so that row stays claimable for as long as the test
+/// runs - which is what makes the hosted app's absence from the same answer
+/// mean something.
 #[compio::test]
 async fn the_local_host_claims_runs_and_settles_its_own_journal_sweeps() {
     let root = tempfile::tempdir().unwrap();
     let app = AppId::mint();
     let config = LocalConfig {
         manager: ManagerConfig {
-            // Short enough that the wait below outlasts any lease the lane took,
-            // so a row it never settled is a candidate again by then.
-            lease_ms: 2_000,
             // The recovery lane must publish no sweep of its own, so that the
             // rows this test reads back are the rows it submitted.
             recovery_interval_ms: 3_600_000,
@@ -1284,7 +1280,6 @@ async fn the_local_host_claims_runs_and_settles_its_own_journal_sweeps() {
         },
         ..LocalConfig::default()
     };
-    let lease = Duration::from_millis(config.manager.lease_ms);
     let host = start(root.path(), &app, config, None);
     let sweep = JobSpec {
         id: JobId::mint(),
@@ -1318,10 +1313,19 @@ async fn the_local_host_claims_runs_and_settles_its_own_journal_sweeps() {
         receipt.outcome
     );
 
+    // The receipt above commits before the queue row is settled, so it proves
+    // the lane claimed and ran the sweep, not that it settled it. Reading the
+    // row's own state until it is settled is the wait the assertion needs; it
+    // does not wait out a lease window, because a settled row is not a
+    // candidate whatever its lease says.
+    let metadata = rusqlite::Connection::open(root.path().join(".zeroship/platform/metadata.sqlite"))
+        .unwrap();
+    metadata.busy_timeout(Duration::from_secs(10)).unwrap();
+    until(async || (queue_row(&metadata, &sweep).0 == "settled").then_some(())).await;
+
     // Nothing competes for the row once the lane has stopped, so what the queue
-    // offers after the lease window is what the lane left behind.
+    // offers is what the lane left behind.
     drop(host);
-    compio::time::sleep(lease * 2).await;
     assert_eq!(sweepable(root.path()).await, vec![unhosted.app_id]);
 }
 
