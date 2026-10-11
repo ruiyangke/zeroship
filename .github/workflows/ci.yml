@@ -249,8 +249,10 @@ jobs:
         with:
           shared-key: portable-${{ matrix.platform.name }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      # zeroship-data-v8 embeds the DB adapter bundle, and the CLI's suites run
-      # the vite-plugin's sources under tsx; both are gitignored build outputs.
+      # The install puts the tsx runner the CLI's workflow suites run the
+      # vite-plugin's sources under; the build makes the DB adapter bundle
+      # zeroship-data-v8 embeds and the workspace packages those suites bundle,
+      # which are gitignored build outputs.
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - name: Build the CLI

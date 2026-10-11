@@ -416,8 +416,7 @@ pub const PORTABLE: Portable = Portable {
             binary: CLI_UNIT,
             prefix: "dev::tests::",
             on: UNIX,
-            reason: "it reads the POSIX mode a generated secret is created with, which Windows \
-                     does not keep",
+            reason: "they set and read POSIX file modes, which Windows does not keep",
         },
         Confined {
             binary: CLI_UNIT,

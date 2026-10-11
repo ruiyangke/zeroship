@@ -44,6 +44,7 @@ async function linkDependencies(): Promise<void> {
     }
   }
 }
+await linkDependencies();
 await fs.writeFile(join(root, "src/version.ts"), `export default ${JSON.stringify(version)};`);
 await fs.writeFile(join(root, "src/tail.ts"), 'export const suffix = ":lazy";');
 const entry = join(root, "src/server.ts");
@@ -82,97 +83,19 @@ export default {
   }
 };
 `);
-/**
- * What the build's resolver answered for `@zeroship/workflows`, recorded by a
- * plugin that asks it the same question with the same importer, and again
- * from a module of the vite-plugin itself, with the resolve settings of the
- * environment that asked. An answer of `null` is an import the resolver could
- * not find; the bundler then leaves it unbundled without saying why.
- */
-// Vite's plugin type, as the dev bundle's inline config takes it; this file
-// sits outside the package that depends on Vite.
-type InlinePlugins = NonNullable<Parameters<typeof buildDevBundle>[0]["config"]["inlineConfig"]["plugins"]>;
-type Plugin = Extract<InlinePlugins[number], { name: string }>;
-const resolutions: string[] = [];
-const resolutionProbe: Plugin = {
-  name: "fixture:resolution-probe",
-  resolveId: {
-    async handler(source, importer, options) {
-      if (source !== "@zeroship/workflows") return null;
-      const resolved = await this.resolve(source, importer, { ...options, skipSelf: true });
-      resolutions.push(`the resolver answered from ${importer}: ${JSON.stringify(resolved)}`);
-      const inside = join(dependencies, "..", "src", "index.ts");
-      const fromInside = await this.resolve(source, inside, { ...options, skipSelf: true });
-      resolutions.push(`the resolver answered from ${inside}: ${JSON.stringify(fromInside)}`);
-      const { name, config } = this.environment;
-      resolutions.push(
-        `the ${name} environment resolves with root ${config.root}, conditions ${JSON.stringify(config.resolve.conditions)}, ` +
-          `mainFields ${JSON.stringify(config.resolve.mainFields)}, preserveSymlinks ${config.resolve.preserveSymlinks}, ` +
-          `noExternal ${JSON.stringify(config.resolve.noExternal)}`,
-      );
-      return null;
-    },
+const bundle = await buildDevBundle({
+  config: {
+    root,
+    configFile: undefined,
+    // The level the dev server builds at, so a failed build's warnings print
+    // beside its error rather than being silenced.
+    inlineConfig: { root, logLevel: "warn" },
+    mode: "development",
+    plugins: () => zeroshipPlugins({}, {}),
   },
-};
-
-/**
- * How the build's resolver and the file system see `@zeroship/workflows`,
- * both where the workspace installed it and where the project links it.
- * Printed when the build fails, so a failure names the link it went through.
- */
-async function describeLinkedWorkflows(): Promise<string> {
-  const lines: string[] = [];
-  for (const resolution of resolutions) lines.push(`[fixture] ${resolution}`);
-  const probe = async (label: string, read: () => Promise<string>) => {
-    try {
-      lines.push(`[fixture] ${label}: ${await read()}`);
-    } catch (error) {
-      lines.push(`[fixture] ${label} failed: ${(error as Error).message}`);
-    }
-  };
-  const describe = async (label: string, path: string) => {
-    await probe(`lstat of ${label} (${path})`, async () => {
-      const stat = await fs.lstat(path);
-      return `symbolic link ${stat.isSymbolicLink()}, directory ${stat.isDirectory()}`;
-    });
-    await probe(`readlink of ${label}`, () => fs.readlink(path));
-    await probe(`realpath of ${label}`, () => fs.realpath(path));
-  };
-  const scope = join(dependencies, "@zeroship");
-  await probe(`entries of ${scope}`, async () => (await fs.readdir(scope)).join(", "));
-  await describe("the installed @zeroship/workflows", join(scope, "workflows"));
-  await probe("the built entry of @zeroship/workflows", async () => {
-    const built = join(await fs.realpath(join(scope, "workflows")), "dist", "index.js");
-    return `${built}, ${(await fs.stat(built)).size} bytes`;
-  });
-  const workflows = join(linked, "@zeroship", "workflows");
-  await describe("the project's @zeroship/workflows", workflows);
-  await probe("exports of @zeroship/workflows", async () =>
-    JSON.stringify(JSON.parse(await fs.readFile(join(workflows, "package.json"), "utf8")).exports));
-  return lines.join("\n");
-}
-
-let bundle: Awaited<ReturnType<typeof buildDevBundle>>;
-try {
-  await linkDependencies();
-  bundle = await buildDevBundle({
-    config: {
-      root,
-      configFile: undefined,
-      // Warnings, not silence: an import the bundler cannot resolve is a
-      // warning that names why, and it is the only account of a failed build.
-      inlineConfig: { root, logLevel: "warn", plugins: [resolutionProbe] },
-      mode: "development",
-      plugins: () => zeroshipPlugins({}, {}),
-    },
-    project: defaultProjectConfig(),
-    databases: [],
-  });
-} catch (error) {
-  // Linking fails here too when an installed package does not resolve.
-  console.error(await describeLinkedWorkflows());
-  throw error;
-}
+  project: defaultProjectConfig(),
+  databases: [],
+});
 const pending = join(root, "pending.zship");
 await fs.writeFile(pending, bundle.archive);
 await fs.rename(pending, join(root, "app.zship"));
