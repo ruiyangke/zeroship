@@ -4999,6 +4999,13 @@ enum Teardown {
     Drained,
 }
 
+/// One more of the probe's connector. Generic because the suite's connector is
+/// `NoTls`, a `Copy` type, unless the suite runs over TLS, where it is a
+/// `MakeRustlsConnect` that has to be cloned; one spelling serves both builds.
+fn another<T: Clone>(connector: &T) -> T {
+    connector.clone()
+}
+
 /// Opens `connections` connections inside a fresh runtime, tears the runtime
 /// down `teardown`-wise, and does that [`FD_PROBE_ITERATIONS`] times.
 ///
@@ -5022,7 +5029,7 @@ fn fd_series(url: &str, connections: usize, teardown: Teardown) -> Vec<usize> {
             let mut clients = Vec::with_capacity(connections);
             for _ in 0..connections {
                 let (client, connection) =
-                    match compio_postgres::connect(&tagged, tls.clone()).await {
+                    match compio_postgres::connect(&tagged, another(&tls)).await {
                         Ok(pair) => pair,
                         Err(e) => support::postgres_unreachable(&tagged, &e),
                     };
