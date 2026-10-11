@@ -441,11 +441,78 @@ async fn submission_and_competing_claims(fixture: &Fixture) {
     assert_eq!(first.submit(&changed).await, Err(Error::Conflict));
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "lease expiry, replacement and lost renewal responses share queue state"
-)]
 async fn delayed_jobs_and_redelivery(fixture: &Fixture) {
+    a_delayed_job_waits_for_its_time_and_renews(fixture).await;
+    a_lapsed_lease_refuses_renewal_and_redelivers(fixture).await;
+    a_lost_heartbeat_reply_is_retried(fixture).await;
+}
+
+/// A job is not a claim candidate before its time and is one after it, and a
+/// renewal while its lease is live moves the stored deadline without changing
+/// the attempt.
+///
+/// The not-yet-available half leans on an availability instant far enough away
+/// that no stall in this suite reaches it, so the negative claim does not race
+/// the instant; the available half waits on the database clock.
+async fn a_delayed_job_waits_for_its_time_and_renews(fixture: &Fixture) {
+    // An offset no run of this suite can stall past.
+    const DISTANT_MS: i64 = 60 * 60 * 1000;
+    let queue = queue(fixture, Options::default()).await;
+    let app = AppId::mint();
+    queue
+        .register_scope(&app, &zeroship_core::ZoneId::default_zone())
+        .await
+        .unwrap();
+    let authority = assignment(fixture, &app).await;
+
+    let mut distant = job(&app);
+    distant.available_at = (now(fixture).await + DISTANT_MS).try_into().unwrap();
+    queue.submit(&distant).await.unwrap();
+    // The row is present and ready; only its time keeps it off the queue.
+    assert_eq!(
+        stored(fixture, &distant.id).await.unwrap()["state"],
+        value!("ready")
+    );
+    assert!((queue.claim(&authority).await.unwrap()).is_none());
+
+    let mut due = job(&app);
+    due.available_at = (now(fixture).await + 400).try_into().unwrap();
+    queue.submit(&due).await.unwrap();
+    until(fixture, due.available_at.get()).await;
+    let delivery = queue
+        .claim(&authority)
+        .await
+        .unwrap()
+        .expect("a job past its time is a claim candidate")
+        .delivery()
+        .clone();
+    assert_eq!(delivery.job, due);
+
+    let renewed = queue
+        .heartbeat(&authority, &delivery)
+        .await
+        .unwrap()
+        .delivery()
+        .clone();
+    assert_eq!(renewed.attempt, delivery.attempt);
+    assert!(renewed.deadline >= delivery.deadline);
+    assert_eq!(
+        stored(fixture, &due.id).await.unwrap()["lease_deadline"],
+        value!(renewed.deadline.get())
+    );
+    queue
+        .settle(&authority, &settlement(&renewed))
+        .await
+        .unwrap();
+}
+
+/// A lease that lapses refuses renewal and settlement; a replacement queue
+/// redelivers the job to another worker under the next attempt, and the
+/// superseded holder stays refused.
+///
+/// The lease is waited out on the database clock before anything relies on its
+/// lapse, so no step races the deadline.
+async fn a_lapsed_lease_refuses_renewal_and_redelivers(fixture: &Fixture) {
     let queue = queue(
         fixture,
         Options {
@@ -455,39 +522,31 @@ async fn delayed_jobs_and_redelivery(fixture: &Fixture) {
     )
     .await;
     let app = AppId::mint();
-    queue.register_scope(&app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
+    queue
+        .register_scope(&app, &zeroship_core::ZoneId::default_zone())
+        .await
+        .unwrap();
     let authority = assignment(fixture, &app).await;
-    let mut spec = job(&app);
-    spec.available_at = (now(fixture).await + 400).try_into().unwrap();
+    let spec = job(&app);
     queue.submit(&spec).await.unwrap();
-    assert!((queue.claim(&authority).await.unwrap()).is_none());
-    until(fixture, spec.available_at.get()).await;
     let delivery = queue
         .claim(&authority)
         .await
         .unwrap()
-        .unwrap()
+        .expect("a ready job is a claim candidate")
         .delivery()
         .clone();
     assert_eq!(delivery.job, spec);
-    let renewed = queue
-        .heartbeat(&authority, &delivery)
-        .await
-        .unwrap()
-        .delivery()
-        .clone();
-    assert!(renewed.deadline >= delivery.deadline);
-    until(fixture, renewed.deadline.get()).await;
+    until(fixture, delivery.deadline.get()).await;
     assert!(matches!(
-        queue.heartbeat(&authority, &renewed).await,
+        queue.heartbeat(&authority, &delivery).await,
         Err(Error::Conflict)
     ));
     assert_eq!(
-        queue
-            .settle(&authority, &settlement(&renewed))
-            .await,
+        queue.settle(&authority, &settlement(&delivery)).await,
         Err(Error::Conflict)
     );
+
     let replacement = Queue::connect(
         fixture.binding(),
         fixture.url(),
@@ -501,19 +560,19 @@ async fn delayed_jobs_and_redelivery(fixture: &Fixture) {
         .claim(&replacement_authority)
         .await
         .unwrap()
-        .unwrap()
+        .expect("a lapsed lease is a claim candidate again")
         .delivery()
         .clone();
     assert_eq!(redelivered.job, spec);
-    assert_eq!(redelivered.attempt.get(), renewed.attempt.get() + 1);
-    assert_ne!(redelivered.worker_id, renewed.worker_id);
+    assert_eq!(redelivered.attempt.get(), delivery.attempt.get() + 1);
+    assert_ne!(redelivered.worker_id, delivery.worker_id);
     assert!(matches!(
-        queue.heartbeat(&authority, &renewed).await,
+        replacement.heartbeat(&authority, &delivery).await,
         Err(Error::Conflict)
     ));
     assert_eq!(
-        queue
-            .settle(&authority, &settlement(&renewed))
+        replacement
+            .settle(&authority, &settlement(&delivery))
             .await,
         Err(Error::Conflict)
     );
@@ -522,38 +581,64 @@ async fn delayed_jobs_and_redelivery(fixture: &Fixture) {
         replacement.heartbeat(&expired, &redelivered).await,
         Err(Error::Denied)
     ));
+}
 
-    let retry_app = AppId::mint();
-    queue.register_scope(&retry_app, &zeroship_core::ZoneId::default_zone()).await.unwrap();
-    let retry_authority = assignment(fixture, &retry_app).await;
-    queue.submit(&job(&retry_app)).await.unwrap();
+/// A lost heartbeat reply is retried from the delivery the caller still holds.
+/// That copy's deadline has already passed; the queue answers from the lease it
+/// renewed rather than the caller's instant, advances the lease again, and the
+/// retry settles.
+async fn a_lost_heartbeat_reply_is_retried(fixture: &Fixture) {
+    let queue = queue(fixture, Options::default()).await;
+    let app = AppId::mint();
+    queue
+        .register_scope(&app, &zeroship_core::ZoneId::default_zone())
+        .await
+        .unwrap();
+    let authority = assignment(fixture, &app).await;
+    let spec = job(&app);
+    queue.submit(&spec).await.unwrap();
     let original = queue
-        .claim(&retry_authority)
+        .claim(&authority)
         .await
         .unwrap()
-        .unwrap()
+        .expect("a ready job is a claim candidate")
         .delivery()
         .clone();
-    compio::time::sleep(Duration::from_millis(200)).await;
+    // A renewal is written from the database clock, so a heartbeat landing in
+    // the claim's own millisecond would re-derive the same deadline. Wait past
+    // that instant before the first heartbeat, so the strict comparison
+    // measures the lease the heartbeat extends rather than the clock.
+    let claimed_at = now(fixture).await;
+    until(fixture, claimed_at).await;
     let lost_reply = queue
-        .heartbeat(&retry_authority, &original)
+        .heartbeat(&authority, &original)
         .await
         .unwrap()
         .delivery()
         .clone();
     assert!(lost_reply.deadline > original.deadline);
-    until(fixture, original.deadline.get()).await;
+
+    // The reply never reached the caller, so it retries the delivery it holds.
+    // The deadline on that copy sits in the past, which models the wait between
+    // the lost reply and the retry without keeping one.
+    let mut stale = original.clone();
+    stale.deadline = (now(fixture).await - 1).try_into().unwrap();
     let retried = queue
-        .heartbeat(&retry_authority, &original)
+        .heartbeat(&authority, &stale)
         .await
         .unwrap()
         .delivery()
         .clone();
     assert!(retried.deadline >= lost_reply.deadline);
+    assert_eq!(retried.attempt, original.attempt);
     queue
-        .settle(&retry_authority, &settlement(&original))
+        .settle(&authority, &settlement(&stale))
         .await
         .unwrap();
+    assert_eq!(
+        stored(fixture, &spec.id).await.unwrap()["state"],
+        value!("settled")
+    );
 }
 
 async fn atomic_receipt_and_replayed_receipts(fixture: &Fixture) {
