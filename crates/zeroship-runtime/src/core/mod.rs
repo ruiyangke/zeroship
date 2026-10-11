@@ -38,4 +38,4 @@ pub mod cpu_timer;
 /// The stop is the POSIX CPU-time timer `cpu_timer` arms on the isolate's
 /// thread, which only Linux builds; elsewhere a limit could only be checked
 /// after the handler returned, which no caller may present as enforcement.
-pub const CPU_LIMIT_STOPS_A_RUNNING_HANDLER: bool = false;
+pub const CPU_LIMIT_STOPS_A_RUNNING_HANDLER: bool = cfg!(target_os = "linux");
