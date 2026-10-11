@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::os::unix::fs::PermissionsExt as _;
 use std::process::{Command, Output};
 
 use base64::Engine as _;
@@ -97,12 +96,7 @@ fn dev_init_generates_the_complete_private_deployment_secret_set() {
     }
     // The peer document is deliberately NOT in that loop; see PUBLIC_FILES.
     for name in PUBLIC_FILES {
-        let mode = std::fs::metadata(secrets_dir.join(name))
-            .unwrap_or_else(|error| panic!("stat {name}: {error}"))
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_ne!(mode, 0o600, "{name} holds public keys and must not be private");
+        assert_not_private_mode(&secrets_dir.join(name));
     }
     assert_private_mode(&env_file, 0o600);
 
@@ -517,7 +511,6 @@ fn dev_init_rejects_an_env_file_that_aliases_any_generated_secret() {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn dev_init_rejects_an_env_file_hard_linked_to_a_generated_secret() {
     let temp = tempfile::tempdir().expect("create temp directory");
@@ -883,6 +876,21 @@ fn assert_private_mode(path: &Path, expected: u32) {
 
 #[cfg(not(unix))]
 fn assert_private_mode(_path: &Path, _expected: u32) {}
+
+#[cfg(unix)]
+fn assert_not_private_mode(path: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mode = std::fs::metadata(path)
+        .unwrap_or_else(|error| panic!("stat {}: {error}", path.display()))
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_ne!(mode, 0o600, "{} holds public keys and must not be private", path.display());
+}
+
+#[cfg(not(unix))]
+fn assert_not_private_mode(_path: &Path) {}
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")

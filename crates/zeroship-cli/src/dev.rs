@@ -433,28 +433,30 @@ fn reject_env_file_alias(secrets_dir: &Path, env_file: &Path) -> Result<(), Stri
     Ok(())
 }
 
+/// Whether `left` and `right` both exist and are one file, so a hard link is
+/// caught: the same device and inode on Unix, read from metadata so that a
+/// file this user cannot read, or a FIFO, neither fails nor blocks the check;
+/// the same volume and file index on Windows, which keeps no inode in its
+/// metadata and is read through a handle.
 fn same_existing_file(left: &Path, right: &Path) -> Result<bool, String> {
-    let left_metadata = match std::fs::metadata(left) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(format!("inspect {}: {error}", left.display())),
-    };
-    let right_metadata = match std::fs::metadata(right) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(format!("inspect {}: {error}", right.display())),
-    };
-
+    let mut metadata = Vec::with_capacity(2);
+    for path in [left, right] {
+        match std::fs::metadata(path) {
+            Ok(found) => metadata.push(found),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(format!("inspect {}: {error}", path.display())),
+        }
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
-        Ok(left_metadata.dev() == right_metadata.dev()
-            && left_metadata.ino() == right_metadata.ino())
+        Ok(metadata[0].dev() == metadata[1].dev() && metadata[0].ino() == metadata[1].ino())
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = (left_metadata, right_metadata);
-        Ok(false)
+        same_file::is_same_file(left, right).map_err(|error| {
+            format!("compare {} with {}: {error}", left.display(), right.display())
+        })
     }
 }
 
@@ -1195,7 +1197,29 @@ fn set_private_file_permissions(_path: &Path) -> Result<(), String> {
 mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 
-    use super::open_new_private;
+    use super::{open_new_private, same_existing_file};
+
+    /// The alias check compares where two paths lead without opening either,
+    /// so a file this user cannot read is still compared, and a hard link to
+    /// it is still caught.
+    #[test]
+    fn the_alias_check_compares_files_it_cannot_open() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let secret = dir.path().join("secret");
+        let other = dir.path().join("other");
+        let link = dir.path().join("link");
+        std::fs::write(&secret, b"secret").expect("write the secret");
+        std::fs::write(&other, b"other").expect("write the other file");
+        std::fs::hard_link(&secret, &link).expect("link the secret");
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o000))
+            .expect("close the secret");
+        let linked = same_existing_file(&link, &secret);
+        let apart = same_existing_file(&other, &secret);
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600))
+            .expect("reopen the secret");
+        assert_eq!(linked, Ok(true), "a hard link to an unreadable file is the same file");
+        assert_eq!(apart, Ok(false), "a different file is not");
+    }
 
     /// The `O_CREAT` mode must be owner-only on its own: the secret exists
     /// with the creation mode in the window before the post-write chmod,

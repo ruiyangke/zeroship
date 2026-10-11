@@ -7026,6 +7026,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "waitpid-any"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18aa3ce681e189f125c4c1e1388c03285e2fd434ef52c7203084012ac29c5e4a"
+dependencies = [
+ "rustix 1.1.4",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "walkdir"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7925,6 +7935,7 @@ dependencies = [
  "percent-encoding",
  "rand 0.8.5",
  "rusqlite",
+ "same-file",
  "serde",
  "serde_json",
  "tempfile",
@@ -7932,6 +7943,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "waitpid-any",
  "zeroship-bundle",
  "zeroship-core",
  "zeroship-data-orm",
@@ -8626,6 +8638,7 @@ dependencies = [
  "url",
  "uuid",
  "v8",
+ "windows-sys 0.61.2",
  "zeroship-core",
  "zeroship-metering",
  "zeroship-runtime-macros",
@@ -8658,6 +8671,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "uuid",
+ "winapi-util",
  "zeroship-core",
  "zeroship-testkit",
 ]

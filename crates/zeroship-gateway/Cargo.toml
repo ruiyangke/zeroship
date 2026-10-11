@@ -46,7 +46,7 @@ zeroship-authn = { workspace = true }
 # `gateway_egress_bytes` for the bodies the worker never sees (static
 # assets, redirects, gateway error pages). The crate is service-agnostic
 # (no V8), so this is a plain dependency with no new abstraction.
-zeroship-metering = { workspace = true }
+zeroship-metering = { workspace = true, features = ["outbox"] }
 clap = { workspace = true, features = ["derive", "env"] }
 ntex = { workspace = true }
 serde = { workspace = true }

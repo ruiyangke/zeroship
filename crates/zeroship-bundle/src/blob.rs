@@ -253,7 +253,7 @@ impl LocalDiskBlobStore {
         std::fs::create_dir_all(&manifests)?;
         probe_hard_links(&manifests, hard_link)?;
         for dir in [&blobs, &manifests, &root] {
-            std::fs::File::open(dir)?.sync_all()?;
+            sync_dir_blocking(dir)?;
         }
         Ok(Self { root })
     }
@@ -361,6 +361,11 @@ fn probe_hard_links(
     })
 }
 
+/// The refusal of a manifest key that holds something other than a file.
+fn not_a_regular_file(path: &Path) -> BlobError {
+    BlobError::Backend(format!("manifest key {} is not a regular file", path.display()))
+}
+
 /// A publish found `path` taken: succeed only when it holds exactly `json`.
 ///
 /// A manifest's bytes are a function of its key, so a key holding anything
@@ -372,13 +377,23 @@ fn probe_hard_links(
 async fn check_existing_manifest(path: &Path, json: &[u8]) -> Result<(), BlobError> {
     use compio::io::AsyncReadAtExt;
 
-    let file = compio::fs::File::open(path).await?;
+    let file = match compio::fs::File::open(path).await {
+        Ok(file) => file,
+        // A directory at the key is not a manifest. Unix opens it and the kind
+        // check below says so; Windows refuses to open a directory as a file
+        // at all, as Unix does one it may not read, and the path's kind then
+        // gives the same refusal.
+        Err(error)
+            if error.kind() == std::io::ErrorKind::PermissionDenied
+                && compio::fs::metadata(path).await.is_ok_and(|meta| meta.is_dir()) =>
+        {
+            return Err(not_a_regular_file(path));
+        }
+        Err(error) => return Err(BlobError::Io(error)),
+    };
     let meta = file.metadata().await?;
     if !meta.is_file() {
-        return Err(BlobError::Backend(format!(
-            "manifest key {} is not a regular file",
-            path.display()
-        )));
+        return Err(not_a_regular_file(path));
     }
     let divergent = || {
         BlobError::Backend(format!(
@@ -791,8 +806,29 @@ impl BlobStore for LocalDiskBlobStore {
 /// Sync a directory, so the entries created, renamed or removed in it survive
 /// a crash. The same shape as `sync_dir` in `zeroship-storage`'s local
 /// backend, returning the `std::io::Error` this crate converts from.
+///
+/// The standard library offers no directory flush on Windows, so this does
+/// nothing there, and an entry's durability is the file system's metadata
+/// journal's.
+#[cfg(not(windows))]
 async fn sync_dir(dir: &Path) -> std::io::Result<()> {
     compio::fs::File::open(dir).await?.sync_all().await
+}
+
+#[cfg(windows)]
+async fn sync_dir(_dir: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// [`sync_dir`], blocking, for the store's construction.
+#[cfg(not(windows))]
+fn sync_dir_blocking(dir: &Path) -> std::io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()
+}
+
+#[cfg(windows)]
+fn sync_dir_blocking(_dir: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Size/hash-verify a local blob file before trusting a dedup hit. Returns
@@ -936,13 +972,14 @@ mod tests {
     /// opens, with a message naming the requirement, and the probe leaves no
     /// file behind. The refusal is driven through the seam `open` takes,
     /// because no filesystem without hard links (SMB, many FUSE mounts) can be
-    /// mounted by an unprivileged test. EPERM is what Linux returns for a
-    /// filesystem that does not support links.
+    /// mounted by an unprivileged test. Linux answers a filesystem that does
+    /// not support links with EPERM, which is a permission refusal; the seam
+    /// returns that kind, which every system spells the same.
     #[test]
     fn a_root_that_cannot_hard_link_is_refused_at_startup() {
         let root = tempfile::tempdir().expect("blob root");
         let refused = LocalDiskBlobStore::open(root.path().to_path_buf(), |_, _| {
-            Err(std::io::Error::from_raw_os_error(1))
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
         })
         .expect_err("a root without hard links is refused");
         assert_eq!(refused.kind(), std::io::ErrorKind::PermissionDenied);

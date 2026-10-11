@@ -540,26 +540,58 @@ fn base64_url_decode(value: &str) -> Result<Vec<u8>, String> {
 pub(crate) fn state_dir() -> Result<PathBuf, String> {
     // `var_os`, not `var`: these are filesystem paths, where a non-Unicode
     // value is legitimate on Unix and dropping it would silently relocate the
-    // credentials file. `XDG_CONFIG_HOME` and `HOME` are external contracts;
-    // only the zeroship-owned override is class `cli`.
-    let base = if let Some(path) = zeroship_core::declared_env_os!(
-        cli,
-        "ZEROSHIP_CONFIG_HOME",
-        crate::ZeroshipCliConsumer
-    ) {
+    // credentials file. `XDG_CONFIG_HOME`, `APPDATA` and `HOME` are external
+    // contracts; only the zeroship-owned override is class `cli`.
+    resolve_state_dir(StateDirSources {
+        config_home: zeroship_core::declared_env_os!(
+            cli,
+            "ZEROSHIP_CONFIG_HOME",
+            crate::ZeroshipCliConsumer
+        ),
+        xdg_config_home: zeroship_core::declared_env_os!(
+            external,
+            "XDG_CONFIG_HOME",
+            crate::ZeroshipCliConsumer
+        ),
+        app_data: windows_app_data(),
+        home: zeroship_core::declared_env_os!(external, "HOME", crate::ZeroshipCliConsumer),
+    })
+}
+
+/// Windows' per-user roaming configuration directory. A Windows shell sets
+/// `APPDATA` and not `HOME`, so without it the CLI would find no state
+/// directory there at all.
+#[cfg(windows)]
+fn windows_app_data() -> Option<std::ffi::OsString> {
+    zeroship_core::declared_env_os!(external, "APPDATA", crate::ZeroshipCliConsumer)
+}
+
+#[cfg(not(windows))]
+const fn windows_app_data() -> Option<std::ffi::OsString> {
+    None
+}
+
+/// The values [`state_dir`] chooses among, read once.
+struct StateDirSources {
+    config_home: Option<std::ffi::OsString>,
+    xdg_config_home: Option<std::ffi::OsString>,
+    app_data: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+}
+
+/// The first of the override, the XDG base, Windows' `APPDATA` and `HOME`'s
+/// `.config` that is set, with `zeroship` under it.
+fn resolve_state_dir(sources: StateDirSources) -> Result<PathBuf, String> {
+    let base = if let Some(path) = sources.config_home {
         PathBuf::from(path)
-    } else if let Some(path) = zeroship_core::declared_env_os!(
-        external,
-        "XDG_CONFIG_HOME",
-        crate::ZeroshipCliConsumer
-    ) {
+    } else if let Some(path) = sources.xdg_config_home {
         PathBuf::from(path)
-    } else if let Some(home) =
-        zeroship_core::declared_env_os!(external, "HOME", crate::ZeroshipCliConsumer)
-    {
+    } else if let Some(path) = sources.app_data {
+        PathBuf::from(path)
+    } else if let Some(home) = sources.home {
         PathBuf::from(home).join(".config")
     } else {
-        return Err("HOME is not set".into());
+        return Err("no state directory: set ZEROSHIP_CONFIG_HOME, or HOME (APPDATA on Windows)".into());
     };
     Ok(base.join("zeroship"))
 }
@@ -717,6 +749,38 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sources(
+        config_home: Option<&str>,
+        xdg_config_home: Option<&str>,
+        app_data: Option<&str>,
+        home: Option<&str>,
+    ) -> StateDirSources {
+        StateDirSources {
+            config_home: config_home.map(Into::into),
+            xdg_config_home: xdg_config_home.map(Into::into),
+            app_data: app_data.map(Into::into),
+            home: home.map(Into::into),
+        }
+    }
+
+    /// Each source wins over every one after it, and Windows' `APPDATA` sits
+    /// between the XDG base and `HOME`, so a Windows shell, which sets
+    /// `APPDATA` and not `HOME`, still has a state directory.
+    #[test]
+    fn the_state_dir_is_the_first_source_set_in_precedence_order() {
+        let all = Some("o");
+        let resolve = |s| resolve_state_dir(s).expect("a state dir");
+        assert_eq!(resolve(sources(all, Some("x"), Some("a"), Some("h"))), PathBuf::from("o/zeroship"));
+        assert_eq!(resolve(sources(None, Some("x"), Some("a"), Some("h"))), PathBuf::from("x/zeroship"));
+        assert_eq!(resolve(sources(None, None, Some("a"), Some("h"))), PathBuf::from("a/zeroship"));
+        assert_eq!(resolve(sources(None, None, Some("a"), None)), PathBuf::from("a/zeroship"));
+        assert_eq!(
+            resolve(sources(None, None, None, Some("h"))),
+            PathBuf::from("h").join(".config").join("zeroship")
+        );
+        assert!(resolve_state_dir(sources(None, None, None, None)).is_err());
+    }
 
     #[test]
     fn device_grant_request_shape() {

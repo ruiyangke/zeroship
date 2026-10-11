@@ -512,8 +512,8 @@ None of these is creator-facing.
 **Readable by app code:** `ZEROSHIP_DEPLOY_ID`, covered under
 [names the platform provides](../reference/env-vars.md#names-the-platform-provides). A process also
 inherits ambient names it does not own - `PATH`, `HOME`, `HOSTNAME`, `PORT`,
-`CI`, `XDG_CONFIG_HOME`, `SSL_CERT_FILE`, `SSL_CERT_DIR` and the AWS credential
-names - as well as `DATABASE_URL` for the dev provisioning tool. Do not read an
+`CI`, `XDG_CONFIG_HOME`, `APPDATA`, `SSL_CERT_FILE`, `SSL_CERT_DIR` and the AWS
+credential names - as well as `DATABASE_URL` for the dev provisioning tool. Do not read an
 ambient name from app code: it is present only because a process inherited it.
 
 ---

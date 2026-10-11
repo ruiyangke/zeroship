@@ -33,6 +33,15 @@ every shard's reports back, as CI's `verify` job does, and fails unless each run
 executed exactly what it lists, no test ran in two shards, and every test target
 `cargo metadata` declares is in exactly one shard.
 
+`PORTABLE` in the same file declares the CLI's run on the other systems
+creators install it on: the platforms CI's `portable` job runs on, which
+`cargo xtask shards platforms` prints as its matrix, and the CLI tests compiled
+for some systems only, each with why. That job runs no xtask: it runs the
+nextest command `PORTABLE` builds and keeps `junit-portable-<platform>.xml` and
+`list-portable-<platform>.json`. `shards verify` then requires each platform to
+have run exactly what it lists, at least one test, and the `runtime` shard's
+listing of the CLI less the confined tests, plus those confined to it.
+
 `--filter` narrows a diagnostic run to a nextest filter expression and skips the
 untimed tests and the doctests; `--build-only` builds every artifact the shard
 runs and runs nothing, which is how CI's `cargo-cache` job fills the dependency
@@ -40,10 +49,11 @@ cache. `tests/repository/shards.rs` fails when a workspace package with tests is
 in no shard or in two, when a test target needs a feature its shard's run does
 not enable, when a feature of a shard package is enabled by no run and explained
 by no entry, when the test job could skip a shard, or when another CI job runs a
-workspace package's tests.
+workspace package's tests other than as `PORTABLE` declares.
 
 ```console
 cargo xtask shards list
+cargo xtask shards platforms
 cargo xtask test data
 cargo xtask test data --filter 'test(tests::postgres::transactions::)'
 cargo xtask test billing --build-only

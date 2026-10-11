@@ -226,9 +226,12 @@ zeroship serve app.js --wall-timeout=5000
 zeroship serve app.js --cpu-limit=50
 ```
 
-Neither flag is on by default, and `pnpm dev` does not pass them. If any request
-can run long, exercise it once with your plan's `--wall-timeout` before you
-ship.
+Neither flag is on by default, and `pnpm dev` does not pass them. `--cpu-limit`
+is enforced on Linux only: on macOS and Windows the dev server cannot stop a
+handler that runs past it, so it refuses the flag at startup rather than run
+unenforced (see [the CLI's platform differences](cli.md#platform-differences)).
+Reproduce a CPU limit on Linux. If any request can run long, exercise it once
+with your plan's `--wall-timeout` before you ship.
 
 ## Request body size
 

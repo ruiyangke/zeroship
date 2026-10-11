@@ -111,18 +111,60 @@ pub fn init_v8() {
 // CPU time helper
 // ===========================================================================
 
-/// Read the current thread's CPU time via CLOCK_THREAD_CPUTIME_ID.
-/// Only counts actual CPU cycles — I/O wait is excluded.
+/// Read the current thread's CPU time. Only counts actual CPU cycles; I/O wait
+/// is excluded.
+///
+/// Unix reads `CLOCK_THREAD_CPUTIME_ID`, and Windows `GetThreadTimes`, whose
+/// kernel and user times advance by whole scheduler ticks rather than
+/// continuously. A clock the system refuses reads as zero, as an unread clock
+/// does: every caller subtracts two readings, so a refusal measures nothing
+/// rather than failing the request it measures.
+#[cfg(unix)]
 pub fn thread_cpu_time() -> Duration {
-    let mut ts = libc::timespec {
+    let mut now = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
     };
-    #[allow(unsafe_code)]
-    unsafe {
-        libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts);
+    // SAFETY: `clock_gettime` writes one `timespec` through the pointer, which
+    // addresses a live local, and reports a refusal in its return value.
+    if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &raw mut now) } != 0 {
+        return Duration::ZERO;
     }
-    Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
+    Duration::new(
+        u64::try_from(now.tv_sec).unwrap_or(0),
+        u32::try_from(now.tv_nsec).unwrap_or(0),
+    )
+}
+
+/// See the Unix arm: `GetThreadTimes` reports the thread's kernel and user
+/// time in 100 ns units, and their sum is its CPU time.
+#[cfg(windows)]
+pub fn thread_cpu_time() -> Duration {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
+
+    let unset = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let (mut created, mut exited, mut kernel, mut user) = (unset, unset, unset, unset);
+    // SAFETY: `GetCurrentThread` returns a pseudo-handle that needs no
+    // closing, and `GetThreadTimes` writes four `FILETIME`s through pointers
+    // to live locals, reporting a refusal in its return value.
+    let read = unsafe {
+        GetThreadTimes(
+            GetCurrentThread(),
+            &raw mut created,
+            &raw mut exited,
+            &raw mut kernel,
+            &raw mut user,
+        )
+    };
+    if read == 0 {
+        return Duration::ZERO;
+    }
+    let units = |time: FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
+    Duration::from_nanos(units(kernel).saturating_add(units(user)).saturating_mul(100))
 }
 
 // ===========================================================================
@@ -1954,5 +1996,47 @@ mod console_tests {
         long.push_str(&"y".repeat(200));
         let out = truncate_console_line(long);
         assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod thread_cpu_time_tests {
+    use super::thread_cpu_time;
+    use std::time::{Duration, Instant};
+
+    /// Spin on the calling thread until its own clock has advanced by `cpu`.
+    /// A clock that advances by whole scheduler ticks still gets there; one
+    /// that reads zero fails at the wall-clock bound.
+    fn spin_for(cpu: Duration) {
+        let started = thread_cpu_time();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut spins = 0_u64;
+        while thread_cpu_time().saturating_sub(started) < cpu {
+            spins = std::hint::black_box(spins.wrapping_add(1));
+            assert!(Instant::now() < deadline, "the thread CPU clock did not advance under busy work");
+        }
+    }
+
+    /// The clock counts the calling thread's own work, and neither the time it
+    /// spends blocked nor another thread's work in the meantime: this thread
+    /// waits on a thread that spins well past the bound, so a process-wide
+    /// clock would charge it that spin.
+    #[test]
+    fn the_thread_clock_counts_this_threads_work_and_not_its_blocked_time() {
+        spin_for(Duration::from_millis(20));
+
+        let (finished, spun) = std::sync::mpsc::channel();
+        let before_blocking = thread_cpu_time();
+        let spinner = std::thread::spawn(move || {
+            spin_for(Duration::from_millis(300));
+            finished.send(()).expect("the waiting thread is still there");
+        });
+        spun.recv_timeout(Duration::from_secs(30)).expect("the spinning thread finishes");
+        let blocked = thread_cpu_time().saturating_sub(before_blocking);
+        spinner.join().expect("the spinning thread does not panic");
+        assert!(
+            blocked < Duration::from_millis(100),
+            "a thread blocked while another spun was charged {blocked:?} of CPU"
+        );
     }
 }

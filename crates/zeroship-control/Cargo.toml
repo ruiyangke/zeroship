@@ -63,7 +63,7 @@ zeroship-workflow-client = { workspace = true }
 zeroship-workflow-manager = { workspace = true }
 zeroship-data-orm = { workspace = true }
 zeroship-stream = { workspace = true }
-zeroship-metering = { workspace = true }
+zeroship-metering = { workspace = true, features = ["outbox"] }
 clap = { workspace = true, features = ["derive", "env"] }
 # `with-chrono-0_4` so PAT issuance / the console seed can map
 # `TIMESTAMPTZ` columns to `chrono::DateTime<Utc>` directly.

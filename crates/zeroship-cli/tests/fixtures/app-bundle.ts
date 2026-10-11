@@ -9,8 +9,42 @@ const [root, version, cooldown = "10ms", timeout = "1h"] = process.argv.slice(2)
 if (!root || !version) throw new Error("expected a fixture project and version");
 const dependencies = fileURLToPath(new URL("../../../../packages/vite-plugin/node_modules", import.meta.url));
 await fs.mkdir(join(root, "src"), { recursive: true });
-try { await fs.symlink(dependencies, join(root, "node_modules"), "dir"); }
-catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+// Windows links a directory without elevation only as a junction.
+const link = process.platform === "win32" ? "junction" : "dir";
+const linked = join(root, "node_modules");
+
+/**
+ * Give the project the vite-plugin's dependencies: a real `node_modules`
+ * holding one link per installed package, inside a real directory for each
+ * `@scope`, each to the package's canonical directory. pnpm installs each
+ * package as a link of its own, so linking the whole `node_modules` would
+ * reach every package through a link nested inside another link; one link
+ * per package to where it lives leaves nothing for the platform to resolve
+ * through a second link.
+ */
+async function linkDependencies(): Promise<void> {
+  await fs.mkdir(linked, { recursive: true });
+  const linkPackage = async (installed: string, at: string) => {
+    const canonical = await fs.realpath(installed);
+    try { await fs.symlink(canonical, at, link); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+  };
+  for (const entry of await fs.readdir(dependencies, { withFileTypes: true })) {
+    // `.bin`, caches and the package manager's own records are not packages.
+    if (entry.name.startsWith(".")) continue;
+    const installed = join(dependencies, entry.name);
+    if (entry.name.startsWith("@") && entry.isDirectory()) {
+      const scope = join(linked, entry.name);
+      await fs.mkdir(scope, { recursive: true });
+      for (const name of await fs.readdir(installed)) {
+        await linkPackage(join(installed, name), join(scope, name));
+      }
+    } else {
+      await linkPackage(installed, join(linked, entry.name));
+    }
+  }
+}
+await linkDependencies();
 await fs.writeFile(join(root, "src/version.ts"), `export default ${JSON.stringify(version)};`);
 await fs.writeFile(join(root, "src/tail.ts"), 'export const suffix = ":lazy";');
 const entry = join(root, "src/server.ts");
@@ -53,7 +87,9 @@ const bundle = await buildDevBundle({
   config: {
     root,
     configFile: undefined,
-    inlineConfig: { root, logLevel: "silent" },
+    // The level the dev server builds at, so a failed build's warnings print
+    // beside its error rather than being silenced.
+    inlineConfig: { root, logLevel: "warn" },
     mode: "development",
     plugins: () => zeroshipPlugins({}, {}),
   },

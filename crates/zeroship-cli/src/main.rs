@@ -121,6 +121,10 @@ fn cmd_serve(args: &[String]) {
     let port = parse_flag_u16(args, "--port").unwrap_or(3000);
     let workers: usize = parse_flag_usize(args, "--workers").unwrap_or(0);
     let cpu_limit = parse_flag_u64(args, "--cpu-limit").map(std::time::Duration::from_millis);
+    if let Err(e) = check_cpu_limit(cpu_limit, zeroship_runtime::CPU_LIMIT_STOPS_A_RUNNING_HANDLER) {
+        eprintln!("zeroship serve: {e}");
+        std::process::exit(1);
+    }
     let wall_timeout = parse_flag_u64(args, "--wall-timeout").map(std::time::Duration::from_millis);
     let dev_entry_loader = parse_flag(args, "--dev-entry-loader");
     // The dev server states its own heap cap. A deployed app runs at its
@@ -1547,6 +1551,22 @@ fn parse_flag_u64(args: &[String], flag_name: &str) -> Option<u64> {
     parse_flag(args, flag_name).and_then(|s| s.parse().ok())
 }
 
+/// Refuse a `--cpu-limit` this system cannot enforce (`stops_running` false).
+///
+/// The flag exists to reproduce a deployed app's CPU limit locally, and a limit
+/// the runtime cannot stop a handler at would let a handler that production
+/// stops pass here instead, which is worse than no flag.
+fn check_cpu_limit(cpu_limit: Option<std::time::Duration>, stops_running: bool) -> Result<(), String> {
+    if cpu_limit.is_some() && !stops_running {
+        return Err(format!(
+            "--cpu-limit is enforced on Linux only: the {} runtime cannot stop a handler that \
+             runs past it. Reproduce a CPU limit on Linux, or leave the flag off.",
+            std::env::consts::OS
+        ));
+    }
+    Ok(())
+}
+
 /// Known flags accepted by `zeroship serve` (bare names, no `=`).
 const SERVE_KNOWN_FLAGS: &[&str] = &[
     "--app",
@@ -1806,6 +1826,21 @@ mod tests {
 
         let args = s(&["zeroship", "serve", "app.js"]);
         assert_eq!(parse_flag_usize(&args, "--workers"), None);
+    }
+
+    /// A CPU limit the runtime cannot stop a handler at is refused rather than
+    /// accepted and left unenforced; one it can stop at, and no limit at all,
+    /// pass.
+    #[test]
+    fn a_cpu_limit_is_refused_where_the_runtime_cannot_stop_a_handler() {
+        let limit = Some(std::time::Duration::from_millis(50));
+        let refused = check_cpu_limit(limit, false).expect_err("an unenforceable limit is refused");
+        assert!(
+            refused.contains("--cpu-limit") && refused.contains("Linux"),
+            "the refusal names the flag and where it is enforced: {refused}"
+        );
+        assert!(check_cpu_limit(limit, true).is_ok(), "an enforceable limit is accepted");
+        assert!(check_cpu_limit(None, false).is_ok(), "no limit asks nothing of the system");
     }
 
     /// An unrecognized `--flag` in the `serve` command must surface as an error,
@@ -2653,9 +2688,17 @@ mod dev_database_identity {
         // What `devSqlitePaths(root, databaseId)` names, spelled the way that
         // function spells it.
         let apply_target = state.join(format!("zs-db_{}.sqlite", declared.as_str()));
+        // SQLite reports the file by its full path with links resolved, so a
+        // temp directory reached through one (macOS's `/var`, Windows'
+        // abbreviated profile names) names the same file by another spelling.
+        // Both sides are resolved before they are compared.
+        let canonical = |path: &Path| {
+            std::fs::canonicalize(path)
+                .unwrap_or_else(|error| panic!("resolve {}: {error}", path.display()))
+        };
         assert_eq!(
-            Path::new(attached),
-            apply_target,
+            canonical(Path::new(attached)),
+            canonical(&apply_target),
             "the attached file and the dev apply's target must be one file"
         );
         // Second oracle: the same name, through the derivation the backend

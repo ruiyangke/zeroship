@@ -11,7 +11,9 @@ answers the CLI's authenticated HTTP calls (see [`control.md`](control.md)).
 This page assumes the `zeroship` binary is already on your `PATH`. zeroship is
 pre-launch and has no published installer; the binary is built from the zeroship
 repository, and the local setup is in
-[`docs/runbooks/local-dev.md`](../runbooks/local-dev.md).
+[`docs/runbooks/local-dev.md`](../runbooks/local-dev.md). The CLI runs on Linux,
+macOS and Windows; what differs between them is in
+[Platform differences](#platform-differences).
 
 ## Project configuration
 
@@ -76,9 +78,9 @@ select a second login backend.
 
 The credential is written to `<state>/zeroship/token.json` with mode `0600`,
 where `<state>` is `ZEROSHIP_CONFIG_HOME` if set, else `XDG_CONFIG_HOME`, else
-`$HOME/.config`. This is the same per-user state directory `organization use`
-records into. The environment names the CLI reads are in
-[`env-vars.md`](env-vars.md).
+`%APPDATA%` on Windows, else `$HOME/.config`. This is the same per-user state
+directory `organization use` records into. The environment names the CLI reads
+are in [`env-vars.md`](env-vars.md).
 
 `whoami` prints the signed-in account's identity (the subject id for a platform
 credential; an email when the provider supplies one) and the token's expiry.
@@ -357,7 +359,9 @@ Flag defaults: `--port` is `3000`, `--workers` is `0`, and `--heap-limit-mb` is
 `512` (`ZEROSHIP_HEAP_LIMIT_MB` overrides it when the flag is absent).
 `--cpu-limit` and `--wall-timeout` have no CLI default; the runtime's own limits
 apply. The dev server's limits and defaults differ from a deployed app's; see
-[`runtime-limits.md`](runtime-limits.md).
+[`runtime-limits.md`](runtime-limits.md). On macOS and Windows `--cpu-limit` is
+refused and `serve` runs one worker; see
+[Platform differences](#platform-differences).
 
 It uses a project-local SQLite database and local key-value store under
 `.zeroship/` unless `DATABASE_URL` selects another backend. `DATABASE_URL` is a
@@ -415,6 +419,41 @@ project without a seat.
 add, role, remove). A bare `zeroship organization projects` lists the
 organization's projects, and `zeroship organization` with no subcommand prints
 the full verb list.
+
+## Platform differences
+
+The CLI behaves the same on Linux, macOS and Windows except where the operating
+system lacks what the behavior is built on:
+
+- **`zeroship serve --cpu-limit` is Linux-only.** The dev server stops a handler
+  that runs past its CPU limit with a CPU-time timer only Linux provides. On
+  macOS and Windows the flag is refused at startup, rather than accepted and
+  left unenforced, so reproduce a deployed CPU limit on Linux. `--wall-timeout`
+  works everywhere.
+- **`zeroship serve` runs one worker on macOS and Windows.** Several workers
+  share one port only where the kernel spreads its connections across them,
+  which is Linux. Elsewhere it runs one worker whatever `--workers` asks for.
+- **Windows keeps no POSIX file modes.** The CLI writes `token.json`, the dev
+  server's project key and the files `zeroship dev init` generates owner-only
+  (mode `0600`) on Linux and macOS. On Windows they take the access list of the
+  directory they are written into, so keep your state directory and project
+  under your own user profile.
+- **The dev server's local object store names objects as files.** On Windows a
+  bucket name or key segment may not contain `< > : " | ? *` or be a name
+  Windows reserves for a device, such as `con`, and one ending in a dot or a
+  space is the same name without it, so the keys `a.` and `a` name one object.
+  On macOS and Windows, bucket names and keys that differ only in letter case
+  collide the same way. A deployed app's object storage has none of these
+  limits.
+- **Windows does not flush directory entries.** The dev server's local object
+  store and deployment cache make a newly written file durable before they
+  report it written; on Windows a write that lands just before a power loss can
+  still be missing afterwards.
+- **A PostgreSQL `DATABASE_URL` reaches a Unix-domain socket on Linux and macOS
+  only.** A host that is a directory path names the server's socket there; on
+  Windows give a TCP host and port.
+- **The state directory on Windows** is `%APPDATA%\zeroship` unless
+  `ZEROSHIP_CONFIG_HOME` or `XDG_CONFIG_HOME` is set (see [Sign in](#sign-in)).
 
 ## Platform operation is not here
 

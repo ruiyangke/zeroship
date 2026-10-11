@@ -6,7 +6,7 @@ use zeroship_storage::{
     LocalFs, Namespace, StorageBackendConfig, StorageError, StorageLimits, StorageStore,
 };
 
-#[cfg(feature = "s3")]
+#[cfg(all(feature = "s3", target_os = "linux"))]
 use zeroship_testkit::s3::S3Server;
 
 async fn drain(mut stream: BoxByteStream) -> Vec<u8> {
@@ -225,7 +225,7 @@ fn local_scoped_storage_contract() {
         .block_on(scoped_contract(store));
 }
 
-#[cfg(feature = "s3")]
+#[cfg(all(feature = "s3", target_os = "linux"))]
 #[test]
 fn s3_scoped_storage_contract() {
     let server = S3Server::start();

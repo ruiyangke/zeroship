@@ -49,6 +49,35 @@
           extensions = [ "rust-src" "miri" ];
         };
 
+        # The creator CLI ships for macOS and Windows as well as Linux. This
+        # toolchain is the default shell's compiler release, read from
+        # nixpkgs' `rustc`, with the standard libraries of the CLI's other
+        # release targets added, so a cross-target `cargo check` on a Linux
+        # host type-checks the same compiler CI builds those targets with.
+        crossTargets = [ "aarch64-apple-darwin" "x86_64-pc-windows-msvc" ];
+        crossToolchain = fuzzPkgs.rust-bin.stable.${pkgs.rustc.version}.default.override {
+          targets = crossTargets;
+        };
+
+        # A C and C++ compiler for the Windows MSVC target's C dependencies in a
+        # check. There are no MSVC headers here, so zig compiles them against
+        # the MinGW headers it carries, dropping the MSVC target flag cc-rs
+        # adds; the objects are never linked, so a check that passes proves the
+        # Rust code, not the C build, which CI's Windows job owns.
+        windowsCheckCompiler = name: driver: pkgs.writeShellScript name ''
+          args=()
+          for arg in "$@"; do
+            case "$arg" in
+              --target=*|-m64) ;;
+              *) args+=("$arg") ;;
+            esac
+          done
+          exec ${fuzzPkgs.zig}/bin/zig ${driver} -target x86_64-windows-gnu "''${args[@]}"
+        '';
+        windowsCheckArchiver = pkgs.writeShellScript "windows-check-lib" ''
+          exec ${fuzzPkgs.zig}/bin/zig lib "$@"
+        '';
+
         # bindgen (libsqlite3-sys, pg_query, v8) drives libclang directly, so
         # the cc wrapper's flags never reach it: name the system headers here.
         # Darwin names them as a sysroot, since libSystem carries no headers.
@@ -226,6 +255,46 @@
           RUST_BACKTRACE = "1";
           LIBCLANG_PATH = "${fuzzPkgs.llvmPackages.libclang.lib}/lib";
           BINDGEN_EXTRA_CLANG_ARGS = lib.concatStringsSep " " bindgenClangArgs;
+        };
+
+        # Cross-target type checks of the creator CLI from a Linux host:
+        #
+        #   nix develop .#cross --command cargo-zigbuild check --locked \
+        #     -p zeroship-cli --all-targets --target aarch64-apple-darwin
+        #   nix develop .#cross --command cargo check --locked \
+        #     -p zeroship-cli --all-targets --target x86_64-pc-windows-msvc
+        #
+        # cargo-zigbuild compiles the macOS C dependencies with zig, which
+        # carries the macOS libc headers but no Apple framework. A check never
+        # links, so the one framework header on the path, aws-lc's jitter
+        # entropy source (`CoreServices`), is left out of the macOS check
+        # below. The Windows check compiles its C dependencies with the zig
+        # wrappers above, and aws-lc with its plain C builder and the assembly
+        # objects its crate ships, since there is no NASM or MSVC toolchain
+        # here. Both checks prove the Rust code; CI's `portable` jobs build and
+        # link everything on the real systems.
+        devShells.cross = fuzzPkgs.mkShell {
+          buildInputs = with fuzzPkgs; [
+            crossToolchain
+            cargo-zigbuild
+            zig
+
+            cmake
+            pkg-config
+            llvmPackages.libclang
+
+            git
+            which
+          ];
+
+          RUST_BACKTRACE = "1";
+          LIBCLANG_PATH = "${fuzzPkgs.llvmPackages.libclang.lib}/lib";
+          AWS_LC_SYS_NO_JITTER_ENTROPY_aarch64_apple_darwin = "1";
+          CC_x86_64_pc_windows_msvc = windowsCheckCompiler "windows-check-cc" "cc";
+          CXX_x86_64_pc_windows_msvc = windowsCheckCompiler "windows-check-cxx" "c++";
+          AR_x86_64_pc_windows_msvc = windowsCheckArchiver;
+          AWS_LC_SYS_CMAKE_BUILDER_x86_64_pc_windows_msvc = "0";
+          AWS_LC_SYS_PREBUILT_NASM_x86_64_pc_windows_msvc = "1";
         };
       });
 }

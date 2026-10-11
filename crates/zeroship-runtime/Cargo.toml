@@ -179,6 +179,12 @@ indexmap = { workspace = true }
 # impossible.
 uuid = { workspace = true }
 
+# The calling thread's CPU clock on Windows (`core::init::thread_cpu_time`);
+# Unix reads it through `libc`. The version is the one the CLI's Windows
+# closure already carries through compio.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
 # The bench binaries carry no tests, so no test run builds them.
 [[bin]]
 name = "zeroship-bench-server"

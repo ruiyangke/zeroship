@@ -5,9 +5,8 @@
 #   * libpg_query  — the SQL parser behind `env.db` / zeroship-migrate
 #   * librdkafka   — the Redpanda usage-event producer/consumer (zeroship-stream)
 #
-# Any binary that links BOTH (the worker: env.db + usage producer; the CLI and
-# zeroship-migrate: pg_query + rdkafka pulled transitively via
-# zeroship-runtime -> zeroship-metering -> zeroship-stream) fails to link with
+# Any binary that links BOTH (`cargo tree -i rdkafka-sys` beside
+# `cargo tree -i pg_query` names them) fails to link with
 # "multiple definition of `XXH_versionNumber`". The two copies are ABI-identical
 # (xxhash has a frozen, versioned ABI), so instructing the GNU linker to take the
 # first definition is safe and is the standard resolution for this well-known

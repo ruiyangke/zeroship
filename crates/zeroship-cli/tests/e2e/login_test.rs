@@ -66,7 +66,15 @@ fn accept_with_timeout(listener: &TcpListener) -> TcpStream {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match listener.accept() {
-            Ok((stream, _)) => return stream,
+            // Windows and macOS hand the accepted stream the listener's
+            // non-blocking mode, so a read that comes before the request
+            // would fail rather than wait for it; `read_request` bounds it.
+            Ok((stream, _)) => {
+                stream
+                    .set_nonblocking(false)
+                    .expect("make the mock request stream blocking");
+                return stream;
+            }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(10));
             }

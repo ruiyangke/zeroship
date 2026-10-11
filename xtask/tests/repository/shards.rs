@@ -10,13 +10,16 @@
 //! workspace-wide build, a feature of a shard package no run enables and no
 //! entry explains, a test job shaped so it could skip a shard or forgive its
 //! failure, and a second CI job that runs a workspace package's tests outside
-//! the shards. CI's `verify` job then checks what the shards actually ran.
+//! the shards. The `portable` job, which runs the CLI's tests on the other
+//! systems creators install it on, is held to the declaration in
+//! `xtask::shards::PORTABLE` the same way. CI's `verify` job then checks what
+//! the shards and the platforms actually ran.
 
 use crate::architecture::repo;
 use serde_json::Value;
 use serde_yaml::Value as Yaml;
 use std::collections::{BTreeMap, BTreeSet};
-use xtask::shards::{feature_package, selection, Shard, SHARDS};
+use xtask::shards::{feature_package, selection, Portable, Shard, LINUX, PORTABLE, SHARDS};
 
 /// The workspace packages with a target nextest or `cargo test --doc` runs.
 fn tested_packages(packages: &[&Value]) -> BTreeSet<String> {
@@ -550,9 +553,12 @@ const DELIBERATE_RERUNS: &[(&str, &str)] = &[(
 /// Steps outside the sharded test job that run workspace tests: a `cargo test`,
 /// `cargo nextest` or `cargo <tool> test` against the root workspace, or a
 /// shard through `cargo xtask test` other than as a build-only step. Composite
-/// actions a job uses are scanned as part of that job.
+/// actions a job uses are scanned as part of that job. The `portable` job may
+/// run exactly the run and the listing `PORTABLE` declares, and nothing else.
 fn duplicate_runs(workflow: &Yaml, actions: &BTreeMap<String, Yaml>) -> Vec<String> {
     let shard_names: BTreeSet<&str> = SHARDS.iter().map(|shard| shard.name).collect();
+    let portable_run = cargo_line(&PORTABLE.nextest_args());
+    let portable_listing = cargo_line(&PORTABLE.list_args());
     let mut found = Vec::new();
     for (name, job) in workflow["jobs"].as_mapping().into_iter().flatten() {
         let name = name.as_str().expect("job name");
@@ -567,6 +573,13 @@ fn duplicate_runs(workflow: &Yaml, actions: &BTreeMap<String, Yaml>) -> Vec<Stri
         }
         for script in scripts {
             for line in script.lines() {
+                let declared_listing = line
+                    .trim()
+                    .strip_prefix(portable_listing.as_str())
+                    .is_some_and(|rest| matches!(rest.trim(), "" | "\\"));
+                if name == PORTABLE_JOB && (line.trim() == portable_run || declared_listing) {
+                    continue;
+                }
                 let words: Vec<&str> = line.split_whitespace().collect();
                 let xtask_workspace = words.contains(&"xtask/Cargo.toml");
                 let build_only = words.contains(&"--build-only");
@@ -585,6 +598,280 @@ fn duplicate_runs(workflow: &Yaml, actions: &BTreeMap<String, Yaml>) -> Vec<Stri
         }
     }
     found
+}
+
+/// The job that runs the portable packages' tests on the other platforms.
+const PORTABLE_JOB: &str = "portable";
+
+/// The exact command the plan job lists the platforms with.
+const PLATFORMS_SCRIPT: &str = r#"echo "platforms=$(cargo xtask shards platforms)" >> "$GITHUB_OUTPUT""#;
+
+/// `cargo` and its arguments as one shell line.
+fn cargo_line(args: &[String]) -> String {
+    format!("cargo {}", args.join(" "))
+}
+
+/// Everything about the plan, portable and verify jobs that could let a
+/// platform be skipped or its run be filtered, forgiven or left unchecked, or
+/// let the toolchain drift from the development shell's.
+fn portable_problems(workflow: &Yaml) -> Vec<String> {
+    let mut problems = Vec::new();
+    let jobs = &workflow["jobs"];
+    let plan = &jobs["plan"];
+    let job = &jobs[PORTABLE_JOB];
+    if job.is_null() {
+        return vec![format!("there is no `{PORTABLE_JOB}` job")];
+    }
+
+    // The plan lists the platforms, whole, and reads the toolchain versions
+    // from the development shell.
+    if text(&plan["outputs"]["platforms"]) != Some("${{ steps.platforms.outputs.platforms }}") {
+        problems.push("`plan`'s `platforms` output is not its `platforms` step's".to_owned());
+    }
+    match steps(plan).into_iter().find(|step| text(&step["id"]) == Some("platforms")) {
+        Some(step) if text(&step["run"]) == Some(PLATFORMS_SCRIPT) && step["if"].is_null() => {}
+        _ => problems.push(format!("`plan` must run exactly `{PLATFORMS_SCRIPT}`, unconditionally")),
+    }
+    for tool in ["rust", "node", "nextest"] {
+        if text(&plan["outputs"][tool]) != Some(&format!("${{{{ steps.toolchain.outputs.{tool} }}}}")) {
+            problems.push(format!("`plan`'s `{tool}` output is not its `toolchain` step's"));
+        }
+    }
+
+    // One job per listed platform, nothing added or removed, none forgiven.
+    if text(&job["needs"]) != Some("plan") {
+        problems.push(format!("`{PORTABLE_JOB}` must need exactly `plan`"));
+    }
+    if !job["if"].is_null() {
+        problems.push(format!("`{PORTABLE_JOB}` is conditional"));
+    }
+    if !job["continue-on-error"].is_null() {
+        problems.push(format!("`{PORTABLE_JOB}` may fail without failing the run"));
+    }
+    if keys(&job["strategy"]) != BTreeSet::from(["fail-fast".to_owned(), "matrix".to_owned()])
+        || job["strategy"]["fail-fast"] != Yaml::Bool(false)
+        || keys(&job["strategy"]["matrix"]) != BTreeSet::from(["platform".to_owned()])
+        || text(&job["strategy"]["matrix"]["platform"])
+            != Some("${{ fromJSON(needs.plan.outputs.platforms) }}")
+    {
+        problems.push(format!(
+            "`{PORTABLE_JOB}`'s strategy must be exactly `fail-fast: false` and the matrix \
+             `platform: ${{{{ fromJSON(needs.plan.outputs.platforms) }}}}`"
+        ));
+    }
+    if text(&job["runs-on"]) != Some("${{ matrix.platform.runner }}") {
+        problems.push(format!("`{PORTABLE_JOB}` must run on `${{{{ matrix.platform.runner }}}}`"));
+    }
+
+    // The toolchain is the plan's, so flake.lock stays the one pin.
+    let job_steps = steps(job);
+    let uses = |prefix: &str, key: &str, value: &str| {
+        job_steps.iter().any(|step| {
+            text(&step["uses"]).is_some_and(|uses| uses.starts_with(prefix))
+                && text(&step["with"][key]) == Some(value)
+        })
+    };
+    for (prefix, key, value) in [
+        ("dtolnay/rust-toolchain@", "toolchain", "${{ needs.plan.outputs.rust }}"),
+        ("actions/setup-node@", "node-version", "${{ needs.plan.outputs.node }}"),
+        ("taiki-e/install-action@", "tool", "cargo-nextest@${{ needs.plan.outputs.nextest }}"),
+    ] {
+        if !uses(prefix, key, value) {
+            problems.push(format!("`{PORTABLE_JOB}` must install with `{prefix}` `{key}: {value}`"));
+        }
+    }
+
+    // The run is the declared one, whole, and only reporting may follow it
+    // conditionally.
+    let run = cargo_line(&PORTABLE.nextest_args());
+    match job_steps.iter().position(|step| text(&step["run"]) == Some(run.as_str())) {
+        Some(at) => {
+            for (index, step) in job_steps.iter().enumerate() {
+                if !step["continue-on-error"].is_null() {
+                    problems.push(format!("a `{PORTABLE_JOB}` step may fail without failing the job"));
+                }
+                let condition = text(&step["if"]);
+                if !(condition.is_none() || (index > at && condition == Some("${{ !cancelled() }}"))) {
+                    problems.push(format!(
+                        "`{PORTABLE_JOB}` step {index} is conditional ({condition:?}); only reporting \
+                         steps after the run may be, and only on `${{{{ !cancelled() }}}}`"
+                    ));
+                }
+            }
+        }
+        None => problems.push(format!("`{PORTABLE_JOB}` never runs exactly `{run}`")),
+    }
+
+    // Its reports carry the platform's label, as `verify` reads them.
+    let label = Portable::label(&xtask::shards::Platform {
+        name: "$PLATFORM",
+        runner: "",
+    });
+    let listing = cargo_line(&PORTABLE.list_args());
+    let reports = job_steps.iter().any(|step| {
+        let script = step["run"].as_str().unwrap_or_default();
+        text(&step["env"]["PLATFORM"]) == Some("${{ matrix.platform.name }}")
+            && script.contains(&listing)
+            && script.contains(&format!("junit-{label}.xml"))
+            && script.contains(&format!("list-{label}.json"))
+    });
+    if !reports {
+        problems.push(format!(
+            "`{PORTABLE_JOB}` does not keep its JUnit report and its listing as `junit-{label}.xml` \
+             and `list-{label}.json`"
+        ));
+    }
+    let uploads = job_steps.iter().any(|step| {
+        text(&step["uses"]).is_some_and(|uses| uses.starts_with("actions/upload-artifact@"))
+            && text(&step["with"]["name"]) == Some("reports-portable-${{ matrix.platform.name }}")
+            && text(&step["with"]["path"]) == Some("target/nextest/ci/")
+    });
+    if !uploads {
+        problems.push(format!(
+            "`{PORTABLE_JOB}` does not upload `target/nextest/ci/` as `reports-portable-<platform>`"
+        ));
+    }
+
+    // `verify` reads every platform's reports, whatever happened to them.
+    let needs: BTreeSet<&str> = jobs["verify"]["needs"]
+        .as_sequence()
+        .into_iter()
+        .flatten()
+        .filter_map(Yaml::as_str)
+        .collect();
+    if !needs.contains(PORTABLE_JOB) {
+        problems.push(format!("`verify` must need `{PORTABLE_JOB}`"));
+    }
+    problems
+}
+
+fn portable_step<'a>(workflow: &'a mut Yaml, run: &str) -> &'a mut Yaml {
+    workflow["jobs"][PORTABLE_JOB]["steps"]
+        .as_sequence_mut()
+        .expect("portable steps")
+        .iter_mut()
+        .find(|step| step["run"].as_str() == Some(run))
+        .expect("the portable run step")
+}
+
+#[test]
+fn ci_runs_the_portable_tests_on_every_declared_platform_as_declared() {
+    let workflow = workflow();
+    let problems = portable_problems(&workflow);
+    assert!(problems.is_empty(), "the portable job's shape: {problems:#?}");
+
+    // Rejection controls: each way a platform could be dropped, its run
+    // filtered or forgiven, or its toolchain pinned apart, applied alone.
+    let run = cargo_line(&PORTABLE.nextest_args());
+    let filtered = format!("{run} -E 'not test(slow)'");
+    let controls: Vec<(&str, Yaml)> = vec![
+        ("a matrix include", mutated(&workflow, |w| set(&mut w["jobs"][PORTABLE_JOB]["strategy"]["matrix"], "include", "[{platform: {name: freebsd, runner: x}}]"))),
+        ("a hardcoded runner", mutated(&workflow, |w| set(&mut w["jobs"][PORTABLE_JOB], "runs-on", "macos-14"))),
+        ("continue-on-error on the job", mutated(&workflow, |w| set(&mut w["jobs"][PORTABLE_JOB], "continue-on-error", "true"))),
+        ("continue-on-error on the run", mutated(&workflow, |w| set(portable_step(w, &run), "continue-on-error", "true"))),
+        ("a condition on the run", mutated(&workflow, |w| set(portable_step(w, &run), "if", "matrix.platform.name != 'windows'"))),
+        ("a filtered run", mutated(&workflow, |w| set(portable_step(w, &run), "run", &serde_json::to_string(&filtered).unwrap()))),
+        ("a pinned toolchain", mutated(&workflow, |w| {
+            let step = w["jobs"][PORTABLE_JOB]["steps"]
+                .as_sequence_mut()
+                .expect("portable steps")
+                .iter_mut()
+                .find(|step| step["uses"].as_str().is_some_and(|uses| uses.starts_with("dtolnay/rust-toolchain@")))
+                .expect("the toolchain step");
+            set(&mut step["with"], "toolchain", "1.95.0");
+        })),
+        ("a verify job that does not wait for it", mutated(&workflow, |w| set(&mut w["jobs"]["verify"], "needs", "[plan, test]"))),
+        ("a slice of the platform list", mutated(&workflow, |w| {
+            let step = w["jobs"]["plan"]["steps"]
+                .as_sequence_mut()
+                .expect("plan steps")
+                .iter_mut()
+                .find(|step| step["id"].as_str() == Some("platforms"))
+                .expect("the platforms step");
+            set(step, "run", r#""echo \"platforms=$(cargo xtask shards platforms | jq -c '.[1:]')\" >> \"$GITHUB_OUTPUT\"""#);
+        })),
+    ];
+    for (control, workflow) in &controls {
+        assert!(!portable_problems(workflow).is_empty(), "{control} must be reported");
+    }
+    let actions = composite_actions();
+    let widened = mutated(&workflow, |w| set(portable_step(w, &run), "run", &serde_json::to_string(&filtered).unwrap()));
+    assert_eq!(
+        duplicate_runs(&widened, &actions),
+        [format!("{PORTABLE_JOB}: {filtered}")],
+        "a portable run other than the declared one runs tests outside the shards"
+    );
+}
+
+/// The portable table names real things: packages a shard runs, so a Linux
+/// listing exists to compare each platform with; systems by `target_os`;
+/// confined entries that name a test target of those packages, a reason, and
+/// some but not all of the systems.
+#[test]
+fn the_portable_table_names_real_packages_targets_and_systems() {
+    let packages: BTreeMap<String, &Value> = repo::workspace()
+        .into_iter()
+        .map(|package| (package["name"].as_str().expect("name").to_owned(), package))
+        .collect();
+    let owners = owners();
+    assert!(!PORTABLE.packages.is_empty(), "the portable run names no package");
+    for package in PORTABLE.packages {
+        assert!(
+            owners.get(package).is_some_and(|shards| shards.len() == 1),
+            "portable package {package} must be in exactly one shard, whose listing the \
+             platforms are held to"
+        );
+    }
+    let mut systems = BTreeSet::from([LINUX]);
+    for platform in PORTABLE.platforms {
+        assert!(
+            matches!(platform.name, "macos" | "windows"),
+            "{} is not a target_os the portable job installs a toolchain for",
+            platform.name
+        );
+        assert!(!platform.runner.trim().is_empty(), "{} names no runner", platform.name);
+        assert!(systems.insert(platform.name), "{} is declared twice", platform.name);
+    }
+    assert!(systems.len() > 1, "the portable run names no platform besides Linux");
+    for shard in SHARDS {
+        assert_ne!(shard.name, PORTABLE_JOB, "a shard's reports would collide with the portable runs'");
+    }
+
+    let binaries: BTreeSet<String> = PORTABLE
+        .packages
+        .iter()
+        .flat_map(|package| {
+            packages[*package]["targets"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|target| target["test"] == true)
+                .map(move |target| {
+                    let name = target["name"].as_str().expect("target name");
+                    let kinds: Vec<&str> =
+                        target["kind"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                    if kinds.contains(&"bin") {
+                        format!("{package}::bin/{name}")
+                    } else if kinds.contains(&"test") {
+                        format!("{package}::{name}")
+                    } else {
+                        (*package).to_owned()
+                    }
+                })
+        })
+        .collect();
+    assert!(binaries.len() >= 2, "the portable packages declare too few test targets: {binaries:?}");
+    let mut seen = BTreeSet::new();
+    for entry in PORTABLE.confined {
+        let name = format!("{} {}", entry.binary, entry.prefix);
+        assert!(binaries.contains(entry.binary), "{name}: {} is no test target of the portable packages", entry.binary);
+        assert!(!entry.prefix.is_empty() && !entry.reason.trim().is_empty(), "{name} has no prefix or no reason");
+        assert!(!entry.on.is_empty() && entry.on.len() < systems.len(), "{name} must name some systems, not all");
+        for system in entry.on {
+            assert!(systems.contains(system), "{name} names {system}, which the portable run does not");
+        }
+        assert!(seen.insert(name.clone()), "{name} is declared twice");
+    }
 }
 
 /// Apply `edit` to a copy of `workflow`.
