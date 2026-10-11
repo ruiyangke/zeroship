@@ -173,6 +173,14 @@ enum RequestOutcome {
     HousekeepingUndeliverable(Error),
 }
 
+/// The serialized loop's next action after one queued request is handled.
+enum RequestFollowup {
+    /// Keep running.
+    Continue,
+    /// End the session with a clean `Ok(())`.
+    Close,
+}
+
 enum DispatchOutcome {
     Continue,
     RetireAfterDiagnostics(Error),
@@ -432,31 +440,28 @@ impl ReadObligation {
 /// Whether a caller asked for work the driver has not finished.
 ///
 /// IT DELIBERATELY IGNORES WHETHER THE CONSUMER CHANNEL IS STILL CONNECTED.
-/// Making a response with a hung-up consumer count as NOT awaited is
-/// attractive: a caller that abandons a `RowStream` and then drops the last
-/// `Client` makes `crate::release` shut the socket down under the driver's
-/// parked read, and the resulting EOF is reported as `UnexpectedEof`,
-/// "connection closed by server", for a close this side caused
-/// (`a_client_released_eof_is_reported_as_a_server_close` pins that, wrong
-/// message and all). Two findings say the reachability rule is not the fix:
+/// Reachability cannot answer WHO closed the socket, and that is the question
+/// an EOF under an outstanding response raises. Two findings say counting a
+/// hung-up consumer as NOT awaited is the wrong fix:
 ///
-/// * It does not fix what prompted it. The intermittent
-///   `serialized_copy_reads_startup_then_excludes_producer_idle_time` failure
-///   happens with `CopyInSink` still holding its `Responses`, so the response
-///   is reachable and stays awaited either way.
+/// * It does not answer the defect. In
+///   `serialized_copy_reads_startup_then_excludes_producer_idle_time` the
+///   `CopyInSink` still holds its `Responses` when the client drops, so the
+///   response is reachable and stays awaited under that rule.
 /// * It breaks a live invariant.
-///   `integration.rs::losing_the_backend_under_a_live_client_is_still_an_error`
+///   `tests/integration/api.rs::losing_the_backend_under_a_live_client_is_still_an_error`
 ///   terminates its own backend, reads the FATAL, drops that one stream and
 ///   keeps the `Client`. Every outstanding response is then unreachable, so
 ///   the rule calls losing a backend under a live client a clean close.
 ///
-/// The wrong message is an ATTRIBUTION defect - who closed the socket - and
-/// reachability cannot answer it. Nor can "the client half is gone":
+/// The message is an ATTRIBUTION defect - who closed the socket - and the
+/// reader answers it directly. `ConnectionDropRelease::local_teardown_started`
+/// records whether this side's release had begun shutting the socket down when
+/// the read saw EOF, and `classify_read_terminal` treats such an EOF as the
+/// clean local close it is. The server-closes-first interleavings keep the
+/// error, which
 /// `backend_error_determined_before_the_last_client_drops_is_still_reported`
-/// pins the interleaving where the server closes FIRST and the client drops
-/// afterwards, which that proxy would also call clean. Answering it needs the
-/// reader to record whether our own release had fired when it saw EOF, and the
-/// serialized loop has no independent reader to record it with.
+/// and `a_peer_closed_eof_under_a_live_client_reports_the_server_close` pin.
 fn has_awaited_response(
     responses: &VecDeque<Response>,
     pending_responses: &VecDeque<PendingResponse>,
@@ -670,7 +675,10 @@ where
     /// `TlsConnect` whose stream answers `Err` to `try_into_split`. Both
     /// transports this crate ships (plain socket and rustls) split, and use
     /// [`run_multiplexed`](Self::run_multiplexed) instead.
-    async fn run_serialized(mut self) -> Result<(), Error> {
+    async fn run_serialized(
+        mut self,
+        read_error_release: Option<crate::release::ConnectionDropRelease>,
+    ) -> Result<(), Error> {
         loop {
             // Step A - deliver batches stashed only to preserve wire order.
             // Doing this BEFORE any read keeps a second batch for the same
@@ -690,6 +698,15 @@ where
                 let msg = match read_backend(&mut self.stream).await {
                     Ok(msg) => msg,
                     Err(e) => {
+                        // Attribute an EOF or a reset before recording it: a
+                        // release that already ran set the flag before its own
+                        // `shutdown`, so either read error seen after that is
+                        // this side's close.
+                        let local_release = is_local_release_read(&e, read_error_release.as_ref());
+                        if local_release {
+                            self.record_terminal_read(&Error::local_release());
+                            return Ok(());
+                        }
                         self.record_terminal_read(&e);
                         if is_eof(&e)
                             && !has_awaited_response(&self.responses, &self.pending_responses)
@@ -702,13 +719,12 @@ where
                 self.dispatch_decoded_message(msg, true).await?;
                 // Drain any requests that arrived while we were reading.
                 while let Ok(request) = self.receiver.try_recv() {
-                    if let RequestOutcome::HousekeepingUndeliverable(error) =
-                        self.handle_request(request).await?
-                    {
-                        debug!(
-                            "housekeeping request was not delivered; closing connection: {error}"
-                        );
-                        return Ok(());
+                    match request_followup(
+                        self.handle_request(request, read_error_release.as_ref())
+                            .await,
+                    )? {
+                        RequestFollowup::Continue => {}
+                        RequestFollowup::Close => return Ok(()),
                     }
                 }
                 continue;
@@ -724,13 +740,12 @@ where
             // cancel-safety of the read side.
             match self.receiver.next().await {
                 Some(request) => {
-                    if let RequestOutcome::HousekeepingUndeliverable(error) =
-                        self.handle_request(request).await?
-                    {
-                        debug!(
-                            "housekeeping request was not delivered; closing connection: {error}"
-                        );
-                        return Ok(());
+                    match request_followup(
+                        self.handle_request(request, read_error_release.as_ref())
+                            .await,
+                    )? {
+                        RequestFollowup::Continue => {}
+                        RequestFollowup::Close => return Ok(()),
                     }
                 }
                 None => {
@@ -901,6 +916,26 @@ where
         publish_terminal_error(error, &mut self.responses);
     }
 
+    /// Record a terminal read error on the serialized path, attributing a close
+    /// this side's release started.
+    ///
+    /// A local release is published and returned as `Error::local_release()`,
+    /// so the holder is told the reason and the caller resolves the session
+    /// cleanly; every other error keeps its own account.
+    fn record_read_terminal(
+        &mut self,
+        error: Error,
+        read_error_release: Option<&crate::release::ConnectionDropRelease>,
+    ) -> Error {
+        let error = if is_local_release_read(&error, read_error_release) {
+            Error::local_release()
+        } else {
+            error
+        };
+        self.record_terminal_read(&error);
+        error
+    }
+
     /// Prefer a complete server diagnosis already in the serialized read
     /// buffer over the local write failure which exposed it.
     async fn prefer_buffered_server_error(&mut self, local: Error) -> Error {
@@ -914,7 +949,11 @@ where
     /// Handle a request received from the client (serialized path).
     /// Pushes the response channel onto `responses` and writes the
     /// frontend messages onto the unsplit stream.
-    async fn handle_request(&mut self, request: Request) -> Result<RequestOutcome, Error> {
+    async fn handle_request(
+        &mut self,
+        request: Request,
+        read_error_release: Option<&crate::release::ConnectionDropRelease>,
+    ) -> Result<RequestOutcome, Error> {
         let Request {
             messages,
             sender,
@@ -1009,7 +1048,8 @@ where
                                     let message = match read_backend(&mut self.stream).await {
                                         Ok(message) => message,
                                         Err(error) => {
-                                            self.record_terminal_read(&error);
+                                            let error = self
+                                                .record_read_terminal(error, read_error_release);
                                             return Err(error);
                                         }
                                     };
@@ -1626,6 +1666,44 @@ fn is_eof(e: &Error) -> bool {
     }
 }
 
+/// Whether a terminal socket-read error is the close this side's release
+/// started, rather than a failure the peer caused.
+///
+/// A release that shuts the socket down surfaces at a parked read either as a
+/// clean EOF, or - when the server sends a late frame after that shutdown and
+/// the kernel answers it with RST - as a connection reset. Both are this side's
+/// close once the release flag is set; with no release begun, either one stays
+/// the peer failure it is.
+fn is_local_release_read(
+    error: &Error,
+    release: Option<&crate::release::ConnectionDropRelease>,
+) -> bool {
+    release.is_some_and(crate::release::ConnectionDropRelease::local_teardown_started)
+        && (is_eof(error)
+            || error
+                .as_io()
+                .is_some_and(crate::release::ConnectionRelease::is_local_teardown_reset))
+}
+
+/// Reduce a handled request's outcome to the serialized loop's next action.
+///
+/// Step B's post-read drain and Step C's idle arm both route their
+/// `handle_request` result through here. A local release carried out of
+/// `handle_request` (a COPY startup read that ends on this side's own release)
+/// closes the session the same way at either site. A housekeeping request whose
+/// diagnosis has no consumer closes it too, for the reason the debug line names.
+fn request_followup(outcome: Result<RequestOutcome, Error>) -> Result<RequestFollowup, Error> {
+    match outcome {
+        Ok(RequestOutcome::HousekeepingUndeliverable(error)) => {
+            debug!("housekeeping request was not delivered; closing connection: {error}");
+            Ok(RequestFollowup::Close)
+        }
+        Ok(RequestOutcome::Continue) => Ok(RequestFollowup::Continue),
+        Err(error) if error.is_local_release() => Ok(RequestFollowup::Close),
+        Err(error) => Err(error),
+    }
+}
+
 // Small extension to `Error` so `is_eof` can peek at the underlying
 // `io::Error`. We add this as a free function here because Error is
 // otherwise opaque (factory methods only).
@@ -1654,7 +1732,9 @@ impl Error {
 /// the explanation at that moment; this is what gives it away.
 ///
 /// A clean EOF is exempt, because "closed" is an honest and complete account
-/// of it: there is no failure to explain, the peer simply went away.
+/// of it: there is no failure to explain, the peer simply went away. A local
+/// release is not an EOF (it carries no cause), so it is delivered like any
+/// other terminal error.
 fn publish_terminal_error(error: &Error, responses: &mut VecDeque<Response>) {
     if is_eof(error) {
         return;
@@ -1666,12 +1746,13 @@ fn publish_terminal_error(error: &Error, responses: &mut VecDeque<Response>) {
     // receives the distinguishable error directly. A consumer that has filled
     // its own channel is application backpressure, not a socket-read wait.
     //
-    // A read timeout keeps its own duplication, so it stays classifiable as
-    // one (`Error::is_read_timeout`) on the receiving side; anything else
-    // travels as its rendered text.
+    // A read timeout and a local release keep their own duplication, so each
+    // stays classifiable on the receiving side; anything else travels as its
+    // rendered text.
     for response in responses {
         let response_error = error
             .duplicate_read_timeout()
+            .or_else(|| error.duplicate_local_release())
             .unwrap_or_else(|| error.duplicate_terminal());
         let _ = response
             .sender
@@ -1681,15 +1762,19 @@ fn publish_terminal_error(error: &Error, responses: &mut VecDeque<Response>) {
     }
 }
 
-/// Map a terminal read event (I/O error or reader-channel close) observed by the
-/// multiplexed loop into the `Result` the loop should return. Shared by the
-/// main `select` and the in-flush read-draining
-/// ([`flush_with_read_draining`]) so both classify EOF / error / close
-/// identically.
+/// Map a terminal read event (I/O error, local release, or reader-channel
+/// close) observed by the multiplexed loop into the `Result` the loop should
+/// return. Shared by the main `select` and the in-flush read-draining
+/// ([`flush_with_read_draining`]) so both classify every terminal identically.
 ///
-/// `Some(e)` -> clean close (`Ok(())`) iff EOF with no awaited response, else
-/// propagate `e`. `None` (channel closed without a terminal error) ->
-/// clean iff no awaited response is in flight, else `Error::closed()`.
+/// `Some(Error::local_release())` -> clean close (`Ok(())`): this side's own
+/// release ended the session, so no caller can receive the outstanding
+/// response. Every still-registered response is failed with the release's own
+/// error first, so a holder sees a named failure rather than a hang.
+/// `Some(e)` that is not a local release -> clean (`Ok(())`) iff EOF with no
+/// awaited response, else propagate `e`. `None` (channel closed without a
+/// terminal error) -> clean iff no awaited response is in flight, else
+/// `Error::closed()`.
 ///
 /// Decoded backend frames and ordinary I/O errors share one FIFO channel;
 /// `ReadTimeout` alone arrives on the acknowledged out-of-band path.
@@ -1701,6 +1786,11 @@ fn classify_read_terminal(
     match terminal {
         Some(e) => {
             publish_terminal_error(&e, responses);
+            if e.is_local_release() {
+                // The peer did not close; our own release did. No response can
+                // still be delivered, so this is a clean end for `run`.
+                return Ok(());
+            }
             // EOF with no awaited response is a clean close; otherwise it is
             // a genuine error (IO-4: EOF mid-awaited-response is always an
             // error on the multiplexed path).
@@ -1722,11 +1812,16 @@ fn classify_read_terminal(
     }
 }
 
-fn take_captured_non_eof_terminal(terminal: &mut Option<Option<Error>>) -> Option<Error> {
-    if terminal
-        .as_ref()
-        .is_some_and(|terminal| terminal.as_ref().is_some_and(|error| !is_eof(error)))
-    {
+/// Take a captured reader failure that must be surfaced ahead of a write
+/// failure. A clean EOF and a local-release EOF are both clean ends, so they
+/// stay in `terminal` for [`classify_read_terminal`]; only a genuine failure
+/// is returned here.
+fn take_captured_failure_terminal(terminal: &mut Option<Option<Error>>) -> Option<Error> {
+    if terminal.as_ref().is_some_and(|terminal| {
+        terminal
+            .as_ref()
+            .is_some_and(|error| !is_eof(error) && !error.is_local_release())
+    }) {
         terminal.take().flatten()
     } else {
         None
@@ -2237,13 +2332,13 @@ where
     /// Drive the connection until the client is dropped and all awaited
     /// requests have completed, or a fatal I/O error occurs.
     ///
-    /// An end-of-stream is "fatal" whenever it interrupted work a caller asked
-    /// for, whether or not that caller is still listening and WHETHER OR NOT
-    /// THIS SIDE CAUSED THE CLOSE. Dropping the last `Client` under an
-    /// outstanding response therefore resolves to `UnexpectedEof`, "connection
-    /// closed by server", even though `crate::release` closed the socket - see
-    /// [`has_awaited_response`] for the two measurements behind keeping it that
-    /// way.
+    /// An end-of-stream the server caused is "fatal" whenever it interrupted
+    /// work a caller asked for, whether or not that caller is still listening.
+    /// An end-of-stream THIS SIDE'S release caused is not: dropping the last
+    /// `Client` under an outstanding response makes `crate::release` shut the
+    /// socket down, the reader attributes that EOF to the local release, and
+    /// `run` resolves `Ok(())` while any holder still owning the outstanding
+    /// `Responses` is told the reason. See [`classify_read_terminal`].
     ///
     /// Splits the socket into owned read/write halves and runs the
     /// [multiplexed loop](Self::run_multiplexed). BOTH transports reach it:
@@ -2341,7 +2436,7 @@ where
                     drop_release: None,
                     _live,
                 };
-                conn.run_serialized().await
+                conn.run_serialized(read_error_release).await
             }
         }
     }
@@ -2532,6 +2627,14 @@ where
                         // wakes a compio operation whose cancellation alone
                         // may not release its fd.
                         read_error_status.store(READ_RETIRED_STATUS, Ordering::Release);
+                        // ATTRIBUTE THE READ ERROR BEFORE THIS SIDE SHUTS
+                        // ANYTHING DOWN. A release that already ran set the
+                        // flag before its own `shutdown`, so an EOF or a reset
+                        // seen after that is the local close; sampling after
+                        // `release.shutdown()` below would set the flag itself
+                        // and misattribute every peer close.
+                        let local_release =
+                            is_local_release_read(&error, read_error_release.as_ref());
                         if let Some(release) = &read_error_release {
                             // A local read failure can leave the server
                             // blocked writing into our full receive window, and
@@ -2544,9 +2647,25 @@ where
                             if is_eof(&error) {
                                 release.shutdown();
                             } else {
+                                // A local-release reset also reaches here: the
+                                // peer sent a late frame after this side shut
+                                // the socket down for reading. Aborting is
+                                // harmless then. If the last `Client` dropped,
+                                // `ConnectionRelease::drop` released the only
+                                // strong reference to the socket slot, so the
+                                // guard's `Weak` upgrade fails and `abort`
+                                // returns. Under `force_close` the connection is
+                                // already shut down, and the read task still
+                                // holds its own descriptor, so taking this
+                                // duplicate out sends nothing.
                                 release.abort();
                             }
                         }
+                        let error = if local_release {
+                            Error::local_release()
+                        } else {
+                            error
+                        };
                         publish_reader_failure(error, &mut read_tx, &read_terminal_tx).await;
                         break;
                     }
@@ -2869,7 +2988,7 @@ where
                                     (write_result, None)
                                 };
                                 if let Some(error) =
-                                    take_captured_non_eof_terminal(&mut terminal)
+                                    take_captured_failure_terminal(&mut terminal)
                                 {
                                     publish_terminal_error(&error, &mut responses);
                                     return Err(error);
@@ -2955,7 +3074,7 @@ where
                             !copy_initial_flushed || resume_terminal,
                         )
                         .await;
-                        if let Some(error) = take_captured_non_eof_terminal(&mut terminal) {
+                        if let Some(error) = take_captured_failure_terminal(&mut terminal) {
                             publish_terminal_error(&error, &mut responses);
                             return Err(error);
                         }
@@ -3201,10 +3320,10 @@ mod tests {
         write_started: Rc<Cell<bool>>,
     }
 
-    /// The EOF twin of `ReadFailureDuringWriteSplitStream`. A non-EOF terminal
-    /// is taken by `take_captured_non_eof_terminal` before the flush path's
-    /// `classify_read_terminal` call is reached, so only a clean EOF exercises
-    /// that call site.
+    /// The EOF twin of `ReadFailureDuringWriteSplitStream`. A failure terminal
+    /// is taken by `take_captured_failure_terminal` before the flush path's
+    /// `classify_read_terminal` call is reached; a clean EOF and a
+    /// local-release EOF both reach that call site.
     struct EofDuringWriteSplitStream {
         write_started: Rc<Cell<bool>>,
         write_future_dropped: Rc<Cell<bool>>,
@@ -4618,7 +4737,7 @@ mod tests {
         let read_error = Error::read_timeout(Duration::from_millis(75));
 
         let mut terminal = Some(Some(read_error));
-        let surfaced = take_captured_non_eof_terminal(&mut terminal)
+        let surfaced = take_captured_failure_terminal(&mut terminal)
             .expect("a concurrent write failure hid the captured read timeout");
         assert!(surfaced.is_read_timeout());
     }
@@ -6205,7 +6324,7 @@ mod tests {
         );
 
         let driver_error = connection
-            .run_serialized()
+            .run_serialized(None)
             .await
             .expect_err("the unsupported encoding left the serialized session alive");
         assert!(
@@ -6661,7 +6780,7 @@ mod tests {
             None,
         );
 
-        let result = compio::time::timeout(Duration::from_secs(1), connection.run_serialized())
+        let result = compio::time::timeout(Duration::from_secs(1), connection.run_serialized(None))
             .await
             .expect("the coalesced-failure serialized reader exceeded its watchdog");
         let local = result.expect_err("the malformed tail left the serialized session reusable");
@@ -7065,15 +7184,155 @@ mod tests {
         .expect("terminal read stayed trapped behind the in-flight write");
     }
 
-    /// The flush path's own `classify_read_terminal` call, which nothing
-    /// reached: passing `None` in place of the captured terminal left all 1441
-    /// tests green. Its sibling above cannot bind it, because a non-EOF
-    /// terminal is taken by `take_captured_non_eof_terminal` and returned
-    /// before that call site runs. Only a clean EOF arrives still carried in
-    /// `terminal`, and it must be classified rather than discarded - discarding
-    /// it downgrades `UnexpectedEof` to a bare `Error::closed()` with no cause,
-    /// which is exactly the unexplained disconnect the terminal-error plumbing
-    /// exists to prevent.
+    /// A reset that arrives after this side's release has begun is the local
+    /// close, not a server failure. The reader turns it into
+    /// `Error::local_release()`, `run_multiplexed` resolves `Ok(())`, and the
+    /// held response is told the reason.
+    #[compio::test]
+    async fn a_local_release_reset_is_a_clean_close_on_the_multiplexed_loop() {
+        compio::time::timeout(Duration::from_secs(5), async {
+            let write_started = Rc::new(Cell::new(false));
+            let write_future_dropped = Rc::new(Cell::new(false));
+            let stream = BufStream::new(ReadFailureDuringWriteSplitStream {
+                write_started: Rc::clone(&write_started),
+                write_future_dropped: Rc::clone(&write_future_dropped),
+            });
+            let Ok((read_half, write_half)) = stream.try_into_split() else {
+                panic!("the local-release reset fixture did not split");
+            };
+            let (request_tx, request_rx) = mpsc::unbounded();
+            let (response_tx, mut response_rx) = mpsc::channel(1);
+            request_tx
+                .unbounded_send(Request {
+                    messages: RequestMessages::Single(FrontendMessage::Raw(
+                        bytes::Bytes::from_static(b"scripted request"),
+                    )),
+                    sender: response_tx,
+                    disposition: RequestDisposition::Awaited,
+                    transaction_effect: TransactionEffect::MayChange,
+                    prepare_cleanup: None,
+                    statement: None,
+                    observation: None,
+                    request_server_error: Arc::default(),
+                })
+                .expect("queue the local-release request");
+
+            let result = Connection::<
+                ReadFailureDuringWriteSplitStream,
+                ReadFailureDuringWriteSplitStream,
+            >::run_multiplexed(
+                read_half,
+                write_half,
+                Arc::default(),
+                request_rx,
+                None,
+                Arc::new(AtomicU8::new(b'I')),
+                Arc::new(AtomicUsize::new(1)),
+                Arc::default(),
+                Cell::new(false),
+                None,
+                Some(locally_released_guard()),
+                crate::live::LiveConnectionGuard::new(),
+            )
+            .await;
+
+            assert!(
+                result.is_ok(),
+                "a reset after the local release was reported as a server failure: {result:?}"
+            );
+            let delivered = response_rx
+                .next()
+                .await
+                .expect("the local release told the registered response nothing");
+            let ResponseMessages::Observed(mut messages) = delivered else {
+                panic!("the local release delivered frames rather than its error");
+            };
+            let Err(first) = messages.pop_front().expect("the delivered batch is empty") else {
+                panic!("the local release delivered a frame rather than its error");
+            };
+            assert!(
+                first.is_local_release(),
+                "the holder was not told the connection was released: {first:?}"
+            );
+            drop(request_tx);
+        })
+        .await
+        .expect("local-release reset test exceeded its watchdog");
+    }
+
+    /// The control: the identical reset with NO release begun stays the server
+    /// failure it is.
+    #[compio::test]
+    async fn a_reset_without_a_local_release_stays_a_server_failure() {
+        compio::time::timeout(Duration::from_secs(5), async {
+            let write_started = Rc::new(Cell::new(false));
+            let write_future_dropped = Rc::new(Cell::new(false));
+            let stream = BufStream::new(ReadFailureDuringWriteSplitStream {
+                write_started: Rc::clone(&write_started),
+                write_future_dropped: Rc::clone(&write_future_dropped),
+            });
+            let Ok((read_half, write_half)) = stream.try_into_split() else {
+                panic!("the server-reset control fixture did not split");
+            };
+            let (request_tx, request_rx) = mpsc::unbounded();
+            let (response_tx, _response_rx) = mpsc::channel(1);
+            request_tx
+                .unbounded_send(Request {
+                    messages: RequestMessages::Single(FrontendMessage::Raw(
+                        bytes::Bytes::from_static(b"scripted request"),
+                    )),
+                    sender: response_tx,
+                    disposition: RequestDisposition::Awaited,
+                    transaction_effect: TransactionEffect::MayChange,
+                    prepare_cleanup: None,
+                    statement: None,
+                    observation: None,
+                    request_server_error: Arc::default(),
+                })
+                .expect("queue the server-reset control request");
+            // A guard that exists but has not been released. The reset must be
+            // attributed to the flag, not to the guard's mere presence.
+            let (_release, guard) = unreleased_guard();
+
+            let result = Connection::<
+                ReadFailureDuringWriteSplitStream,
+                ReadFailureDuringWriteSplitStream,
+            >::run_multiplexed(
+                read_half,
+                write_half,
+                Arc::default(),
+                request_rx,
+                None,
+                Arc::new(AtomicU8::new(b'I')),
+                Arc::new(AtomicUsize::new(1)),
+                Arc::default(),
+                Cell::new(false),
+                None,
+                Some(guard),
+                crate::live::LiveConnectionGuard::new(),
+            )
+            .await;
+
+            let error = result.expect_err("a server reset without a release became clean");
+            assert_eq!(
+                error.as_io().map(std::io::Error::kind),
+                Some(std::io::ErrorKind::ConnectionReset),
+                "the server reset lost its kind: {error:?}"
+            );
+            drop(request_tx);
+        })
+        .await
+        .expect("server-reset control exceeded its watchdog");
+    }
+
+    /// The flush path's own `classify_read_terminal` call, which nothing else
+    /// reaches. Its sibling above cannot bind it, because a failure terminal
+    /// is taken by `take_captured_failure_terminal` and returned before that
+    /// call site runs. A clean EOF and a local-release EOF arrive
+    /// still carried in `terminal`, and each must be classified rather than
+    /// discarded - discarding a clean EOF downgrades `UnexpectedEof` to a bare
+    /// `Error::closed()` with no cause, which is exactly the unexplained
+    /// disconnect the terminal-error plumbing exists to prevent.
     #[compio::test]
     async fn eof_during_write_classifies_the_captured_terminal() {
         compio::time::timeout(Duration::from_secs(5), async {
@@ -7676,43 +7935,23 @@ mod tests {
             assert_eq!(sink.as_mut().finish().await.expect("finish COPY"), 0);
             assert!(split_attempted.get(), "test did not enter serialized loop");
 
-            // SETTLE THE SESSION BEFORE DROPPING THE CLIENT, and wait on that
-            // CONDITION rather than on any duration.
+            // DROP THE CLIENT WITH THE COPY RESPONSE STILL OUTSTANDING.
             //
             // `CopyInSink::finish` returns at `CommandComplete`, one frame
-            // BEFORE the `ReadyForQuery` that settles the session. The peer
-            // writes those two frames with separate `write_all` calls, so under
-            // load they routinely arrive as separate decoder batches and the
-            // COPY response is still queued and `Awaited` when the client drops.
-            // `crate::release` then shuts the socket down under the driver's
-            // parked Step B read, and Step B will not call an EOF with an
-            // awaited response a clean close - so `run` returns
-            // `UnexpectedEof`, "connection closed by server", for what is
-            // otherwise an ordinary shutdown. That is the whole of this test's
-            // intermittent failure, and it is NOT the read budget: a timed-out
-            // read reports `ReadTimeout`, not EOF, and the peer thread passes
-            // every one of its own assertions on a failing run.
+            // BEFORE the `ReadyForQuery` that settles the session, and the peer
+            // writes those two frames with separate `write_all` calls. Under
+            // load they routinely arrive as separate decoder batches, so the
+            // COPY response is still queued and `Awaited` when the client
+            // drops. `crate::release` then shuts the socket down under the
+            // driver's parked Step B read.
             //
-            // NOT FIXABLE BY EXCUSING RESPONSES NOBODY IS LISTENING TO. `sink`
-            // still owns the `Responses` here, so this response is reachable
-            // and stays awaited under that rule too: deleting the loop below
-            // with the rule in place still fails with this same
-            // `UnexpectedEof`. `has_awaited_response` carries why the
-            // rule was rejected outright.
-            //
-            // The failure correlates exactly with `transaction_status()`
-            // still reading `None` at this point; a run that reaches
-            // `Some(Idle)` does not fail. Widening a budget would
-            // only lower the rate.
-            let settled_by = Instant::now() + Duration::from_secs(2);
-            while client.transaction_status() != Some(crate::TransactionStatus::Idle) {
-                assert!(
-                    Instant::now() < settled_by,
-                    "the COPY session never reached its trailing ReadyForQuery"
-                );
-                compio::time::sleep(Duration::from_millis(1)).await;
-            }
-
+            // That is the case `ConnectionDropRelease::local_teardown_started`
+            // exists for: Step B attributes the EOF to this side's release and
+            // returns `Ok(())`, while `sink` - which still owns the `Responses`
+            // - is told the local release rather than left to hang. Excusing
+            // responses nobody is listening to would not help here, because
+            // `sink` is reachable and stays awaited; `has_awaited_response`
+            // carries why that rule was rejected.
             drop(client);
             let driver_outcome = driver
                 .await
@@ -7790,6 +8029,38 @@ mod tests {
     }
 
     impl AsyncWrite for ScriptedDuplex {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            let len = buf.buf_len();
+            BufResult(Ok(len), buf)
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A non-splittable duplex whose read reports a connection reset and whose
+    /// writes are accepted and discarded. It pins the reset attribution on the
+    /// serialized loop without a peer.
+    struct ResettingDuplex;
+
+    impl AsyncRead for ResettingDuplex {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            BufResult(
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "scripted reset",
+                )),
+                buf,
+            )
+        }
+    }
+
+    impl AsyncWrite for ResettingDuplex {
         async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
             let len = buf.buf_len();
             BufResult(Ok(len), buf)
@@ -7963,6 +8234,45 @@ mod tests {
         (connection, observed)
     }
 
+    /// A connection-side release guard whose teardown flag is already set, as it
+    /// is once the client half's release has shut the socket down.
+    ///
+    /// The flag lives on the `ConnectionRelease`, so the test drives it through
+    /// a real loopback descriptor rather than reaching into the guard. The
+    /// listener and its accepted peer stay alive only for the duration of the
+    /// call; once the flag is set the guard carries its own clone of it.
+    fn locally_released_guard() -> crate::release::ConnectionDropRelease {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local-release listener");
+        let address = listener.local_addr().expect("local-release address");
+        let client = std::net::TcpStream::connect(address).expect("connect local-release client");
+        let (_peer, _) = listener.accept().expect("accept local-release peer");
+        let release = crate::release::ConnectionRelease::dup_of(&client)
+            .expect("duplicate the local-release socket");
+        release.shutdown();
+        release.connection_guard()
+    }
+
+    /// A connection-side release guard whose teardown flag is NOT set, as it is
+    /// under a client half that is live and has not released the socket.
+    ///
+    /// The guard is built over a real loopback descriptor so it is the same
+    /// guard a live session carries. The `ConnectionRelease` it came from
+    /// stays alive with the caller: dropping it would run its own release and
+    /// set the flag, which is exactly the condition this control must not have.
+    fn unreleased_guard() -> (
+        crate::release::ConnectionRelease,
+        crate::release::ConnectionDropRelease,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind unreleased-listener");
+        let address = listener.local_addr().expect("unreleased address");
+        let client = std::net::TcpStream::connect(address).expect("connect unreleased client");
+        let (_peer, _) = listener.accept().expect("accept unreleased peer");
+        let release = crate::release::ConnectionRelease::dup_of(&client)
+            .expect("duplicate the unreleased socket");
+        let guard = release.connection_guard();
+        (release, guard)
+    }
+
     /// An in-flight read has already delivered the awaited response when the
     /// queued housekeeping write fails. Nobody can observe that maintenance
     /// request, so it cannot replace the completed operation with a transport
@@ -7993,7 +8303,7 @@ mod tests {
                 None,
             );
 
-        let result = connection.run_serialized().await;
+        let result = connection.run_serialized(None).await;
 
         assert!(
             result.is_ok(),
@@ -8030,7 +8340,7 @@ mod tests {
                 None,
             );
 
-        let result = connection.run_serialized().await;
+        let result = connection.run_serialized(None).await;
 
         assert!(
             result.is_ok(),
@@ -8043,7 +8353,7 @@ mod tests {
         let (connection, observed) = serialized_teardown_probe(b"prebuffered sentinel", true);
 
         connection
-            .run_serialized()
+            .run_serialized(None)
             .await
             .expect("final flush failure escaped serialized teardown");
 
@@ -8056,7 +8366,7 @@ mod tests {
         let (connection, observed) = serialized_teardown_probe(b"", false);
 
         connection
-            .run_serialized()
+            .run_serialized(None)
             .await
             .expect("serialized teardown failed");
 
@@ -8088,7 +8398,7 @@ mod tests {
                 None,
             );
 
-        let result = connection.run_serialized().await;
+        let result = connection.run_serialized(None).await;
 
         assert!(
             result.is_ok(),
@@ -8166,7 +8476,7 @@ mod tests {
                 _ => panic!("the first response lost its ReadyForQuery"),
             }
         };
-        let (driver_result, ()) = futures_util::join!(connection.run_serialized(), consume_first);
+        let (driver_result, ()) = futures_util::join!(connection.run_serialized(None), consume_first);
         driver_result.expect_err("the scripted second flush unexpectedly succeeded");
         assert!(matches!(
             async_messages.next().await,
@@ -8245,7 +8555,7 @@ mod tests {
             Statement::unnamed(Vec::new(), Vec::new()),
             None,
         );
-        let driver = connection.run_serialized();
+        let driver = connection.run_serialized(None);
         let (copy_result, driver_result) = futures_util::join!(copy, driver);
         driver_result.expect_err("the scripted COPY flush unexpectedly succeeded");
         let error = match copy_result {
@@ -8308,7 +8618,7 @@ mod tests {
             None,
         );
 
-        let result = connection.run_serialized().await;
+        let result = connection.run_serialized(None).await;
         assert!(
             result.is_ok(),
             "an EOF with only housekeeping in flight was reported as a failure: {:?}",
@@ -8418,7 +8728,7 @@ mod tests {
             drop(client);
         };
         let (driver_result, ()) =
-            futures_util::join!(connection.run_serialized(), consume_then_close);
+            futures_util::join!(connection.run_serialized(None), consume_then_close);
         let error = match driver_result {
             Err(error) => error,
             Ok(()) => {
@@ -8703,7 +9013,7 @@ mod tests {
             None,
         );
 
-        let mut handling = Box::pin(connection.handle_request(request));
+        let mut handling = Box::pin(connection.handle_request(request, None));
         let waker = Waker::from(Arc::new(NoopWake));
         let mut context = Context::from_waker(&waker);
         assert!(
@@ -8775,7 +9085,7 @@ mod tests {
             None,
         );
 
-        let Err(error) = connection.handle_request(request).await else {
+        let Err(error) = connection.handle_request(request, None).await else {
             panic!("a COPY startup read failure was not reported to the caller")
         };
         // The socket ended mid-startup, so this surfaces as the read failure it
@@ -8787,13 +9097,174 @@ mod tests {
         );
     }
 
+    /// Build a serialized `Connection` over [`ResettingDuplex`], whose read
+    /// reports a connection reset, with `messages` queued as the first request
+    /// the loop handles. Returns the connection and the response consumer.
+    fn resetting_serialized_connection(
+        messages: RequestMessages,
+    ) -> (
+        Connection<ResettingDuplex, ResettingDuplex>,
+        mpsc::Receiver<ResponseMessages>,
+    ) {
+        let (request_sender, request_receiver) = mpsc::unbounded();
+        let (response_tx, response_rx) = mpsc::channel(1);
+        request_sender
+            .unbounded_send(Request {
+                messages,
+                sender: response_tx,
+                disposition: RequestDisposition::Awaited,
+                transaction_effect: TransactionEffect::MayChange,
+                prepare_cleanup: None,
+                statement: None,
+                observation: None,
+                request_server_error: Arc::default(),
+            })
+            .expect("queue the resetting request");
+        let connection = Connection::new(
+            BufStream::new(MaybeTlsStream::Raw(ResettingDuplex)),
+            VecDeque::new(),
+            HashMap::new(),
+            Arc::default(),
+            request_receiver,
+            Arc::new(AtomicU8::new(b'I')),
+            Arc::new(AtomicUsize::new(1)),
+            Arc::default(),
+            None,
+        );
+        (connection, response_rx)
+    }
+
+    /// A reset on the serialized Step B read after this side's release has
+    /// begun is the local close: `run_serialized` resolves `Ok(())` and the
+    /// held response is told the reason.
+    #[compio::test]
+    async fn a_local_release_reset_is_a_clean_close_on_the_serialized_loop() {
+        let (connection, mut response_rx) =
+            resetting_serialized_connection(RequestMessages::Single(FrontendMessage::Raw(
+                bytes::Bytes::from_static(b"scripted request"),
+            )));
+
+        let result = connection
+            .run_serialized(Some(locally_released_guard()))
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "a serialized reset after the local release was reported as a server failure: {result:?}"
+        );
+        let delivered = response_rx
+            .next()
+            .await
+            .expect("the serialized local release told the response nothing");
+        let ResponseMessages::Observed(mut messages) = delivered else {
+            panic!("the serialized local release delivered frames rather than its error");
+        };
+        let Err(first) = messages.pop_front().expect("the delivered batch is empty") else {
+            panic!("the serialized local release delivered a frame");
+        };
+        assert!(
+            first.is_local_release(),
+            "the serialized holder was not told the connection was released: {first:?}"
+        );
+    }
+
+    /// The serialized control: the identical reset with NO release begun stays
+    /// the server failure it is.
+    #[compio::test]
+    async fn a_reset_without_a_local_release_stays_a_server_failure_on_the_serialized_loop() {
+        // A guard that exists but has not been released. The reset must be
+        // attributed to the flag, not to the guard's mere presence.
+        let (_release, guard) = unreleased_guard();
+        let (connection, _response_rx) = resetting_serialized_connection(RequestMessages::Single(
+            FrontendMessage::Raw(bytes::Bytes::from_static(b"scripted request")),
+        ));
+
+        let error = connection
+            .run_serialized(Some(guard))
+            .await
+            .expect_err("a serialized server reset without a release became clean");
+
+        assert_eq!(
+            error.as_io().map(std::io::Error::kind),
+            Some(std::io::ErrorKind::ConnectionReset),
+            "the serialized server reset lost its kind: {error:?}"
+        );
+    }
+
+    /// The COPY startup read loop attributes the same reset: with the release
+    /// begun, `run_serialized` resolves `Ok(())` and the COPY response is told
+    /// the release.
+    #[compio::test]
+    async fn a_local_release_reset_during_copy_startup_is_a_clean_close() {
+        let (copy_in, _producer) = CopyInReceiver::for_connection_test(
+            Some(FrontendMessage::Raw(bytes::Bytes::from_static(
+                b"scripted COPY startup",
+            ))),
+            None,
+        );
+        let (connection, mut response_rx) =
+            resetting_serialized_connection(RequestMessages::CopyIn(copy_in));
+
+        let result = connection
+            .run_serialized(Some(locally_released_guard()))
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "a COPY startup reset after the local release was reported as a server failure: \
+             {result:?}"
+        );
+        let delivered = response_rx
+            .next()
+            .await
+            .expect("the COPY local release told the response nothing");
+        let ResponseMessages::Observed(mut messages) = delivered else {
+            panic!("the COPY local release delivered frames rather than its error");
+        };
+        let Err(first) = messages.pop_front().expect("the delivered batch is empty") else {
+            panic!("the COPY local release delivered a frame");
+        };
+        assert!(
+            first.is_local_release(),
+            "the COPY holder was not told the connection was released: {first:?}"
+        );
+    }
+
+    /// The COPY startup control: the identical reset with NO release begun
+    /// stays the server failure it is.
+    #[compio::test]
+    async fn a_reset_without_a_local_release_during_copy_startup_stays_a_server_failure() {
+        // A guard that exists but has not been released. The reset must be
+        // attributed to the flag, not to the guard's mere presence.
+        let (_release, guard) = unreleased_guard();
+        let (copy_in, _producer) = CopyInReceiver::for_connection_test(
+            Some(FrontendMessage::Raw(bytes::Bytes::from_static(
+                b"scripted COPY startup",
+            ))),
+            None,
+        );
+        let (connection, _response_rx) =
+            resetting_serialized_connection(RequestMessages::CopyIn(copy_in));
+
+        let error = connection
+            .run_serialized(Some(guard))
+            .await
+            .expect_err("a COPY startup server reset without a release became clean");
+
+        assert_eq!(
+            error.as_io().map(std::io::Error::kind),
+            Some(std::io::ErrorKind::ConnectionReset),
+            "the COPY server reset lost its kind: {error:?}"
+        );
+    }
+
     #[compio::test]
     async fn serialized_main_loop_preserves_stashed_batch_order() {
         let (connection, mut response, copy_request) =
             connection_with_stashed_batch(vec![completed_response_batch(b'I')]);
         drop(copy_request);
 
-        compio::time::timeout(Duration::from_secs(1), connection.run_serialized())
+        compio::time::timeout(Duration::from_secs(1), connection.run_serialized(None))
             .await
             .expect("serialized main loop exceeded its watchdog")
             .expect("serialized main loop failed");
@@ -8838,7 +9309,7 @@ mod tests {
 
         compio::time::timeout(
             Duration::from_secs(5),
-            connection.handle_request(copy_request),
+            connection.handle_request(copy_request, None),
         )
         .await
         .expect("COPY startup exceeded its watchdog")
@@ -8883,7 +9354,7 @@ mod tests {
 
         compio::time::timeout(
             Duration::from_secs(5),
-            connection.handle_request(copy_request),
+            connection.handle_request(copy_request, None),
         )
         .await
         .expect("COPY startup exceeded its watchdog")
@@ -8952,21 +9423,20 @@ mod tests {
         (address, query_read_rx, handle)
     }
 
-    /// PINS A KNOWN-WRONG MESSAGE, on purpose.
+    /// A client release under an outstanding response is a CLEAN local close.
     ///
-    /// Nobody is listening to this response and no server closed anything: the
-    /// peer parks on its own read and only ever sees the FIN this side sends.
-    /// The close comes from `crate::release`, which shuts the socket down when
-    /// the last `Client` drops. `run` still reports `UnexpectedEof`,
-    /// "connection closed by server".
+    /// No server closed anything: the peer parks on its own read and only ever
+    /// sees the FIN this side sends. The close comes from `crate::release`,
+    /// which shuts the socket down when the last `Client` drops, and the reader
+    /// attributes the resulting EOF to that release. `run` resolves `Ok(())`,
+    /// and the `Responses` still held here is told the local release rather
+    /// than left to hang.
     ///
-    /// Excusing responses whose consumer has hung up is the obvious repair and
-    /// it is the wrong one; [`has_awaited_response`] carries the two
-    /// measurements that rejected it, including the live invariant it breaks. A
-    /// real fix has to attribute the close, so this test is what should go red
-    /// when somebody builds that - not something to relax quietly.
+    /// Excusing responses whose consumer has hung up would not be the fix;
+    /// [`has_awaited_response`] carries why, including the live invariant it
+    /// breaks. This test is the regression for the attribution.
     #[compio::test]
-    async fn a_client_released_eof_is_reported_as_a_server_close() {
+    async fn a_client_released_eof_is_a_clean_close() {
         let (address, query_read, peer) = parked_after_query_peer();
         let tcp = compio::net::TcpStream::connect(address)
             .await
@@ -8994,6 +9464,7 @@ mod tests {
             .simple_query_raw("SELECT 1")
             .await
             .expect("queue the release-verdict request");
+        let mut observer = std::pin::pin!(observer);
         // The peer has read the query and will never answer it, so the response
         // is unambiguously outstanding when the client releases the socket.
         compio::time::timeout(Duration::from_secs(5), query_read)
@@ -9001,7 +9472,7 @@ mod tests {
             .expect("the parked peer did not read the query within 5 seconds")
             .expect("the query-read observer was dropped");
 
-        drop(observer);
+        // The observer stays alive: it is the holder the release must tell.
         drop(client);
 
         let verdict = compio::time::timeout(Duration::from_secs(5), driver)
@@ -9011,14 +9482,220 @@ mod tests {
         peer.join()
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
 
+        assert!(
+            verdict.is_ok(),
+            "a client release under an outstanding response was reported as a server close: \
+             {verdict:?}"
+        );
+
+        let held = observer
+            .next()
+            .await
+            .expect("the released response delivered nothing")
+            .expect_err("the released response delivered a value rather than its cause");
+        assert!(
+            held.is_local_release(),
+            "the holder was not told the connection was released: {held:?}"
+        );
+    }
+
+    /// The control: an EOF the SERVER caused under a live client stays an
+    /// error.
+    ///
+    /// The peer reads the query and closes, and the client is still alive when
+    /// the driver observes the EOF, so no release has begun and the reader
+    /// cannot attribute the close to this side. `run` reports the server close
+    /// exactly as it did before attribution existed.
+    #[compio::test]
+    async fn a_peer_closed_eof_under_a_live_client_reports_the_server_close() {
+        let (address, peer) = scripted_peer();
+        let tcp = compio::net::TcpStream::connect(address)
+            .await
+            .expect("connect to scripted peer");
+        let socket = Socket::new_tcp(tcp);
+        let release = socket
+            .release_handle()
+            .expect("duplicate the server-close control release handle");
+        let config: Config = "user=test dbname=test sslmode=disable"
+            .parse()
+            .expect("parse server-close control config");
+        let (client, connection) = connect_raw(
+            socket,
+            NoTls,
+            Encryption::Plaintext,
+            true,
+            &config,
+            Some(release),
+        )
+        .await
+        .expect("complete scripted startup");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let observer = client
+            .simple_query_raw("SELECT 1")
+            .await
+            .expect("queue the server-close control request");
+
+        // The client is still alive: no local release has begun.
+        let verdict = compio::time::timeout(Duration::from_secs(5), driver)
+            .await
+            .expect("the connection driver did not finish within 5 seconds")
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        peer.join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+
+        let error = verdict
+            .expect_err("a server close under a live client became a clean local close");
+        assert!(
+            is_eof(&error),
+            "the server close failed for a reason other than EOF: {error:?}"
+        );
+
+        drop(observer);
+        drop(client);
+    }
+
+    /// The serialized loop attributes a locally released EOF the same way.
+    ///
+    /// A stream that refuses to split reaches `run_serialized`, whose Step B
+    /// reads the socket directly. The client drops with the query outstanding,
+    /// so the read ends on the release this side started, and `run` resolves
+    /// `Ok(())` rather than reporting a server close. The response stream is
+    /// told the reason rather than left to hang.
+    #[compio::test]
+    async fn a_client_released_eof_is_a_clean_close_on_the_serialized_loop() {
+        let (address, query_read, peer) = parked_after_query_peer();
+        let tcp = compio::net::TcpStream::connect(address)
+            .await
+            .expect("connect to parked peer");
+        let socket = Socket::new_tcp(tcp);
+        let release = socket
+            .release_handle()
+            .expect("duplicate the serialized release handle");
+        let split_attempted = Rc::new(Cell::new(false));
+        let stream = UnsplittableSocket {
+            inner: socket,
+            split_attempted: Rc::clone(&split_attempted),
+        };
+        let config: Config = "user=test dbname=test sslmode=disable"
+            .parse()
+            .expect("parse serialized release-verdict config");
+        let (client, connection) = connect_raw(
+            stream,
+            NoTls,
+            Encryption::Plaintext,
+            true,
+            &config,
+            Some(release),
+        )
+        .await
+        .expect("complete serialized parked startup");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let observer = client
+            .simple_query_raw("SELECT 1")
+            .await
+            .expect("queue the serialized release-verdict request");
+        compio::time::timeout(Duration::from_secs(5), query_read)
+            .await
+            .expect("the parked peer did not read the query within 5 seconds")
+            .expect("the query-read observer was dropped");
+        assert!(
+            split_attempted.get(),
+            "the fixture did not enter the serialized loop"
+        );
+
+        drop(client);
+
+        let verdict = compio::time::timeout(Duration::from_secs(5), driver)
+            .await
+            .expect("the serialized driver did not finish within 5 seconds")
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        peer.join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+
+        assert!(
+            verdict.is_ok(),
+            "a serialized client release under an outstanding response was reported as a \
+             server close: {verdict:?}"
+        );
+
+        let mut observer = std::pin::pin!(observer);
+        let held = futures_util::StreamExt::next(&mut observer)
+            .await
+            .expect("the serialized released response delivered nothing")
+            .expect_err("the serialized released response delivered a value rather than its cause");
+        assert!(
+            held.is_local_release(),
+            "the serialized holder was not told the connection was released: {held:?}"
+        );
+    }
+
+    /// The serialized loop's control: an EOF the SERVER caused under a live
+    /// client stays an error there too.
+    ///
+    /// Same shape as
+    /// `a_client_released_eof_is_a_clean_close_on_the_serialized_loop`, but the
+    /// peer closes after reading the query while the client is still alive, so
+    /// no release on this side has begun when Step B sees the EOF. `run`
+    /// reports the server close.
+    #[compio::test]
+    async fn a_peer_closed_eof_on_the_serialized_loop_reports_the_server_close() {
+        let (address, peer) = scripted_peer();
+        let tcp = compio::net::TcpStream::connect(address)
+            .await
+            .expect("connect to scripted peer");
+        let socket = Socket::new_tcp(tcp);
+        let release = socket
+            .release_handle()
+            .expect("duplicate the serialized server-close control release handle");
+        let split_attempted = Rc::new(Cell::new(false));
+        let stream = UnsplittableSocket {
+            inner: socket,
+            split_attempted: Rc::clone(&split_attempted),
+        };
+        let config: Config = "user=test dbname=test sslmode=disable"
+            .parse()
+            .expect("parse serialized server-close control config");
+        let (client, connection) = connect_raw(
+            stream,
+            NoTls,
+            Encryption::Plaintext,
+            true,
+            &config,
+            Some(release),
+        )
+        .await
+        .expect("complete serialized scripted startup");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let observer = client
+            .simple_query_raw("SELECT 1")
+            .await
+            .expect("queue the serialized server-close control request");
+
+        // The client is still alive: no local release has begun.
+        let verdict = compio::time::timeout(Duration::from_secs(5), driver)
+            .await
+            .expect("the serialized driver did not finish within 5 seconds")
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        peer.join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        assert!(
+            split_attempted.get(),
+            "the fixture did not enter the serialized loop"
+        );
+
         let error = verdict.expect_err(
-            "a client release under an outstanding response became a clean close; \
-             if that was deliberate, read has_awaited_response first",
+            "a serialized server close under a live client became a clean local close",
         );
         assert!(
             is_eof(&error),
-            "the client release failed for some reason other than EOF: {error:?}"
+            "the serialized server close failed for a reason other than EOF: {error:?}"
         );
+
+        drop(observer);
+        drop(client);
     }
 
     /// The classifier's blindness stated directly, without a socket.

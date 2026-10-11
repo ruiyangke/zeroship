@@ -5606,11 +5606,16 @@ async fn dropping_a_bound_portal_and_its_client_closes_without_an_error() {
     }
 }
 
-/// A real request remains fallible even if the last client drops after queuing
-/// it. The response stream outlives the client and still represents an awaited
-/// operation; only explicitly marked drop-time housekeeping may be absorbed.
+/// A real request queued before the last client drops ends as a clean local
+/// close, and its response stream is told why.
+///
+/// The response stream outlives the client and still represents an awaited
+/// operation, so it must receive an error rather than hang. The connection
+/// itself resolves `Ok(())`: the client that would have received the response
+/// is gone, and `crate::release` closed the socket, so the close is this
+/// side's, not a server failure.
 #[compio::test]
-async fn an_awaited_query_queued_before_client_drop_still_reports_its_write_error() {
+async fn an_awaited_query_queued_before_client_drop_is_a_clean_local_close() {
     let url = require_pg().await;
 
     let (client, connection) = compio_postgres::connect(&url, support::suite_tls())
@@ -5621,10 +5626,22 @@ async fn an_awaited_query_queued_before_client_drop_still_reports_its_write_erro
 
     let outcome = connection.run().await;
     assert!(
-        outcome.is_err(),
-        "an awaited query write was treated as fire-and-forget housekeeping"
+        outcome.is_ok(),
+        "a query queued before the last client dropped was reported as a failure: {:?}",
+        outcome.as_ref().err().map(|error| support::error_chain(error))
     );
-    drop(observer);
+
+    // The response stream outlives the client, so it must not hang: it
+    // receives the close as an error that names the local release.
+    let mut observer = std::pin::pin!(observer);
+    let held = futures_util::StreamExt::next(&mut observer)
+        .await
+        .expect("the queued response delivered nothing")
+        .expect_err("the queued response delivered a value rather than its cause");
+    assert!(
+        held.is_local_release(),
+        "the queued response was not told the local release: {held:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

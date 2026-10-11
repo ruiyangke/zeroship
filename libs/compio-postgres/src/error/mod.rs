@@ -428,6 +428,11 @@ enum Kind {
     /// A post-startup socket read made no progress before the connection's
     /// configured inactivity deadline. The protocol session is unrecoverable.
     ReadTimeout,
+    /// A socket read ended because this side's own release shut the socket
+    /// down, not because the peer closed it. A response still outstanding is
+    /// failed with this kind, so a close the local side caused is never
+    /// reported as a server close.
+    LocalRelease,
     /// `COMMIT` reached the server inside an aborted transaction block, so
     /// PostgreSQL discarded every change and answered with the `ROLLBACK`
     /// command tag instead of `COMMIT`.
@@ -520,6 +525,9 @@ impl fmt::Display for Error {
             }
             Kind::CommandTimeout => fmt.write_str("client command timeout expired"),
             Kind::ReadTimeout => fmt.write_str("socket read timeout expired"),
+            Kind::LocalRelease => fmt.write_str(
+                "the client released the connection before its response arrived",
+            ),
             Kind::TransactionRolledBack => fmt.write_str(
                 "the server rolled the transaction back instead of committing it: a statement \
                  in it had already failed",
@@ -612,6 +620,19 @@ impl Error {
     #[must_use]
     pub fn is_read_timeout(&self) -> bool {
         self.0.kind == Kind::ReadTimeout
+    }
+
+    /// Whether the session ended because this side's release shut the socket
+    /// down, rather than because the peer closed it.
+    ///
+    /// A response still outstanding when the last `Client` drops is failed with
+    /// this classification, and so is one held when `InnerClient::force_close`
+    /// retires a live client (pool command-timeout recovery and
+    /// `CancelDropTarget::abandon`). A caller can tell either local release
+    /// from a server that closed the connection.
+    #[must_use]
+    pub fn is_local_release(&self) -> bool {
+        self.0.kind == Kind::LocalRelease
     }
 
     /// Whether `commit` failed because the server rolled the transaction back.
@@ -844,6 +865,16 @@ impl Error {
         )
     }
 
+    /// The local client released the socket while this response was in flight.
+    ///
+    /// The reader builds this when a socket read ends and this side's release
+    /// had already begun shutting the socket down. It is distinct from an
+    /// orderly server close because the peer did not cause it, and distinct
+    /// from [`Error::closed`] so a response holder can name what happened.
+    pub(crate) fn local_release() -> Self {
+        Self::new(Kind::LocalRelease, None)
+    }
+
     /// Build the same public classification for a response channel while the
     /// original error remains owned by `Connection::run`.
     /// A copy of a terminal connection error, for handing to a request that
@@ -878,6 +909,12 @@ impl Error {
             Kind::ReadTimeout,
             Some(Box::new(io::Error::new(io::ErrorKind::TimedOut, detail))),
         ))
+    }
+
+    /// Preserve the local-release classification when handing a copy to a
+    /// response that was waiting on the connection.
+    pub(crate) fn duplicate_local_release(&self) -> Option<Self> {
+        self.is_local_release().then(Self::local_release)
     }
 }
 

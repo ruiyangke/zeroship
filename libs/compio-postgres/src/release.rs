@@ -14,7 +14,7 @@
 //! A parked connection task is therefore exactly the case the reclaim skips:
 //! the runtime, its driver, the task and the socket all leak, and the
 //! server-side backend stays live for the rest of the PROCESS. See
-//! `tests/integration/integration.rs::a_connection_does_not_outlive_the_runtime_that_opened_it`.
+//! `tests/integration/api.rs::a_connection_does_not_outlive_the_runtime_that_opened_it`.
 //!
 //! So the socket's release cannot be left to a future. It has to be a plain
 //! syscall on a descriptor this crate owns, run from a `Drop` that needs no
@@ -82,7 +82,10 @@
 use std::{
     fmt,
     net::Shutdown,
-    sync::{Arc, Weak},
+    sync::{
+        Arc, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 #[cfg(test)]
@@ -102,6 +105,14 @@ pub(crate) struct ConnectionRelease {
     /// half. `Some` until a guard closes it; `shutdown` on the inner socket
     /// reaches the same underlying socket the connection task is using.
     socket: Arc<parking_lot::Mutex<Option<socket2::Socket>>>,
+    /// Set by [`ConnectionRelease::shutdown`] - reached from the last client
+    /// drop and from `InnerClient::force_close` - immediately before it shuts
+    /// the socket down, and read by the driver's reader when its socket read
+    /// ends. A close this side started is not a server close, so the reader
+    /// needs this attribution when it sees EOF or reset; the flag lives beside
+    /// the socket both halves share rather than in
+    /// `crate::tls_sansio::SharedSession`, which only a TLS transport has.
+    local_teardown_started: Arc<AtomicBool>,
     /// The live rustls state, including ciphertext not yet handed to the
     /// socket. Present only when this physical connection negotiated TLS.
     #[cfg(feature = "tls")]
@@ -128,6 +139,10 @@ impl fmt::Debug for ConnectionRelease {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug = formatter.debug_struct("ConnectionRelease");
         debug.field("socket", &self.socket);
+        debug.field(
+            "local_teardown_started",
+            &self.local_teardown_started.load(Ordering::Acquire),
+        );
         #[cfg(feature = "tls")]
         debug.field("has_tls_session", &self.tls_session.is_some());
         debug.finish()
@@ -138,6 +153,10 @@ impl fmt::Debug for ConnectionRelease {
 #[derive(Clone)]
 pub(crate) struct ConnectionDropRelease {
     socket: Weak<parking_lot::Mutex<Option<socket2::Socket>>>,
+    /// The same flag [`ConnectionRelease::shutdown`] sets; this guard only
+    /// reads it. A connection-side exit runs after the reader has sampled the
+    /// flag, or stops the reader immediately, so it cannot change the answer.
+    local_teardown_started: Arc<AtomicBool>,
     /// Shared with the client-side guard; see its field for why.
     #[cfg(feature = "tls")]
     alert_then_shutdown: Arc<parking_lot::Mutex<()>>,
@@ -153,6 +172,10 @@ impl fmt::Debug for ConnectionDropRelease {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug = formatter.debug_struct("ConnectionDropRelease");
         debug.field("socket", &self.socket);
+        debug.field(
+            "local_teardown_started",
+            &self.local_teardown_started.load(Ordering::Acquire),
+        );
         #[cfg(feature = "tls")]
         debug.field("has_tls_session", &self.tls_session.is_some());
         debug.finish()
@@ -282,6 +305,7 @@ impl ConnectionRelease {
     fn from_owned(owned: impl Into<socket2::Socket>) -> Self {
         Self {
             socket: Arc::new(parking_lot::Mutex::new(Some(owned.into()))),
+            local_teardown_started: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "tls")]
             tls_session: None,
             #[cfg(feature = "tls")]
@@ -313,6 +337,21 @@ impl ConnectionRelease {
 }
 
 impl ConnectionRelease {
+    /// Whether `error` is the reset the kernel sends when a frame arrives after
+    /// the local side shut the socket down for reading.
+    ///
+    /// `shutdown(Both)` gives the receive side up, so a late server record
+    /// stops being deliverable and the connection is reset rather than ended
+    /// with a FIN. Every reader turns that reset into a local close once a
+    /// release has begun ending the session; with no release begun it stays the
+    /// peer failure it is.
+    pub(crate) fn is_local_teardown_reset(error: &std::io::Error) -> bool {
+        matches!(
+            error.kind(),
+            std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+        )
+    }
+
     #[cfg(feature = "tls")]
     pub(crate) fn set_tls_session(&mut self, session: crate::tls_sansio::SharedSession) {
         self.tls_session = Some(session);
@@ -321,6 +360,7 @@ impl ConnectionRelease {
     pub(crate) fn connection_guard(&self) -> ConnectionDropRelease {
         ConnectionDropRelease {
             socket: Arc::downgrade(&self.socket),
+            local_teardown_started: Arc::clone(&self.local_teardown_started),
             // The guard is built after `configure_release` has attached the
             // session, so it gets the same handle rather than nothing.
             #[cfg(feature = "tls")]
@@ -362,6 +402,13 @@ impl ConnectionRelease {
 
         let guard = self.socket.lock();
         if let Some(socket) = guard.as_ref() {
+            // Attribution before the syscall, and only when this release
+            // actually found a socket to shut down. The reader samples this
+            // flag when its socket read ends, so setting it here is what lets
+            // that sample tell a close this side started from one the server
+            // started; a release that shuts nothing down leaves the flag
+            // unchanged.
+            self.local_teardown_started.store(true, Ordering::Release);
             #[cfg(feature = "tls")]
             mark_local_teardown(self.tls_session.as_ref());
             #[cfg(feature = "tls")]
@@ -459,6 +506,17 @@ impl ConnectionDropRelease {
             let _ = socket.shutdown(Shutdown::Both);
         }
         guard.take();
+    }
+
+    /// Whether this side's release has begun shutting the socket down.
+    ///
+    /// Sampled by the reader when its read task resumes, not by the kernel when
+    /// the read completes, so a server close already delivered to the socket
+    /// but not yet processed when a concurrent release fires reads as local.
+    /// `true` means this side started the close, `false` means no release had
+    /// run and the close came from the peer.
+    pub(crate) fn local_teardown_started(&self) -> bool {
+        self.local_teardown_started.load(Ordering::Acquire)
     }
 }
 

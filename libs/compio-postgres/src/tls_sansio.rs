@@ -418,20 +418,6 @@ fn is_close_notify_sent_error(error: &io::Error) -> bool {
         .is_some_and(<dyn std::error::Error + Send + Sync + 'static>::is::<CloseNotifySent>)
 }
 
-/// Whether `error` is the reset the kernel sends when a frame arrives after the
-/// local side shut the socket down for reading.
-///
-/// `shutdown(Both)` in [`crate::release`] gives the receive side up, so a late
-/// server record stops being deliverable and the connection is reset rather
-/// than ended with a FIN. The reader turns that reset into EOF once a release
-/// has begun ending the session.
-fn is_local_teardown_reset(error: &io::Error) -> bool {
-    matches!(
-        error.kind(),
-        io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
-    )
-}
-
 struct SharedSessionState {
     session: Option<TlsSession>,
     owner: Option<ThreadId>,
@@ -910,15 +896,15 @@ where
                 // elsewhere, or a write is in flight) still shuts the socket
                 // down without serializing `close_notify`.
                 //
-                // This does NOT turn a failed request into a success. A request
-                // still awaiting a response when the local side tears down sees
-                // the connection as closed rather than as reset by the peer,
-                // which is the accurate account because the local side ended
-                // it; `classify_read_terminal` still returns an error while a
-                // response is awaited.
+                // A request still awaiting a response when the local side tears
+                // down ends the session cleanly, the same as over plaintext:
+                // this EOF is attributed to the release, and
+                // `classify_read_terminal` treats the resulting
+                // `Error::local_release()` as a clean close while still telling
+                // the holder which close it was.
                 Err(error)
                     if self.session.local_teardown_started()
-                        && is_local_teardown_reset(&error) =>
+                        && crate::release::ConnectionRelease::is_local_teardown_reset(&error) =>
                 {
                     return Ok(0);
                 }
