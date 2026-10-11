@@ -46,9 +46,6 @@ base64 = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["pkcs8", "pem", "rand_core"] }
 hex = { workspace = true }
 rand = "0.8"
-# Whether two paths are one file, by device and inode on Unix and by volume and
-# file index on Windows (`dev::same_existing_file`).
-same-file = "1"
 compio = { workspace = true }
 flume = { workspace = true }
 futures = { workspace = true }
@@ -60,6 +57,9 @@ tracing = { workspace = true }
 # parent's process handle through this safe wrapper.
 [target.'cfg(windows)'.dependencies]
 waitpid-any = "0.3"
+# Whether two paths are one file, by volume and file index, which Windows keeps
+# out of its metadata (`dev::same_existing_file`).
+same-file = "1"
 
 [dev-dependencies]
 # A second connection to the host's SQLite files: holding the journal's write

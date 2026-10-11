@@ -74,6 +74,51 @@ const META_SUBDIR: &str = "m";
 /// one as a new one.
 const SIDECAR_VERSION: u64 = 1;
 
+/// The directory a namespace's objects live under, named so that every
+/// namespace gets its own on every system the store runs on.
+///
+/// Each byte outside `[a-z0-9_-]` is written as `%` and two lowercase hex
+/// digits, and so is the first byte of a name Windows reserves for a device
+/// (`con`, `nul`, `com1` and the like). Decoding the escapes gives the
+/// namespace back, so two namespaces never share a directory, and a platform
+/// namespace, whose `:` becomes `%3a`, never lands on an app's. The name holds
+/// no character a file system reserves, no `.` (so neither a trailing dot
+/// Windows would strip nor a `.` or `..` component), and no upper-case letter
+/// (so a case-insensitive file system cannot fold two names into one).
+fn namespace_dir(namespace: &str) -> String {
+    let mut dir = String::with_capacity(namespace.len());
+    for byte in namespace.bytes() {
+        if byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-') {
+            dir.push(char::from(byte));
+        } else {
+            escape_byte(&mut dir, byte);
+        }
+    }
+    if is_windows_device_name(&dir) {
+        let mut escaped = String::with_capacity(dir.len() + 2);
+        escape_byte(&mut escaped, dir.as_bytes()[0]);
+        escaped.push_str(&dir[1..]);
+        dir = escaped;
+    }
+    dir
+}
+
+fn escape_byte(out: &mut String, byte: u8) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    out.push('%');
+    out.push(char::from(HEX[usize::from(byte >> 4)]));
+    out.push(char::from(HEX[usize::from(byte & 0x0f)]));
+}
+
+/// Whether `name`, already lower case and dot-free, is one Windows reserves
+/// for a device in every directory.
+fn is_windows_device_name(name: &str) -> bool {
+    matches!(name, "con" | "prn" | "aux" | "nul")
+        || (name.len() == 4
+            && (name.starts_with("com") || name.starts_with("lpt"))
+            && name.as_bytes()[3].is_ascii_digit())
+}
+
 #[derive(Debug, Clone)]
 pub struct LocalFs {
     root: PathBuf,
@@ -102,7 +147,7 @@ impl LocalFs {
         // segment (not via Path::new) so a '/' in a key component — which
         // *would* have been rejected — can never be interpreted as a
         // directory separator by the OS path parser.
-        let mut path = self.root.join(app_id).join(bucket).join(subdir);
+        let mut path = self.root.join(namespace_dir(app_id)).join(bucket).join(subdir);
         for segment in key.split('/') {
             path.push(segment);
         }
@@ -113,7 +158,7 @@ impl LocalFs {
     /// Metadata lives outside it, so no sidecar can ever be listed as an
     /// object.
     fn objects_dir(&self, app_id: &str, bucket: &str) -> PathBuf {
-        self.root.join(app_id).join(bucket).join(OBJECTS_SUBDIR)
+        self.root.join(namespace_dir(app_id)).join(bucket).join(OBJECTS_SUBDIR)
     }
 
     /// Read the content type recorded for the object instance identified by
@@ -185,16 +230,16 @@ impl ObjectFingerprint {
     }
 
     /// The identity half on Windows: the volume serial number and the file
-    /// index of the file at `path`, which `rename` keeps and a newly created
-    /// file never shares. Creation time cannot stand in for it: NTFS hands a
-    /// file created under a recently removed name that name's old creation
-    /// time. The file is opened again by path, so a writer that replaced it
-    /// since leaves a fingerprint that matches no sidecar, which degrades the
-    /// type rather than mislabelling the bytes.
+    /// index of the open `file`, which `rename` keeps and a newly created file
+    /// never shares. Creation time cannot stand in for it: NTFS hands a file
+    /// created under a recently removed name that name's old creation time.
+    /// It is read through a duplicate of the open handle, so it describes the
+    /// file the caller holds whatever has since been renamed onto its path.
     #[cfg(windows)]
-    fn with_identity(self, path: &Path) -> std::io::Result<Self> {
-        let file = std::fs::File::open(path)?;
-        let identity = winapi_util::file::information(&file)?;
+    fn with_identity(self, file: &fs::File) -> std::io::Result<Self> {
+        use std::os::windows::io::AsHandle as _;
+        let held = std::fs::File::from(file.as_handle().try_clone_to_owned()?);
+        let identity = winapi_util::file::information(&held)?;
         Ok(Self {
             dev: identity.volume_serial_number(),
             ino: identity.file_index(),
@@ -348,7 +393,7 @@ impl Backend for LocalFs {
             let fingerprint = ObjectFingerprint::of(&stat);
             #[cfg(windows)]
             let fingerprint = fingerprint
-                .with_identity(&tmp)
+                .with_identity(&f)
                 .map_err(|e| format!("storage: identify temp: {e}"))?;
             Ok(fingerprint)
         }
@@ -420,6 +465,16 @@ impl Backend for LocalFs {
         let f = match fs::File::open(&full).await {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            // A key that names a directory is no object. Unix opens the
+            // directory and the kind check below says so; Windows refuses to
+            // open a directory as a file at all, as Unix does one it may not
+            // read, and the path's kind then gives the same answer.
+            Err(e)
+                if e.kind() == std::io::ErrorKind::PermissionDenied
+                    && fs::metadata(&full).await.is_ok_and(|meta| meta.is_dir()) =>
+            {
+                return Ok(None);
+            }
             Err(e) => return Err(format!("storage: open: {e}").into()),
         };
         let meta = f
@@ -433,7 +488,7 @@ impl Backend for LocalFs {
         let modified_at = meta.modified().unwrap_or_else(|_| SystemTime::now());
         let fingerprint = ObjectFingerprint::of(&meta);
         #[cfg(windows)]
-        let content_type = match fingerprint.with_identity(&full) {
+        let content_type = match fingerprint.with_identity(&f) {
             Ok(fingerprint) => self.read_content_type(app_id, bucket, key, fingerprint).await,
             Err(_) => DEFAULT_CONTENT_TYPE.to_string(),
         };
@@ -924,6 +979,132 @@ mod tests {
                 Some(DEFAULT_CONTENT_TYPE),
                 "a sidecar describing an older write must be ignored, not applied"
             );
+        });
+    }
+
+    /// The characters Windows refuses in a file name besides the separators.
+    const WINDOWS_RESERVED: &[char] = &['<', '>', ':', '"', '|', '?', '*'];
+
+    /// The namespace a `namespace_dir` name was made from.
+    fn decode_namespace_dir(dir: &str) -> String {
+        let bytes = dir.as_bytes();
+        let mut out = Vec::new();
+        let mut at = 0;
+        while at < bytes.len() {
+            if bytes[at] == b'%' {
+                let hex = std::str::from_utf8(&bytes[at + 1..at + 3]).expect("an escape is ASCII");
+                out.push(u8::from_str_radix(hex, 16).expect("an escape is two hex digits"));
+                at += 3;
+            } else {
+                out.push(bytes[at]);
+                at += 1;
+            }
+        }
+        String::from_utf8(out).expect("a namespace is UTF-8")
+    }
+
+    /// Every namespace, platform and app alike, gets a directory name every
+    /// system accepts, and no two get the same one, case folded or not.
+    #[test]
+    fn every_namespace_gets_its_own_directory_every_system_accepts() {
+        let platform = crate::Namespace::platform("payloads").expect("a platform namespace");
+        let names = [
+            platform.as_str(),
+            "platform-payloads",
+            "platform%3apayloads",
+            "app_034klb07lrb9jgma6imvmx000",
+            "con",
+            "CON",
+            "Con",
+            "nul",
+            "com1",
+            "lpt9",
+            "com",
+            "console",
+            "a.b",
+            "trailing.",
+            "..x",
+            "MixedCase",
+            "mixedcase",
+            "space name",
+            "\u{e9}t\u{e9}",
+        ];
+        let mut seen = std::collections::BTreeSet::new();
+        for name in names {
+            let dir = namespace_dir(name);
+            assert!(
+                !dir.is_empty()
+                    && dir.chars().all(|c| {
+                        c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-' | '%')
+                    }),
+                "{name:?} -> {dir:?} holds a character some system reserves or folds"
+            );
+            assert!(!dir.contains(WINDOWS_RESERVED) && !dir.contains('.'), "{name:?} -> {dir:?}");
+            assert!(!is_windows_device_name(&dir), "{name:?} -> {dir:?} is a Windows device name");
+            assert_eq!(decode_namespace_dir(&dir), name, "the directory names its namespace back");
+            assert!(seen.insert(dir.clone()), "{name:?} shares the directory {dir:?}");
+        }
+        assert_eq!(
+            namespace_dir("app_034klb07lrb9jgma6imvmx000"),
+            "app_034klb07lrb9jgma6imvmx000",
+            "a typed app id names its own directory unchanged"
+        );
+        assert_eq!(namespace_dir(platform.as_str()), "platform%3apayloads");
+    }
+
+    /// A platform namespace stores, reads, lists and deletes through a
+    /// directory whose name Windows accepts.
+    #[test]
+    fn a_platform_namespace_round_trips_through_a_directory_every_system_accepts() {
+        let root = TempRoot::new("platform");
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let be = LocalFs::new(&root.0);
+            let platform = crate::Namespace::platform("payloads").expect("a platform namespace");
+            let namespace = platform.as_str();
+            be.put(namespace, BUCKET, "staged/input", b"staged bytes", Some("application/json"))
+                .await
+                .expect("put under the platform namespace");
+            let (bytes, meta) = be
+                .get(namespace, BUCKET, "staged/input", 1 << 20)
+                .await
+                .expect("get")
+                .expect("the object is there");
+            assert_eq!(bytes, b"staged bytes");
+            assert_eq!(meta.content_type.as_deref(), Some("application/json"));
+            let page = be
+                .list(namespace, BUCKET, ListRequest { prefix: "", cursor: None, limit: 10 })
+                .await
+                .expect("list");
+            let keys: Vec<String> = page.entries.into_iter().map(|entry| entry.key).collect();
+            assert_eq!(keys, ["staged/input"]);
+            for entry in std::fs::read_dir(&root.0).expect("read the store root") {
+                let name = entry.expect("an entry").file_name().into_string().expect("UTF-8");
+                assert!(!name.contains(WINDOWS_RESERVED), "{name:?} is no Windows file name");
+            }
+            assert!(be.delete(namespace, BUCKET, "staged/input").await.expect("delete"));
+        });
+    }
+
+    /// A key that names a directory the process may not open is still no
+    /// object, which is how Windows treats every directory key: it refuses to
+    /// open any directory as a file.
+    #[cfg(unix)]
+    #[test]
+    fn a_key_naming_a_directory_that_cannot_be_opened_is_no_object() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = TempRoot::new("closed-dir");
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let be = LocalFs::new(&root.0);
+            put_bytes(&be, "a/b/c.svg", b"<svg/>", Some("image/svg+xml")).await;
+            let directory = be.object_path(APP, BUCKET, "a");
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o000))
+                .expect("close the directory");
+            let read = be.get(APP, BUCKET, "a", 1 << 20).await;
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755))
+                .expect("reopen the directory");
+            assert!(matches!(read, Ok(None)), "a directory key is no object: {read:?}");
+            assert_eq!(content_type_of(&be, "a/b/c.svg").await.as_deref(), Some("image/svg+xml"));
         });
     }
 

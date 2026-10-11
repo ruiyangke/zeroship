@@ -438,6 +438,11 @@ system lacks what the behavior is built on:
   (mode `0600`) on Linux and macOS. On Windows they take the access list of the
   directory they are written into, so keep your state directory and project
   under your own user profile.
+- **The dev server's local object store names objects as files.** On Windows a
+  key segment may not contain `< > : " | ? *` or be a name Windows reserves for
+  a device, such as `con`; on macOS and Windows two keys that differ only in
+  letter case name one object. A deployed app's object storage has neither
+  limit.
 - **Windows does not flush directory entries.** The dev server's local object
   store and deployment cache make a newly written file durable before they
   report it written; on Windows a write that lands just before a power loss can

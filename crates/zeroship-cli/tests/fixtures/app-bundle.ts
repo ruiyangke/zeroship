@@ -11,7 +11,8 @@ const dependencies = fileURLToPath(new URL("../../../../packages/vite-plugin/nod
 await fs.mkdir(join(root, "src"), { recursive: true });
 // Windows links a directory without elevation only as a junction.
 const link = process.platform === "win32" ? "junction" : "dir";
-try { await fs.symlink(dependencies, join(root, "node_modules"), link); }
+const linked = join(root, "node_modules");
+try { await fs.symlink(dependencies, linked, link); }
 catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
 await fs.writeFile(join(root, "src/version.ts"), `export default ${JSON.stringify(version)};`);
 await fs.writeFile(join(root, "src/tail.ts"), 'export const suffix = ":lazy";');
@@ -51,17 +52,75 @@ export default {
   }
 };
 `);
-const bundle = await buildDevBundle({
-  config: {
-    root,
-    configFile: undefined,
-    inlineConfig: { root, logLevel: "silent" },
-    mode: "development",
-    plugins: () => zeroshipPlugins({}, {}),
+/**
+ * What the build's resolver answered for `@zeroship/workflows`, recorded by a
+ * plugin that asks it the same question with the same importer. An answer of
+ * `null` is an import the resolver could not find; the bundler then leaves it
+ * unbundled without saying why.
+ */
+// Vite's plugin type, as the dev bundle's inline config takes it; this file
+// sits outside the package that depends on Vite.
+type InlinePlugins = NonNullable<Parameters<typeof buildDevBundle>[0]["config"]["inlineConfig"]["plugins"]>;
+type Plugin = Extract<InlinePlugins[number], { name: string }>;
+const resolutions: string[] = [];
+const resolutionProbe: Plugin = {
+  name: "fixture:resolution-probe",
+  resolveId: {
+    async handler(source, importer, options) {
+      if (source !== "@zeroship/workflows") return null;
+      const resolved = await this.resolve(source, importer, { ...options, skipSelf: true });
+      resolutions.push(`from ${importer}: ${JSON.stringify(resolved)}`);
+      return null;
+    },
   },
-  project: defaultProjectConfig(),
-  databases: [],
-});
+};
+
+/**
+ * How the build's resolver and the file system see the linked dependencies
+ * the build resolves `@zeroship/workflows` through. Printed when the build
+ * fails, so a failure names the link it went through.
+ */
+async function describeLinkedWorkflows(): Promise<string> {
+  const lines = [`[fixture] ${linked} is a ${link} to ${dependencies}`];
+  for (const resolution of resolutions) lines.push(`[fixture] the resolver answered ${resolution}`);
+  const probe = async (label: string, read: () => Promise<string>) => {
+    try {
+      lines.push(`[fixture] ${label}: ${await read()}`);
+    } catch (error) {
+      lines.push(`[fixture] ${label} failed: ${(error as Error).message}`);
+    }
+  };
+  const workflows = join(linked, "@zeroship", "workflows");
+  await probe("lstat of the link", async () => {
+    const stat = await fs.lstat(linked);
+    return `symbolic link ${stat.isSymbolicLink()}, directory ${stat.isDirectory()}`;
+  });
+  await probe("realpath of the link", () => fs.realpath(linked));
+  await probe("realpath of @zeroship/workflows", () => fs.realpath(workflows));
+  await probe("exports of @zeroship/workflows", async () =>
+    JSON.stringify(JSON.parse(await fs.readFile(join(workflows, "package.json"), "utf8")).exports));
+  return lines.join("\n");
+}
+
+let bundle: Awaited<ReturnType<typeof buildDevBundle>>;
+try {
+  bundle = await buildDevBundle({
+    config: {
+      root,
+      configFile: undefined,
+      // Warnings, not silence: an import the bundler cannot resolve is a
+      // warning that names why, and it is the only account of a failed build.
+      inlineConfig: { root, logLevel: "warn", plugins: [resolutionProbe] },
+      mode: "development",
+      plugins: () => zeroshipPlugins({}, {}),
+    },
+    project: defaultProjectConfig(),
+    databases: [],
+  });
+} catch (error) {
+  console.error(await describeLinkedWorkflows());
+  throw error;
+}
 const pending = join(root, "pending.zship");
 await fs.writeFile(pending, bundle.archive);
 await fs.rename(pending, join(root, "app.zship"));

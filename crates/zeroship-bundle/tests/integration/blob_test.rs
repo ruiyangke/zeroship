@@ -577,10 +577,11 @@ async fn local_disk_local_path_returns_sharded_path() {
     let store = LocalDiskBlobStore::new(root.clone()).unwrap();
     let hash = "ab1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcd";
     let path = store.local_path(hash).expect("local_path");
-    let path_str = path.to_string_lossy();
+    let sharded = std::path::Path::new("blobs").join("ab").join(&hash[2..]);
     assert!(
-        path_str.contains("/blobs/ab/") && path_str.ends_with(&hash[2..]),
-        "expected sharded /blobs/ab/<rest>, got {path_str}"
+        path.starts_with(&root) && path.ends_with(&sharded),
+        "expected <root>/blobs/ab/<rest>, got {}",
+        path.display()
     );
 
     let _ = std::fs::remove_dir_all(&root);

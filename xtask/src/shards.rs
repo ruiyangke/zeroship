@@ -502,9 +502,21 @@ pub const PORTABLE: Portable = Portable {
         },
         Confined {
             binary: "zeroship-bundle::main",
+            prefix: "integration::zstd_window_probe::zstd_does_not_allocate_the_declared_window_eagerly",
+            on: &[LINUX],
+            reason: "it reads the process's resident set from /proc, which only Linux has",
+        },
+        Confined {
+            binary: "zeroship-bundle::main",
             prefix: "integration::s3_blob_store::",
             on: &[LINUX],
             reason: CONTAINER,
+        },
+        Confined {
+            binary: "zeroship-storage",
+            prefix: "backend::local::tests::a_key_naming_a_directory_that_cannot_be_opened_is_no_object",
+            on: UNIX,
+            reason: "it closes a directory with a POSIX mode, which Windows does not keep",
         },
         Confined {
             binary: "zeroship-storage::main",

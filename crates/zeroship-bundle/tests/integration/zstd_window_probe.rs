@@ -15,6 +15,8 @@
 //! window. The frame is therefore hand-built, with Single_Segment clear and no
 //! Frame_Content_Size, leaving the decoder nothing to clamp against.
 
+/// The process's resident set, which only Linux's `/proc` reports this way.
+#[cfg(target_os = "linux")]
 fn rss_kb() -> u64 {
     std::fs::read_to_string("/proc/self/status")
         .unwrap()
@@ -38,6 +40,8 @@ fn frame_declaring_128mib_window() -> Vec<u8> {
     f
 }
 
+/// How many decoders the eager-allocation test constructs.
+#[cfg(target_os = "linux")]
 const N: usize = 8;
 
 /// The fixture really does declare a window larger than 8 MiB.
@@ -58,6 +62,7 @@ fn the_fixture_declares_a_window_larger_than_the_cap() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn zstd_does_not_allocate_the_declared_window_eagerly() {
     let frame = frame_declaring_128mib_window();

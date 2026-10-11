@@ -155,10 +155,10 @@ fn serve_answers_a_request_with_what_the_script_returns() {
 }
 
 /// On Linux the flag is accepted and enforced: a handler that never returns is
-/// stopped, so its request is answered, with a server error, instead of
-/// holding the connection forever, and the same server still answers a
-/// handler that returns. Without enforcement the stuck request would outlast
-/// the read timeout.
+/// stopped, and its request gets the answer a deployed app gives a synchronous
+/// overrun, a `503` whose envelope blanks the cause. The same server still
+/// answers a handler that returns. Without enforcement the stuck request would
+/// outlast the read timeout.
 #[cfg(target_os = "linux")]
 #[test]
 fn serve_enforces_a_cpu_limit() {
@@ -168,10 +168,15 @@ fn serve_enforces_a_cpu_limit() {
 
     let mut served = serve(dir.path(), &["--cpu-limit=50"]);
     let (status, body) = get(served.port, "/spin");
+    let envelope: serde_json::Value = serde_json::from_str(&body)
+        .unwrap_or_else(|error| panic!("the stop's answer is a JSON envelope ({error}): {body}"));
     assert!(
-        status.starts_with("HTTP/1.1 5"),
-        "a handler past its CPU limit is stopped and its request answered with a server \
-         error; got {status}: {body}\noutput:\n{}",
+        status.starts_with("HTTP/1.1 503")
+            && envelope["message"] == "internal error"
+            && envelope["name"] == "Error"
+            && envelope["request_id"].is_string(),
+        "a synchronous overrun is answered 503 with the cause blanked; got {status}: {body}\n\
+         output:\n{}",
         served.output.text()
     );
     let (status, body) = get(served.port, "/");
