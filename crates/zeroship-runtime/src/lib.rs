@@ -192,6 +192,7 @@ pub use webidl::wrap;
 
 #[cfg(target_os = "linux")]
 pub use core::cpu_timer;
+pub use core::CPU_LIMIT_STOPS_A_RUNNING_HANDLER;
 
 // Convenience re-exports
 pub use clamp::{

@@ -253,7 +253,7 @@ impl LocalDiskBlobStore {
         std::fs::create_dir_all(&manifests)?;
         probe_hard_links(&manifests, hard_link)?;
         for dir in [&blobs, &manifests, &root] {
-            std::fs::File::open(dir)?.sync_all()?;
+            sync_dir_blocking(dir)?;
         }
         Ok(Self { root })
     }
@@ -791,8 +791,29 @@ impl BlobStore for LocalDiskBlobStore {
 /// Sync a directory, so the entries created, renamed or removed in it survive
 /// a crash. The same shape as `sync_dir` in `zeroship-storage`'s local
 /// backend, returning the `std::io::Error` this crate converts from.
+///
+/// Windows has no directory flush: a directory cannot be opened as a file
+/// there, so this does nothing, and an entry's durability is the file
+/// system's metadata journal's.
+#[cfg(not(windows))]
 async fn sync_dir(dir: &Path) -> std::io::Result<()> {
     compio::fs::File::open(dir).await?.sync_all().await
+}
+
+#[cfg(windows)]
+async fn sync_dir(_dir: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// [`sync_dir`], blocking, for the store's construction.
+#[cfg(not(windows))]
+fn sync_dir_blocking(dir: &Path) -> std::io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()
+}
+
+#[cfg(windows)]
+fn sync_dir_blocking(_dir: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Size/hash-verify a local blob file before trusting a dedup hit. Returns

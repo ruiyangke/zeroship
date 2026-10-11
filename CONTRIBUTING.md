@@ -119,6 +119,19 @@ The `miri` CI job runs the same per-package filters: `cloning_` and
 `commit_declares` for `compio-postgres`, `aead_key_zeroizes` for
 `zeroship-data-orm`, and `zeroize_slice` for `zeroship-runtime`.
 
+The CLI's macOS and Windows code can be type-checked from Linux through the
+flake's `cross` shell, which carries the development shell's compiler release
+with those targets' standard libraries. The checks compile the C dependencies
+against headers that stand in for the real SDKs, so they prove the Rust code,
+not the C build; the `portable` CI jobs build everything on the real systems:
+
+```
+nix develop .#cross --command cargo-zigbuild check --locked \
+  -p zeroship-cli --all-targets --target aarch64-apple-darwin
+nix develop .#cross --command cargo check --locked \
+  -p zeroship-cli --all-targets --target x86_64-pc-windows-msvc
+```
+
 ### Test tiers
 
 A crate links one test target, `main`, declared by `tests/main.rs`. It sets
@@ -245,17 +258,31 @@ every name there must ship a binary target.
 
 `.github/workflows/ci.yml` runs on GitHub-hosted runners:
 
-- `plan` prints `cargo xtask shards list` for the test matrix, and fills the
-  fixture image cache when `cargo xtask images list` changes.
+- `plan` prints `cargo xtask shards list` for the test matrix and
+  `cargo xtask shards platforms` for the portable one, reads the development
+  shell's Rust, Node.js and nextest versions for the portable jobs, and fills
+  the fixture image cache when `cargo xtask images list` changes.
 - `test (<shard>)` runs `cargo xtask test <shard>`, one job per shard, so every
   test runs exactly once. `cargo xtask test repository` fails when a workspace
   package with tests is in no shard or in two, when the test job's shape could
   skip a shard or forgive its failure, or when another CI job runs a workspace
-  package's tests. `miri` is the one deliberate exception: it interprets a few
-  unit tests the shards also run natively.
+  package's tests. The deliberate exceptions are declared: `miri` interprets a
+  few unit tests the shards also run natively, and `portable` runs the CLI's
+  tests on other systems, held to its declaration as the test job is to the
+  shards.
+- `portable (<platform>)` builds the `zeroship` CLI and runs its tests on
+  macOS and Windows, where creators also install it, one job per platform
+  `cargo xtask shards platforms` prints. There is no Nix there: the job
+  installs the Rust, Node.js and nextest versions the plan job reads from the
+  development shell, and pnpm takes `package.json#packageManager`. No CLI test
+  starts a container, so each platform runs the package's whole suite; a test
+  that exists on some systems only is compiled there by its own `#[cfg]` and
+  declared, with why, in `PORTABLE.confined` (`xtask/src/shards.rs`).
 - `verify` reads every shard's reports and fails unless each run executed
   exactly what its build lists, no test ran in two shards, and every declared
-  test target is in one shard.
+  test target is in one shard. It holds each platform's run to the same rule,
+  and its listing to the `runtime` shard's listing of the CLI less the confined
+  tests, so a test cannot leave or join a platform without an entry saying so.
 - `checks` runs the generator checks, the shipped-target build, rustdoc links,
   the data-architecture, repository and Playwright checks, the edge artifact
   check and clippy; `sdk`, `miri` and `fuzz-smoke` run the JavaScript suites,

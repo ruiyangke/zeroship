@@ -56,6 +56,9 @@ enum Task {
 enum ShardsAction {
     /// Print the shard names as the JSON array CI's test matrix reads.
     List,
+    /// Print the platforms CI's `portable` job runs the CLI's tests on, as the
+    /// JSON array its matrix reads.
+    Platforms,
     /// Check the reports every shard left in `directory` against what the
     /// shards build: CI's `verify` job.
     Verify {
@@ -90,6 +93,12 @@ fn main() -> ExitCode {
         } => {
             let names: Vec<&str> = SHARDS.iter().map(|shard| shard.name).collect();
             println!("{}", serde_json::Value::from(names));
+            Ok(())
+        }
+        Task::Shards {
+            action: ShardsAction::Platforms,
+        } => {
+            println!("{}", shards::PORTABLE.matrix());
             Ok(())
         }
         Task::Shards {

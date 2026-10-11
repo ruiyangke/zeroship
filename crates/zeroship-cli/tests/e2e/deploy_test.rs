@@ -1,20 +1,13 @@
-#[cfg(unix)]
 use std::io::{Read, Write};
-#[cfg(unix)]
 use std::net::{TcpListener, TcpStream};
-#[cfg(unix)]
 use std::path::Path;
-#[cfg(unix)]
 use std::process::{Command, Output};
-#[cfg(unix)]
 use std::thread::JoinHandle;
-#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 /// One scripted answer. An empty `status` closes the connection after reading
 /// the request, the way a reply lost after Control committed looks to the CLI.
 /// A `{command}` in `body` is replaced by the request's `Idempotency-Key`.
-#[cfg(unix)]
 struct Route {
     method: &'static str,
     path: &'static str,
@@ -23,7 +16,6 @@ struct Route {
 }
 
 /// A request as the stub saw it.
-#[cfg(unix)]
 #[derive(Debug, Clone)]
 struct Seen {
     line: String,
@@ -31,13 +23,11 @@ struct Seen {
     body: Vec<u8>,
 }
 
-#[cfg(unix)]
 struct ControlStub {
     base_url: String,
     server: JoinHandle<Vec<Seen>>,
 }
 
-#[cfg(unix)]
 impl ControlStub {
     fn start(routes: Vec<Route>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind control stub");
@@ -106,16 +96,13 @@ impl ControlStub {
     }
 }
 
-#[cfg(unix)]
 fn lines(seen: &[Seen]) -> Vec<&str> {
     seen.iter().map(|request| request.line.as_str()).collect()
 }
 
 /// Control's acceptance, naming the command the request carried.
-#[cfg(unix)]
 const ACCEPTED: &str = r#"{"command_id":"{command}","deploy_id":"dep_034klb07lrb9jgma6imvmx000","deploy_hash":"sha256:test","blobs_uploaded":1,"blobs_deduped":0,"lifecycle_revision":1}"#;
 
-#[cfg(unix)]
 fn read_request(stream: &mut TcpStream) -> Seen {
     let mut bytes = Vec::new();
     let mut chunk = [0_u8; 4096];
@@ -161,7 +148,6 @@ fn read_request(stream: &mut TcpStream) -> Seen {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn deploy_warns_for_each_declared_secret_missing_from_the_app() {
     let control = ControlStub::start(vec![
@@ -214,7 +200,6 @@ fn deploy_warns_for_each_declared_secret_missing_from_the_app() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn first_deploy_creates_the_app_and_persists_its_id() {
     let control = ControlStub::start(vec![
@@ -265,7 +250,6 @@ fn first_deploy_creates_the_app_and_persists_its_id() {
 
 /// A reply lost after the upload is resent under the same command id with the
 /// same bytes, and the command id the CLI prints is the one it sent.
-#[cfg(unix)]
 #[test]
 fn a_lost_reply_resends_the_same_command_and_bytes() {
     let deploy = "/api/apps/app_034klb07lrb9jgma6imvmx021/deploy";
@@ -318,7 +302,6 @@ fn a_lost_reply_resends_the_same_command_and_bytes() {
 
 /// When no attempt is answered the deploy fails naming its command id, and
 /// re-running with that id resends the same command instead of a new one.
-#[cfg(unix)]
 #[test]
 fn an_unanswered_deploy_can_be_resumed_by_its_command_id() {
     let deploy = "/api/apps/app_034klb07lrb9jgma6imvmx022/deploy";
@@ -375,7 +358,6 @@ fn an_unanswered_deploy_can_be_resumed_by_its_command_id() {
 }
 
 /// Point an existing project at another control stub.
-#[cfg(unix)]
 fn rewrite_control(project: &Path, control_url: &str) {
     let path = project.join("zeroship.jsonc");
     let config = std::fs::read_to_string(&path).expect("read project config");
@@ -389,7 +371,6 @@ fn rewrite_control(project: &Path, control_url: &str) {
     std::fs::write(path, rewritten).expect("write project config");
 }
 
-#[cfg(unix)]
 fn project(
     name: &str,
     app_id: Option<&str>,
@@ -419,12 +400,10 @@ fn project(
     project
 }
 
-#[cfg(unix)]
 fn run_deploy(project: &Path) -> Output {
     run_deploy_with(project, &[])
 }
 
-#[cfg(unix)]
 fn run_deploy_with(project: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_zeroship"))
         .arg("deploy")

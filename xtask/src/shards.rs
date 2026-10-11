@@ -332,6 +332,208 @@ pub const SHARDS: &[Shard] = &[
     },
 ];
 
+/// The tests that also run on the creator platforms: CI's `portable` job.
+///
+/// Creators install the `zeroship` CLI on their own machines, so its package's
+/// tests run on macOS and Windows as well as in the `runtime` shard on Linux.
+/// That repeats them deliberately, on another operating system, which is why it
+/// is declared here rather than being a shard owning the same package. No CLI
+/// test starts a container, so the run on each platform is the package's whole
+/// nextest run, with nothing filtered out. A test that exists on some systems
+/// only is compiled for those systems by its own `#[cfg]`, and is listed in
+/// [`Portable::confined`] with why; CI's `verify` job holds every platform's
+/// listing to the Linux shard's listing and that table, so a test cannot leave
+/// or join a platform's run without an entry saying so.
+#[derive(Debug)]
+pub struct Portable {
+    /// The workspace packages whose tests run on every platform.
+    pub packages: &'static [&'static str],
+    /// The systems the packages' tests run on besides Linux.
+    pub platforms: &'static [Platform],
+    /// The packages' tests that are compiled for some systems only.
+    pub confined: &'static [Confined],
+}
+
+/// One operating system CI's `portable` job runs on.
+#[derive(Debug)]
+pub struct Platform {
+    /// Rust's `target_os` for the system; the job's matrix and the run's reports
+    /// (`junit-portable-<name>.xml`, `list-portable-<name>.json`) carry it.
+    pub name: &'static str,
+    /// The GitHub-hosted runner image the job runs on.
+    pub runner: &'static str,
+}
+
+/// Tests whose `#[cfg]` compiles them for some systems and not the others.
+#[derive(Debug)]
+pub struct Confined {
+    /// The nextest binary id of the test target.
+    pub binary: &'static str,
+    /// The tests it covers: a module path ending in `::` covers every test under
+    /// it, and anything else is one test's whole name.
+    pub prefix: &'static str,
+    /// The systems the tests exist on, by `target_os`: `linux` and the names of
+    /// [`Portable::platforms`].
+    pub on: &'static [&'static str],
+    /// Why the tests cannot exist on the other systems.
+    pub reason: &'static str,
+}
+
+impl Confined {
+    /// Whether this entry covers the test `test` of `binary`. A whole-name entry
+    /// covers that test alone, so a new test whose name merely starts the same
+    /// way is not confined by it.
+    #[must_use]
+    pub fn covers(&self, binary: &str, test: &str) -> bool {
+        binary == self.binary
+            && if self.prefix.ends_with("::") {
+                test.starts_with(self.prefix)
+            } else {
+                test == self.prefix
+            }
+    }
+}
+
+/// The system the shards run on.
+pub const LINUX: &str = "linux";
+
+/// The portable run, and the tests confined to some of its systems.
+pub const PORTABLE: Portable = Portable {
+    packages: &["zeroship-cli"],
+    platforms: &[
+        Platform {
+            name: "macos",
+            runner: "macos-14",
+        },
+        Platform {
+            name: "windows",
+            runner: "windows-2022",
+        },
+    ],
+    confined: &[
+        Confined {
+            binary: CLI_UNIT,
+            prefix: "dev::tests::",
+            on: UNIX,
+            reason: "it reads the POSIX mode a generated secret is created with, which Windows \
+                     does not keep",
+        },
+        Confined {
+            binary: CLI_UNIT,
+            prefix: "migrate::tests::a_positional_file_is_refused_rather_than_posted",
+            on: UNIX,
+            reason: "it reads the recorded migration set from zeroship-testkit, which builds on \
+                     Unix only: its container lease is an flock protocol",
+        },
+        Confined {
+            binary: CLI_UNIT,
+            prefix: "migrate::tests::recording_db_todos_reproduces_the_posted_ir",
+            on: UNIX,
+            reason: "it compares against the recorded migration set in zeroship-testkit, which \
+                     builds on Unix only: its container lease is an flock protocol",
+        },
+        Confined {
+            binary: CLI_UNIT,
+            prefix: "project_config::tests::build_dist_cannot_symlink_to_the_project_root",
+            on: UNIX,
+            reason: "it creates a symbolic link, which Windows grants only to elevated or \
+                     developer-mode accounts",
+        },
+        Confined {
+            binary: CLI_UNIT,
+            prefix: "project_keys::tests::a_linked_key_is_refused",
+            on: UNIX,
+            reason: "it creates a symbolic link, which Windows grants only to elevated or \
+                     developer-mode accounts",
+        },
+        Confined {
+            binary: CLI_UNIT,
+            prefix: "project_keys::tests::public_keys_are_refused_and_never_replaced",
+            on: UNIX,
+            reason: "it widens the key's POSIX mode, which Windows does not keep",
+        },
+        Confined {
+            binary: CLI_E2E,
+            prefix: "e2e::dev_init_test::dev_init_rejects_an_env_file_hard_linked_to_a_generated_secret",
+            on: UNIX,
+            reason: "dev init recognises a hard link by device and inode, which the stable \
+                     standard library exposes on Unix only",
+        },
+        Confined {
+            binary: CLI_E2E,
+            prefix: "e2e::parent_death_test::",
+            on: &[LINUX],
+            reason: "it tests the PR_SET_PDEATHSIG arm of the parent-death guard and reads \
+                     liveness from /proc, both Linux's",
+        },
+        Confined {
+            binary: CLI_E2E,
+            prefix: "e2e::parent_death_windows_test::",
+            on: &["windows"],
+            reason: "it tests the Windows arm of the parent-death guard, which waits on the \
+                     process handle of the parent the environment names",
+        },
+        Confined {
+            binary: CLI_E2E,
+            prefix: "e2e::secrets_test::",
+            on: UNIX,
+            reason: "it stands in for curl with a shell script on PATH",
+        },
+        Confined {
+            binary: CLI_E2E,
+            prefix: "e2e::serve_test::serve_refuses_a_cpu_limit_it_cannot_enforce",
+            on: &["macos", "windows"],
+            reason: "Linux enforces a CPU limit, so only the other systems refuse the flag",
+        },
+        Confined {
+            binary: CLI_E2E,
+            prefix: "e2e::workflow_local::",
+            on: &[LINUX],
+            reason: "its host trusts a port only once /proc shows its own child holds the \
+                     listening socket",
+        },
+    ],
+};
+
+/// The CLI's unit tests and its end-to-end target, as nextest names them.
+const CLI_UNIT: &str = "zeroship-cli::bin/zeroship";
+const CLI_E2E: &str = "zeroship-cli::main";
+
+/// The systems with POSIX file modes, links and shells.
+const UNIX: &[&str] = &[LINUX, "macos"];
+
+impl Portable {
+    /// The report label a platform's run carries, `portable-<platform>`.
+    #[must_use]
+    pub fn label(platform: &Platform) -> String {
+        format!("portable-{}", platform.name)
+    }
+
+    /// The arguments after `cargo` for a platform's test run: the packages'
+    /// whole nextest run, failing when it selects no test.
+    #[must_use]
+    pub fn nextest_args(&self) -> Vec<String> {
+        nextest_args(self.packages, &[], None, false)
+    }
+
+    /// The arguments after `cargo` that list what a platform's run builds.
+    #[must_use]
+    pub fn list_args(&self) -> Vec<String> {
+        list_args(self.packages, &[])
+    }
+
+    /// The platforms as the JSON array CI's `portable` matrix reads.
+    #[must_use]
+    pub fn matrix(&self) -> String {
+        let entries: Vec<serde_json::Value> = self
+            .platforms
+            .iter()
+            .map(|platform| serde_json::json!({ "name": platform.name, "runner": platform.runner }))
+            .collect();
+        serde_json::Value::from(entries).to_string()
+    }
+}
+
 /// The shard named `name`.
 #[must_use]
 pub fn find(name: &str) -> Option<&'static Shard> {

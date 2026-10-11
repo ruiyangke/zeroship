@@ -149,9 +149,15 @@ fn a_disconnected_publication_wake_is_reported_once() {
 }
 
 /// Where the workspace install puts the TypeScript runner the bundle compiler
-/// runs under.
+/// runs under. On Windows the installed runner is the command script pnpm
+/// writes beside the shell one, which Windows cannot execute.
 fn typescript_runner(workspace: &Path) -> PathBuf {
-    workspace.join("packages/vite-plugin/node_modules/.bin/tsx")
+    let bin = workspace.join("packages/vite-plugin/node_modules/.bin");
+    if cfg!(windows) {
+        bin.join("tsx.CMD")
+    } else {
+        bin.join("tsx")
+    }
 }
 
 /// The bundle compiler runs under the installed TypeScript runner, addressed by

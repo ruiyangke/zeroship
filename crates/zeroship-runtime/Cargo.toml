@@ -149,6 +149,9 @@ http = { workspace = true }
 httparse = { workspace = true }
 
 # Utilities
+# The calling thread's CPU clock on every system the CLI ships for, behind a
+# safe call (`core::init::thread_cpu_time`).
+cpu-time = "1"
 mimalloc = { workspace = true }
 itoa = { workspace = true }
 socket2 = { workspace = true }

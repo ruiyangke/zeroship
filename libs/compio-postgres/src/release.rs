@@ -252,15 +252,17 @@ fn mark_local_teardown(session: Option<&crate::tls_sansio::SharedSession>) {
 /// (`BorrowedFd` / `BorrowedSocket`) and both offer `try_clone_to_owned` - so
 /// neither arm needs `unsafe`, which this crate denies.
 ///
-/// The `cfg(windows)` arm is compiled by nothing in this repository: CI is
-/// Linux-only and no job names a Windows target, so neither a local build nor
-/// the clippy gate's `--all-features` sweep type-checks it. Keep the blind arm
-/// as SMALL as possible rather than merely watched. It holds a trait bound, an
-/// accessor and a `map`; the struct literal - the part a new field changes -
-/// lives once in [`ConnectionRelease::from_owned`], which Linux compiles, so
-/// adding a field fails the build at exactly ONE site. What is left blind is a
-/// bound and an accessor, which break loudly against a changed `std` or
-/// `socket2` API rather than quietly. Read both arms when touching either.
+/// The `cfg(windows)` arm is compiled only for a Windows target: CI's
+/// `portable (windows)` job, which builds the creator CLI this crate is linked
+/// into, and the flake's `cross` shell check. Neither a Linux build nor the
+/// clippy gate's `--all-features` sweep type-checks it. Keep it as SMALL as
+/// possible rather than merely watched. It holds a trait bound, an accessor
+/// and a `map`; the struct literal - the part a new field changes - lives once
+/// in [`ConnectionRelease::from_owned`], which Linux compiles, so adding a
+/// field fails the build at exactly ONE site. What is left to the Windows
+/// build is a bound and an accessor, which break loudly against a changed
+/// `std` or `socket2` API rather than quietly. Read both arms when touching
+/// either.
 ///
 /// The `cfg(not(target_os = "linux"))` send in `send_close_notify_on` can be
 /// checked here by flipping its `cfg` to `all()` and building, because it calls
@@ -271,7 +273,7 @@ impl ConnectionRelease {
     ///
     /// THE STRUCT LITERAL LIVES HERE AND NOWHERE ELSE, deliberately: this is
     /// the part that changes when a field is added, and the `cfg(windows)`
-    /// arm below is compiled by nothing in this repository. Each arm carries a
+    /// arm below is compiled by a Windows build alone. Each arm carries a
     /// bound, an accessor and a `map`, so a new field cannot diverge between
     /// them.
     ///

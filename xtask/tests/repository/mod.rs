@@ -4,6 +4,7 @@
 //! is a suite that silently stops running.
 
 mod build_inputs;
+mod creator_cli;
 mod crypto_library;
 mod deploy_image;
 mod jwt_backend;

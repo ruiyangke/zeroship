@@ -30,6 +30,13 @@
 //! (`PR_SET_CHILD_SUBREAPER`, which systemd user sessions and some supervisors
 //! set) an orphan is reparented to the subreaper, not to init.
 //!
+//! # Other systems
+//!
+//! The kernel arm is Linux's. macOS polls `getppid()` instead (`arm_kernel`),
+//! and Windows, which has neither, waits on the process the variable names
+//! (the Windows `arm`), so there the pid is the whole guard rather than its
+//! cross-check.
+//!
 //! # Known limits, stated rather than discovered
 //!
 //! - **SIGKILL, not SIGTERM.** This is the backstop for a cooperative teardown
@@ -81,23 +88,30 @@ pub fn arm_from_env() {
     if raw.is_empty() {
         return;
     }
-    // A value that is not a live-looking pid still arms the guard, and says so.
-    // Failing OPEN here (no guard) would reintroduce the orphan silently, which
-    // is the one outcome this module exists to prevent; failing closed without
-    // the cross-check only loses the arm-time race detection.
-    let expected = match parse_parent_pid(raw) {
-        Some(pid) => Some(pid),
-        None => {
-            eprintln!(
-                "[zeroship] {ENV_DIE_WITH_PARENT}={raw} is not a parent pid - arming the \
-                 parent-death guard WITHOUT the already-exited check (a parent that died \
-                 before this point will not be noticed)"
-            );
-            None
-        }
-    };
+    // On Unix a value that is not a live-looking pid still arms the guard, and
+    // says so. Failing OPEN here (no guard) would reintroduce the orphan
+    // silently, which is the one outcome this module exists to prevent; failing
+    // closed without the cross-check only loses the arm-time race detection.
+    // Windows watches the parent by the pid itself, so there such a value arms
+    // nothing, and says that instead.
+    let expected = parse_parent_pid(raw);
+    if expected.is_none() {
+        eprintln!("[zeroship] {ENV_DIE_WITH_PARENT}={raw} is not a parent pid - {UNNAMED_PARENT}");
+    }
     arm(expected);
 }
+
+/// What a value that names no parent leaves of the guard, said where it happens.
+#[cfg(unix)]
+const UNNAMED_PARENT: &str = "arming the parent-death guard WITHOUT the already-exited check \
+                              (a parent that died before this point will not be noticed)";
+
+/// Windows watches the parent by the pid the variable names, so a value naming
+/// none arms nothing.
+#[cfg(windows)]
+const UNNAMED_PARENT: &str = "the parent-death guard is NOT armed (Windows watches the parent \
+                              by its pid), so this process can outlive its parent and hold \
+                              the state dir open";
 
 /// `Some(pid)` for a value usable as the recorded parent.
 ///
@@ -116,6 +130,7 @@ fn parse_parent_pid(raw: &str) -> Option<i32> {
 /// Allowed narrowly rather than crate-wide: `getppid` is the only unsafe call
 /// in the CLI outside this module's kernel arm, and a `#![allow]` at the crate
 /// root would quietly cover every future one.
+#[cfg(unix)]
 #[allow(unsafe_code)]
 fn arm(expected_parent: Option<i32>) {
     arm_kernel();
@@ -159,14 +174,14 @@ fn arm_kernel() {
     }
 }
 
-/// Non-Linux fallback: poll `getppid()`.
+/// Unix fallback outside Linux: poll `getppid()`.
 ///
 /// There is no `PR_SET_PDEATHSIG` outside Linux. Doing nothing would leave the
 /// same orphan with no message, so this trades a sleeping thread and up to
 /// [`POLL_INTERVAL`] of latency for the guarantee. The `expected` pid is not
 /// needed: any reparenting is a parent death, because a live parent's pid
 /// cannot change.
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 #[allow(unsafe_code)]
 fn arm_kernel() {
     const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
@@ -179,6 +194,51 @@ fn arm_kernel() {
             eprintln!("[zeroship] parent {original} exited - exiting with it");
             std::process::exit(0);
         }
+    });
+}
+
+/// Windows: wait on the recorded parent itself.
+///
+/// Windows has neither a parent-death signal nor `getppid`, so the guard opens
+/// the process the variable names and exits when that process does. Opening it
+/// is also the already-exited check: a pid naming no process means the parent
+/// is gone. The race [`waitpid_any::WaitHandle::open`] documents remains: a
+/// parent that exited before this call, and whose pid Windows has already
+/// handed to a new process, is waited on as that new process.
+#[cfg(windows)]
+fn arm(expected_parent: Option<i32>) {
+    /// `ERROR_INVALID_PARAMETER`, which `OpenProcess` reports for a pid naming
+    /// no process.
+    const NO_SUCH_PROCESS: i32 = 87;
+    let Some(parent) = expected_parent else {
+        return;
+    };
+    let mut handle = match waitpid_any::WaitHandle::open(parent) {
+        Ok(handle) => handle,
+        Err(error) if error.raw_os_error() == Some(NO_SUCH_PROCESS) => {
+            eprintln!(
+                "[zeroship] parent {parent} exited before the parent-death guard was armed - \
+                 exiting rather than becoming an orphan holding the state dir"
+            );
+            std::process::exit(0);
+        }
+        Err(error) => {
+            eprintln!(
+                "[zeroship] could not arm the parent-death guard (open parent {parent}: \
+                 {error}) - this process can outlive its parent and hold the state dir open"
+            );
+            return;
+        }
+    };
+    std::thread::spawn(move || match handle.wait() {
+        Ok(()) => {
+            eprintln!("[zeroship] parent {parent} exited - exiting with it");
+            std::process::exit(0);
+        }
+        Err(error) => eprintln!(
+            "[zeroship] the parent-death guard stopped watching parent {parent} ({error}) - \
+             this process can outlive its parent and hold the state dir open"
+        ),
     });
 }
 

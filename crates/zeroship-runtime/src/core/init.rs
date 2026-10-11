@@ -111,18 +111,16 @@ pub fn init_v8() {
 // CPU time helper
 // ===========================================================================
 
-/// Read the current thread's CPU time via CLOCK_THREAD_CPUTIME_ID.
-/// Only counts actual CPU cycles — I/O wait is excluded.
+/// Read the current thread's CPU time. Only counts actual CPU cycles; I/O wait
+/// is excluded.
+///
+/// Unix reads `CLOCK_THREAD_CPUTIME_ID`, and Windows `GetThreadTimes`, whose
+/// kernel and user times advance by whole scheduler ticks rather than
+/// continuously. A clock the system refuses reads as zero, as an unread clock
+/// does: every caller subtracts two readings, so a refusal measures nothing
+/// rather than failing the request it measures.
 pub fn thread_cpu_time() -> Duration {
-    let mut ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    #[allow(unsafe_code)]
-    unsafe {
-        libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts);
-    }
-    Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
+    cpu_time::ThreadTime::try_now().map_or(Duration::ZERO, |now| now.as_duration())
 }
 
 // ===========================================================================
@@ -1954,5 +1952,36 @@ mod console_tests {
         long.push_str(&"y".repeat(200));
         let out = truncate_console_line(long);
         assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod thread_cpu_time_tests {
+    use super::thread_cpu_time;
+    use std::time::{Duration, Instant};
+
+    /// The clock counts the calling thread's own work, and not time it spends
+    /// blocked. Busy work is spun until the clock moves, so a clock that
+    /// advances by whole scheduler ticks still passes, while one that reads
+    /// zero fails at the wall-clock bound.
+    #[test]
+    fn the_thread_clock_counts_this_threads_work_and_not_its_blocked_time() {
+        let started = thread_cpu_time();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut spins = 0_u64;
+        while thread_cpu_time().saturating_sub(started) < Duration::from_millis(20) {
+            spins = std::hint::black_box(spins.wrapping_add(1));
+            assert!(Instant::now() < deadline, "the thread CPU clock did not advance under busy work");
+        }
+
+        // A receive nothing will answer blocks the thread for its whole timeout.
+        let (_sender, receiver) = std::sync::mpsc::channel::<()>();
+        let before_blocking = thread_cpu_time();
+        assert!(receiver.recv_timeout(Duration::from_millis(200)).is_err());
+        let blocked = thread_cpu_time().saturating_sub(before_blocking);
+        assert!(
+            blocked < Duration::from_millis(100),
+            "a blocked thread was charged {blocked:?} of CPU"
+        );
     }
 }

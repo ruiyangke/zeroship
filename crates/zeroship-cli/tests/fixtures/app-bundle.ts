@@ -9,7 +9,9 @@ const [root, version, cooldown = "10ms", timeout = "1h"] = process.argv.slice(2)
 if (!root || !version) throw new Error("expected a fixture project and version");
 const dependencies = fileURLToPath(new URL("../../../../packages/vite-plugin/node_modules", import.meta.url));
 await fs.mkdir(join(root, "src"), { recursive: true });
-try { await fs.symlink(dependencies, join(root, "node_modules"), "dir"); }
+// Windows links a directory without elevation only as a junction.
+const link = process.platform === "win32" ? "junction" : "dir";
+try { await fs.symlink(dependencies, join(root, "node_modules"), link); }
 catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
 await fs.writeFile(join(root, "src/version.ts"), `export default ${JSON.stringify(version)};`);
 await fs.writeFile(join(root, "src/tail.ts"), 'export const suffix = ":lazy";');

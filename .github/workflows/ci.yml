@@ -1,12 +1,15 @@
 name: CI
 on: [push, pull_request]
 
-# Toolchain jobs run inside the flake's devShell, so the environment has one
-# definition. `nix develop` is required for the native build inputs and not only
-# for Rust: `rdkafka` is configured with `cmake-build`, so `rdkafka-sys` compiles
-# librdkafka and needs `curl/curl.h`, which the devShell supplies through
-# `curl.dev`. Anything that builds the workspace needs those inputs, which is why
-# every job opts in instead of only the Rust steps.
+# Toolchain jobs on Linux run inside the flake's devShell, so the environment
+# has one definition. `nix develop` is required for the native build inputs and
+# not only for Rust: `rdkafka` is configured with `cmake-build`, so
+# `rdkafka-sys` compiles librdkafka and needs `curl/curl.h`, which the devShell
+# supplies through `curl.dev`. Anything that builds the workspace needs those
+# inputs, which is why every Linux job opts in instead of only the Rust steps.
+# The `portable` job runs the creator CLI's tests on macOS and Windows, where
+# there is no devShell; it installs the devShell's versions, which the plan
+# job reads from the shell itself, so flake.lock stays the one pin.
 #
 # Node.js and pnpm come from the devShell as well. pnpm is a devShell entry, so
 # it is first on PATH, and pnpm then switches itself to the
@@ -23,12 +26,14 @@ on: [push, pull_request]
 # matrix reads that output. `cargo xtask test repository` fails when a
 # workspace package with tests is in no shard or in two, when the test job's
 # shape could skip a shard, or when another job here runs a workspace
-# package's tests; the one deliberate exception is `miri`, which interprets a
-# few unit tests the shards also run natively. The `verify` job then checks
-# what every shard actually ran against what it builds.
+# package's tests. The deliberate exceptions are declared: `miri` interprets a
+# few unit tests the shards also run natively, and `portable` runs the CLI's
+# tests again on the other systems creators install it on. The `verify` job
+# then checks what every shard and every platform actually ran against what it
+# builds.
 #
-# CI builds dependencies without debuginfo (`.github/cargo-ci.toml`, which the
-# setup action installs as the runner's cargo config), so the cached dependency
+# CI builds dependencies without debuginfo (`.github/cargo-ci.toml`, which every
+# job installs as the runner's cargo config), so the cached dependency
 # artifacts fit the Actions cache budget.
 
 defaults:
@@ -36,16 +41,21 @@ defaults:
     shell: nix develop --command bash -eo pipefail {0}
 
 jobs:
-  # Lists the shards and makes sure the fixture image cache exists before any
-  # shard restores it. The images are pulled only here, only when the list in
-  # zeroship_testkit_server::images changes, and only the references the
-  # previous cache lacks.
+  # Lists the shards and the portable platforms, reads the toolchain versions
+  # the portable jobs install, and makes sure the fixture image cache exists
+  # before any shard restores it. The images are pulled only here, only when
+  # the list in zeroship_testkit_server::images changes, and only the
+  # references the previous cache lacks.
   plan:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     outputs:
       shards: ${{ steps.shards.outputs.shards }}
+      platforms: ${{ steps.platforms.outputs.platforms }}
       images-key: ${{ steps.images.outputs.key }}
+      rust: ${{ steps.toolchain.outputs.rust }}
+      node: ${{ steps.toolchain.outputs.node }}
+      nextest: ${{ steps.toolchain.outputs.nextest }}
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup
@@ -56,6 +66,15 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - id: shards
         run: echo "shards=$(cargo xtask shards list)" >> "$GITHUB_OUTPUT"
+      - id: platforms
+        run: echo "platforms=$(cargo xtask shards platforms)" >> "$GITHUB_OUTPUT"
+      # The versions the development shell carries, for the `portable` job,
+      # which runs where there is no Nix. flake.lock stays the one pin.
+      - id: toolchain
+        run: |
+          echo "rust=$(rustc --version | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
+          echo "node=$(node --version | cut -c2-)" >> "$GITHUB_OUTPUT"
+          echo "nextest=$(cargo nextest --version | awk 'NR == 1 { print $2 }')" >> "$GITHUB_OUTPUT"
       # The list is every base image and every fetching recipe's content-hashed
       # reference, so a recipe edit moves the key as a base bump does.
       - id: images
@@ -150,7 +169,7 @@ jobs:
   # two shards, and every test target cargo declares is in one shard. It runs
   # whatever happened to the shards, so a missing shard is a red verify.
   verify:
-    needs: [plan, test]
+    needs: [plan, test, portable]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -169,6 +188,89 @@ jobs:
           merge-multiple: true
       - name: Every shard ran exactly what it builds
         run: cargo xtask shards verify reports
+
+  # The creator CLI's tests on the systems creators install it on besides
+  # Linux, one job per platform `cargo xtask shards platforms` lists
+  # (xtask/src/shards.rs, `PORTABLE`). It repeats tests the `runtime` shard
+  # runs, deliberately, on another operating system. No CLI test starts a
+  # container, so the run is the package's whole nextest run; a test that
+  # exists on some systems only is compiled there by its own `#[cfg]` and
+  # declared in `PORTABLE.confined`, and `verify` holds each platform's listing
+  # to the Linux shard's and to that table. `--no-tests fail` makes an empty
+  # run red. The contract in xtask/tests/repository/shards.rs holds this job's
+  # shape as it holds the shards'.
+  #
+  # There is no Nix on Windows, so this job installs the toolchain the
+  # development shell carries, at the versions the plan job reads from it.
+  # macOS takes the same path, so both platforms are one job definition and
+  # neither fetches the shell's database, browser and profiling tools, which
+  # the CLI's tests do not use. pnpm takes its version from
+  # `package.json#packageManager`. Bash is the shell on both, Git for Windows'
+  # on Windows, with `-eo pipefail`.
+  portable:
+    name: portable (${{ matrix.platform.name }})
+    needs: plan
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJSON(needs.plan.outputs.platforms) }}
+    defaults:
+      run:
+        shell: bash
+    # aws-lc-sys assembles its Windows x86-64 code with NASM unless told to use
+    # the objects it ships prebuilt; this tells it, so the build does not
+    # depend on a NASM install the job does not make. Other targets ignore it.
+    env:
+      AWS_LC_SYS_PREBUILT_NASM: "1"
+    steps:
+      # Git for Windows checks text out with CRLF line endings by default, and
+      # the suites embed and hash committed fixtures byte for byte.
+      - name: Check out text files as committed
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ needs.plan.outputs.rust }}
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ needs.plan.outputs.node }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@${{ needs.plan.outputs.nextest }}
+      - name: Install the CI cargo configuration
+        run: |
+          mkdir -p "${CARGO_HOME:-$HOME/.cargo}"
+          cp .github/cargo-ci.toml "${CARGO_HOME:-$HOME/.cargo}/config.toml"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: portable-${{ matrix.platform.name }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # zeroship-data-v8 embeds the DB adapter bundle, and the CLI's suites run
+      # the vite-plugin's sources under tsx; both are gitignored build outputs.
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Build the CLI
+        run: cargo build --locked -p zeroship-cli
+      - name: Run the CLI's tests
+        run: cargo nextest run --locked --profile ci --no-tests fail -p zeroship-cli
+      - name: Keep the run's reports
+        if: ${{ !cancelled() }}
+        env:
+          PLATFORM: ${{ matrix.platform.name }}
+        run: |
+          mv target/nextest/ci/junit.xml "target/nextest/ci/junit-portable-$PLATFORM.xml"
+          cargo nextest list --locked --profile ci --message-format json -p zeroship-cli \
+            > "target/nextest/ci/list-portable-$PLATFORM.json"
+      - name: Upload the run's reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-portable-${{ matrix.platform.name }}
+          path: target/nextest/ci/
+          if-no-files-found: error
 
   # Builds every shard's artifacts and saves the one dependency cache the
   # shards restore. It runs beside the shards rather than before them: a shard
@@ -213,7 +315,7 @@ jobs:
   # their total, after the jobs that save one. `cargo-cache` saves only on
   # main, so a main run is the one that measures the shard dependency entry.
   cache-budget:
-    needs: [plan, test, verify, cargo-cache, checks]
+    needs: [plan, test, portable, verify, cargo-cache, checks]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10

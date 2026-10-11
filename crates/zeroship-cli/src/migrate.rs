@@ -826,9 +826,14 @@ mod tests {
     /// them, and its `descriptor_sha256` to the committed `schema.runtime.json`
     /// by hashing that file - so a migration change that is not reflected here
     /// fails this suite by name instead of ageing quietly.
+    ///
+    /// The testkit that owns it builds on Unix only, so the cases reading it do
+    /// too.
+    #[cfg(unix)]
     const DB_TODOS_IR: &str = zeroship_testkit::recorded::DB_TODOS_MIGRATIONS_IR;
 
     /// The committed descriptor for the same app - the bytes the packer hashes.
+    #[cfg(unix)]
     const DB_TODOS_RUNTIME_JSON: &str =
         include_str!("../../../examples/db-todos/generated/zeroship/schema.runtime.json");
 
@@ -846,6 +851,7 @@ mod tests {
     /// built `packages/vite-plugin/dist` (`pnpm build`); without one it fails
     /// naming what is missing, which is the correct outcome for a fixture that
     /// cannot reach its dependency.
+    #[cfg(unix)]
     #[test]
     fn recording_db_todos_reproduces_the_posted_ir() {
         let app = repo_root().join("examples/db-todos");
@@ -900,6 +906,7 @@ mod tests {
     /// refused rather than posted: its documents are whatever was in it, not
     /// what the app's `.ts` say today, so posting it would apply a schema
     /// nothing in the checkout derived.
+    #[cfg(unix)]
     #[test]
     fn a_positional_file_is_refused_rather_than_posted() {
         let recorded = zeroship_testkit::recorded::db_todos_migrations_ir_path();

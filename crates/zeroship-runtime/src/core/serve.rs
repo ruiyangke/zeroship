@@ -146,6 +146,9 @@ struct ResolvedWorkers {
     requested: usize,
     /// `true` iff the SQLite single-isolate clamp narrowed the count to 1.
     clamped_for_sqlite: bool,
+    /// `true` iff the system cannot spread one port across workers, so the
+    /// count was narrowed to 1 (see [`one_listener_unless_port_sharing`]).
+    clamped_for_platform: bool,
 }
 
 /// Resolve the isolate count, applying the SQLite dev-tier single-isolate clamp
@@ -178,6 +181,27 @@ fn resolve_num_workers(
         num_workers: if clamped_for_sqlite { 1 } else { requested },
         requested,
         clamped_for_sqlite,
+        clamped_for_platform: false,
+    }
+}
+
+/// Whether the kernel spreads accepted connections across sockets bound to one
+/// port with `SO_REUSEPORT`. Linux does. macOS lets several sockets bind the
+/// port without spreading its connections across them, and Windows has no such
+/// option, so a second worker there would serve nothing or fail to bind.
+const KERNEL_SPREADS_A_SHARED_PORT: bool = cfg!(target_os = "linux");
+
+/// Narrow `resolved` to one worker when the kernel cannot spread one port
+/// across several (`port_sharing` false). Every worker binds the same port, so
+/// one is the most such a system serves with.
+const fn one_listener_unless_port_sharing(resolved: ResolvedWorkers, port_sharing: bool) -> ResolvedWorkers {
+    if port_sharing || resolved.num_workers <= 1 {
+        return resolved;
+    }
+    ResolvedWorkers {
+        num_workers: 1,
+        clamped_for_platform: true,
+        ..resolved
     }
 }
 
@@ -192,7 +216,16 @@ pub fn start_server(modules: Vec<ModuleEntry>, options: ServerOptions) -> ! {
         .map(|n| n.get())
         .unwrap_or(1);
     let database_url = options.env_vars.get("DATABASE_URL").map(String::as_str);
-    let resolved = resolve_num_workers(options.workers, available, database_url);
+    let resolved = one_listener_unless_port_sharing(
+        resolve_num_workers(options.workers, available, database_url),
+        KERNEL_SPREADS_A_SHARED_PORT,
+    );
+    if resolved.clamped_for_platform {
+        tracing::warn!(
+            requested_workers = resolved.requested,
+            "this system does not spread one port across workers; serving with a single worker"
+        );
+    }
     if resolved.clamped_for_sqlite {
         tracing::info!(
             requested_workers = resolved.requested,
@@ -1585,6 +1618,10 @@ fn create_reuseport_listener(port: u16) -> std::io::Result<std::net::TcpListener
     use socket2::{Domain, Protocol, Socket, Type};
 
     let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+    // Only where the kernel spreads the port's connections across the workers
+    // bound to it: `one_listener_unless_port_sharing` keeps every other system
+    // at one worker, which never asks for a shared port.
+    #[cfg(target_os = "linux")]
     socket.set_reuse_port(true)?;
     socket.set_reuse_address(true)?;
     let addr: std::net::SocketAddr = format!("0.0.0.0:{port}")
@@ -1815,11 +1852,7 @@ fn run_single_worker(
     runtime
         .block_on(async move {
             let listener = if use_reuseport {
-                let std_listener = create_reuseport_listener(port)?;
-                unsafe {
-                    use std::os::fd::{FromRawFd, IntoRawFd};
-                    TcpListener::from_raw_fd(std_listener.into_raw_fd())
-                }
+                TcpListener::from_std(create_reuseport_listener(port)?)?
             } else {
                 TcpListener::bind(format!("0.0.0.0:{port}")).await?
             };
@@ -2905,6 +2938,30 @@ mod dev_isolate_replacement_tests {
     }
 }
 
+/// Two workers share one port only through the listener each converts from
+/// its own socket, which is the path `start_server` takes on Linux.
+#[cfg(all(test, target_os = "linux"))]
+mod reuseport_listener_tests {
+    use super::create_reuseport_listener;
+
+    /// Both workers bind the port, and the converted listener accepts on the
+    /// runtime. A socket without `SO_REUSEPORT` fails the second bind.
+    #[test]
+    fn two_workers_bind_one_port_and_accept_through_the_converted_listener() {
+        let first = create_reuseport_listener(0).expect("bind the first worker's socket");
+        let port = first.local_addr().expect("read the bound port").port();
+        let second = create_reuseport_listener(port).expect("a second worker binds the same port");
+        compio::runtime::Runtime::new().unwrap().block_on(async move {
+            let first = compio::net::TcpListener::from_std(first).expect("convert the first socket");
+            drop(compio::net::TcpListener::from_std(second).expect("convert the second socket"));
+            let client = std::thread::spawn(move || std::net::TcpStream::connect(("127.0.0.1", port)));
+            let (_stream, peer) = first.accept().await.expect("accept through the converted listener");
+            let client = client.join().unwrap().expect("connect to the shared port");
+            assert_eq!(peer, client.local_addr().unwrap(), "the accepted peer is the client");
+        });
+    }
+}
+
 #[cfg(test)]
 mod worker_count_clamp_tests {
     //! SQLite-engine wiring design R3.4 fix 1 — the dev SQLite backend forces a
@@ -2912,7 +2969,31 @@ mod worker_count_clamp_tests {
     //! same `zs-<app>.sqlite` (the engine's project-lock is a single-actor
     //! no-op). Drives the pure `resolve_num_workers` helper the real
     //! `start_server` calls.
-    use super::resolve_num_workers;
+    use super::{one_listener_unless_port_sharing, resolve_num_workers};
+
+    /// A system whose kernel cannot spread one port serves with one worker,
+    /// whatever was asked for; one that can keeps the count. Both arms are
+    /// driven through the pure helper `start_server` calls.
+    #[test]
+    fn workers_share_a_port_only_where_the_kernel_spreads_it() {
+        let asked = resolve_num_workers(0, 8, Some("postgres://localhost/dev"));
+        assert_eq!(asked.num_workers, 8);
+
+        let spread = one_listener_unless_port_sharing(asked, true);
+        assert_eq!(spread, asked, "a kernel that spreads the port keeps every worker");
+
+        let single = one_listener_unless_port_sharing(asked, false);
+        assert_eq!(single.num_workers, 1);
+        assert_eq!(single.requested, 8, "the request is still reported");
+        assert!(single.clamped_for_platform);
+        assert!(!single.clamped_for_sqlite);
+
+        let one = resolve_num_workers(1, 8, None);
+        assert!(
+            !one_listener_unless_port_sharing(one, false).clamped_for_platform,
+            "one worker asked for is not reported as narrowed"
+        );
+    }
 
     #[test]
     fn sqlite_dsn_clamps_to_one_isolate_even_with_explicit_workers() {

@@ -46,7 +46,6 @@
 
 use crate::StorageError;
 
-use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -157,13 +156,34 @@ struct ObjectFingerprint {
 }
 
 impl ObjectFingerprint {
+    #[cfg(unix)]
     fn of(meta: &fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt as _;
         Self {
             dev: meta.dev(),
             ino: meta.ino(),
             mtime: meta.mtime(),
             mtime_nsec: meta.mtime_nsec(),
             size: meta.size(),
+        }
+    }
+
+    /// Windows' stable standard library names no file identity (the volume
+    /// serial number and file index are unstable), so `dev` is zero and `ino`
+    /// carries the file's creation time: every write creates a fresh temp file,
+    /// and `rename` keeps its creation time as it keeps an inode. The write
+    /// half is the last-write time, split like `st_mtime` from its 100 ns
+    /// ticks.
+    #[cfg(windows)]
+    fn of(meta: &fs::Metadata) -> Self {
+        const TICKS_PER_SECOND: u64 = 10_000_000;
+        let written = meta.last_write_time();
+        Self {
+            dev: 0,
+            ino: meta.creation_time(),
+            mtime: i64::try_from(written / TICKS_PER_SECOND).unwrap_or(i64::MAX),
+            mtime_nsec: i64::try_from(written % TICKS_PER_SECOND * 100).unwrap_or(0),
+            size: meta.len(),
         }
     }
 }
@@ -229,6 +249,11 @@ async fn write_sidecar(
 /// directory entry after `put` has already reported success (and already
 /// billed `storage_bytes`), leaving the caller believing in an object that no
 /// longer exists.
+///
+/// Windows has no directory flush: a directory cannot be opened as a file
+/// there, so this does nothing, and the rename's durability is the file
+/// system's metadata journal's.
+#[cfg(not(windows))]
 async fn sync_dir(dir: &Path) -> Result<(), StorageError> {
     let handle = fs::File::open(dir)
         .await
@@ -237,6 +262,11 @@ async fn sync_dir(dir: &Path) -> Result<(), StorageError> {
         .sync_all()
         .await
         .map_err(|e| StorageError::Backend(format!("storage: fsync dir '{}': {e}", dir.display())))
+}
+
+#[cfg(windows)]
+async fn sync_dir(_dir: &Path) -> Result<(), StorageError> {
+    Ok(())
 }
 
 #[async_trait::async_trait(?Send)]

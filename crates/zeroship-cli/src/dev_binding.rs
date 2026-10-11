@@ -85,11 +85,7 @@ pub(crate) fn load(
 }
 
 fn load_binding_id(directory: &Path) -> Result<BindingId, Box<dyn std::error::Error>> {
-    use std::os::unix::fs::DirBuilderExt;
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(directory)?;
+    crate::project_keys::create_private_dir(directory)?;
     let path = directory.join("dev-database-binding.json");
     if !path.try_exists()? {
         let temporary = directory.join(format!(".dev-database-binding-{}", uuid::Uuid::new_v4()));
@@ -114,7 +110,7 @@ fn load_binding_id(directory: &Path) -> Result<BindingId, Box<dyn std::error::Er
         file.sync_all()?;
         // Publish complete material without replacing a concurrent winner.
         match std::fs::hard_link(&pending.0, &path) {
-            Ok(()) => std::fs::File::open(directory)?.sync_all()?,
+            Ok(()) => crate::project_keys::sync_directory(directory)?,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error.into()),
         }

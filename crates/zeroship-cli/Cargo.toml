@@ -53,13 +53,22 @@ tempfile = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 
+# Windows has no parent-death signal, so `parent_death` waits on the recorded
+# parent's process handle through this safe wrapper.
+[target.'cfg(windows)'.dependencies]
+waitpid-any = "0.3"
+
 [dev-dependencies]
-# The recorded migration set the migrate suites pin against. The testkit owns it
-# because `zeroship-migrate-node`'s suites pin the same bytes.
-zeroship-testkit = { workspace = true }
 # A second connection to the host's SQLite files: holding the journal's write
 # lock and reading the queue row a claim leased.
 rusqlite = { workspace = true }
+
+# The recorded migration set the migrate suites pin against, and the listening
+# socket check the e2e workflow host trusts. The testkit owns the set because
+# `zeroship-migrate-node`'s suites pin the same bytes. It builds on Unix only:
+# its container lease is an `flock` protocol.
+[target.'cfg(unix)'.dev-dependencies]
+zeroship-testkit = { workspace = true }
 
 [lints]
 workspace = true

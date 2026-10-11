@@ -1,6 +1,5 @@
 //! Application startup, driven by the runtime's existing event pump.
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use super::{
@@ -444,7 +443,7 @@ impl RuntimeInner {
             let handle = self.isolate.thread_safe_handle();
             self.cpu_note
                 .store(false, std::sync::atomic::Ordering::Relaxed);
-            match crate::cpu_timer::CpuTimer::new(handle, Arc::clone(&self.cpu_note)) {
+            match crate::cpu_timer::CpuTimer::new(handle, std::sync::Arc::clone(&self.cpu_note)) {
                 Ok(timer) => self.cpu_timer = Some(timer),
                 Err(error) => tracing::error!(%error, "cpu-timer initialisation failed"),
             }

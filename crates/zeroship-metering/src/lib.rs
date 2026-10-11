@@ -1,10 +1,12 @@
 //! Metering infrastructure — the platform-measured usage signal.
 //!
 //! This crate is the home of the per-worker [`Meter`] (atomic
-//! per-`(app_id, metric)` counters) and the compio [`outbox`] task that
-//! drains it into `UsageEvent` records and publishes them to the durable
-//! stream. It carries **no V8** and depends only on `zeroship-core`
-//! (wire types), `zeroship-stream`, `compio`, `serde_json`, and `uuid`.
+//! per-`(app_id, metric)` counters) and, behind the `outbox` feature, the
+//! compio `outbox` task that drains it into `UsageEvent` records and publishes
+//! them to the durable stream. It carries **no V8**. The counters depend only
+//! on `zeroship-core` (wire types) and `uuid`; the outbox adds
+//! `zeroship-stream`, `compio`, `redb` and `serde_json`, which is why only the
+//! services that publish usage enable it.
 //!
 //! ## Metering is infrastructure, not a creator API
 //!
@@ -28,6 +30,7 @@ use std::sync::Arc;
 use zeroship_core::AppId;
 
 pub mod meter;
+#[cfg(feature = "outbox")]
 pub mod outbox;
 
 // No env consumer is declared here, and that is deliberate: the reads happen in
@@ -36,6 +39,7 @@ pub mod outbox;
 // left to read would be a registry entry claiming reads that do not exist.
 
 pub use meter::Meter;
+#[cfg(feature = "outbox")]
 pub use outbox::{
     build_usage_outbox, spawn_disabled_drain_task, spawn_outbox_task, wal_identity, OutboxConfig,
     OutboxFailure, OutboxPublishResult, UsageOutbox, UsageStreamSettings, WalIdentity,

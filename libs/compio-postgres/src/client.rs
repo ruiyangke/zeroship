@@ -36,7 +36,6 @@ use std::fmt;
 use std::future;
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
@@ -2206,7 +2205,7 @@ pub(crate) enum Addr {
     /// with the zone intact.
     Tcp { ip: IpAddr, scope_id: u32 },
     #[cfg(unix)]
-    Unix(PathBuf),
+    Unix(std::path::PathBuf),
 }
 
 impl Addr {
