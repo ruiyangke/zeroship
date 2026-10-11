@@ -168,23 +168,38 @@ impl ObjectFingerprint {
         }
     }
 
-    /// Windows' stable standard library names no file identity (the volume
-    /// serial number and file index are unstable), so `dev` is zero and `ino`
-    /// carries the file's creation time: every write creates a fresh temp file,
-    /// and `rename` keeps its creation time as it keeps an inode. The write
-    /// half is the last-write time, split like `st_mtime` from its 100 ns
-    /// ticks.
+    /// The write half of the fingerprint on Windows: the last-write time, split
+    /// like `st_mtime` from its 100 ns ticks, and the size. The identity half
+    /// is not in Windows' stable metadata; [`Self::with_identity`] reads it.
     #[cfg(windows)]
     fn of(meta: &fs::Metadata) -> Self {
         const TICKS_PER_SECOND: u64 = 10_000_000;
         let written = meta.last_write_time();
         Self {
             dev: 0,
-            ino: meta.creation_time(),
+            ino: 0,
             mtime: i64::try_from(written / TICKS_PER_SECOND).unwrap_or(i64::MAX),
             mtime_nsec: i64::try_from(written % TICKS_PER_SECOND * 100).unwrap_or(0),
             size: meta.len(),
         }
+    }
+
+    /// The identity half on Windows: the volume serial number and the file
+    /// index of the file at `path`, which `rename` keeps and a newly created
+    /// file never shares. Creation time cannot stand in for it: NTFS hands a
+    /// file created under a recently removed name that name's old creation
+    /// time. The file is opened again by path, so a writer that replaced it
+    /// since leaves a fingerprint that matches no sidecar, which degrades the
+    /// type rather than mislabelling the bytes.
+    #[cfg(windows)]
+    fn with_identity(self, path: &Path) -> std::io::Result<Self> {
+        let file = std::fs::File::open(path)?;
+        let identity = winapi_util::file::information(&file)?;
+        Ok(Self {
+            dev: identity.volume_serial_number(),
+            ino: identity.file_index(),
+            ..self
+        })
     }
 }
 
@@ -250,9 +265,9 @@ async fn write_sidecar(
 /// billed `storage_bytes`), leaving the caller believing in an object that no
 /// longer exists.
 ///
-/// Windows has no directory flush: a directory cannot be opened as a file
-/// there, so this does nothing, and the rename's durability is the file
-/// system's metadata journal's.
+/// The standard library offers no directory flush on Windows, so this does
+/// nothing there, and the rename's durability is the file system's metadata
+/// journal's.
 #[cfg(not(windows))]
 async fn sync_dir(dir: &Path) -> Result<(), StorageError> {
     let handle = fs::File::open(dir)
@@ -330,7 +345,12 @@ impl Backend for LocalFs {
                 .metadata()
                 .await
                 .map_err(|e| format!("storage: stat temp: {e}"))?;
-            Ok(ObjectFingerprint::of(&stat))
+            let fingerprint = ObjectFingerprint::of(&stat);
+            #[cfg(windows)]
+            let fingerprint = fingerprint
+                .with_identity(&tmp)
+                .map_err(|e| format!("storage: identify temp: {e}"))?;
+            Ok(fingerprint)
         }
         .await;
 
@@ -411,9 +431,14 @@ impl Backend for LocalFs {
         }
         let size = meta.len();
         let modified_at = meta.modified().unwrap_or_else(|_| SystemTime::now());
-        let content_type = self
-            .read_content_type(app_id, bucket, key, ObjectFingerprint::of(&meta))
-            .await;
+        let fingerprint = ObjectFingerprint::of(&meta);
+        #[cfg(windows)]
+        let content_type = match fingerprint.with_identity(&full) {
+            Ok(fingerprint) => self.read_content_type(app_id, bucket, key, fingerprint).await,
+            Err(_) => DEFAULT_CONTENT_TYPE.to_string(),
+        };
+        #[cfg(not(windows))]
+        let content_type = self.read_content_type(app_id, bucket, key, fingerprint).await;
         let object_meta = ObjectMeta {
             size,
             content_type: Some(content_type),
@@ -898,6 +923,36 @@ mod tests {
                 content_type_of(&be, key).await.as_deref(),
                 Some(DEFAULT_CONTENT_TYPE),
                 "a sidecar describing an older write must be ignored, not applied"
+            );
+        });
+    }
+
+    /// A key deleted and written again at once, then overwritten, reads each
+    /// time with the type its latest write gave it. Each write renames a new
+    /// file into a name that was just removed or replaced, which is where an
+    /// identity that a new file can inherit from the old name would mistake
+    /// the new object's sidecar for a stale one.
+    #[test]
+    fn a_key_written_again_at_once_takes_each_new_type() {
+        let root = TempRoot::new("rewritten");
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let be = LocalFs::new(&root.0);
+            let key = "avatar";
+
+            put_bytes(&be, key, b"first", Some("text/plain")).await;
+            assert_eq!(content_type_of(&be, key).await.as_deref(), Some("text/plain"));
+            assert!(be.delete(APP, BUCKET, key).await.expect("delete"), "the object existed");
+            put_bytes(&be, key, b"second", Some("image/png")).await;
+            assert_eq!(
+                content_type_of(&be, key).await.as_deref(),
+                Some("image/png"),
+                "a write into a just-deleted key keeps its own type"
+            );
+            put_bytes(&be, key, b"third!", Some("application/json")).await;
+            assert_eq!(
+                content_type_of(&be, key).await.as_deref(),
+                Some("application/json"),
+                "an overwrite keeps its own type"
             );
         });
     }

@@ -221,10 +221,17 @@ pub fn start_server(modules: Vec<ModuleEntry>, options: ServerOptions) -> ! {
         KERNEL_SPREADS_A_SHARED_PORT,
     );
     if resolved.clamped_for_platform {
-        tracing::warn!(
-            requested_workers = resolved.requested,
-            "this system does not spread one port across workers; serving with a single worker"
-        );
+        if options.workers > 1 {
+            tracing::warn!(
+                requested_workers = resolved.requested,
+                "this system does not spread one port across workers; serving with a single worker"
+            );
+        } else {
+            tracing::info!(
+                available = resolved.requested,
+                "this system does not spread one port across workers; serving with a single worker"
+            );
+        }
     }
     if resolved.clamped_for_sqlite {
         tracing::info!(

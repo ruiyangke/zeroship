@@ -433,29 +433,20 @@ fn reject_env_file_alias(secrets_dir: &Path, env_file: &Path) -> Result<(), Stri
     Ok(())
 }
 
+/// Whether `left` and `right` both exist and are one file: the same device and
+/// inode on Unix, the same volume and file index on Windows, so a hard link
+/// is caught on both.
 fn same_existing_file(left: &Path, right: &Path) -> Result<bool, String> {
-    let left_metadata = match std::fs::metadata(left) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(format!("inspect {}: {error}", left.display())),
-    };
-    let right_metadata = match std::fs::metadata(right) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(format!("inspect {}: {error}", right.display())),
-    };
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        Ok(left_metadata.dev() == right_metadata.dev()
-            && left_metadata.ino() == right_metadata.ino())
+    for path in [left, right] {
+        match std::fs::metadata(path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(format!("inspect {}: {error}", path.display())),
+        }
     }
-    #[cfg(not(unix))]
-    {
-        let _ = (left_metadata, right_metadata);
-        Ok(false)
-    }
+    same_file::is_same_file(left, right).map_err(|error| {
+        format!("compare {} with {}: {error}", left.display(), right.display())
+    })
 }
 
 fn validate_existing_secret(

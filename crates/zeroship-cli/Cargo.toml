@@ -46,6 +46,9 @@ base64 = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["pkcs8", "pem", "rand_core"] }
 hex = { workspace = true }
 rand = "0.8"
+# Whether two paths are one file, by device and inode on Unix and by volume and
+# file index on Windows (`dev::same_existing_file`).
+same-file = "1"
 compio = { workspace = true }
 flume = { workspace = true }
 futures = { workspace = true }

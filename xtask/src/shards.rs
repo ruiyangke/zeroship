@@ -335,15 +335,16 @@ pub const SHARDS: &[Shard] = &[
 /// The tests that also run on the creator platforms: CI's `portable` job.
 ///
 /// Creators install the `zeroship` CLI on their own machines, so its package's
-/// tests run on macOS and Windows as well as in the `runtime` shard on Linux.
-/// That repeats them deliberately, on another operating system, which is why it
-/// is declared here rather than being a shard owning the same package. No CLI
-/// test starts a container, so the run on each platform is the package's whole
-/// nextest run, with nothing filtered out. A test that exists on some systems
-/// only is compiled for those systems by its own `#[cfg]`, and is listed in
-/// [`Portable::confined`] with why; CI's `verify` job holds every platform's
-/// listing to the Linux shard's listing and that table, so a test cannot leave
-/// or join a platform's run without an entry saying so.
+/// tests run on macOS and Windows as well as in the `runtime` shard on Linux,
+/// and so do the tests of the local storage and deployment-cache backends it
+/// serves from. That repeats them deliberately, on another operating system,
+/// which is why it is declared here rather than being a shard owning the same
+/// packages. The run on each platform is the packages' whole nextest run, with
+/// nothing filtered out. A test that exists on some systems only, a container
+/// suite among them, is compiled for those systems by its own `#[cfg]`, and is
+/// listed in [`Portable::confined`] with why; CI's `verify` job holds every
+/// platform's listing to the shards' listing and that table, so a test cannot
+/// leave or join a platform's run without an entry saying so.
 #[derive(Debug)]
 pub struct Portable {
     /// The workspace packages whose tests run on every platform.
@@ -399,7 +400,7 @@ pub const LINUX: &str = "linux";
 
 /// The portable run, and the tests confined to some of its systems.
 pub const PORTABLE: Portable = Portable {
-    packages: &["zeroship-cli"],
+    packages: &["zeroship-cli", "zeroship-storage", "zeroship-bundle"],
     platforms: &[
         Platform {
             name: "macos",
@@ -441,23 +442,9 @@ pub const PORTABLE: Portable = Portable {
         },
         Confined {
             binary: CLI_UNIT,
-            prefix: "project_keys::tests::a_linked_key_is_refused",
-            on: UNIX,
-            reason: "it creates a symbolic link, which Windows grants only to elevated or \
-                     developer-mode accounts",
-        },
-        Confined {
-            binary: CLI_UNIT,
             prefix: "project_keys::tests::public_keys_are_refused_and_never_replaced",
             on: UNIX,
             reason: "it widens the key's POSIX mode, which Windows does not keep",
-        },
-        Confined {
-            binary: CLI_E2E,
-            prefix: "e2e::dev_init_test::dev_init_rejects_an_env_file_hard_linked_to_a_generated_secret",
-            on: UNIX,
-            reason: "dev init recognises a hard link by device and inode, which the stable \
-                     standard library exposes on Unix only",
         },
         Confined {
             binary: CLI_E2E,
@@ -465,6 +452,13 @@ pub const PORTABLE: Portable = Portable {
             on: &[LINUX],
             reason: "it tests the PR_SET_PDEATHSIG arm of the parent-death guard and reads \
                      liveness from /proc, both Linux's",
+        },
+        Confined {
+            binary: CLI_E2E,
+            prefix: "e2e::parent_death_unix_test::",
+            on: UNIX,
+            reason: "it runs the runtime under sh and kills the shell, the Unix arms of the \
+                     parent-death guard",
         },
         Confined {
             binary: CLI_E2E,
@@ -481,6 +475,13 @@ pub const PORTABLE: Portable = Portable {
         },
         Confined {
             binary: CLI_E2E,
+            prefix: "e2e::serve_test::serve_enforces_a_cpu_limit",
+            on: &[LINUX],
+            reason: "only Linux stops a running handler at its CPU limit; the other systems \
+                     refuse the flag",
+        },
+        Confined {
+            binary: CLI_E2E,
             prefix: "e2e::serve_test::serve_refuses_a_cpu_limit_it_cannot_enforce",
             on: &["macos", "windows"],
             reason: "Linux enforces a CPU limit, so only the other systems refuse the flag",
@@ -492,8 +493,43 @@ pub const PORTABLE: Portable = Portable {
             reason: "its host trusts a port only once /proc shows its own child holds the \
                      listening socket",
         },
+        Confined {
+            binary: "zeroship-bundle::main",
+            prefix: "integration::blob_test::local_disk_an_unreadable_manifest_key_is_refused_and_kept",
+            on: UNIX,
+            reason: "it withdraws read permission through a POSIX mode, which Windows does not \
+                     keep",
+        },
+        Confined {
+            binary: "zeroship-bundle::main",
+            prefix: "integration::s3_blob_store::",
+            on: &[LINUX],
+            reason: CONTAINER,
+        },
+        Confined {
+            binary: "zeroship-storage::main",
+            prefix: "integration::backend_parity::s3_parity_and_large_stream",
+            on: &[LINUX],
+            reason: CONTAINER,
+        },
+        Confined {
+            binary: "zeroship-storage::main",
+            prefix: "integration::backend_parity::s3_shared_gateway_isolates_multipart_uploads_by_prefix",
+            on: &[LINUX],
+            reason: CONTAINER,
+        },
+        Confined {
+            binary: "zeroship-storage::main",
+            prefix: "integration::store::s3_scoped_storage_contract",
+            on: &[LINUX],
+            reason: CONTAINER,
+        },
     ],
 };
+
+/// Why an S3 suite runs on Linux only.
+const CONTAINER: &str = "it joins the shared S3 gateway container, and the macOS and Windows \
+                         runners have no Linux container engine";
 
 /// The CLI's unit tests and its end-to-end target, as nextest names them.
 const CLI_UNIT: &str = "zeroship-cli::bin/zeroship";

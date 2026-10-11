@@ -148,6 +148,23 @@ fn a_disconnected_publication_wake_is_reported_once() {
     );
 }
 
+/// A temporary directory for a fixture project.
+///
+/// On Windows it sits beside the test executable rather than in the system
+/// temporary directory. On the CI runners that directory is an abbreviated
+/// (8.3) path on another volume than the checkout, and a project there could
+/// not resolve the workspace packages its build links in: Vite left
+/// `@zeroship/workflows` unbundled. The test executable's directory sits in the
+/// build's target directory under its full name.
+fn project_directory() -> tempfile::TempDir {
+    if cfg!(windows) {
+        let executable = std::env::current_exe().expect("the test executable's path");
+        tempfile::tempdir_in(executable.parent().expect("the executable's directory")).unwrap()
+    } else {
+        tempfile::tempdir().unwrap()
+    }
+}
+
 /// Where the workspace install puts the TypeScript runner the bundle compiler
 /// runs under. On Windows the installed runner is the command script pnpm
 /// writes beside the shell one, which Windows cannot execute.
@@ -209,7 +226,7 @@ fn publish(root: &Path, version: &str, cooldown: &str) -> PathBuf {
 /// temporary project.
 #[test]
 fn the_bundle_compiler_runs_an_installed_runner_inside_the_project() {
-    let root = tempfile::tempdir().unwrap();
+    let root = project_directory();
     let command = bundle_compiler(root.path(), "original", "10ms");
     let program = Path::new(command.get_program());
     assert!(
@@ -491,7 +508,7 @@ async fn signal(backend: &AppBackend, run: &str) {
 
 #[compio::test]
 async fn delivered_activation_selects_the_archive_and_runs_complete_through_the_manager() {
-    let root = tempfile::tempdir().unwrap();
+    let root = project_directory();
     let bundle = publish(root.path(), "original", "10ms");
     let app = zeroship_core::app_id::local_dev_app_id();
     // Workflow isolates get the app's metered database, as under `zeroship serve`.
@@ -565,7 +582,7 @@ async fn delivered_activation_selects_the_archive_and_runs_complete_through_the_
 
 #[compio::test]
 async fn sleeping_run_resumes_from_queue_metadata_after_restart() {
-    let root = tempfile::tempdir().unwrap();
+    let root = project_directory();
     let bundle = publish(root.path(), "original", "3s");
     let app = AppId::mint();
     let host = start(
@@ -601,7 +618,7 @@ async fn sleeping_run_resumes_from_queue_metadata_after_restart() {
 
 #[compio::test]
 async fn republished_bundle_activates_while_existing_runs_keep_their_pins() {
-    let root = tempfile::tempdir().unwrap();
+    let root = project_directory();
     let bundle = publish(root.path(), "original", "10ms");
     let app = zeroship_core::app_id::local_dev_app_id();
     let host = start(
@@ -652,7 +669,7 @@ async fn republished_bundle_activates_while_existing_runs_keep_their_pins() {
 
 #[compio::test]
 async fn reconciliation_publishes_work_committed_outside_the_host() {
-    let root = tempfile::tempdir().unwrap();
+    let root = project_directory();
     let bundle = publish(root.path(), "original", "10ms");
     let app = AppId::mint();
     let config = LocalConfig {
@@ -686,7 +703,7 @@ async fn reconciliation_publishes_work_committed_outside_the_host() {
 /// reopens a retired scope before accepting requests.
 #[compio::test]
 async fn idle_responsibility_retires_and_the_next_acceptance_reopens_it() {
-    let root = tempfile::tempdir().unwrap();
+    let root = project_directory();
     let bundle = publish(root.path(), "original", "10ms");
     let app = AppId::mint();
     let config = LocalConfig {
@@ -763,7 +780,7 @@ async fn recovery(root: &Path) -> Result<Recovery, WorkflowServiceError> {
 /// its own without establishing again.
 #[compio::test]
 async fn restart_cancels_an_in_flight_closing_attempt() {
-    let root = tempfile::tempdir().unwrap();
+    let root = project_directory();
     let bundle = publish(root.path(), "original", "10ms");
     let app = AppId::mint();
     let host = start(
@@ -848,7 +865,7 @@ async fn quiescent(root: &Path, app: &AppId) -> Responsibility {
 /// restarts the idle window of an app in use.
 #[compio::test]
 async fn reported_ingress_counts_as_activity() {
-    let root = tempfile::tempdir().unwrap();
+    let root = project_directory();
     let bundle = publish(root.path(), "original", "10ms");
     let app = AppId::mint();
     let config = LocalConfig {
@@ -1124,7 +1141,7 @@ async fn end_lease(root: &Path, delivery: &Delivery) {
 /// that no other turn ever re-ran.
 #[compio::test]
 async fn lost_acknowledgement_replays_the_committed_turn_without_executing_again() {
-    let root = tempfile::tempdir().unwrap();
+    let root = project_directory();
     let bundle = publish(root.path(), "original", "10ms");
     let app = AppId::mint();
     let observed = Arc::new(Deliveries::default());
@@ -1270,7 +1287,7 @@ async fn sweepable(root: &Path) -> Vec<AppId> {
 /// the same answer mean something.
 #[compio::test]
 async fn the_local_host_claims_runs_and_settles_its_own_journal_sweeps() {
-    let root = tempfile::tempdir().unwrap();
+    let root = project_directory();
     let app = AppId::mint();
     let config = LocalConfig {
         manager: ManagerConfig {
@@ -1375,7 +1392,7 @@ impl TaskExecutor for FailingOnce {
 /// release that left the row leased would never let the run reach its wait.
 #[compio::test]
 async fn an_interrupted_local_attempt_returns_its_row_at_once() {
-    let root = tempfile::tempdir().unwrap();
+    let root = project_directory();
     let bundle = publish(root.path(), "original", "10ms");
     let app = AppId::mint();
     let starts = Arc::new(Mutex::new(0));
@@ -1521,7 +1538,7 @@ fn one_delivery() -> ClaimJobs {
 /// own, so a give-back would certainly find the lease live and land.
 #[compio::test]
 async fn a_local_grant_its_journal_acceptance_spent_is_left_to_lapse() {
-    let root = tempfile::tempdir().unwrap();
+    let root = project_directory();
     let app = AppId::mint();
     let (manager, thread, platform_file) = local_halves(root.path(), &app, 2_000).await;
     let transport = manager.transport(client(root.path(), &app).await);
@@ -1592,7 +1609,7 @@ async fn a_local_grant_its_journal_acceptance_spent_is_left_to_lapse() {
 /// grant.
 #[compio::test]
 async fn a_local_grant_the_journal_refuses_with_lease_left_goes_back_with_a_back_off() {
-    let root = tempfile::tempdir().unwrap();
+    let root = project_directory();
     let app = AppId::mint();
     let (manager, thread, platform_file) = local_halves(root.path(), &app, 120_000).await;
     let (journal, policy) = bound_client(root.path(), &app).await;

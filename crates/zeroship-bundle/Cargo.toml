@@ -30,8 +30,10 @@ zeroship-id = { workspace = true }
 
 [dev-dependencies]
 compio = { workspace = true, features = ["fs", "macros", "runtime"] }
+
 # The shared S3 gateway the suite joins rather than starting a container of its
-# own.
+# own. It builds on Unix only: its container lease is an `flock` protocol.
+[target.'cfg(unix)'.dev-dependencies]
 zeroship-testkit = { workspace = true }
 
 [[test]]

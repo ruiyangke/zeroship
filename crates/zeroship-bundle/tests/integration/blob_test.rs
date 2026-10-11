@@ -371,6 +371,7 @@ async fn local_disk_a_torn_or_empty_manifest_is_refused_and_kept() {
 
 /// A key this process cannot read is refused as an I/O failure and keeps its
 /// bytes: failing to read a key is never a reason to remove it.
+#[cfg(unix)]
 #[compio::test]
 async fn local_disk_an_unreadable_manifest_key_is_refused_and_kept() {
     use std::os::unix::fs::PermissionsExt as _;

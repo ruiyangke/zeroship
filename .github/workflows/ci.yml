@@ -189,22 +189,23 @@ jobs:
       - name: Every shard ran exactly what it builds
         run: cargo xtask shards verify reports
 
-  # The creator CLI's tests on the systems creators install it on besides
+  # The creator CLI's tests, and those of the local storage and deployment-cache
+  # backends it serves from, on the systems creators install it on besides
   # Linux, one job per platform `cargo xtask shards platforms` lists
-  # (xtask/src/shards.rs, `PORTABLE`). It repeats tests the `runtime` shard
-  # runs, deliberately, on another operating system. No CLI test starts a
-  # container, so the run is the package's whole nextest run; a test that
-  # exists on some systems only is compiled there by its own `#[cfg]` and
-  # declared in `PORTABLE.confined`, and `verify` holds each platform's listing
-  # to the Linux shard's and to that table. `--no-tests fail` makes an empty
-  # run red. The contract in xtask/tests/repository/shards.rs holds this job's
-  # shape as it holds the shards'.
+  # (xtask/src/shards.rs, `PORTABLE`). It repeats tests the shards run,
+  # deliberately, on another operating system. The run is the packages' whole
+  # nextest run; a test that exists on some systems only, a container suite
+  # among them, is compiled there by its own `#[cfg]` and declared in
+  # `PORTABLE.confined`, and `verify` holds each platform's listing to the
+  # shards' and to that table. `--no-tests fail` makes an empty run red. The
+  # contract in xtask/tests/repository/shards.rs holds this job's shape as it
+  # holds the shards'.
   #
   # There is no Nix on Windows, so this job installs the toolchain the
   # development shell carries, at the versions the plan job reads from it.
   # macOS takes the same path, so both platforms are one job definition and
   # neither fetches the shell's database, browser and profiling tools, which
-  # the CLI's tests do not use. pnpm takes its version from
+  # these tests do not use. pnpm takes its version from
   # `package.json#packageManager`. Bash is the shell on both, Git for Windows'
   # on Windows, with `-eo pipefail`.
   portable:
@@ -254,15 +255,15 @@ jobs:
       - run: pnpm build
       - name: Build the CLI
         run: cargo build --locked -p zeroship-cli
-      - name: Run the CLI's tests
-        run: cargo nextest run --locked --profile ci --no-tests fail -p zeroship-cli
+      - name: Run the portable tests
+        run: cargo nextest run --locked --profile ci --no-tests fail -p zeroship-cli -p zeroship-storage -p zeroship-bundle
       - name: Keep the run's reports
         if: ${{ !cancelled() }}
         env:
           PLATFORM: ${{ matrix.platform.name }}
         run: |
           mv target/nextest/ci/junit.xml "target/nextest/ci/junit-portable-$PLATFORM.xml"
-          cargo nextest list --locked --profile ci --message-format json -p zeroship-cli \
+          cargo nextest list --locked --profile ci --message-format json -p zeroship-cli -p zeroship-storage -p zeroship-bundle \
             > "target/nextest/ci/list-portable-$PLATFORM.json"
       - name: Upload the run's reports
         if: ${{ !cancelled() }}

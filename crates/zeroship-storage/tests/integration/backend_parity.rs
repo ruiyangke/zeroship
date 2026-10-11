@@ -17,12 +17,12 @@
 
 #![allow(clippy::future_not_send)]
 
-#[cfg(feature = "s3")]
+#[cfg(all(feature = "s3", target_os = "linux"))]
 use zeroship_testkit::s3::S3Server;
 use zeroship_storage::StorageError;
-#[cfg(feature = "s3")]
+#[cfg(all(feature = "s3", target_os = "linux"))]
 use std::sync::OnceLock;
-#[cfg(feature = "s3")]
+#[cfg(all(feature = "s3", target_os = "linux"))]
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -579,9 +579,11 @@ fn localfs_parity_and_large_stream() {
 
 // ---------------------------------------------------------------------------
 // S3 leg — Docker-gated, self-contained container
+// It runs on Linux only: the macOS and Windows CI runners have no Linux
+// container engine to start it on.
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "s3")]
+#[cfg(all(feature = "s3", target_os = "linux"))]
 /// The fixture bucket's configuration under this suite's prefix.
 fn s3_config(server: &S3Server) -> compio_s3::S3Config {
     compio_s3::S3Config::parse_url(&server.url(s3_prefix())).expect("S3 fixture configuration")
@@ -592,17 +594,19 @@ fn s3_config(server: &S3Server) -> compio_s3::S3Config {
 /// The nonce keeps a repeated run in one worktree fresh: an upload a failed
 /// abort left behind under a fixed prefix would make every later run list it as
 /// this run's orphan and fail.
-#[cfg(feature = "s3")]
+#[cfg(all(feature = "s3", target_os = "linux"))]
 fn s3_prefix() -> &'static str {
     static PREFIX: OnceLock<String> = OnceLock::new();
     PREFIX.get_or_init(|| format!("it-{}", uuid::Uuid::new_v4().simple()))
 }
 
 /// The credentials the fixture gateway accepts.
+#[cfg(all(feature = "s3", target_os = "linux"))]
 fn s3_credentials(server: &S3Server) -> compio_s3::S3Credentials {
     compio_s3::S3Credentials::new(server.access_key(), server.secret_key(), None)
 }
 
+#[cfg(all(feature = "s3", target_os = "linux"))]
 fn make_s3(server: &S3Server) -> zeroship_storage::S3 {
     make_s3_tuned(server, zeroship_storage::S3UploadTuning::DEFAULTS)
 }
@@ -610,7 +614,7 @@ fn make_s3(server: &S3Server) -> zeroship_storage::S3 {
 /// The same S3-backed backend with the upload knobs stated at the call
 /// site. Tests that need a non-default concurrency or stream ceiling pass one
 /// here; nothing plants a process-global environment variable to do it.
-#[cfg(feature = "s3")]
+#[cfg(all(feature = "s3", target_os = "linux"))]
 fn make_s3_tuned(
     server: &S3Server,
     tuning: zeroship_storage::S3UploadTuning,
@@ -618,7 +622,7 @@ fn make_s3_tuned(
     zeroship_storage::S3::with_tuning(s3_config(server), s3_credentials(server), tuning)
 }
 
-#[cfg(feature = "s3")]
+#[cfg(all(feature = "s3", target_os = "linux"))]
 #[test]
 fn s3_parity_and_large_stream() {
     let server = S3Server::start();
@@ -647,7 +651,7 @@ fn s3_parity_and_large_stream() {
 /// passes: an upload left in flight under one prefix must never appear in
 /// another prefix's listing, or two parallel cases on the one gateway would see
 /// and abort each other's uploads.
-#[cfg(feature = "s3")]
+#[cfg(all(feature = "s3", target_os = "linux"))]
 #[test]
 fn s3_shared_gateway_isolates_multipart_uploads_by_prefix() {
     let server = S3Server::start();
@@ -692,13 +696,13 @@ fn s3_shared_gateway_isolates_multipart_uploads_by_prefix() {
 
 /// A raw `compio_s3::S3Client` over the same S3 bucket, for asserting that an
 /// aborted multipart leaves no orphaned upload.
-#[cfg(feature = "s3")]
+#[cfg(all(feature = "s3", target_os = "linux"))]
 fn s3_raw_client(server: &S3Server) -> compio_s3::S3Client {
     compio_s3::S3Client::new(s3_config(server), s3_credentials(server))
 }
 
 /// A raw `compio_s3::S3Client` over the shared bucket under an explicit prefix.
-#[cfg(feature = "s3")]
+#[cfg(all(feature = "s3", target_os = "linux"))]
 fn s3_client_for(server: &S3Server, prefix: &str) -> compio_s3::S3Client {
     let config = compio_s3::S3Config::parse_url(&server.url(prefix))
         .expect("S3 fixture configuration");
@@ -708,13 +712,13 @@ fn s3_client_for(server: &S3Server, prefix: &str) -> compio_s3::S3Client {
 /// A `ChunkSource` that yields `before_err` bytes (in 64 KiB chunks) and then
 /// returns an error — a stream that dies mid-upload after the multipart upload
 /// + first part(s) exist.
-#[cfg(feature = "s3")]
+#[cfg(all(feature = "s3", target_os = "linux"))]
 struct ErrAfterChunks {
     remaining: usize,
     errored: bool,
 }
 
-#[cfg(feature = "s3")]
+#[cfg(all(feature = "s3", target_os = "linux"))]
 #[async_trait::async_trait(?Send)]
 impl ChunkSource for ErrAfterChunks {
     async fn next_chunk(&mut self) -> Option<ChunkResult> {
@@ -737,7 +741,7 @@ impl ChunkSource for ErrAfterChunks {
 ///
 /// The bytes are position-dependent so a misordered/duplicated/dropped part
 /// fails the byte-compare, not merely a length check.
-#[cfg(feature = "s3")]
+#[cfg(all(feature = "s3", target_os = "linux"))]
 struct SlowChunks {
     produced: usize,
     total: usize,
@@ -746,7 +750,7 @@ struct SlowChunks {
     first: bool,
 }
 
-#[cfg(feature = "s3")]
+#[cfg(all(feature = "s3", target_os = "linux"))]
 #[async_trait::async_trait(?Send)]
 impl ChunkSource for SlowChunks {
     async fn next_chunk(&mut self) -> Option<ChunkResult> {
@@ -776,7 +780,7 @@ impl ChunkSource for SlowChunks {
 /// must still COMPLETE the multipart upload byte-exact. The select-overlap loop
 /// drives the producer and the in-flight PUTs concurrently so a
 /// slow-but-progressing source finishes.
-#[cfg(feature = "s3")]
+#[cfg(all(feature = "s3", target_os = "linux"))]
 async fn run_s3_slow_producer_overlap(server: &S3Server) {
     use zeroship_storage::S3UploadTuning;
     const PART_SIZE: usize = 8 * 1024 * 1024;
@@ -829,7 +833,7 @@ async fn run_s3_slow_producer_overlap(server: &S3Server) {
 
 /// A mid-upload error during `S3::put_stream` must abort the multipart
 /// explicitly - no panic/process-abort, no orphaned upload.
-#[cfg(feature = "s3")]
+#[cfg(all(feature = "s3", target_os = "linux"))]
 async fn run_s3_mid_upload_abort(backend: &zeroship_storage::S3, server: &S3Server) {
     // 8 MiB part size; yield 1.25 parts then error → create_multipart + ≥1
     // upload_part have run before the failure.
@@ -869,7 +873,7 @@ async fn run_s3_mid_upload_abort(backend: &zeroship_storage::S3, server: &S3Serv
 
 /// H2 regression: a stream that would exceed the configured max object size
 /// fails fast (and the explicit abort leaves no orphaned upload).
-#[cfg(feature = "s3")]
+#[cfg(all(feature = "s3", target_os = "linux"))]
 async fn run_s3_part_limit_fast_fail(server: &S3Server) {
     use zeroship_storage::S3UploadTuning;
     // Cap at 12 MiB so the first full 8 MiB part is flushed (creating a real
@@ -912,7 +916,7 @@ async fn run_s3_part_limit_fast_fail(server: &S3Server) {
 /// `(part_number, ETag)` list ascending before `complete_multipart` — a
 /// mis-sorted or duplicated list makes `complete_multipart` reject the upload.
 /// (Pre-change this path was strictly sequential, so the sort line is new.)
-#[cfg(feature = "s3")]
+#[cfg(all(feature = "s3", target_os = "linux"))]
 async fn run_s3_parallel_many_parts(server: &S3Server) {
     use zeroship_storage::S3UploadTuning;
     const PART_SIZE: usize = 8 * 1024 * 1024;
@@ -968,7 +972,7 @@ async fn run_s3_parallel_many_parts(server: &S3Server) {
 /// an injected reader error must still abort the multipart explicitly - the
 /// other in-flight uploads are dropped/cancelled and no orphaned (billed)
 /// multipart upload remains listable.
-#[cfg(feature = "s3")]
+#[cfg(all(feature = "s3", target_os = "linux"))]
 async fn run_s3_parallel_mid_upload_abort(server: &S3Server) {
     use zeroship_storage::S3UploadTuning;
     const PART_SIZE: usize = 8 * 1024 * 1024;

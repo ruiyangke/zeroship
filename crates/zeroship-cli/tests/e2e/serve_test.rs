@@ -2,14 +2,17 @@
 //!
 //! The dev server is what a creator runs on their own machine, so the first
 //! thing every platform must show is that it boots a plain script and answers a
-//! request with what that script returns. The limit a platform cannot enforce
-//! is refused at startup, before anything is bound or opened.
+//! request with what that script returns. A CPU limit is enforced where the
+//! runtime can stop a running handler, which is Linux, and refused at startup
+//! everywhere else, before anything is bound or opened.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
+
+use super::child_output::ChildOutput;
 
 const BIN: &str = env!("CARGO_BIN_EXE_zeroship");
 
@@ -26,13 +29,7 @@ fn reserve_port() -> u16 {
 struct Served {
     child: Child,
     port: u16,
-    log: tempfile::NamedTempFile,
-}
-
-impl Served {
-    fn log(&self) -> String {
-        std::fs::read_to_string(self.log.path()).unwrap_or_default()
-    }
+    output: ChildOutput,
 }
 
 impl Drop for Served {
@@ -42,44 +39,64 @@ impl Drop for Served {
     }
 }
 
-/// Serve `app.js` from `dir` on a fresh port, relaunching on a new one when a
-/// parallel process took the reserved port before the child bound it.
-fn serve(dir: &Path) -> Served {
+/// Serve `app.js` from `dir` with `flags` on a fresh port, relaunching on a new
+/// one when a parallel process took the reserved port before the child bound
+/// it. Readiness is a connection that succeeds while the child is running.
+fn serve(dir: &Path, flags: &[&str]) -> Served {
     for _ in 0..16 {
         let port = reserve_port();
-        let log = tempfile::NamedTempFile::new().expect("log file");
-        let child = Command::new(BIN)
+        let mut child = Command::new(BIN)
             .args(["serve", "app.js", &format!("--port={port}"), "--workers=1"])
+            .args(flags)
             .env_remove("ZEROSHIP_DIE_WITH_PARENT")
             .env_remove("DATABASE_URL")
             .current_dir(dir)
             .stdin(Stdio::null())
-            .stdout(log.reopen().expect("reopen the log"))
-            .stderr(log.reopen().expect("reopen the log"))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("spawn zeroship serve");
-        let mut served = Served { child, port, log };
+        let output = ChildOutput::capture(&mut child);
+        let mut served = Served {
+            child,
+            port,
+            output,
+        };
         let deadline = Instant::now() + Duration::from_mins(1);
         loop {
-            if let Some(status) = served.child.try_wait().expect("poll the child") {
-                let log = served.log();
-                if log.contains(&format!("port {port} is already in use")) {
-                    break;
-                }
-                panic!("zeroship serve exited with {status} before it listened; log:\n{log}");
-            }
             if TcpStream::connect(("127.0.0.1", port)).is_ok() {
                 return served;
             }
+            if !served.output.open_after(Duration::from_millis(50)) {
+                let log = served.output.text();
+                if log.contains(&format!("port {port} is already in use")) {
+                    break;
+                }
+                panic!("zeroship serve exited before it listened; output:\n{log}");
+            }
             assert!(
                 Instant::now() < deadline,
-                "zeroship serve never listened on {port}; log:\n{}",
-                served.log()
+                "zeroship serve never listened on {port}; output:\n{}",
+                served.output.text()
             );
-            std::thread::sleep(Duration::from_millis(50));
         }
     }
     panic!("every reserved port was taken before zeroship serve bound it");
+}
+
+/// Write `app.js` into `dir`: `/spin` never returns, and every other path
+/// answers `body`.
+fn write_app(dir: &Path, body: &str) {
+    std::fs::write(
+        dir.join("app.js"),
+        format!(
+            "export default {{ fetch(request) {{\n\
+             if (new URL(request.url).pathname === '/spin') {{ for (;;) {{}} }}\n\
+             return new Response('{body}');\n\
+             }} }};\n"
+        ),
+    )
+    .expect("write app.js");
 }
 
 /// One HTTP/1.1 request over a fresh connection, returning the status line and
@@ -125,20 +142,41 @@ fn get(port: u16, path: &str) -> (String, String) {
 fn serve_answers_a_request_with_what_the_script_returns() {
     let dir = tempfile::tempdir().expect("tempdir");
     let nonce = format!("served-{}", uuid::Uuid::new_v4());
-    std::fs::write(
-        dir.path().join("app.js"),
-        format!("export default {{ fetch() {{ return new Response('{nonce}'); }} }};\n"),
-    )
-    .expect("write app.js");
+    write_app(dir.path(), &nonce);
 
-    let served = serve(dir.path());
+    let mut served = serve(dir.path(), &[]);
     let (status, body) = get(served.port, "/");
     assert!(
         status.starts_with("HTTP/1.1 200"),
-        "the script's response must succeed; got {status}\nlog:\n{}",
-        served.log()
+        "the script's response must succeed; got {status}\noutput:\n{}",
+        served.output.text()
     );
-    assert_eq!(body, nonce, "the body must be the script's; log:\n{}", served.log());
+    assert_eq!(body, nonce, "the body must be the script's; output:\n{}", served.output.text());
+}
+
+/// On Linux the flag is accepted and enforced: a handler that never returns is
+/// stopped, so its request is answered, with a server error, instead of
+/// holding the connection forever, and the same server still answers a
+/// handler that returns. Without enforcement the stuck request would outlast
+/// the read timeout.
+#[cfg(target_os = "linux")]
+#[test]
+fn serve_enforces_a_cpu_limit() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let nonce = format!("limited-{}", uuid::Uuid::new_v4());
+    write_app(dir.path(), &nonce);
+
+    let mut served = serve(dir.path(), &["--cpu-limit=50"]);
+    let (status, body) = get(served.port, "/spin");
+    assert!(
+        status.starts_with("HTTP/1.1 5"),
+        "a handler past its CPU limit is stopped and its request answered with a server \
+         error; got {status}: {body}\noutput:\n{}",
+        served.output.text()
+    );
+    let (status, body) = get(served.port, "/");
+    assert!(status.starts_with("HTTP/1.1 200"), "the control: {status}");
+    assert_eq!(body, nonce, "the server still serves a handler that returns");
 }
 
 /// The refusal is the whole outcome: a non-zero exit, a message naming the

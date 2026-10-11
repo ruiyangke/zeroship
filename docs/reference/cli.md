@@ -432,8 +432,7 @@ system lacks what the behavior is built on:
   works everywhere.
 - **`zeroship serve` runs one worker on macOS and Windows.** Several workers
   share one port only where the kernel spreads its connections across them,
-  which is Linux. Elsewhere a `--workers` above 1, or the default of one worker
-  per core, is narrowed to one, with a warning.
+  which is Linux. Elsewhere it runs one worker whatever `--workers` asks for.
 - **Windows keeps no POSIX file modes.** The CLI writes `token.json`, the dev
   server's project key and the files `zeroship dev init` generates owner-only
   (mode `0600`) on Linux and macOS. On Windows they take the access list of the

@@ -5,15 +5,22 @@
 //! spawning one, what the runtime lives by, so this suite names a stand-in it
 //! can kill outright - `TerminateProcess`, which runs nothing in the stand-in,
 //! as a crash or a killed dev server would - while the test stays the
-//! runtime's real parent and polls it directly.
+//! runtime's real parent and reads its output. The output closes when the
+//! runtime exits, which is how both tests observe it.
 
 #![cfg(windows)]
 
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use super::child_output::ChildOutput;
 
 const BIN: &str = env!("CARGO_BIN_EXE_zeroship");
+
+/// The line the runtime prints once its workflow host is up, the last step
+/// before it serves.
+const READY: &str = "workflow host ready";
 
 /// Kills what is left on the panic path as well as the happy one.
 struct Reaper(Vec<Child>);
@@ -23,19 +30,6 @@ impl Drop for Reaper {
             let _ = child.kill();
             let _ = child.wait();
         }
-    }
-}
-
-fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if cond() {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -51,47 +45,34 @@ fn stand_in() -> Child {
         .expect("spawn the stand-in parent")
 }
 
-/// `zeroship serve` in `dir`, logging to `runtime.log`, guarded by `parent`
-/// when one is named.
-fn spawn_runtime(dir: &Path, parent: Option<u32>) -> Child {
+/// `zeroship serve` in `dir`, guarded by `parent` when one is named, and its
+/// output once it is up.
+fn spawn_runtime(dir: &Path, parent: Option<u32>) -> (Child, ChildOutput) {
     std::fs::write(
         dir.join("app.js"),
         "export default { fetch() { return new Response('ok'); } };\n",
     )
     .expect("write app.js");
-    let log = std::fs::File::create(dir.join("runtime.log")).expect("create runtime.log");
     let mut command = Command::new(BIN);
     command
         .args(["serve", "app.js", "--port=0", "--workers=1"])
         .env_remove("DATABASE_URL")
         .current_dir(dir)
         .stdin(Stdio::null())
-        .stdout(log.try_clone().expect("share the log"))
-        .stderr(log);
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     match parent {
         Some(pid) => command.env("ZEROSHIP_DIE_WITH_PARENT", pid.to_string()),
         None => command.env_remove("ZEROSHIP_DIE_WITH_PARENT"),
     };
-    command.spawn().expect("spawn zeroship serve")
-}
-
-fn log(dir: &Path) -> String {
-    std::fs::read_to_string(dir.join("runtime.log")).unwrap_or_default()
-}
-
-/// Block until the runtime has opened its state dir, the resource an orphan
-/// holds hostage, so "it exited" below means it exited holding it.
-fn assert_booted(dir: &Path, runtime: &mut Child) {
+    let mut runtime = command.spawn().expect("spawn zeroship serve");
+    let mut output = ChildOutput::capture(&mut runtime);
     assert!(
-        wait_until(Duration::from_mins(1), || log(dir).contains("kv binding registered")),
-        "the runtime never opened its state dir; log:\n{}",
-        log(dir)
+        output.wait_for(READY, Duration::from_mins(1)),
+        "the runtime never came up; output:\n{}",
+        output.text()
     );
-    assert!(
-        runtime.try_wait().expect("poll the runtime").is_none(),
-        "the runtime exited right after boot; log:\n{}",
-        log(dir)
-    );
+    (runtime, output)
 }
 
 #[test]
@@ -99,27 +80,23 @@ fn a_runtime_dies_when_the_parent_it_names_is_killed() {
     let dir = tempfile::tempdir().expect("tempdir");
     let parent = stand_in();
     let parent_pid = parent.id();
-    let runtime = spawn_runtime(dir.path(), Some(parent_pid));
-    let mut reaper = Reaper(vec![parent, runtime]);
-    assert_booted(dir.path(), &mut reaper.0[1]);
+    let mut reaper = Reaper(vec![parent]);
+    let (runtime, mut output) = spawn_runtime(dir.path(), Some(parent_pid));
+    reaper.0.push(runtime);
 
     reaper.0[0].kill().expect("kill the stand-in parent");
     reaper.0[0].wait().expect("reap the stand-in parent");
 
-    let runtime = &mut reaper.0[1];
     assert!(
-        wait_until(Duration::from_secs(15), || runtime
-            .try_wait()
-            .expect("poll the runtime")
-            .is_some()),
-        "the runtime SURVIVED the parent it names ({parent_pid}) and still holds {}; log:\n{}",
+        output.closes_within(Duration::from_secs(15)),
+        "the runtime SURVIVED the parent it names ({parent_pid}) and still holds {}; output:\n{}",
         dir.path().join(".zeroship").display(),
-        log(dir.path())
+        output.text()
     );
     assert!(
-        log(dir.path()).contains(&format!("parent {parent_pid} exited - exiting with it")),
-        "the runtime exited without saying why; log:\n{}",
-        log(dir.path())
+        output.text().contains(&format!("parent {parent_pid} exited - exiting with it")),
+        "the runtime exited without saying why; output:\n{}",
+        output.text()
     );
 }
 
@@ -130,21 +107,16 @@ fn a_runtime_dies_when_the_parent_it_names_is_killed() {
 #[test]
 fn control_an_unguarded_runtime_survives_the_stand_in() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let parent = stand_in();
-    let runtime = spawn_runtime(dir.path(), None);
-    let mut reaper = Reaper(vec![parent, runtime]);
-    assert_booted(dir.path(), &mut reaper.0[1]);
+    let mut reaper = Reaper(vec![stand_in()]);
+    let (runtime, mut output) = spawn_runtime(dir.path(), None);
+    reaper.0.push(runtime);
 
     reaper.0[0].kill().expect("kill the stand-in parent");
     reaper.0[0].wait().expect("reap the stand-in parent");
 
-    let runtime = &mut reaper.0[1];
     assert!(
-        !wait_until(Duration::from_secs(5), || runtime
-            .try_wait()
-            .expect("poll the runtime")
-            .is_some()),
-        "an UNGUARDED runtime exited after an unrelated process was killed; log:\n{}",
-        log(dir.path())
+        !output.closes_within(Duration::from_secs(5)),
+        "an UNGUARDED runtime exited after an unrelated process was killed; output:\n{}",
+        output.text()
     );
 }

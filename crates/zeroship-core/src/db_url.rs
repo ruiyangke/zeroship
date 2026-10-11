@@ -27,11 +27,20 @@ pub fn valid_sqlite_file_path(path: &str) -> bool {
 }
 
 fn has_scheme(path: &str) -> bool {
-    path.split_once(':').is_some_and(|(scheme, _)| {
-        let mut chars = scheme.chars();
-        matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
-            && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
-    })
+    !has_drive_prefix(path)
+        && path.split_once(':').is_some_and(|(scheme, _)| {
+            let mut chars = scheme.chars();
+            matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
+                && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
+        })
+}
+
+/// A Windows drive-absolute path, `C:\...` or `C:/...`: one letter, a colon
+/// and a separator. Its colon ends a drive, not a URL scheme, so the path is a
+/// file location on every system that parses it, and the dev host's own
+/// files are named this way on Windows.
+fn has_drive_prefix(path: &str) -> bool {
+    matches!(path.as_bytes(), [drive, b':', b'\\' | b'/', ..] if drive.is_ascii_alphabetic())
 }
 
 /// Resolve a SQLite selector to a filesystem path without opening it.
@@ -71,6 +80,25 @@ mod tests {
         assert!(is_sqlite_url("file:./local.db"));
         assert!(is_sqlite_url("/var/lib/zeroship/dev.sqlite"));
         assert!(is_sqlite_url("./relative/path.sqlite"));
+    }
+
+    /// A Windows drive-absolute path is a file, bare or behind a `sqlite:` or
+    /// `file:` prefix, in either separator; it resolves to exactly the path
+    /// written.
+    /// A scheme of more than one letter is still a scheme, and a drive letter
+    /// without a separator names no file.
+    #[test]
+    fn windows_drive_paths_are_sqlite_files() {
+        for (url, path) in [
+            (r"C:\Users\dev\project\.zeroship\dev.sqlite", r"C:\Users\dev\project\.zeroship\dev.sqlite"),
+            (r"sqlite:C:\Users\dev\.zeroship\dev.sqlite", r"C:\Users\dev\.zeroship\dev.sqlite"),
+            ("sqlite://D:/data/app.sqlite", "D:/data/app.sqlite"),
+            ("file:e:/platform/metadata.sqlite", "e:/platform/metadata.sqlite"),
+        ] {
+            assert_eq!(super::sqlite_file_path(url), Some(path), "{url}");
+        }
+        assert!(!is_sqlite_url("ab:/x/app.sqlite"), "a two-letter scheme is a scheme");
+        assert!(!is_sqlite_url("sqlite:C:dev.sqlite"), "a drive without a separator");
     }
 
     #[test]

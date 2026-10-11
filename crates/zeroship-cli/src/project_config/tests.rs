@@ -385,21 +385,57 @@ fn build_output_may_replace_an_existing_generated_artifact() {
         .expect("an existing generated artifact remains a valid output");
 }
 
+/// `FULL` with `databases.main.out` set to `out`.
+fn with_out(out: &str) -> String {
+    let text = FULL.replace(
+        "\"out\": \"generated/zeroship\"",
+        &format!("\"out\": {}", serde_json::to_string(out).unwrap()),
+    );
+    assert_ne!(text, FULL, "the out path must actually change for {out}");
+    text
+}
+
 #[test]
 fn a_databases_out_cannot_target_the_project_root_or_one_of_its_ancestors() {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join(CONFIG_FILENAME);
+    // The project's parent, written absolutely: an ancestor wherever the
+    // system keeps its temporary directories.
+    let parent = dir.path().parent().expect("a temp dir has a parent");
+    let absolute = parent.to_str().expect("a UTF-8 temp path").to_owned();
 
-    for out in [".", "..", "generated/zeroship/../..", "/tmp"] {
-        let text = FULL.replace(
-            "\"out\": \"generated/zeroship\"",
-            &format!("\"out\": {}", serde_json::to_string(out).unwrap()),
-        );
-        assert_ne!(text, FULL, "the out path must actually change for {out}");
-        let err = ProjectConfig::parse(config_path.clone(), text)
+    for out in [".", "..", "generated/zeroship/../..", absolute.as_str()] {
+        let err = ProjectConfig::parse(config_path.clone(), with_out(out))
             .expect_err("a gen-types directory containing creator files must not parse");
-        assert!(err.contains("databases.main.out"), "{err}");
+        assert!(err.contains("databases.main.out"), "{out}: {err}");
     }
+    ProjectConfig::parse(config_path, FULL.to_string())
+        .expect("the control: the directory below the project parses");
+}
+
+/// The ancestor check compares where paths lead, not how they are spelled: a
+/// link elsewhere that leads to the project's parent is that parent.
+#[test]
+fn a_databases_out_linked_to_an_ancestor_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let config_path = project.join(CONFIG_FILENAME);
+    let elsewhere = tempfile::tempdir().unwrap();
+    let link = elsewhere.path().join("leads-to-the-parent");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(dir.path(), &link).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(dir.path(), &link).unwrap_or_else(|error| {
+        panic!("creating a directory link needs the symbolic-link privilege: {error}")
+    });
+
+    let err = ProjectConfig::parse(config_path.clone(), with_out(link.to_str().unwrap()))
+        .expect_err("a link to the project's parent must not parse");
+    assert!(err.contains("databases.main.out"), "{err}");
+    let beside = elsewhere.path().join("beside");
+    ProjectConfig::parse(config_path, with_out(beside.to_str().unwrap()))
+        .expect("the control: a directory beside the link parses");
 }
 
 /// Two databases may not share one gen-types directory. The three filenames in

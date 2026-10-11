@@ -1492,16 +1492,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cpu-time"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9e393a7668fe1fad3075085b86c781883000b4ede868f43627b34a87c8b7ded"
-dependencies = [
- "libc",
- "winapi",
-]
-
-[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7945,6 +7935,7 @@ dependencies = [
  "percent-encoding",
  "rand 0.8.5",
  "rusqlite",
+ "same-file",
  "serde",
  "serde_json",
  "tempfile",
@@ -8620,7 +8611,6 @@ dependencies = [
  "compio",
  "compio-tls",
  "compio-ws",
- "cpu-time",
  "criterion",
  "cyper",
  "deno_core_icudata",
@@ -8648,6 +8638,7 @@ dependencies = [
  "url",
  "uuid",
  "v8",
+ "windows-sys 0.61.2",
  "zeroship-core",
  "zeroship-metering",
  "zeroship-runtime-macros",
@@ -8680,6 +8671,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "uuid",
+ "winapi-util",
  "zeroship-core",
  "zeroship-testkit",
 ]

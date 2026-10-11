@@ -2688,9 +2688,17 @@ mod dev_database_identity {
         // What `devSqlitePaths(root, databaseId)` names, spelled the way that
         // function spells it.
         let apply_target = state.join(format!("zs-db_{}.sqlite", declared.as_str()));
+        // SQLite reports the file by its full path with links resolved, so a
+        // temp directory reached through one (macOS's `/var`, Windows'
+        // abbreviated profile names) names the same file by another spelling.
+        // Both sides are resolved before they are compared.
+        let canonical = |path: &Path| {
+            std::fs::canonicalize(path)
+                .unwrap_or_else(|error| panic!("resolve {}: {error}", path.display()))
+        };
         assert_eq!(
-            Path::new(attached),
-            apply_target,
+            canonical(Path::new(attached)),
+            canonical(&apply_target),
             "the attached file and the dev apply's target must be one file"
         );
         // Second oracle: the same name, through the derivation the backend

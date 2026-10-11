@@ -32,9 +32,9 @@ pub fn create_private_dir(directory: &Path) -> std::io::Result<()> {
 
 /// Make the entries created in `directory` durable.
 ///
-/// Windows has no directory flush: a directory cannot be opened as a file
-/// there, so this does nothing, and the entry's durability is the file
-/// system's metadata journal's.
+/// The standard library offers no directory flush on Windows, so this does
+/// nothing there, and the entry's durability is the file system's metadata
+/// journal's.
 pub fn sync_directory(directory: &Path) -> std::io::Result<()> {
     #[cfg(windows)]
     {
@@ -185,19 +185,23 @@ mod tests {
 
     /// A link where the key belongs is refused, whatever it points at: a
     /// project directory checked out or unpacked from elsewhere must not hand
-    /// the host another file's bytes as its key.
-    #[cfg(unix)]
+    /// the host another file's bytes as its key. Windows lets an account
+    /// without the symbolic-link privilege create no link, and the test then
+    /// fails naming it rather than passing over nothing.
     #[test]
     fn a_linked_key_is_refused() {
         let directory = tempfile::tempdir().unwrap();
         let elsewhere = tempfile::tempdir().unwrap();
         load_material(elsewhere.path()).unwrap();
         create_private_dir(directory.path()).unwrap();
-        std::os::unix::fs::symlink(
-            elsewhere.path().join("project-data-key.json"),
-            directory.path().join("project-data-key.json"),
-        )
-        .unwrap();
+        let target = elsewhere.path().join("project-data-key.json");
+        let link = directory.path().join("project-data-key.json");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&target, &link).unwrap_or_else(|error| {
+            panic!("creating a file link needs the symbolic-link privilege: {error}")
+        });
         assert!(load_material(directory.path()).is_err());
         assert!(load_material(elsewhere.path()).is_ok(), "the control: the target itself loads");
     }

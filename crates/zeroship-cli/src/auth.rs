@@ -591,7 +591,7 @@ fn resolve_state_dir(sources: StateDirSources) -> Result<PathBuf, String> {
     } else if let Some(home) = sources.home {
         PathBuf::from(home).join(".config")
     } else {
-        return Err("HOME is not set".into());
+        return Err("no state directory: set ZEROSHIP_CONFIG_HOME, or HOME (APPDATA on Windows)".into());
     };
     Ok(base.join("zeroship"))
 }

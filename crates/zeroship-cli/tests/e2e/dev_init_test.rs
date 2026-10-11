@@ -511,7 +511,6 @@ fn dev_init_rejects_an_env_file_that_aliases_any_generated_secret() {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn dev_init_rejects_an_env_file_hard_linked_to_a_generated_secret() {
     let temp = tempfile::tempdir().expect("create temp directory");

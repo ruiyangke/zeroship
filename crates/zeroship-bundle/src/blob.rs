@@ -792,9 +792,9 @@ impl BlobStore for LocalDiskBlobStore {
 /// a crash. The same shape as `sync_dir` in `zeroship-storage`'s local
 /// backend, returning the `std::io::Error` this crate converts from.
 ///
-/// Windows has no directory flush: a directory cannot be opened as a file
-/// there, so this does nothing, and an entry's durability is the file
-/// system's metadata journal's.
+/// The standard library offers no directory flush on Windows, so this does
+/// nothing there, and an entry's durability is the file system's metadata
+/// journal's.
 #[cfg(not(windows))]
 async fn sync_dir(dir: &Path) -> std::io::Result<()> {
     compio::fs::File::open(dir).await?.sync_all().await
