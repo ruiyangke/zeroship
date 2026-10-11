@@ -78,6 +78,9 @@ use std::time::{Duration, Instant};
 
 #[cfg(doc)]
 use crate::config::SslMode;
+use crate::connect::{
+    ConnectProgress, SystemResolver, connect_phase_suffix, connect_with_resolver,
+};
 use crate::error::PoolBudget;
 use crate::tls::NoTls;
 use crate::{CancelToken, Client, Config, Connection, Error, Socket, TransactionStatus};
@@ -717,21 +720,42 @@ impl Transport {
     /// Open a single client + spawn its Connection task. Returns the Client;
     /// the task is detached and self-terminates when the Client's sender is
     /// closed (i.e. when the Client is dropped).
-    fn connect_one(&self) -> Pin<Box<dyn Future<Output = Result<Client, Error>> + '_>> {
+    fn connect_one<'a>(
+        &'a self,
+        progress: &'a ConnectProgress,
+    ) -> Pin<Box<dyn Future<Output = Result<Client, Error>> + 'a>> {
         // Erase the driver's nested connection future at the physical-connect
         // boundary. Pool callers then keep a bounded layout depth without
         // allocating a boxed future when reusing an idle connection.
         Box::pin(async move {
-            #[cfg(feature = "tls")]
-            if let Some(tls) = &self.tls {
-                let (client, connection) = self.config.connect(tls.clone()).await?;
-                spawn_connection_task(connection);
-                return Ok(client);
-            }
+            let connected = async {
+                #[cfg(feature = "tls")]
+                if let Some(tls) = &self.tls {
+                    let (client, connection) = connect_with_resolver(
+                        tls.clone(),
+                        &self.config,
+                        &mut SystemResolver,
+                        progress,
+                    )
+                    .await?;
+                    spawn_connection_task(connection);
+                    return Ok(client);
+                }
 
-            let (client, connection) = self.config.connect(NoTls).await?;
-            spawn_connection_task(connection);
-            Ok(client)
+                let (client, connection) =
+                    connect_with_resolver(NoTls, &self.config, &mut SystemResolver, progress)
+                        .await?;
+                spawn_connection_task(connection);
+                Ok(client)
+            }
+            .await;
+            // The physical connect is over - success or failure. Clear the
+            // marker before returning so a warm-up backoff or an `after_connect`
+            // hook that runs after this attempt does not inherit a stage from it
+            // and report a deadline as having stalled inside a connect that had
+            // already finished.
+            progress.reset();
+            connected
         })
     }
 
@@ -763,11 +787,11 @@ impl Transport {
     /// so the computed 1.6s delay is only ever discarded. Only used for pool
     /// warm-up - `get_inner`'s on-demand connect stays single-shot to keep the
     /// latency budget tight.
-    async fn connect_with_retry(&self) -> Result<Client, Error> {
+    async fn connect_with_retry(&self, progress: &ConnectProgress) -> Result<Client, Error> {
         let mut delay = Duration::from_millis(100);
         let mut last_err: Option<Error> = None;
         for attempt in 0..3 {
-            match self.connect_one().await {
+            match self.connect_one(progress).await {
                 Ok(client) => return Ok(client),
                 Err(e) => {
                     last_err = Some(e);
@@ -994,19 +1018,26 @@ impl Pool {
         pool_config.validate()?;
         let transport = Transport::resolve(connection_config)?;
 
+        // One marker for the whole construction: each warm-up attempt advances
+        // it, and `connect_one` clears it when that attempt ends, so expiry
+        // names the stage the attempt in flight had reached.
+        let progress = ConnectProgress::new();
         let entries = compio::time::timeout(
             pool_config.warm_up_timeout,
-            Self::warm_up(&transport, &pool_config),
+            Self::warm_up(&transport, &pool_config, &progress),
         )
         .await
         .map_err(|_| {
+            let phase = progress.get();
             Error::pool_timeout(
                 PoolBudget::WarmUp,
                 format!(
-                    "pool warm-up exceeded its warm_up_timeout of {:?}",
+                    "pool warm-up exceeded its warm_up_timeout of {:?}{}",
                     pool_config.warm_up_timeout,
+                    connect_phase_suffix(phase),
                 ),
             )
+            .with_connect_phase(phase)
         })??;
 
         let total = entries.len();
@@ -1035,6 +1066,7 @@ impl Pool {
     async fn warm_up(
         transport: &Transport,
         pool_config: &PoolConfig,
+        progress: &ConnectProgress,
     ) -> Result<Vec<PoolEntry>, Error> {
         // `max(1)` keeps a `min_idle` of 0 from making the constructor prove
         // nothing about the connection settings - one connection verifies
@@ -1045,7 +1077,7 @@ impl Pool {
         let warm = pool_config.min_idle.max(1);
         let mut entries: Vec<PoolEntry> = Vec::with_capacity(warm);
         for i in 0..warm {
-            match transport.connect_with_retry().await {
+            match transport.connect_with_retry(progress).await {
                 Ok(client) => {
                     let entry = PoolEntry::new(client, pool_config.max_lifetime);
                     if let Err(e) = pool_config.run_after_connect(&entry.client).await {
@@ -1263,9 +1295,14 @@ impl Pool {
     /// stored across callbacks without borrowing the handle used to acquire it.
     pub async fn acquire(&self) -> Result<PoolConnection, Error> {
         self.ensure_open()?;
+        // One marker for this checkout. It stays `None` while the checkout
+        // waits for a connection or runs a hook; only the on-demand connect
+        // this checkout owns advances it, which is exactly the case the
+        // deadline below can name.
+        let progress = ConnectProgress::new();
         let acquisition = async {
             let mut closing = std::pin::pin!(CloseWaiter::new(self, CloseEvent::Started));
-            let mut checkout = std::pin::pin!(self.get_inner_leased());
+            let mut checkout = std::pin::pin!(self.get_inner_leased(&progress));
             std::future::poll_fn(|cx| {
                 if self.is_closed() {
                     return Poll::Ready(Err(Error::pool_closed()));
@@ -1290,28 +1327,31 @@ impl Pool {
                 // again, so this is the more specific and stable answer.
                 self.ensure_open()?;
                 self.inner.metrics.inc_timeouts();
+                let phase = progress.get();
                 Err(Error::pool_timeout(
                     PoolBudget::Acquire,
                     format!(
                         "pool acquisition exceeded its acquire_timeout of {:?} (pool: {} idle, {} \
-                         total, {} maximum)",
+                         total, {} maximum){}",
                         self.inner.config.acquire_timeout,
                         self.inner.idle.borrow().len(),
                         self.inner.total.get(),
                         self.inner.config.max_size,
+                        connect_phase_suffix(phase),
                     ),
-                ))
+                )
+                .with_connect_phase(phase))
             }
         }
     }
 
     /// Commit ownership before shutdown-listener cleanup can invoke caller
     /// wakers. Cancellation or unwinding must always have a lease to return.
-    async fn get_inner_leased(&self) -> Result<PoolConnection, Error> {
-        Ok(PoolConnection::new(self.get_inner().await?, self))
+    async fn get_inner_leased(&self, progress: &ConnectProgress) -> Result<PoolConnection, Error> {
+        Ok(PoolConnection::new(self.get_inner(progress).await?, self))
     }
 
-    async fn get_inner(&self) -> Result<PoolEntry, Error> {
+    async fn get_inner(&self, progress: &ConnectProgress) -> Result<PoolEntry, Error> {
         // A caller that arrives behind an existing waiter must join the FIFO
         // before looking at idle entries or unreserved capacity. A capacity
         // wake is advisory: the head keeps its queue slot until it is polled,
@@ -1447,7 +1487,7 @@ impl Pool {
             // forever (POOL-1). On Err the guard also releases it on return.
             if self.inner.total.get() < self.inner.config.max_size {
                 let permit = PermitGuard::reserve(self);
-                let connected = self.inner.transport.connect_one().await;
+                let connected = self.inner.transport.connect_one(progress).await;
                 self.ensure_open()?;
                 let client = match connected {
                     Ok(c) => c,
@@ -1884,6 +1924,11 @@ impl Pool {
         drop(pool);
 
         let mut created = 0usize;
+        // Housekeeping has no deadline of its own, but `connect_one` requires a
+        // marker and the connect it runs carries `Config::connect_timeout`, so
+        // a refill that hits that per-attempt deadline reports its stage. A
+        // per-cycle marker keeps one housekeeper cycle off another's state.
+        let progress = ConnectProgress::new();
         loop {
             // RE-CHECK BOTH BOUNDS. A budget computed before the first
             // `connect_one().await` stops being true at that await:
@@ -1919,7 +1964,7 @@ impl Pool {
                 (transport, pool_config, permit)
             };
 
-            match transport.connect_one().await {
+            match transport.connect_one(&progress).await {
                 Ok(client) => {
                     // `start_housekeeper_with_interval` retains this task's
                     // handle in the pool. Dropping or closing the pool while
@@ -3421,7 +3466,8 @@ mod tests {
             2,
         );
 
-        let mut acquire = Box::pin(pool.get_inner_leased());
+        let progress = ConnectProgress::new();
+        let mut acquire = Box::pin(pool.get_inner_leased(&progress));
         let client = match poll_once(acquire.as_mut()) {
             Poll::Ready(Ok(client)) => client,
             Poll::Ready(Err(error)) => panic!("healthy fallback failed: {error}"),
@@ -3749,7 +3795,7 @@ mod tests {
             .expect("fixture pool is unshared")
             .transport = Transport::resolve(url.parse().unwrap()).unwrap();
 
-        let outcome = pool.get_inner_leased().await;
+        let outcome = pool.get_inner_leased(&ConnectProgress::new()).await;
         assert!(
             outcome.is_err(),
             "hook-closed newly connected entry was published"
@@ -3874,7 +3920,8 @@ mod tests {
             pool: pool.clone(),
         };
 
-        let mut acquire = Box::pin(pool.get_inner_leased());
+        let progress = ConnectProgress::new();
+        let mut acquire = Box::pin(pool.get_inner_leased(&progress));
         assert!(poll_once(acquire.as_mut()).is_pending());
         assert_eq!(pool.pending_count(), 1);
 
@@ -3920,7 +3967,8 @@ mod tests {
             pool: pool.clone(),
         };
 
-        let mut acquire = Box::pin(pool.get_inner_leased());
+        let progress = ConnectProgress::new();
+        let mut acquire = Box::pin(pool.get_inner_leased(&progress));
         assert!(poll_once(acquire.as_mut()).is_pending());
         drop(held);
         assert_eq!(pool.pending_count(), 0, "the stale entry was handed off");
@@ -4060,7 +4108,8 @@ mod tests {
             pool: pool.clone(),
         };
 
-        let mut acquire = Box::pin(pool.get_inner_leased());
+        let progress = ConnectProgress::new();
+        let mut acquire = Box::pin(pool.get_inner_leased(&progress));
         assert!(poll_once(acquire.as_mut()).is_pending());
         drop(held);
 
@@ -4228,7 +4277,8 @@ mod tests {
         // and require the entry to go BACK to the pool, which is
         // `PoolConnection`'s Drop. A bare `PoolEntry` has no such Drop, so
         // `get_inner` would leave active_count at 1 forever.
-        let mut acquire = Box::pin(pool.get_inner_leased());
+        let progress = ConnectProgress::new();
+        let mut acquire = Box::pin(pool.get_inner_leased(&progress));
         let reused = match poll_once(acquire.as_mut()) {
             Poll::Ready(Ok(client)) => client,
             Poll::Ready(Err(error)) => panic!("reacquiring after unwind failed: {error}"),
@@ -6059,7 +6109,7 @@ mod tests {
         );
 
         let borrowed = pool
-            .get_inner_leased()
+            .get_inner_leased(&ConnectProgress::new())
             .await
             .expect("concurrent checkout did not consume the first refill");
         assert_eq!(pool.idle_count(), 0);
@@ -6382,8 +6432,9 @@ mod tests {
         let second_count = Arc::new(AtomicUsize::new(0));
         let first_waker = counting_waker(&first_count);
         let second_waker = counting_waker(&second_count);
-        let mut first = Box::pin(pool.get_inner_leased());
-        let mut second = Box::pin(pool.get_inner_leased());
+        let progress = ConnectProgress::new();
+        let mut first = Box::pin(pool.get_inner_leased(&progress));
+        let mut second = Box::pin(pool.get_inner_leased(&progress));
 
         assert!(poll_with_waker(first.as_mut(), &first_waker).is_pending());
         assert!(poll_with_waker(second.as_mut(), &second_waker).is_pending());

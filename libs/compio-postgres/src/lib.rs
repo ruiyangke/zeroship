@@ -189,7 +189,7 @@ pub use crate::copy_format::CopyFormat;
 pub use crate::copy_in::CopyInSink;
 pub use crate::copy_out::CopyOutStream;
 use crate::error::DbError;
-pub use crate::error::Error;
+pub use crate::error::{ConnectPhase, Error, PoolBudget};
 pub use crate::generic_client::GenericClient;
 pub use crate::live::{drain_connections, live_connections};
 pub use crate::maybe_tls_stream::{MaybeTlsReadHalf, MaybeTlsWriteHalf};

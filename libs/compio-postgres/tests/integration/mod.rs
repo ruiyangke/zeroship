@@ -17,6 +17,7 @@ mod command_timeout;
 mod concurrent_routing;
 mod config_fuzz;
 mod connect_failure_diagnosis;
+mod connect_phase;
 mod connection_churn;
 mod copy_in_failure;
 mod copy_interleaving;

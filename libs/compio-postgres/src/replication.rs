@@ -207,6 +207,7 @@ where
     let addrs = with_connect_timeout(
         timeout,
         endpoint.addresses(resolver, cfg.get_load_balance_hosts()),
+        None,
     )
     .await?;
 
@@ -215,6 +216,7 @@ where
         match with_connect_timeout(
             timeout,
             connect_replication_addr(addr, endpoint.hostname(), endpoint.port(), tls, cfg),
+            None,
         )
         .await
         {

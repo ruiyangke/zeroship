@@ -137,41 +137,45 @@ where
     // whichever error emerges.
     let delivery = cancel_query_raw::CancelDeliveryTracker::default();
     let attempt_delivery = delivery.clone();
-    with_connect_timeout(config.connect_timeout, async move {
-        let encryption = config.encryption;
-        let server_name = tls_server_name(&config.addr, config.hostname.as_deref());
-        let tls = tls
-            .make_tls_connect(&server_name)
-            .map_err(|e| Error::tls(e.into()))?;
-        // The cancel key is a bearer credential, and its connector comes from
-        // the caller at cancel time. Hold that new connection to every TLS
-        // disclosure and verification policy the session recorded before the
-        // connector can emit a ClientHello.
-        validate_cancel_tls_connector(&tls, &config, expected_policy_identity.as_ref())?;
-        let has_hostname = config.hostname.is_some();
+    with_connect_timeout(
+        config.connect_timeout,
+        async move {
+            let encryption = config.encryption;
+            let server_name = tls_server_name(&config.addr, config.hostname.as_deref());
+            let tls = tls
+                .make_tls_connect(&server_name)
+                .map_err(|e| Error::tls(e.into()))?;
+            // The cancel key is a bearer credential, and its connector comes from
+            // the caller at cancel time. Hold that new connection to every TLS
+            // disclosure and verification policy the session recorded before the
+            // connector can emit a ClientHello.
+            validate_cancel_tls_connector(&tls, &config, expected_policy_identity.as_ref())?;
+            let has_hostname = config.hostname.is_some();
 
-        let socket = connect_socket::connect_socket(
-            &config.addr,
-            config.port,
-            config.tcp_user_timeout,
-            config.keepalive.as_ref(),
-            config.require_peer.as_deref(),
-        )
-        .await?;
+            let socket = connect_socket::connect_socket(
+                &config.addr,
+                config.port,
+                config.tcp_user_timeout,
+                config.keepalive.as_ref(),
+                config.require_peer.as_deref(),
+            )
+            .await?;
 
-        cancel_query_raw::cancel_query_with_encryption(
-            socket,
-            encryption,
-            ssl_mode,
-            ssl_negotiation,
-            tls,
-            has_hostname,
-            process_id,
-            secret_key,
-            &attempt_delivery,
-        )
-        .await
-    })
+            cancel_query_raw::cancel_query_with_encryption(
+                socket,
+                encryption,
+                ssl_mode,
+                ssl_negotiation,
+                tls,
+                has_hostname,
+                process_id,
+                secret_key,
+                &attempt_delivery,
+            )
+            .await
+        },
+        None,
+    )
     .await
     .map_err(|error| error.with_cancel_delivery(delivery.delivery()))
 }
@@ -205,36 +209,40 @@ where
         }
     };
 
-    let stream = with_connect_timeout(config.connect_timeout, async move {
-        let encryption = config.encryption;
-        let server_name = tls_server_name(&config.addr, config.hostname.as_deref());
-        let tls = tls
-            .make_tls_connect(&server_name)
-            .map_err(|e| Error::tls(e.into()))?;
-        validate_cancel_tls_connector(&tls, &config, expected_policy_identity.as_ref())?;
-        let has_hostname = config.hostname.is_some();
+    let stream = with_connect_timeout(
+        config.connect_timeout,
+        async move {
+            let encryption = config.encryption;
+            let server_name = tls_server_name(&config.addr, config.hostname.as_deref());
+            let tls = tls
+                .make_tls_connect(&server_name)
+                .map_err(|e| Error::tls(e.into()))?;
+            validate_cancel_tls_connector(&tls, &config, expected_policy_identity.as_ref())?;
+            let has_hostname = config.hostname.is_some();
 
-        let socket = connect_socket::connect_socket(
-            &config.addr,
-            config.port,
-            config.tcp_user_timeout,
-            config.keepalive.as_ref(),
-            config.require_peer.as_deref(),
-        )
-        .await?;
+            let socket = connect_socket::connect_socket(
+                &config.addr,
+                config.port,
+                config.tcp_user_timeout,
+                config.keepalive.as_ref(),
+                config.require_peer.as_deref(),
+            )
+            .await?;
 
-        cancel_query_raw::send_cancel_request_with_exact_encryption(
-            socket,
-            encryption,
-            ssl_mode,
-            ssl_negotiation,
-            tls,
-            has_hostname,
-            process_id,
-            secret_key,
-        )
-        .await
-    })
+            cancel_query_raw::send_cancel_request_with_exact_encryption(
+                socket,
+                encryption,
+                ssl_mode,
+                ssl_negotiation,
+                tls,
+                has_hostname,
+                process_id,
+                secret_key,
+            )
+            .await
+        },
+        None,
+    )
     .await?;
 
     // Deliberately outside `with_connect_timeout`: waiting for postmaster EOF

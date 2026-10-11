@@ -13,7 +13,9 @@
 
 use crate::Error;
 use crate::config::{SslMode, SslNegotiation};
+use crate::connect::ConnectProgress;
 use crate::encryption::Encryption;
+use crate::error::ConnectPhase;
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::tls::private::ForcePrivateApi;
 use crate::tls::{POSTGRESQL_ALPN_PROTOCOL, TlsConnect, TlsStream};
@@ -56,6 +58,35 @@ where
         tls,
         has_hostname,
         mode == SslMode::Prefer,
+        None,
+    )
+    .await
+}
+
+/// [`negotiate_tls`], recording the SSL-request and TLS-handshake stages in
+/// `progress` so a connect deadline can name the one it expired in.
+pub async fn negotiate_tls_tracked<S, T>(
+    stream: S,
+    encryption: Encryption,
+    mode: SslMode,
+    negotiation: SslNegotiation,
+    tls: T,
+    has_hostname: bool,
+    progress: &ConnectProgress,
+) -> Result<MaybeTlsStream<S, T::Stream>, Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    T: TlsConnect<S>,
+{
+    negotiate_tls_inner(
+        stream,
+        encryption,
+        mode,
+        negotiation,
+        tls,
+        has_hostname,
+        mode == SslMode::Prefer,
+        Some(progress),
     )
     .await
 }
@@ -83,6 +114,7 @@ where
         tls,
         has_hostname,
         false,
+        None,
     )
     .await
 }
@@ -96,6 +128,7 @@ async fn negotiate_tls_inner<S, T>(
     tls: T,
     has_hostname: bool,
     permit_plaintext: bool,
+    progress: Option<&ConnectProgress>,
 ) -> Result<MaybeTlsStream<S, T::Stream>, Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -127,6 +160,9 @@ where
     }
 
     if negotiation == SslNegotiation::Postgres {
+        if let Some(progress) = progress {
+            progress.set(ConnectPhase::SslRequest);
+        }
         let mut buf = BytesMut::new();
         frontend::ssl_request(&mut buf);
         // AsyncWriteExt::write_all consumes the buffer and returns it; we
@@ -179,6 +215,9 @@ where
         }
     }
 
+    if let Some(progress) = progress {
+        progress.set(ConnectPhase::TlsHandshake);
+    }
     let stream = tls
         .connect(stream)
         .await

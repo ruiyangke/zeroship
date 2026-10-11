@@ -4066,6 +4066,7 @@ mod tests {
             true,
             &config,
             None,
+            &crate::connect::ConnectProgress::new(),
         )
         .await
         .expect("connect_raw multiplexed");
@@ -7705,6 +7706,7 @@ mod tests {
             true,
             &config,
             Some(release),
+            &crate::connect::ConnectProgress::new(),
         )
         .await
         .expect("complete scripted startup");
@@ -7806,6 +7808,7 @@ mod tests {
                 true,
                 &config,
                 Some(release),
+                &crate::connect::ConnectProgress::new(),
             )
             .await
             .expect("complete serialized startup");
@@ -7862,6 +7865,7 @@ mod tests {
                 true,
                 &config,
                 Some(release),
+                &crate::connect::ConnectProgress::new(),
             )
             .await
             .expect("complete serialized control startup");
@@ -7916,6 +7920,7 @@ mod tests {
                 true,
                 &config,
                 Some(release),
+                &crate::connect::ConnectProgress::new(),
             )
             .await
             .expect("complete serialized COPY startup");
@@ -9455,6 +9460,7 @@ mod tests {
             true,
             &config,
             Some(release),
+            &crate::connect::ConnectProgress::new(),
         )
         .await
         .expect("complete parked startup");
@@ -9526,6 +9532,7 @@ mod tests {
             true,
             &config,
             Some(release),
+            &crate::connect::ConnectProgress::new(),
         )
         .await
         .expect("complete scripted startup");
@@ -9587,6 +9594,7 @@ mod tests {
             true,
             &config,
             Some(release),
+            &crate::connect::ConnectProgress::new(),
         )
         .await
         .expect("complete serialized parked startup");
@@ -9664,6 +9672,7 @@ mod tests {
             true,
             &config,
             Some(release),
+            &crate::connect::ConnectProgress::new(),
         )
         .await
         .expect("complete serialized scripted startup");

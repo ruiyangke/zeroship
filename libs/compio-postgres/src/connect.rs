@@ -23,6 +23,7 @@ use crate::connect_raw::{connect_raw, connect_raw_with_target_session_attrs};
 use crate::connect_socket::connect_socket;
 use crate::connection::Connection;
 use crate::encryption::Encryption;
+use crate::error::ConnectPhase;
 use crate::passfile;
 use crate::tls::{MakeTlsConnect, TlsConnect};
 use crate::{Config, Error, Socket};
@@ -37,8 +38,93 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 use std::{cmp, io};
+
+/// A cheap record of how far one in-flight connection attempt has progressed.
+///
+/// The pool creates one per construction or checkout, and every attempt it
+/// starts writes its current stage here as it moves through the connect path;
+/// the deadline that cuts the attempt short reads it back to name the stage in
+/// the error. The store is a relaxed atomic, which is already [`Send`] and
+/// [`Sync`] on its own, so a connect future that carries it stays `Send` with
+/// no sharing. There is no lock, and one store per stage is not on any hot
+/// path.
+#[derive(Debug, Default)]
+pub struct ConnectProgress(AtomicU8);
+
+/// Sentinel for "no connect stage has been entered".
+const PHASE_UNSET: u8 = 0;
+
+const fn encode_phase(phase: ConnectPhase) -> u8 {
+    match phase {
+        ConnectPhase::NameResolution => 1,
+        ConnectPhase::TcpDial => 2,
+        ConnectPhase::SslRequest => 3,
+        ConnectPhase::TlsHandshake => 4,
+        ConnectPhase::Startup => 5,
+        ConnectPhase::PostConnectSetup => 6,
+    }
+}
+
+const fn decode_phase(raw: u8) -> Option<ConnectPhase> {
+    match raw {
+        PHASE_UNSET => None,
+        1 => Some(ConnectPhase::NameResolution),
+        2 => Some(ConnectPhase::TcpDial),
+        3 => Some(ConnectPhase::SslRequest),
+        4 => Some(ConnectPhase::TlsHandshake),
+        5 => Some(ConnectPhase::Startup),
+        6 => Some(ConnectPhase::PostConnectSetup),
+        _ => None,
+    }
+}
+
+impl ConnectProgress {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record the stage the current attempt has reached.
+    pub(crate) fn set(&self, phase: ConnectPhase) {
+        self.0.store(encode_phase(phase), Ordering::Relaxed);
+    }
+
+    /// Clear the record, for the boundary between two attempts that share one
+    /// marker.
+    pub(crate) fn reset(&self) {
+        self.0.store(PHASE_UNSET, Ordering::Relaxed);
+    }
+
+    /// The stage the current attempt has reached, if any.
+    pub(crate) fn get(&self) -> Option<ConnectPhase> {
+        decode_phase(self.0.load(Ordering::Relaxed))
+    }
+}
+
+/// A suffix naming the stage an attempt had reached, for a deadline's message.
+///
+/// Empty when the marker holds no stage, so a deadline that expired around an
+/// attempt rather than inside one adds nothing to the message.
+pub fn connect_phase_suffix(phase: Option<ConnectPhase>) -> String {
+    phase.map_or_else(String::new, |phase| {
+        format!("; the attempt had reached {phase}")
+    })
+}
+
+/// The per-attempt inputs that travel together through the address walk.
+///
+/// Bundled rather than passed one by one so the functions keep a small
+/// signature as the connect path gains state; `Copy`, so an inner scope can
+/// override one field (`connect_pass` swaps in a passfile-derived `config`)
+/// without disturbing the rest.
+#[derive(Clone, Copy, Debug)]
+pub struct ConnectAttempt<'a> {
+    pub(crate) config: &'a Config,
+    pub(crate) target_session_attrs: TargetSessionAttrs,
+    pub(crate) progress: &'a ConnectProgress,
+}
 
 /// One configured host entry, separated into the address to reach and the
 /// optional name TLS validates.
@@ -252,21 +338,34 @@ pub(crate) fn endpoints(config: &Config) -> Result<Vec<Endpoint>, Error> {
         .collect()
 }
 
+/// Run `connect` under `timeout`, fabricating a `TimedOut` error on expiry.
+///
+/// When `progress` is supplied and the deadline wins, the fabricated error
+/// names the stage the attempt had reached, both in its rendered message and
+/// through [`Error::connect_phase`]; an unset stage leaves the message as the
+/// plain timeout. Callers that track no stage pass `None`.
 pub(crate) async fn with_connect_timeout<T, F>(
     timeout: Option<Duration>,
     connect: F,
+    progress: Option<&ConnectProgress>,
 ) -> Result<T, Error>
 where
     F: Future<Output = Result<T, Error>>,
 {
     match timeout {
-        Some(timeout) => match compio::time::timeout(timeout, connect).await {
-            Ok(result) => result,
-            Err(_) => Err(Error::connect(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "connection timed out",
-            ))),
-        },
+        Some(timeout) => compio::time::timeout(timeout, connect)
+            .await
+            .unwrap_or_else(|_| {
+                let phase = progress.and_then(ConnectProgress::get);
+                let detail = phase.map_or_else(
+                    || "connection timed out".to_string(),
+                    |phase| format!("connection timed out during {phase}"),
+                );
+                Err(
+                    Error::connect(io::Error::new(io::ErrorKind::TimedOut, detail))
+                        .with_connect_phase(phase),
+                )
+            }),
         None => connect.await,
     }
 }
@@ -279,13 +378,15 @@ where
     T: MakeTlsConnect<Socket>,
 {
     let mut resolver = SystemResolver;
-    connect_with_resolver(tls, config, &mut resolver).await
+    let progress = ConnectProgress::new();
+    connect_with_resolver(tls, config, &mut resolver, &progress).await
 }
 
-async fn connect_with_resolver<T, R>(
+pub async fn connect_with_resolver<T, R>(
     mut tls: T,
     config: &Config,
     resolver: &mut R,
+    progress: &ConnectProgress,
 ) -> Result<(Client, Connection<Socket, T::Stream>), Error>
 where
     T: MakeTlsConnect<Socket>,
@@ -299,8 +400,11 @@ where
             &endpoints,
             resolver,
             &mut tls,
-            config,
-            TargetSessionAttrs::Standby,
+            ConnectAttempt {
+                config,
+                target_session_attrs: TargetSessionAttrs::Standby,
+                progress,
+            },
         )
         .await
         {
@@ -321,13 +425,26 @@ where
             &endpoints,
             resolver,
             &mut tls,
-            config,
-            TargetSessionAttrs::Any,
+            ConnectAttempt {
+                config,
+                target_session_attrs: TargetSessionAttrs::Any,
+                progress,
+            },
         )
         .await;
     }
 
-    connect_pass(&endpoints, resolver, &mut tls, config, target).await
+    connect_pass(
+        &endpoints,
+        resolver,
+        &mut tls,
+        ConnectAttempt {
+            config,
+            target_session_attrs: target,
+            progress,
+        },
+    )
+    .await
 }
 
 /// PostgreSQL's one server-side exception to terminal startup errors.
@@ -360,8 +477,7 @@ async fn connect_pass<T, R>(
     endpoints: &[Endpoint],
     resolver: &mut R,
     tls: &mut T,
-    config: &Config,
-    target_session_attrs: TargetSessionAttrs,
+    attempt: ConnectAttempt<'_>,
 ) -> Result<(Client, Connection<Socket, T::Stream>), Error>
 where
     T: MakeTlsConnect<Socket>,
@@ -372,10 +488,17 @@ where
         // The password file is keyed on host, port, database and user, so it
         // is consulted PER ENDPOINT: failover to a different host or port can
         // legitimately select a different line. libpq does the same.
-        let from_passfile = password_from_passfile(config, endpoint)?;
-        let config = from_passfile.as_ref().unwrap_or(config);
+        let from_passfile = password_from_passfile(attempt.config, endpoint)?;
+        let config = from_passfile.as_ref().unwrap_or(attempt.config);
 
-        match connect_host(endpoint, resolver, tls, config, target_session_attrs).await {
+        match connect_host(
+            endpoint,
+            resolver,
+            tls,
+            ConnectAttempt { config, ..attempt },
+        )
+        .await
+        {
             Ok((client, connection)) => return Ok((client, connection)),
             Err(e) if stops_host_walk(&e) => return Err(e),
             Err(e) => error = Some(e),
@@ -444,14 +567,13 @@ async fn connect_host<T, R>(
     endpoint: &Endpoint,
     resolver: &mut R,
     tls: &mut T,
-    config: &Config,
-    target_session_attrs: TargetSessionAttrs,
+    attempt: ConnectAttempt<'_>,
 ) -> Result<(Client, Connection<Socket, T::Stream>), Error>
 where
     T: MakeTlsConnect<Socket>,
     R: Resolver,
 {
-    let timeout = config.get_connect_timeout().copied();
+    let timeout = attempt.config.get_connect_timeout().copied();
 
     // libpq leaves name resolution OUTSIDE the deadline: `pg_getaddrinfo_all`
     // blocks inside `PQconnectPoll`, and `connectDBComplete`'s `finish_time`
@@ -467,9 +589,16 @@ where
     // against a black-holed nameserver therefore tie up blocking-pool threads.
     // Returning control to the caller is still the right trade, but do not
     // read this budget as a bound on resources.
+    //
+    // Recorded before the call for every endpoint, not only a named one: a
+    // literal `hostaddr` and a Unix-domain socket return their one address
+    // without awaiting, so the dial that follows overwrites this before any
+    // deadline can read it. The store costs nothing on that path.
+    attempt.progress.set(ConnectPhase::NameResolution);
     let addrs = with_connect_timeout(
         timeout,
-        endpoint.addresses(resolver, config.get_load_balance_hosts()),
+        endpoint.addresses(resolver, attempt.config.get_load_balance_hosts()),
+        Some(attempt.progress),
     )
     .await?;
 
@@ -482,14 +611,8 @@ where
         // consume it all and strand the healthy addresses behind it.
         match with_connect_timeout(
             timeout,
-            connect_once(
-                addr,
-                endpoint.hostname(),
-                endpoint.port(),
-                tls,
-                config,
-                target_session_attrs,
-            ),
+            connect_once(addr, endpoint.hostname(), endpoint.port(), tls, attempt),
+            Some(attempt.progress),
         )
         .await
         {
@@ -568,42 +691,22 @@ async fn connect_once<T>(
     hostname: Option<&str>,
     port: u16,
     tls: &mut T,
-    config: &Config,
-    target_session_attrs: TargetSessionAttrs,
+    attempt: ConnectAttempt<'_>,
 ) -> Result<(Client, Connection<Socket, T::Stream>), Error>
 where
     T: MakeTlsConnect<Socket>,
 {
-    let first = first_encryption_for_addr(&addr, config.get_ssl_mode());
+    let first = first_encryption_for_addr(&addr, attempt.config.get_ssl_mode());
 
     // libpq: "sslmode is ignored for Unix domain socket communication."
     // A local socket has no network to eavesdrop on and no host name to put in
     // a certificate, so every mode - including verify-full - is plaintext.
     #[cfg(unix)]
     if matches!(addr, Addr::Unix(_)) {
-        return connect_leg(
-            &addr,
-            hostname,
-            port,
-            tls,
-            config,
-            target_session_attrs,
-            first,
-        )
-        .await;
+        return connect_leg(&addr, hostname, port, tls, attempt, first).await;
     }
 
-    let err = match connect_leg(
-        &addr,
-        hostname,
-        port,
-        tls,
-        config,
-        target_session_attrs,
-        first,
-    )
-    .await
-    {
+    let err = match connect_leg(&addr, hostname, port, tls, attempt, first).await {
         Ok(connected) => return Ok(connected),
         Err(e) => e,
     };
@@ -624,7 +727,7 @@ where
         return Err(err);
     }
 
-    let retry = match (config.get_ssl_mode(), first) {
+    let retry = match (attempt.config.get_ssl_mode(), first) {
         // TLS first, and the handshake is what failed: dial again, in the clear.
         //
         // KNOWN SHARP EDGE, and it is libpq's. "The handshake failed" includes
@@ -671,16 +774,7 @@ where
         _ => return Err(err),
     };
 
-    connect_leg(
-        &addr,
-        hostname,
-        port,
-        tls,
-        config,
-        target_session_attrs,
-        retry,
-    )
-    .await
+    connect_leg(&addr, hostname, port, tls, attempt, retry).await
 }
 
 /// One attempt: a fresh socket, one transport, one startup exchange.
@@ -689,24 +783,24 @@ async fn connect_leg<T>(
     hostname: Option<&str>,
     port: u16,
     tls: &mut T,
-    config: &Config,
-    target_session_attrs: TargetSessionAttrs,
+    attempt: ConnectAttempt<'_>,
     encryption: Encryption,
 ) -> Result<(Client, Connection<Socket, T::Stream>), Error>
 where
     T: MakeTlsConnect<Socket>,
 {
     let addr = addr.clone();
+    attempt.progress.set(ConnectPhase::TcpDial);
     let socket = connect_socket(
         &addr,
         port,
-        config.get_tcp_user_timeout().copied(),
-        if config.get_keepalives() {
-            Some(&config.keepalive_config)
+        attempt.config.get_tcp_user_timeout().copied(),
+        if attempt.config.get_keepalives() {
+            Some(&attempt.config.keepalive_config)
         } else {
             None
         },
-        config.get_require_peer(),
+        attempt.config.get_require_peer(),
     )
     .await?;
 
@@ -723,8 +817,7 @@ where
         tls,
         encryption,
         has_hostname,
-        config,
-        target_session_attrs,
+        attempt,
         release,
     )
     .await?;
@@ -733,14 +826,14 @@ where
         addr,
         hostname: hostname.map(|s| s.to_string()),
         port,
-        connect_timeout: config.get_connect_timeout().copied(),
-        tcp_user_timeout: config.get_tcp_user_timeout().copied(),
-        keepalive: if config.get_keepalives() {
-            Some(config.keepalive_config.clone())
+        connect_timeout: attempt.config.get_connect_timeout().copied(),
+        tcp_user_timeout: attempt.config.get_tcp_user_timeout().copied(),
+        keepalive: if attempt.config.get_keepalives() {
+            Some(attempt.config.keepalive_config.clone())
         } else {
             None
         },
-        require_peer: config.get_require_peer().map(str::to_owned),
+        require_peer: attempt.config.get_require_peer().map(str::to_owned),
         // Recorded, not re-derived at cancel time: see the field's doc.
         //
         // Keyed off what this session NEGOTIATED, not off `sslmode` alone. A
@@ -752,15 +845,15 @@ where
             crate::tls::ServerVerification::None
         } else {
             crate::tls::ServerVerification::demanded_by(
-                config.get_ssl_mode(),
-                config.get_ssl_root_cert(),
+                attempt.config.get_ssl_mode(),
+                attempt.config.get_ssl_root_cert(),
             )?
         },
         // `negotiated`, not `encryption`: the argument above is what this leg
         // ATTEMPTED. A cancel has to reproduce what the session got.
         encryption: negotiated,
-        ssl_sni: config.get_ssl_sni(),
-        ssl_cert_mode: config.get_ssl_cert_mode(),
+        ssl_sni: attempt.config.get_ssl_sni(),
+        ssl_cert_mode: attempt.config.get_ssl_cert_mode(),
     });
 
     Ok((client, connection))
@@ -820,6 +913,7 @@ impl Config {
         // and a stream that is not a socket has no descriptor to shut down.
         // Such a connection keeps the pre-existing behaviour - it is released
         // when its connection task is next polled.
+        let progress = ConnectProgress::new();
         with_connect_timeout(
             self.get_connect_timeout().copied(),
             connect_raw(
@@ -829,7 +923,9 @@ impl Config {
                 true,
                 self,
                 None,
+                &progress,
             ),
+            Some(&progress),
         )
         .await
     }
@@ -1759,7 +1855,7 @@ mod tests {
 
         let result = compio::time::timeout(
             Duration::from_secs(1),
-            connect_with_resolver(NoTls, &config, &mut resolver),
+            connect_with_resolver(NoTls, &config, &mut resolver, &ConnectProgress::new()),
         )
         .await
         .expect("outer watchdog expired because DNS resolution escaped connect_timeout");
@@ -1768,12 +1864,164 @@ mod tests {
             Err(error) => error,
         };
 
+        assert_eq!(
+            error.connect_phase(),
+            Some(ConnectPhase::NameResolution),
+            "the stalled resolver was not reported at its stage: {error:?}"
+        );
         let io = error
             .source()
             .and_then(|cause| cause.downcast_ref::<std::io::Error>())
             .expect("connection timeout must retain its I/O cause");
         assert_eq!(io.kind(), std::io::ErrorKind::TimedOut);
-        assert_eq!(io.to_string(), "connection timed out");
+        assert_eq!(
+            io.to_string(),
+            "connection timed out during name resolution"
+        );
+    }
+
+    /// A listener whose accept queue is already full: the kernel drops the SYN
+    /// of the next connection, so `connect` stays in `SYN_SENT` and never
+    /// completes. Linux only - the queue-full decision that drops the SYN and
+    /// the `listen` backlog semantics are kernel behaviour.
+    #[cfg(target_os = "linux")]
+    fn listener_with_a_full_accept_queue() -> (socket2::Socket, std::net::TcpStream) {
+        use socket2::{Domain, Protocol, SockAddr, Type};
+
+        // Backlog zero: the accept queue holds one connection, and the SYN of
+        // the next is dropped instead of answered.
+        const BACKLOG: i32 = 0;
+
+        let listener = socket2::Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))
+            .expect("create a listening socket");
+        listener
+            .bind(&SockAddr::from(
+                "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+            ))
+            .expect("bind the listening socket");
+        listener.listen(BACKLOG).expect("listen with a zero backlog");
+        let addr = listener
+            .local_addr()
+            .expect("listening socket address")
+            .as_socket()
+            .expect("an IPv4 socket address");
+        let filler = std::net::TcpStream::connect(addr).expect("fill the accept queue");
+        wait_for_the_accept_queue_to_fill(&listener, BACKLOG);
+        (listener, filler)
+    }
+
+    /// Wait until the filler has actually reached the listener's accept queue,
+    /// so the queue is full and the next SYN is the one the kernel drops.
+    ///
+    /// The filler's `connect` returning only proves the CLIENT finished its
+    /// half of the handshake; the server may still hold the connection in its
+    /// SYN queue, with an empty accept queue. Dialling in that window does not
+    /// stall: with `tcp_syncookies=1` the SYN is answered with a cookie and the
+    /// dial completes, so the test would read a connection that never timed out.
+    ///
+    /// Linux reports a listening socket's current accept-queue length as
+    /// `rx_queue` on its row in `/proc/net/tcp` (or `/proc/net/tcp6` for an
+    /// IPv6 listener), and calls the queue full once the length is past the
+    /// `listen` backlog (`sk_acceptq_is_full`). With the zero backlog above
+    /// that is one queued connection. Poll the proc file until then, bounded
+    /// by a wall-clock deadline that fails the test if it never fills.
+    #[cfg(target_os = "linux")]
+    fn wait_for_the_accept_queue_to_fill(listener: &socket2::Socket, backlog: i32) {
+        let backlog = u64::try_from(backlog).expect("the listen backlog is non-negative");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let queued = accept_queue_length(listener);
+            if queued > backlog {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the listener's accept queue never filled after the filler connected: \
+                 queue {queued}, backlog {backlog}",
+            );
+            // Yield so the kernel can finish moving the filler into the accept
+            // queue. No fixed wait: the loop re-reads the queue and is bounded
+            // by the deadline above.
+            std::thread::yield_now();
+        }
+    }
+
+    /// The listening socket's current accept-queue length, read from the
+    /// kernel's `/proc/net/tcp` (or `/proc/net/tcp6` for an IPv6 listener).
+    ///
+    /// A listening socket's row carries the connections waiting to be accepted
+    /// in its `rx_queue` field; the row is selected by the listener's local
+    /// port and its `0A` (LISTEN) state. Reading the proc file is ordinary
+    /// `std::fs` I/O, needing neither a raw descriptor nor a new dependency.
+    #[cfg(target_os = "linux")]
+    fn accept_queue_length(listener: &socket2::Socket) -> u64 {
+        let addr = listener
+            .local_addr()
+            .expect("listening socket address")
+            .as_socket()
+            .expect("an internet socket address");
+        let table = match addr {
+            SocketAddr::V4(_) => "/proc/net/tcp",
+            SocketAddr::V6(_) => "/proc/net/tcp6",
+        };
+        let contents =
+            std::fs::read_to_string(table).unwrap_or_else(|error| panic!("read {table}: {error}"));
+        let port = format!("{:04X}", addr.port());
+        contents
+            .lines()
+            .skip(1)
+            .find_map(|line| {
+                let mut fields = line.split_whitespace();
+                let _slot = fields.next()?;
+                let local = fields.next()?;
+                let _remote = fields.next()?;
+                let state = fields.next()?;
+                let queue = fields.next()?;
+                let local_port = local.rsplit_once(':')?.1;
+                if state != "0A" || local_port != port {
+                    return None;
+                }
+                u64::from_str_radix(queue.split_once(':')?.1, 16).ok()
+            })
+            .unwrap_or_else(|| panic!("no LISTEN row for port {} in {table}", addr.port()))
+    }
+
+    /// The dial is a stage of its own: a connect whose SYN the kernel drops
+    /// stays in `TCP dial` until the deadline expires, and cannot advance to a
+    /// later stage, so the assertion does not depend on timing.
+    #[cfg(target_os = "linux")]
+    #[compio::test]
+    async fn connect_timeout_covers_a_stalled_tcp_dial() {
+        let (listener, _filler) = listener_with_a_full_accept_queue();
+        let addr = listener
+            .local_addr()
+            .expect("listening socket address")
+            .as_socket()
+            .expect("an IPv4 socket address");
+        let config = config_for(addr, Duration::from_millis(200));
+        let mut resolver = SystemResolver;
+
+        let result = compio::time::timeout(
+            Duration::from_secs(5),
+            connect_with_resolver(NoTls, &config, &mut resolver, &ConnectProgress::new()),
+        )
+        .await
+        .expect("outer watchdog expired because the dial escaped connect_timeout");
+        let Err(error) = result else {
+            panic!("a listener with a full accept queue completed the dial");
+        };
+
+        assert_eq!(
+            error.connect_phase(),
+            Some(ConnectPhase::TcpDial),
+            "the stalled dial was not reported at its stage: {error:?}"
+        );
+        let io = error
+            .source()
+            .and_then(|cause| cause.downcast_ref::<std::io::Error>())
+            .expect("connection timeout must retain its I/O cause");
+        assert_eq!(io.kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(io.to_string(), "connection timed out during TCP dial");
     }
 
     #[compio::test]
@@ -1796,12 +2044,20 @@ mod tests {
             Err(error) => error,
         };
 
+        assert_eq!(
+            error.connect_phase(),
+            Some(ConnectPhase::Startup),
+            "the stalled startup was not reported at its stage: {error:?}"
+        );
         let io = error
             .source()
             .and_then(|cause| cause.downcast_ref::<std::io::Error>())
             .expect("connection timeout must retain its I/O cause");
         assert_eq!(io.kind(), std::io::ErrorKind::TimedOut);
-        assert_eq!(io.to_string(), "connection timed out");
+        assert_eq!(
+            io.to_string(),
+            "connection timed out during startup and authentication"
+        );
     }
 
     #[compio::test]
@@ -1864,7 +2120,12 @@ mod tests {
 
         let connected = compio::time::timeout(
             Duration::from_secs(5),
-            connect_with_resolver(HandshakeFailingTls, &config, &mut resolver),
+            connect_with_resolver(
+                HandshakeFailingTls,
+                &config,
+                &mut resolver,
+                &ConnectProgress::new(),
+            ),
         )
         .await
         .expect("the probe SQL error host walk hung")
@@ -1930,7 +2191,12 @@ mod tests {
 
         let result = compio::time::timeout(
             Duration::from_secs(5),
-            connect_with_resolver(HandshakeFailingTls, &config, &mut resolver),
+            connect_with_resolver(
+                HandshakeFailingTls,
+                &config,
+                &mut resolver,
+                &ConnectProgress::new(),
+            ),
         )
         .await
         .expect("the probe transport failure host walk hung");
@@ -1991,12 +2257,20 @@ mod tests {
             Ok(_) => panic!("a server that never answered the probe produced a connection"),
             Err(error) => error,
         };
+        assert_eq!(
+            error.connect_phase(),
+            Some(ConnectPhase::PostConnectSetup),
+            "the stalled probe was not reported at its stage: {error:?}"
+        );
         let io = error
             .source()
             .and_then(|cause| cause.downcast_ref::<std::io::Error>())
             .expect("connection timeout must retain its I/O cause");
         assert_eq!(io.kind(), std::io::ErrorKind::TimedOut);
-        assert_eq!(io.to_string(), "connection timed out");
+        assert_eq!(
+            io.to_string(),
+            "connection timed out during post-connect setup"
+        );
     }
 
     #[compio::test]
@@ -2019,12 +2293,20 @@ mod tests {
         let Err(error) = result else {
             panic!("a server that never answered the recovery probe connected");
         };
+        assert_eq!(
+            error.connect_phase(),
+            Some(ConnectPhase::PostConnectSetup),
+            "the stalled recovery probe was not reported at its stage: {error:?}"
+        );
         let io = error
             .source()
             .and_then(|cause| cause.downcast_ref::<std::io::Error>())
             .expect("connection timeout must retain its I/O cause");
         assert_eq!(io.kind(), std::io::ErrorKind::TimedOut);
-        assert_eq!(io.to_string(), "connection timed out");
+        assert_eq!(
+            io.to_string(),
+            "connection timed out during post-connect setup"
+        );
     }
 
     #[compio::test]
@@ -2182,7 +2464,9 @@ mod tests {
         config.target_session_attrs(TargetSessionAttrs::Standby);
         let mut resolver = ListResolver(vec![first, second]);
 
-        let Err(error) = connect_with_resolver(NoTls, &config, &mut resolver).await else {
+        let Err(error) =
+            connect_with_resolver(NoTls, &config, &mut resolver, &ConnectProgress::new()).await
+        else {
             panic!("a primary satisfied target_session_attrs=standby");
         };
         let io = error
@@ -2214,7 +2498,7 @@ mod tests {
 
         let connected = compio::time::timeout(
             Duration::from_secs(10),
-            connect_with_resolver(NoTls, &config, &mut resolver),
+            connect_with_resolver(NoTls, &config, &mut resolver, &ConnectProgress::new()),
         )
         .await
         .expect("outer watchdog expired during scripted DNS and local handshake")
@@ -2407,7 +2691,12 @@ mod tests {
 
         let result = compio::time::timeout(
             Duration::from_secs(5),
-            connect_with_resolver(HandshakeFailingTls, &config, &mut resolver),
+            connect_with_resolver(
+                HandshakeFailingTls,
+                &config,
+                &mut resolver,
+                &ConnectProgress::new(),
+            ),
         )
         .await
         .expect("the TLS address walk hung");
@@ -2444,7 +2733,7 @@ mod tests {
 
         let (client, connection) = compio::time::timeout(
             Duration::from_secs(10),
-            connect_with_resolver(NoTls, &config, &mut resolver),
+            connect_with_resolver(NoTls, &config, &mut resolver, &ConnectProgress::new()),
         )
         .await
         .expect("the resolved-address walk hung")
@@ -2489,7 +2778,7 @@ mod tests {
 
         let result = compio::time::timeout(
             Duration::from_secs(10),
-            connect_with_resolver(NoTls, &config, &mut resolver),
+            connect_with_resolver(NoTls, &config, &mut resolver, &ConnectProgress::new()),
         )
         .await
         .expect("the 57P03 address walk hung");
@@ -2576,7 +2865,7 @@ mod tests {
 
         let result = compio::time::timeout(
             Duration::from_secs(10),
-            connect_with_resolver(NoTls, &config, &mut resolver),
+            connect_with_resolver(NoTls, &config, &mut resolver, &ConnectProgress::new()),
         )
         .await
         .expect("the outer watchdog expired, so some leg had no deadline at all");

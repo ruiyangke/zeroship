@@ -28,9 +28,11 @@ use crate::codec::{
 use crate::config::{
     self, AuthMethod, Config, ProtocolVersion, ReplicationMode, TargetSessionAttrs,
 };
-use crate::connect_tls::negotiate_tls;
+use crate::connect::{ConnectAttempt, ConnectProgress};
+use crate::connect_tls::negotiate_tls_tracked;
 use crate::connection::Connection;
 use crate::encryption::Encryption;
+use crate::error::ConnectPhase;
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::tls::{ServerVerification, TlsConnect, TlsStream};
 use bytes::{Bytes, BytesMut};
@@ -571,6 +573,7 @@ pub(crate) async fn connect_raw<S, T>(
     // client half stores it so the session ends when the client does; see
     // `crate::release`.
     release: Option<crate::release::ConnectionRelease>,
+    progress: &ConnectProgress,
 ) -> Result<(Client, Connection<S, T::Stream>), Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -584,8 +587,11 @@ where
         tls,
         encryption,
         has_hostname,
-        config,
-        TargetSessionAttrs::Any,
+        ConnectAttempt {
+            config,
+            target_session_attrs: TargetSessionAttrs::Any,
+            progress,
+        },
         release,
     )
     .await?;
@@ -604,23 +610,24 @@ pub(crate) async fn connect_raw_with_target_session_attrs<S, T>(
     tls: T,
     encryption: Encryption,
     has_hostname: bool,
-    config: &Config,
-    target_session_attrs: TargetSessionAttrs,
+    attempt: ConnectAttempt<'_>,
     mut release: Option<crate::release::ConnectionRelease>,
 ) -> Result<(Client, Connection<S, T::Stream>, Encryption), Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     T: TlsConnect<S>,
 {
+    let config = attempt.config;
     validate_tls_connector_parameters(&tls, encryption, config)?;
     let cancel_tls_policy_identity = tls.cancel_policy_identity().cloned();
-    let stream = negotiate_tls(
+    let stream = negotiate_tls_tracked(
         stream,
         encryption,
         config.get_ssl_mode(),
         config.get_ssl_negotiation(),
         tls,
         has_hostname,
+        attempt.progress,
     )
     .await?;
     let negotiated = stream.negotiated_encryption();
@@ -638,13 +645,20 @@ where
         None => Cow::Owned(whoami::username().map_err(|err| Error::io(err.into()))?),
     };
 
+    attempt.progress.set(ConnectPhase::Startup);
     startup(&mut handshake, config, &user).await?;
     authenticate(&mut handshake, config, &user).await?;
     let client_cert_status = handshake.stream.get_mut().client_cert_status();
     let ssl_cert_check = check_ssl_cert_mode(config, client_cert_status);
     handshake.prefer_available_server_error(ssl_cert_check)?;
+    attempt.progress.set(ConnectPhase::PostConnectSetup);
     let (process_id, secret_key, mut parameters) = read_info(&mut handshake).await?;
-    probe_target_session_attrs(&mut handshake, target_session_attrs, &mut parameters).await?;
+    probe_target_session_attrs(
+        &mut handshake,
+        attempt.target_session_attrs,
+        &mut parameters,
+    )
+    .await?;
 
     // `connect_timeout` owns negotiation, startup, authentication, and the
     // target-session probe above. The socket-read inactivity clock is a
@@ -2039,13 +2053,17 @@ mod tests {
         let mut config = plaintext_config();
         config.ssl_cert_mode(config::SslCertMode::Require);
 
+        let progress = ConnectProgress::new();
         let error = match connect_raw_with_target_session_attrs(
             stream,
             NoTls,
             Encryption::Plaintext,
             false,
-            &config,
-            TargetSessionAttrs::Any,
+            ConnectAttempt {
+                config: &config,
+                target_session_attrs: TargetSessionAttrs::Any,
+                progress: &progress,
+            },
             None,
         )
         .await
@@ -2522,13 +2540,17 @@ mod tests {
         let config: Config = "user=scripted-user sslmode=disable"
             .parse()
             .expect("parse scripted config");
+        let progress = ConnectProgress::new();
         connect_raw_with_target_session_attrs(
             stream,
             NoTls,
             Encryption::Plaintext,
             false,
-            &config,
-            target,
+            ConnectAttempt {
+                config: &config,
+                target_session_attrs: target,
+                progress: &progress,
+            },
             None,
         )
         .await
@@ -4247,6 +4269,11 @@ mod tests {
             Err(error) => error,
         };
 
+        assert_eq!(
+            error.connect_phase(),
+            Some(ConnectPhase::Startup),
+            "the stalled startup was not reported at its stage: {error:?}"
+        );
         let cause = error
             .into_source()
             .expect("connection timeout must retain its I/O cause");
@@ -4254,7 +4281,10 @@ mod tests {
             .downcast_ref::<std::io::Error>()
             .expect("connection timeout cause must be an I/O error");
         assert_eq!(io.kind(), std::io::ErrorKind::TimedOut);
-        assert_eq!(io.to_string(), "connection timed out");
+        assert_eq!(
+            io.to_string(),
+            "connection timed out during startup and authentication"
+        );
     }
 
     /// The shape every third-party TLS backend has before it opts into a

@@ -168,13 +168,49 @@ fn io_kinds(error: &(dyn std::error::Error + 'static)) -> Vec<std::io::ErrorKind
     kinds
 }
 
-/// Whether the attempt ran out of time: an `io::Error` of kind `TimedOut`
-/// anywhere in the chain. The driver reports an expired connect or pool bound
-/// that way, and it says nothing about whether anything answered - a server
-/// that drops packets and a server too slow to finish the handshake inside the
-/// bound both end here.
+/// Whether a bound expired ([`timed_out`]). The connect stage the attempt had
+/// reached, when the driver recorded one, is read by [`connect_phase`] and
+/// printed in the report so a bound that expired says WHERE it expired.
 fn timed_out(error: &(dyn std::error::Error + 'static)) -> bool {
     io_kinds(error).contains(&std::io::ErrorKind::TimedOut)
+}
+
+/// The connect stage the driver recorded for a deadline error, if any.
+///
+/// The driver carries the stage as a structured field on its own error as well
+/// as in the rendered message, so this reads it without parsing. It is the same
+/// stage the message names, and it answers the question a bare `TimedOut` kind
+/// leaves open: resolving a name, dialling TCP, the SSL request, the TLS
+/// handshake, startup and authentication, or post-connect setup.
+fn connect_phase(
+    error: &(dyn std::error::Error + 'static),
+) -> Option<compio_postgres::error::ConnectPhase> {
+    let mut link = Some(error);
+    while let Some(current) = link {
+        if let Some(phase) = current
+            .downcast_ref::<compio_postgres::Error>()
+            .and_then(compio_postgres::Error::connect_phase)
+        {
+            return Some(phase);
+        }
+        link = current.source();
+    }
+    None
+}
+
+/// Whether the named phase is past the TCP dial, so the peer accepted the
+/// connection. The SSL request phase is past the dial, but its request may
+/// still be unanswered; a TLS handshake or later phase means the server
+/// answered and the handshake got further.
+const fn phase_reached_the_server(phase: compio_postgres::error::ConnectPhase) -> bool {
+    use compio_postgres::error::ConnectPhase;
+    matches!(
+        phase,
+        ConnectPhase::SslRequest
+            | ConnectPhase::TlsHandshake
+            | ConnectPhase::Startup
+            | ConnectPhase::PostConnectSetup
+    )
 }
 
 /// Whether something at the address answered with bytes the driver refused:
@@ -202,11 +238,12 @@ fn refused_as_invalid(error: &(dyn std::error::Error + 'static)) -> bool {
 /// reset or closed the connection before answering.
 ///
 /// A reset or an end of stream records no stage. A peer that accepted TLS -
-/// answered `S` - and then closed mid-handshake lands here too. The only thing
-/// in the chain that marks the handshake stage is this driver's own error
-/// kind, which reaches it only as display text ("error performing TLS
-/// handshake"), so that case is reported as a missing server although
-/// something answered.
+/// answered `S` - and then closed mid-handshake lands here too, reported as a
+/// missing server although something answered. A peer that instead STALLS is
+/// cut short by a connect deadline, and that error DOES carry the stage: the
+/// report prints the [`connect_phase`] it reached (the TLS handshake here)
+/// rather than the driver kind's display text, so the bounded case does not
+/// read as a missing server.
 fn nothing_answered(error: &(dyn std::error::Error + 'static)) -> bool {
     use std::io::ErrorKind::{
         AddrNotAvailable, BrokenPipe, ConnectionAborted, ConnectionRefused, ConnectionReset,
@@ -343,9 +380,10 @@ pub fn postgres_unreachable(dsn: &str, error: &(dyn std::error::Error + 'static)
 ///
 /// * `PostgreSQL` replied ([`server_answered`]): the server is up and objected,
 ///   and its SQLSTATE says to what. A fresh server cannot help.
-/// * A bound expired ([`timed_out`]): nothing says whether a server answered,
-///   so the report asks for the check that tells a missing server from a
-///   loaded machine instead of prescribing either remedy.
+/// * A bound expired ([`timed_out`]): the report prints the connect stage the
+///   attempt had reached ([`connect_phase`]), when the driver recorded one, and
+///   otherwise asks for the check that tells a missing server from a loaded
+///   machine instead of prescribing either remedy.
 /// * Something answered, unintelligibly ([`peer_answered_unintelligibly`]):
 ///   the address is served, by something the driver cannot talk to or behind
 ///   TLS material it does not trust. A fresh server cannot help.
@@ -370,6 +408,12 @@ pub fn postgres_unreachable(dsn: &str, error: &(dyn std::error::Error + 'static)
 pub fn connection_failure_report(dsn: &str, error: &(dyn std::error::Error + 'static)) -> String {
     let dialled = redact_dsn(dsn);
     let cause = error_chain(error);
+    // Printed wherever present. A deadline error carries it; every other cause
+    // has none and the line disappears.
+    let phase = connect_phase(error);
+    let phase_line = phase
+        .map(|phase| format!("\x20 phase:   {phase}\n"))
+        .unwrap_or_default();
 
     if server_answered(error) {
         return format!(
@@ -392,19 +436,54 @@ pub fn connection_failure_report(dsn: &str, error: &(dyn std::error::Error + 'st
     }
 
     if timed_out(error) {
+        // The phase line and the remedy it implies move together: when a phase
+        // was recorded, the prose names that stage and never asks the reader to
+        // consider a case where none was.
+        let expiry = match phase {
+            Some(compio_postgres::error::ConnectPhase::SslRequest) => {
+                "The phase is the SSL request, which is PAST `TCP dial`: the peer\n\
+                 accepted the connection and the request is sent, but the server\n\
+                 had not answered it when the bound expired. The server is\n\
+                 reachable; the bound is what ran out. If the container\n\
+                 {SERVER_SOURCE} started is up\n\
+                 (`docker ps --filter label=zeroship.testkit.dir`), the server is\n\
+                 fine and the bound expired on a machine too loaded to meet it.\n"
+                    .to_string()
+            }
+            Some(phase) if phase_reached_the_server(phase) => {
+                "A timeout WITH a phase line narrows the bound's expiry to that\n\
+                 stage of the connect; a peer that answered the SSL request has a\n\
+                 phase beyond `TCP dial`. This phase is past the dial, so the peer\n\
+                 accepted the connection and the server is reachable. If the\n\
+                 container {SERVER_SOURCE} started is up\n\
+                 (`docker ps --filter label=zeroship.testkit.dir`), the server is\n\
+                 fine and the bound expired on a machine too loaded to meet it.\n"
+                    .to_string()
+            }
+            Some(phase) => format!(
+                "A timeout WITH a phase line narrows the bound's expiry to that\n\
+                 stage of the connect, but {phase} is not past the dial: nothing\n\
+                 says the peer accepted the connection. If the container\n\
+                 {SERVER_SOURCE} started is up\n\
+                 (`docker ps --filter label=zeroship.testkit.dir`), the server is\n\
+                 fine and the bound expired on a machine too loaded to meet it.\n"
+            ),
+            None => "A timeout WITHOUT a phase line does not say whether anything\n\
+                 answered: a server down behind a port that drops packets, and a\n\
+                 server up but too slow for the bound, both end here. If the\n\
+                 container {SERVER_SOURCE} started is up\n\
+                 (`docker ps --filter label=zeroship.testkit.dir`), the server is\n\
+                 fine and the bound expired on a machine too loaded to meet it.\n"
+                .to_string(),
+        };
         return format!(
             "The connection this test requires ran out of time.\n\
              \n\
              \x20 backend: PostgreSQL\n\
              \x20 dialled: {dialled}\n\
-             \x20 error:   {cause}\n\
+             \x20 error:   {cause}\n{phase_line}\
              \n\
-             A timeout does not say whether anything answered: a server that\n\
-             is down behind a port that drops packets, and a server that is up\n\
-             but did not finish the handshake inside the bound named above,\n\
-             both end here. If the container {SERVER_SOURCE} started is up\n\
-             (`docker ps --filter label=zeroship.testkit.dir`), the server is\n\
-             fine and the bound expired on a machine too loaded to meet it.\n\
+             {expiry}\
              \n\
              There is no environment variable that makes this a skip. A database\n\
              this suite cannot reach in time is a failed run, not a green one."
@@ -418,7 +497,7 @@ pub fn connection_failure_report(dsn: &str, error: &(dyn std::error::Error + 'st
              \n\
              \x20 backend: PostgreSQL\n\
              \x20 dialled: {dialled}\n\
-             \x20 error:   {cause}\n\
+             \x20 error:   {cause}\n{phase_line}\
              \n\
              A reply arrived, so the address is served and a fresh server will\n\
              not help. The driver refused what the reply carried: a frame too\n\
@@ -439,7 +518,7 @@ pub fn connection_failure_report(dsn: &str, error: &(dyn std::error::Error + 'st
              \n\
              \x20 backend: PostgreSQL\n\
              \x20 dialled: {dialled}\n\
-             \x20 error:   {cause}\n\
+             \x20 error:   {cause}\n{phase_line}\
              \n\
              The error's kind does not say which side was invalid: something at\n\
              the address may have answered with a message the protocol does not\n\
@@ -460,7 +539,7 @@ pub fn connection_failure_report(dsn: &str, error: &(dyn std::error::Error + 'st
              \n\
              \x20 backend: PostgreSQL\n\
              \x20 dialled: {dialled}\n\
-             \x20 error:   {cause}\n\
+             \x20 error:   {cause}\n{phase_line}\
              \n\
              Nothing replied at that address. {SERVER_SOURCE} handed it out\n\
              for a server it started in Docker, so that server is gone: re-run,\n\
@@ -478,7 +557,7 @@ pub fn connection_failure_report(dsn: &str, error: &(dyn std::error::Error + 'st
          \n\
          \x20 backend: PostgreSQL\n\
          \x20 dialled: {dialled}\n\
-         \x20 error:   {cause}\n\
+         \x20 error:   {cause}\n{phase_line}\
          \n\
          Nothing in the error says a server is missing, so a fresh server\n\
          will not help. The error names what stopped the attempt: a\n\
@@ -1550,6 +1629,23 @@ mod tests {
                 &report,
                 "The connection this test requires ran out of time",
                 false,
+            );
+            assert_eq!(
+                error.connect_phase(),
+                Some(compio_postgres::error::ConnectPhase::Startup),
+                "the warm-up expiry did not record the stage it reached: {error:?}"
+            );
+            assert!(
+                report.contains("phase:   startup and authentication"),
+                "the report did not print the stage the bound expired in:\n{report}"
+            );
+            assert!(
+                !report.contains("WITHOUT a phase line"),
+                "a report that printed a phase still described the no-phase case:\n{report}"
+            );
+            assert!(
+                report.contains("This phase is past the dial"),
+                "a phase past the dial must say the peer accepted the connection:\n{report}"
             );
             assert!(
                 report.contains(&error_chain(&error)),

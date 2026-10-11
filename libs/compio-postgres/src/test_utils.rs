@@ -421,6 +421,7 @@ async fn connect_serialized_via(
         true,
         config,
         None,
+        &crate::connect::ConnectProgress::new(),
     )
     .await?;
 

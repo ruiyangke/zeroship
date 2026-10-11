@@ -339,6 +339,52 @@ pub enum PoolBudget {
     WarmUp,
 }
 
+/// The stage of connection setup an in-flight attempt had reached when a
+/// caller's deadline cut it short.
+///
+/// [`Error::connect_phase`] reports it for an error a connect deadline
+/// produced, and the rendered cause chain names it too. The variants are listed
+/// in the order an attempt reaches them.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ConnectPhase {
+    /// Resolving a configured host name to socket addresses.
+    NameResolution,
+    /// Opening the TCP connection or Unix-domain socket.
+    TcpDial,
+    /// Sending `SSLRequest`; the server's one-byte answer has not arrived.
+    /// The phase is entered as the request goes out, so it names a request
+    /// sent and still unanswered rather than a completed negotiation.
+    SslRequest,
+    /// Performing the TLS handshake over a socket whose server accepted TLS.
+    TlsHandshake,
+    /// Sending the startup packet and completing authentication.
+    Startup,
+    /// Reading startup parameters and the target-session probe after
+    /// authentication.
+    PostConnectSetup,
+}
+
+impl ConnectPhase {
+    /// A short, stable name for the phase.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NameResolution => "name resolution",
+            Self::TcpDial => "TCP dial",
+            Self::SslRequest => "SSL request negotiation",
+            Self::TlsHandshake => "TLS handshake",
+            Self::Startup => "startup and authentication",
+            Self::PostConnectSetup => "post-connect setup",
+        }
+    }
+}
+
+impl fmt::Display for ConnectPhase {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, PartialEq)]
 enum Kind {
     Io,
@@ -449,6 +495,9 @@ struct ErrorInner {
     kind: Kind,
     cause: Option<Box<dyn error::Error + Sync + Send>>,
     cancel_delivery: CancelDelivery,
+    /// The connect phase an attempt had reached, set only on the errors a
+    /// connect deadline produced. See [`Error::connect_phase`].
+    connect_phase: Option<ConnectPhase>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -465,6 +514,7 @@ impl fmt::Debug for Error {
         fmt.debug_struct("Error")
             .field("kind", &self.0.kind)
             .field("cause", &self.0.cause)
+            .field("connect_phase", &self.0.connect_phase)
             .finish()
     }
 }
@@ -591,6 +641,29 @@ impl Error {
         }
     }
 
+    /// The stage of connection setup the attempt had reached when a connect
+    /// deadline expired, if this error is one a deadline produced.
+    ///
+    /// The rendered cause chain names the same stage in words; this returns it
+    /// without parsing the message. The stage is recorded by the connect paths
+    /// that carry a marker as they move through name resolution, the dial, TLS
+    /// negotiation, startup and authentication, and post-connect setup; a
+    /// deadline that expires with no attempt in flight reports `None`.
+    ///
+    /// [`crate::Config::connect`] and the pool's own connects
+    /// ([`crate::PoolConfig::warm_up_timeout`] and
+    /// [`crate::PoolConfig::acquire_timeout`]) record it. So does
+    /// [`crate::Config::connect_raw`], which carries a marker from TLS
+    /// negotiation onward. [`crate::replication::connect_replication`] and the
+    /// cancellation connect behind [`crate::CancelToken::cancel_query`] honour
+    /// [`crate::Config::connect_timeout`] but run no marker, so a deadline they
+    /// produce reports `None` here rather than a stage. `None` is returned on
+    /// every other error too, including a refusal that never reached a phase.
+    #[must_use]
+    pub fn connect_phase(&self) -> Option<ConnectPhase> {
+        self.0.connect_phase
+    }
+
     /// Whether the connection was refused because an earlier operation on it
     /// was dropped before completing.
     ///
@@ -699,11 +772,19 @@ impl Error {
             kind,
             cause,
             cancel_delivery: CancelDelivery::Unsent,
+            connect_phase: None,
         }))
     }
 
     pub(crate) fn with_cancel_delivery(mut self, delivery: CancelDelivery) -> Error {
         self.0.cancel_delivery = delivery;
+        self
+    }
+
+    /// Record the connect phase an attempt had reached when a deadline cut it
+    /// short.
+    pub(crate) fn with_connect_phase(mut self, phase: Option<ConnectPhase>) -> Self {
+        self.0.connect_phase = phase;
         self
     }
 
@@ -962,7 +1043,24 @@ mod tests {
             assert!(!error.is_pool_closed(), "misclassified {error:?}");
             assert!(!error.is_pool_timeout(), "misclassified {error:?}");
             assert_eq!(error.pool_timeout_budget(), None, "misclassified {error:?}");
+            assert_eq!(error.connect_phase(), None, "misclassified {error:?}");
         }
+    }
+
+    /// The connect stage is carried on the error independently of its kind, so
+    /// a deadline error keeps both its budget classification and its stage, and
+    /// an error that reached no stage reports `None` rather than a guess.
+    #[test]
+    fn a_connect_phase_is_carried_independently_of_the_classification() {
+        let staged = Error::pool_timeout(PoolBudget::WarmUp, "diagnostic context".into())
+            .with_connect_phase(Some(ConnectPhase::TlsHandshake));
+        assert!(staged.is_pool_timeout());
+        assert_eq!(staged.pool_timeout_budget(), Some(PoolBudget::WarmUp));
+        assert_eq!(staged.connect_phase(), Some(ConnectPhase::TlsHandshake));
+
+        let plain = Error::connect(io::Error::other("connection refused"));
+        assert!(!plain.is_pool_timeout());
+        assert_eq!(plain.connect_phase(), None);
     }
 
     /// Build a real `ErrorResponseBody` by framing `fields` and running the
