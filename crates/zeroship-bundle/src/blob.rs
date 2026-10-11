@@ -328,14 +328,6 @@ impl LocalDiskBlobStore {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 check_existing_manifest(path, json).await
             }
-            // Windows answers a link onto an existing directory as access
-            // denied, not as taken; the key is then refused as it is on Unix.
-            Err(error)
-                if error.kind() == std::io::ErrorKind::PermissionDenied
-                    && compio::fs::symlink_metadata(path).await.is_ok_and(|meta| meta.is_dir()) =>
-            {
-                Err(not_a_regular_file(path))
-            }
             Err(error) => Err(BlobError::Io(error)),
         }
     }
@@ -385,7 +377,20 @@ fn not_a_regular_file(path: &Path) -> BlobError {
 async fn check_existing_manifest(path: &Path, json: &[u8]) -> Result<(), BlobError> {
     use compio::io::AsyncReadAtExt;
 
-    let file = compio::fs::File::open(path).await?;
+    let file = match compio::fs::File::open(path).await {
+        Ok(file) => file,
+        // A directory at the key is not a manifest. Unix opens it and the kind
+        // check below says so; Windows refuses to open a directory as a file
+        // at all, as Unix does one it may not read, and the path's kind then
+        // gives the same refusal.
+        Err(error)
+            if error.kind() == std::io::ErrorKind::PermissionDenied
+                && compio::fs::metadata(path).await.is_ok_and(|meta| meta.is_dir()) =>
+        {
+            return Err(not_a_regular_file(path));
+        }
+        Err(error) => return Err(BlobError::Io(error)),
+    };
     let meta = file.metadata().await?;
     if !meta.is_file() {
         return Err(not_a_regular_file(path));

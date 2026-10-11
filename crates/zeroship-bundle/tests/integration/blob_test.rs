@@ -571,6 +571,37 @@ async fn local_disk_a_manifest_over_budget_is_refused_on_write() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A directory at the key that the store may not open is still refused naming
+/// the key, which is how Windows treats every directory at a key: it refuses
+/// to open any directory as a file.
+#[cfg(unix)]
+#[compio::test]
+async fn local_disk_a_directory_key_that_cannot_be_opened_is_refused_naming_it() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = tmpdir();
+    let store = LocalDiskBlobStore::new(root.clone()).unwrap();
+    let app_id = AppId::mint();
+    let deploy_hash = sha256_hex(b"closed-deploy");
+    let json = br#"{"version":1,"rules":[],"assets":{}}"#;
+    let app_dir = root.join("manifests").join(app_id.as_str());
+    let key = app_dir.join(format!("{deploy_hash}.json"));
+    std::fs::create_dir_all(&key).unwrap();
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let refused = store.put_manifest(&app_id, &deploy_hash, json).await;
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let err = refused.expect_err("a directory at the key refuses the publish");
+    assert!(
+        matches!(&err, BlobError::Backend(message)
+            if message.contains(&*key.to_string_lossy()) && message.contains("not a regular file")),
+        "unexpected error: {err:?}"
+    );
+    assert_eq!(dir_entries(&app_dir), vec![format!("{deploy_hash}.json")]);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[compio::test]
 async fn local_disk_local_path_returns_sharded_path() {
     let root = tmpdir();

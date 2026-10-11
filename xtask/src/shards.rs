@@ -495,6 +495,12 @@ pub const PORTABLE: Portable = Portable {
         },
         Confined {
             binary: "zeroship-bundle::main",
+            prefix: "integration::blob_test::local_disk_a_directory_key_that_cannot_be_opened_is_refused_naming_it",
+            on: UNIX,
+            reason: "it closes a directory with a POSIX mode, which Windows does not keep",
+        },
+        Confined {
+            binary: "zeroship-bundle::main",
             prefix: "integration::blob_test::local_disk_an_unreadable_manifest_key_is_refused_and_kept",
             on: UNIX,
             reason: "it withdraws read permission through a POSIX mode, which Windows does not \
