@@ -10,12 +10,14 @@ pub mod stripe_mock;
 pub mod workflow_fleet;
 pub mod workflow_postgres;
 
-use std::net::SocketAddr;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::OnceLock;
 use std::sync::{Arc, RwLock};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use ed25519_dalek::pkcs8::EncodePrivateKey;
@@ -33,6 +35,14 @@ pub const PLATFORM_ISSUER: &str = "https://auth.zeroship.test/oauth2";
 pub const DEFAULT_EXECUTION_ZONE_ID: &str = "ezn_default000000000000000000";
 const PLATFORM_KID: &str = "platform-control-test-kid";
 const PLATFORM_KEY_SEED: u8 = 47;
+
+/// The bound every JWKS readiness probe is held to.
+///
+/// A named fixture guard, not a production timeout: a mock whose accept loop
+/// has not begun serving, or that stalls mid-response, fails by name rather
+/// than hanging the run. It covers the connect as well as the exchange, so an
+/// unroutable address fails by name too.
+pub const JWKS_READINESS_BOUND: Duration = Duration::from_secs(30);
 
 /// The migrated working database every test process of a worktree shares.
 ///
@@ -113,17 +123,20 @@ pub fn refuse_missing_backend(backend: &str, problem: &str, remedy: &str) -> ! {
     )
 }
 
+/// A platform JWKS mock that publishes one Ed25519 key.
 pub struct PlatformJwks {
     address: SocketAddr,
     base: String,
+    requests: Arc<AtomicUsize>,
     shutdown: Option<mpsc::Sender<()>>,
     thread: Option<thread::JoinHandle<()>>,
 }
 
 impl PlatformJwks {
     pub fn start() -> Self {
-        let body = Arc::new(RwLock::new(platform_jwks_body()));
-        let factory_body = body.clone();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let factory_state: (Arc<RwLock<String>>, Arc<AtomicUsize>) =
+            (Arc::new(RwLock::new(platform_jwks_body())), Arc::clone(&requests));
         let (started_tx, started_rx) = mpsc::channel();
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
         let thread = thread::spawn(move || {
@@ -133,11 +146,11 @@ impl PlatformJwks {
                 .build(ntex::rt::DefaultRuntime)
                 .block_on(async move {
                     let server = web::test::server(move || {
-                        let body = factory_body.clone();
+                        let state = factory_state.clone();
                         async move {
                             web::App::new()
                                 .middleware(live::CloseConnections)
-                                .state(body)
+                                .state(state)
                                 .service(
                                     web::resource("/.well-known/jwks.json")
                                         .route(web::get().to(platform_jwks_handler)),
@@ -152,9 +165,15 @@ impl PlatformJwks {
                 });
         });
         let addr = started_rx.recv().expect("platform jwks mock starts");
+        // The bound address is not proof the server serves. Its accept loop
+        // runs on its own thread, and a provider pointed at a server that has
+        // not begun serving verifies a valid bearer against a key it cannot
+        // fetch - a refusal that names the token rather than the fixture.
+        Self::await_key(addr, "/.well-known/jwks.json", PLATFORM_KID);
         Self {
             address: addr,
             base: format!("http://{addr}"),
+            requests,
             shutdown: Some(shutdown_tx),
             thread: Some(thread),
         }
@@ -167,6 +186,146 @@ impl PlatformJwks {
     pub fn jwks_url(&self) -> String {
         format!("{}/.well-known/jwks.json", self.base)
     }
+
+    /// How many JWKS requests this mock has served. Readiness is one of them.
+    pub fn requests(&self) -> usize {
+        self.requests.load(Ordering::SeqCst)
+    }
+
+    /// Block until the JWKS endpoint at `path` on `address` answers with a
+    /// document naming `kid`.
+    ///
+    /// A mock's bound address is not proof it is serving. Its accept loop runs
+    /// on its own thread, and a provider pointed at a server that has not begun
+    /// serving verifies a valid bearer against a key it cannot fetch. Making
+    /// readiness a condition the fixture observes keeps that failure out of the
+    /// request path.
+    ///
+    /// The probe reads EXACTLY ONE response and stops: the status line and
+    /// headers to the blank line, then the `Content-Length` body bytes. It
+    /// never waits for the server to close. Reading to EOF instead would make
+    /// the probe depend on the server closing the connection, and a mock that
+    /// answers and keeps the socket open would park the probe until the bound
+    /// expired and then fail with `WouldBlock` - a failure that names the probe
+    /// rather than the server.
+    ///
+    /// # Panics
+    /// When the connect, the probe write or the read does not complete within
+    /// [`JWKS_READINESS_BOUND`], when the server does not answer 200, when it
+    /// answers without `kid`, or when its response is chunked or carries no
+    /// `Content-Length` (there is no point at which reading one response is
+    /// known to be complete). The bound is a fixture guard - a mock that never
+    /// answers fails by name (`connect the platform JWKS mock for its readiness
+    /// probe`) rather than hanging the run. It changes no production timeout.
+    pub fn await_key(address: SocketAddr, path: &str, kid: &str) {
+        let mut stream = TcpStream::connect_timeout(&address, JWKS_READINESS_BOUND)
+            .expect("connect the platform JWKS mock for its readiness probe");
+        stream
+            .set_read_timeout(Some(JWKS_READINESS_BOUND))
+            .expect("bound the platform JWKS readiness probe");
+        stream
+            .set_write_timeout(Some(JWKS_READINESS_BOUND))
+            .expect("bound the platform JWKS readiness probe");
+        stream
+            .write_all(
+                format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .expect("send the platform JWKS readiness probe");
+        let (status_line, body) = read_one_http_response(&mut stream);
+        assert!(
+            status_line.starts_with("HTTP/1.1 200"),
+            "the platform JWKS mock at {address} answered its readiness probe without 200: {status_line}"
+        );
+        assert!(
+            body.contains(kid),
+            "the platform JWKS mock at {address} answered its readiness probe without key {kid}: {body}"
+        );
+    }
+}
+
+/// Read exactly one HTTP/1.1 response from `stream`.
+///
+/// Returns the response's status line and body, and stops at the end of that
+/// response. Reading to EOF instead makes the probe depend on the server
+/// closing the connection: a server that has answered but keeps the socket open
+/// leaves the read parked until the fixture guard expires and then fails with
+/// `WouldBlock`, a failure that names the probe rather than the server. So the
+/// reader takes the response's own `Content-Length` and reads exactly that many
+/// bytes after the header block.
+///
+/// # Panics
+/// When the connection closes before the headers or the declared body arrive,
+/// or when the header block carries no `Content-Length` or frames the body with
+/// `Transfer-Encoding: chunked`. The last two are refused by name: neither
+/// tells the probe where one response ends, and the probe does not guess.
+fn read_one_http_response(stream: &mut TcpStream) -> (String, String) {
+    // `read_exact` continues past `ErrorKind::Interrupted`, the same way the
+    // std read helpers do; a bare `read` would surface a signal delivered mid
+    // response as a readiness failure. One byte at a time is enough for a
+    // response whose header block is the only part of unknown length.
+    let mut head = Vec::new();
+    while !head.ends_with(b"\r\n\r\n") {
+        let mut byte = [0_u8; 1];
+        stream.read_exact(&mut byte).unwrap_or_else(|error| {
+            panic!(
+                "the platform JWKS mock did not complete its readiness response headers: {error}; \
+                 received so far: {}",
+                String::from_utf8_lossy(&head)
+            )
+        });
+        head.push(byte[0]);
+    }
+    let head = String::from_utf8(head).expect("the platform JWKS readiness response headers are UTF-8");
+    let length = declared_content_length(&head);
+    let mut body = vec![0_u8; length];
+    stream.read_exact(&mut body).unwrap_or_else(|error| {
+        panic!(
+            "the platform JWKS mock closed before sending its {length} declared readiness response \
+             body bytes: {error}"
+        )
+    });
+    let status_line = head.lines().next().unwrap_or_default().to_owned();
+    (
+        status_line,
+        String::from_utf8(body).expect("the platform JWKS readiness response body is UTF-8"),
+    )
+}
+
+/// The body length a response's header block declares.
+///
+/// Refuses a header block that frames its body with `Transfer-Encoding:
+/// chunked` or carries no `Content-Length`, naming what it saw. The probe reads
+/// exactly one response and stops, and neither shape says where that response
+/// ends.
+fn declared_content_length(head: &str) -> usize {
+    let mut declared = None;
+    for line in head.lines().skip(1) {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let name = name.trim().to_ascii_lowercase();
+        let value = value.trim();
+        if name == "transfer-encoding" && value.to_ascii_lowercase().contains("chunked") {
+            panic!(
+                "the platform JWKS readiness response is chunked, so reading exactly one response \
+                 has no end to stop at: {head}"
+            );
+        }
+        if name == "content-length" {
+            declared = Some(value.parse::<usize>().unwrap_or_else(|_| {
+                panic!(
+                    "the platform JWKS readiness response's Content-Length is not a number: {value:?}: {head}"
+                )
+            }));
+        }
+    }
+    declared.unwrap_or_else(|| {
+        panic!(
+            "the platform JWKS readiness response carries no Content-Length, so reading exactly \
+             one response has no end to stop at: {head}"
+        )
+    })
 }
 
 impl Drop for PlatformJwks {
@@ -180,7 +339,11 @@ impl Drop for PlatformJwks {
     }
 }
 
-async fn platform_jwks_handler(body: web::types::State<Arc<RwLock<String>>>) -> HttpResponse {
+async fn platform_jwks_handler(
+    state: web::types::State<(Arc<RwLock<String>>, Arc<AtomicUsize>)>,
+) -> HttpResponse {
+    let (body, requests) = &*state;
+    requests.fetch_add(1, Ordering::SeqCst);
     HttpResponse::Ok()
         .content_type("application/json")
         .body(body.read().expect("jwks body lock").clone())
@@ -203,6 +366,30 @@ pub fn platform_jwks_url() -> String {
     let jwks = JWKS.get_or_init(PlatformJwks::start);
     live::register_listener(jwks.address());
     jwks.jwks_url()
+}
+
+/// A platform auth provider whose JWKS cache already holds the mock's key.
+///
+/// [`platform_auth_provider`](zeroship_control::platform_auth_provider) alone
+/// builds a provider that fetches the key set on its first bearer and bounds
+/// that fetch. A fixture that hands one to a request lets the request path
+/// depend on the mock answering then, and a fetch that cannot complete fails
+/// the request closed with a 401 that names the token rather than the key
+/// server. This verifies one valid token through the real provider before
+/// returning, so the cache holds the key and no request fetches it.
+///
+/// It relies on the provider's JWKS cache TTL: the cache refetches once the TTL
+/// passes, so a case that outlives the TTL fetches again, and a key server that
+/// has stopped would then turn a valid bearer back into a 401.
+pub async fn platform_auth_provider_primed() -> Arc<zeroship_core::auth_provider::AuthProvider> {
+    let provider =
+        zeroship_control::platform_auth_provider(PLATFORM_ISSUER, Some(platform_jwks_url()));
+    let probe = platform_token_for_client(&UserId::mint(), "apps:read", "zeroship-cli");
+    provider
+        .verify_token(&probe)
+        .await
+        .expect("the platform JWKS mock serves its key to the provider");
+    provider
 }
 
 /// The console BFF's client id. Distinct from `zeroship-cli` on purpose: it is

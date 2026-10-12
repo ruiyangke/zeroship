@@ -88,10 +88,7 @@ impl Fixture {
             expected_oauth_audience: "control.zeroship.ai".to_string(),
             static_policies: zeroship_authz::load_platform_policies()
                 .expect("bundled authz policies parse"),
-            auth_provider: zeroship_control::platform_auth_provider(
-                "https://auth.zeroship.test/oauth2",
-                Some(crate::support::platform_jwks_url()),
-            ),
+            auth_provider: crate::support::platform_auth_provider_primed().await,
             // A real, non-zero pairwise salt so the disconnect-app cascade
             // writes a `token_revocations` marker under a `pws_` the test can
             // re-derive with the SAME salt + sector (Batch A fix 4).

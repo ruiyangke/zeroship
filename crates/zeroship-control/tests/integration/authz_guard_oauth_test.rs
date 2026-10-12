@@ -1,6 +1,7 @@
 //! Regression coverage for AuthzGuard's platform OAuth bearer branch.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
 use std::thread;
@@ -66,7 +67,7 @@ struct Fixture {
     app_id: Option<AppId>,
     blob_root: PathBuf,
     deploy_tmp_dir: PathBuf,
-    _jwks: Option<PlatformJwksMock>,
+    jwks: Option<PlatformJwksMock>,
     _op: Option<PlatformOp>,
 }
 
@@ -139,6 +140,19 @@ impl Drop for Fixture {
 async fn fixture_with_platform(label: &str, user_id: &UserId) -> Fixture {
     let jwks = PlatformJwksMock::start();
     let auth_provider = platform_auth_provider(jwks.jwks_url());
+    // Fetch the platform JWKS through the provider before any request can. A
+    // provider that still needs this fetch at request time fails the request
+    // closed with a 401 that names the token, not the unavailable key server;
+    // priming here makes the mock's readiness and the cache a fixture
+    // condition, and a key server that cannot answer fails this fixture by
+    // name. It relies on the provider's JWKS cache TTL: the cache refetches
+    // once the TTL passes, so a case that outlives the TTL fetches again, and a
+    // key server that has stopped would then turn a valid bearer into a 401.
+    let probe = platform_token(user_id, "apps:read", PLATFORM_ISSUER);
+    auth_provider
+        .verify_token(&probe)
+        .await
+        .expect("the platform JWKS mock serves its key to the provider");
     fixture_with_auth_provider(label, user_id, auth_provider, Some(jwks)).await
 }
 
@@ -216,7 +230,7 @@ async fn fixture_with_auth_provider(
         app_id: None,
         blob_root,
         deploy_tmp_dir,
-        _jwks: jwks,
+        jwks,
         _op: None,
     }
 }
@@ -464,14 +478,16 @@ fn platform_jwks_body() -> String {
 
 struct PlatformJwksMock {
     base: String,
+    requests: Arc<AtomicUsize>,
     shutdown: Option<mpsc::Sender<()>>,
     thread: Option<thread::JoinHandle<()>>,
 }
 
 impl PlatformJwksMock {
     fn start() -> Self {
-        let body = Arc::new(RwLock::new(platform_jwks_body()));
-        let factory_body = body.clone();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let factory_state: (Arc<RwLock<String>>, Arc<AtomicUsize>) =
+            (Arc::new(RwLock::new(platform_jwks_body())), Arc::clone(&requests));
         let (started_tx, started_rx) = mpsc::channel();
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
         let thread = thread::spawn(move || {
@@ -481,11 +497,11 @@ impl PlatformJwksMock {
                 .build(ntex::rt::DefaultRuntime)
                 .block_on(async move {
                     let server = web::test::server(move || {
-                        let body = factory_body.clone();
+                        let state = factory_state.clone();
                         async move {
                             web::App::new()
                                 .middleware(crate::support::live::CloseConnections)
-                                .state(body)
+                                .state(state)
                                 .service(
                                     web::resource("/.well-known/jwks.json")
                                         .route(web::get().to(platform_jwks_handler)),
@@ -501,8 +517,12 @@ impl PlatformJwksMock {
         });
         let addr = started_rx.recv().expect("platform jwks mock starts");
         crate::support::live::register_listener(addr);
+        // The bound address is not proof the server serves, so prove the key is
+        // published before the address is handed to a provider.
+        crate::support::PlatformJwks::await_key(addr, "/.well-known/jwks.json", PLATFORM_KID);
         Self {
             base: format!("http://{addr}"),
+            requests,
             shutdown: Some(shutdown_tx),
             thread: Some(thread),
         }
@@ -510,6 +530,11 @@ impl PlatformJwksMock {
 
     fn jwks_url(&self) -> String {
         format!("{}/.well-known/jwks.json", self.base)
+    }
+
+    /// How many JWKS requests this mock has served. Readiness is one of them.
+    fn requests(&self) -> usize {
+        self.requests.load(Ordering::SeqCst)
     }
 }
 
@@ -524,7 +549,11 @@ impl Drop for PlatformJwksMock {
     }
 }
 
-async fn platform_jwks_handler(body: web::types::State<Arc<RwLock<String>>>) -> HttpResponse {
+async fn platform_jwks_handler(
+    state: web::types::State<(Arc<RwLock<String>>, Arc<AtomicUsize>)>,
+) -> HttpResponse {
+    let (body, requests) = &*state;
+    requests.fetch_add(1, Ordering::SeqCst);
     HttpResponse::Ok()
         .content_type("application/json")
         .body(body.read().expect("jwks body lock").clone())
@@ -652,7 +681,7 @@ impl PlatformOp {
                         }
                     })
                     .await;
-                    let _ = started_tx.send((server.addr(), issuer_url));
+                    let _ = started_tx.send((server.addr(), issuer_url, signing_kid.clone()));
                     loop {
                         match shutdown_rx.try_recv() {
                             Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
@@ -675,9 +704,14 @@ impl PlatformOp {
                     let _ = driver.cancel().await;
                 });
         });
-        let (addr, issuer) = started_rx
+        let (addr, issuer, signing_kid) = started_rx
             .recv_timeout(StdDuration::from_secs(15))
             .expect("platform OP starts within 15 seconds");
+        // The bound address is not proof the OP serves its key set. Read the
+        // JWKS back and assert the OP's own signing kid is published before the
+        // address is handed to a provider; a provider that fetches an unready
+        // key set rejects a valid bearer as an indistinguishable 401.
+        crate::support::PlatformJwks::await_key(addr, "/oauth2/.well-known/jwks.json", &signing_kid);
         crate::support::live::register_listener(addr);
         Self {
             base: format!("http://{addr}"),
@@ -902,6 +936,16 @@ async fn op_cli_device_token_authorizes_control_endpoint() {
          nothing recalls a bearer this long-lived except the token_revocations marker"
     );
 
+    // Prime the provider's key cache with the live OP token before the control
+    // service can, so no request fetches the OP's key at request time. The
+    // cache refetches once its TTL passes, so a case that outlived the TTL
+    // would fetch again, and a stopped OP would then reject a valid bearer.
+    fx.state
+        .auth_provider
+        .verify_token(access_token)
+        .await
+        .expect("the platform OP serves its key to the provider");
+
     let control = init_control!(fx);
     let deploy_request = test::TestRequest::post()
         .uri(&format!("/raw-app/{}/deploy-check", app_id.as_str()))
@@ -982,6 +1026,42 @@ async fn platform_issuer_accepts_valid_token_and_rejects_unknown_issuer() {
     let status = test::call_service(&app, req).await.status();
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
+    fx.cleanup().await;
+}
+
+/// `PlatformJwksMock::start` must not hand out an address before the server has
+/// served its key. Without that, a provider can verify a valid bearer against a
+/// key it cannot fetch, and the request 401s for a reason that is not the token.
+#[compio::test(crate = "crate::support::live")]
+async fn the_platform_jwks_mock_serves_its_key_before_start_returns() {
+    let mock = PlatformJwksMock::start();
+    assert!(
+        mock.requests() >= 1,
+        "the platform JWKS mock was handed out before it had served its key"
+    );
+}
+
+/// A fixture must prime the provider's key cache before any request, so a slow
+/// or stopped key server cannot turn a valid bearer into a 401. The proof is
+/// the answer with the server GONE: a request that still needed the mock's
+/// first response would fail closed here, while a primed provider answers from
+/// the key it already holds.
+#[compio::test(crate = "crate::support::live")]
+async fn a_primed_provider_verifies_a_valid_bearer_with_the_jwks_server_stopped() {
+    let user_id = UserId::mint();
+    let mut fx = fixture_with_platform("jwks-primed", &user_id).await;
+    fx.jwks = None;
+    let app = init_control!(fx);
+    let req = test::TestRequest::get()
+        .uri("/api/apps")
+        .header("authorization", bearer_for_scope(&user_id, "apps:read"))
+        .to_request();
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a valid bearer was rejected after the key server stopped, so the fixture never primed the provider's key cache"
+    );
     fx.cleanup().await;
 }
 

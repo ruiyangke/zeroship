@@ -426,6 +426,21 @@ fn the_platform_jwks_server_closes_each_connection() {
         });
 }
 
+/// A mock's bound address is not proof it serves. `start` proves the key is
+/// published before it hands the address out, so a provider cannot verify a
+/// valid bearer against a server that has not begun serving.
+#[test]
+fn a_platform_jwks_server_serves_its_key_before_start_returns() {
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let jwks = crate::support::PlatformJwks::start();
+    assert!(
+        jwks.requests() >= 1,
+        "a platform JWKS server was handed out before it had served its key"
+    );
+}
+
 /// A task the case owns that ended in a panic fails the case, rather than
 /// being dropped unseen with the rest.
 #[test]

@@ -351,10 +351,7 @@ async fn build_fixture() -> Fixture {
             expected_oauth_audience: "control.zeroship.ai".to_string(),
             static_policies: zeroship_authz::load_platform_policies()
                 .expect("bundled authz policies parse"),
-            auth_provider: zeroship_control::platform_auth_provider(
-                "https://auth.zeroship.test/oauth2",
-                Some(crate::support::platform_jwks_url()),
-            ),
+            auth_provider: crate::support::platform_auth_provider_primed().await,
             provider_registry: zeroship_control::metering::provider::builtin_registry(),
             billing_stack: zeroship_control::metering::provider::BillingStack::for_tests(),
             billing_stream: None,

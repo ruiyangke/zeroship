@@ -38,6 +38,7 @@ mod erasure_preflight_test;
 mod fleet_sweep_isolation;
 mod internal_service_auth_test;
 mod join_signer_import_test;
+mod jwks_readiness_probe_test;
 mod oauth_clients_test;
 mod oauth_grants_handlers_test;
 mod organizations_test;

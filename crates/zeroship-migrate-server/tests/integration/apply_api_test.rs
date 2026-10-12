@@ -1,10 +1,12 @@
 
 use std::collections::{HashMap, HashSet};
-use std::net::IpAddr;
+use std::io::{Read, Write};
+use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock, RwLock};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -870,14 +872,16 @@ const CONSOLE_CLIENT_ID: &str = "zeroship-console";
 /// than a shared module, because that one is a `tests/common` of another crate.
 struct PlatformJwks {
     base: String,
+    requests: Arc<AtomicUsize>,
     shutdown: Option<mpsc::Sender<()>>,
     thread: Option<thread::JoinHandle<()>>,
 }
 
 impl PlatformJwks {
     fn start() -> Self {
-        let body = Arc::new(RwLock::new(platform_jwks_body()));
-        let factory_body = body.clone();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let factory_state: (Arc<RwLock<String>>, Arc<AtomicUsize>) =
+            (Arc::new(RwLock::new(platform_jwks_body())), Arc::clone(&requests));
         let (started_tx, started_rx) = mpsc::channel();
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
         let thread = thread::spawn(move || {
@@ -887,9 +891,9 @@ impl PlatformJwks {
                 .build(ntex::rt::DefaultRuntime)
                 .block_on(async move {
                     let server = web::test::server(move || {
-                        let body = factory_body.clone();
+                        let state = factory_state.clone();
                         async move {
-                            web::App::new().state(body).service(
+                            web::App::new().state(state).service(
                                 web::resource("/.well-known/jwks.json")
                                     .route(web::get().to(platform_jwks_handler)),
                             )
@@ -903,8 +907,10 @@ impl PlatformJwks {
                 });
         });
         let addr = started_rx.recv().expect("platform jwks mock starts");
+        await_jwks(addr, PLATFORM_KID);
         Self {
             base: format!("http://{addr}"),
+            requests,
             shutdown: Some(shutdown_tx),
             thread: Some(thread),
         }
@@ -912,6 +918,11 @@ impl PlatformJwks {
 
     fn jwks_url(&self) -> String {
         format!("{}/.well-known/jwks.json", self.base)
+    }
+
+    /// How many JWKS requests this mock has served. Readiness is one of them.
+    fn requests(&self) -> usize {
+        self.requests.load(Ordering::SeqCst)
     }
 }
 
@@ -926,10 +937,152 @@ impl Drop for PlatformJwks {
     }
 }
 
-async fn platform_jwks_handler(body: web::types::State<Arc<RwLock<String>>>) -> HttpResponse {
+async fn platform_jwks_handler(
+    state: web::types::State<(Arc<RwLock<String>>, Arc<AtomicUsize>)>,
+) -> HttpResponse {
+    let (body, requests) = &*state;
+    requests.fetch_add(1, Ordering::SeqCst);
     HttpResponse::Ok()
         .content_type("application/json")
         .body(body.read().expect("jwks body lock").clone())
+}
+
+/// The bound every JWKS readiness probe is held to.
+///
+/// A named fixture guard, not a production timeout: a mock whose accept loop
+/// has not begun serving, or that stalls mid-response, fails by name rather
+/// than hanging the run. It covers the connect as well as the exchange.
+const JWKS_READINESS_BOUND: Duration = Duration::from_secs(30);
+
+/// Read a mock's published key set back before its address is handed out.
+///
+/// A bound address is not proof the mock serves. Its accept loop runs on its
+/// own thread, and `real_authenticator` builds a provider that fetches the key
+/// set on its first bearer under a bounded fetch, so a mock that has not
+/// answered yet rejects a valid bearer as an indistinguishable 401. This
+/// blocking loopback read makes readiness a condition `start` waits on.
+///
+/// The probe reads EXACTLY ONE response and stops: the status line and headers
+/// to the blank line, then the `Content-Length` body bytes. It never waits for
+/// the server to close. Reading to EOF instead would make the probe depend on
+/// the server closing the connection, and a mock that answers and keeps the
+/// socket open would park the probe until the bound expired and then fail with
+/// `WouldBlock` - a failure that names the probe rather than the server.
+///
+/// # Panics
+/// When the connect, the probe write or the read does not complete within
+/// [`JWKS_READINESS_BOUND`], when the mock does not answer 200, when it answers
+/// without `kid`, or when its response is chunked or carries no
+/// `Content-Length` (there is no point at which reading one response is known
+/// to be complete). The bound is a fixture guard - a mock that never answers
+/// fails by name rather than hanging the run.
+fn await_jwks(address: SocketAddr, kid: &str) {
+    let mut stream = TcpStream::connect_timeout(&address, JWKS_READINESS_BOUND)
+        .expect("connect the platform JWKS mock for its readiness probe");
+    stream
+        .set_read_timeout(Some(JWKS_READINESS_BOUND))
+        .expect("bound the platform JWKS readiness probe");
+    stream
+        .set_write_timeout(Some(JWKS_READINESS_BOUND))
+        .expect("bound the platform JWKS readiness probe");
+    stream
+        .write_all(
+            b"GET /.well-known/jwks.json HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .expect("send the platform JWKS readiness probe");
+    let (status_line, body) = read_one_http_response(&mut stream);
+    assert!(
+        status_line.starts_with("HTTP/1.1 200"),
+        "the platform JWKS mock at {address} answered its readiness probe without 200: {status_line}"
+    );
+    assert!(
+        body.contains(kid),
+        "the platform JWKS mock at {address} answered its readiness probe without key {kid}: {body}"
+    );
+}
+
+/// Read exactly one HTTP/1.1 response from `stream`.
+///
+/// Returns the response's status line and body, and stops at the end of that
+/// response. Reading to EOF instead makes the probe depend on the server
+/// closing the connection: a server that has answered but keeps the socket open
+/// leaves the read parked until the fixture guard expires and then fails with
+/// `WouldBlock`, a failure that names the probe rather than the server. So the
+/// reader takes the response's own `Content-Length` and reads exactly that many
+/// bytes after the header block.
+///
+/// # Panics
+/// When the connection closes before the headers or the declared body arrive,
+/// or when the header block carries no `Content-Length` or frames the body with
+/// `Transfer-Encoding: chunked`. The last two are refused by name: neither
+/// tells the probe where one response ends, and the probe does not guess.
+fn read_one_http_response(stream: &mut TcpStream) -> (String, String) {
+    // `read_exact` continues past `ErrorKind::Interrupted`, the same way the
+    // std read helpers do; a bare `read` would surface a signal delivered mid
+    // response as a readiness failure. One byte at a time is enough for a
+    // response whose header block is the only part of unknown length.
+    let mut head = Vec::new();
+    while !head.ends_with(b"\r\n\r\n") {
+        let mut byte = [0_u8; 1];
+        stream.read_exact(&mut byte).unwrap_or_else(|error| {
+            panic!(
+                "the platform JWKS mock did not complete its readiness response headers: {error}; \
+                 received so far: {}",
+                String::from_utf8_lossy(&head)
+            )
+        });
+        head.push(byte[0]);
+    }
+    let head = String::from_utf8(head).expect("the platform JWKS readiness response headers are UTF-8");
+    let length = declared_content_length(&head);
+    let mut body = vec![0_u8; length];
+    stream.read_exact(&mut body).unwrap_or_else(|error| {
+        panic!(
+            "the platform JWKS mock closed before sending its {length} declared readiness response \
+             body bytes: {error}"
+        )
+    });
+    let status_line = head.lines().next().unwrap_or_default().to_owned();
+    (
+        status_line,
+        String::from_utf8(body).expect("the platform JWKS readiness response body is UTF-8"),
+    )
+}
+
+/// The body length a response's header block declares.
+///
+/// Refuses a header block that frames its body with `Transfer-Encoding:
+/// chunked` or carries no `Content-Length`, naming what it saw. The probe reads
+/// exactly one response and stops, and neither shape says where that response
+/// ends.
+fn declared_content_length(head: &str) -> usize {
+    let mut declared = None;
+    for line in head.lines().skip(1) {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let name = name.trim().to_ascii_lowercase();
+        let value = value.trim();
+        if name == "transfer-encoding" && value.to_ascii_lowercase().contains("chunked") {
+            panic!(
+                "the platform JWKS readiness response is chunked, so reading exactly one response \
+                 has no end to stop at: {head}"
+            );
+        }
+        if name == "content-length" {
+            declared = Some(value.parse::<usize>().unwrap_or_else(|_| {
+                panic!(
+                    "the platform JWKS readiness response's Content-Length is not a number: {value:?}: {head}"
+                )
+            }));
+        }
+    }
+    declared.unwrap_or_else(|| {
+        panic!(
+            "the platform JWKS readiness response carries no Content-Length, so reading exactly \
+             one response has no end to stop at: {head}"
+        )
+    })
 }
 
 /// One JWKS server per test binary, started on first use. Held in a `OnceLock`
@@ -938,6 +1091,82 @@ async fn platform_jwks_handler(body: web::types::State<Arc<RwLock<String>>>) -> 
 fn platform_jwks_url() -> String {
     static JWKS: OnceLock<PlatformJwks> = OnceLock::new();
     JWKS.get_or_init(PlatformJwks::start).jwks_url()
+}
+
+/// `PlatformJwks::start` must not hand out an address before the mock has
+/// served its key. Without that, `real_authenticator`'s provider can verify a
+/// valid bearer against a key it cannot fetch, and the request 401s for a
+/// reason that is not the token.
+#[test]
+fn the_platform_jwks_mock_serves_its_key_before_start_returns() {
+    let mock = PlatformJwks::start();
+    assert!(
+        mock.requests() >= 1,
+        "the platform JWKS mock was handed out before it had served its key"
+    );
+}
+
+/// The key id the regression's loopback server publishes and the probe looks
+/// for.
+const PROBE_KID: &str = "apply-api-readiness-probe-kid";
+
+/// A loopback server that answers ONE valid JWKS response with a
+/// `Content-Length`, then holds the connection open without closing it.
+///
+/// The returned sender releases the held connection; the join handle is what
+/// proves the server thread ended. Nothing closes the connection until the
+/// caller sends, so a probe that reads to EOF cannot return.
+fn answering_server_that_stays_open() -> (SocketAddr, mpsc::Sender<()>, thread::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind a loopback readiness server");
+    let address = listener.local_addr().expect("the loopback server's address");
+    let (release_tx, release_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept the readiness probe");
+        let mut request = Vec::new();
+        let mut scratch = [0_u8; 1024];
+        loop {
+            let read = socket.read(&mut scratch).expect("read the probe request");
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&scratch[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let body = format!("{{\"keys\":[{{\"kid\":\"{PROBE_KID}\"}}]}}");
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        socket
+            .write_all(response.as_bytes())
+            .expect("write the readiness response");
+        socket.flush().expect("flush the readiness response");
+        // The connection stays open: the probe must not need EOF to return.
+        let _ = release_rx.recv();
+        drop(socket);
+    });
+    (address, release_tx, server)
+}
+
+/// The probe returns against a server that answered and never closed, and it
+/// returns within its guard rather than waiting for an EOF that never comes.
+#[test]
+fn the_readiness_probe_reads_one_response_from_a_server_that_stays_open() {
+    let (address, release, server) = answering_server_that_stays_open();
+    let started = std::time::Instant::now();
+    await_jwks(address, PROBE_KID);
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < JWKS_READINESS_BOUND,
+        "the readiness probe took {elapsed:?} against a server that had already answered; \
+         it waited for the connection to close instead of reading one response"
+    );
+    let _ = release.send(());
+    server.join().expect("the loopback readiness server joins");
 }
 
 fn platform_encoding_key() -> EncodingKey {
@@ -988,6 +1217,13 @@ fn platform_token_for_client(subject: &UserId, client_id: &str, scope: &str) -> 
     encode(&header, &claims, &platform_encoding_key()).expect("platform token")
 }
 
+/// The real control-plane authenticator, its platform provider pointed at the
+/// process-wide JWKS mock.
+///
+/// This constructor is sync, so it cannot prime the provider's key cache; the
+/// readiness probe in `PlatformJwks::start` is what carries the guarantee
+/// instead, by proving the mock serves its key before the provider's first
+/// fetch - which runs on the request path - can be made.
 fn real_authenticator(conn: Client) -> ControlPlaneAuthenticator {
     let auth_provider = Arc::new(zeroship_core::auth_provider::AuthProvider::platform(
         zeroship_core::auth_provider::PlatformProvider::new(

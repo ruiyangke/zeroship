@@ -106,10 +106,7 @@ async fn build_state(db_url: &str, label: &str) -> Fixture {
         expected_oauth_audience: "control.zeroship.ai".to_string(),
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
-        auth_provider: zeroship_control::platform_auth_provider(
-            "https://auth.zeroship.test/oauth2",
-            Some(crate::support::platform_jwks_url()),
-        ),
+        auth_provider: crate::support::platform_auth_provider_primed().await,
         // No platform deploy-token mint here: that is control's OUTBOUND
         // destination for the device flow, and no fixture below drives one.
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
