@@ -1430,57 +1430,97 @@ async fn postgres_a_maintenance_claim_waits_for_a_locked_app() {
 }
 
 /// Every give-back a claim makes ends by the claim's give-back deadline, so
-/// none can push the reply past the caller's wait. Here that deadline is the
-/// attempt deadline itself, and the host's admission never answers: the
-/// deadline cuts the admission, no time is left for the give-back, and the
-/// row is left to lapse rather than returned late. The control is the same
-/// grant turned away at once, whose give-back returns the row.
+/// none can push the reply past the caller's wait.
+///
+/// The attempt deadline is far enough away that no step of the claim races it:
+/// the grant exists and its admission is entered however long the claim's own
+/// reads take. The give-back deadline alone decides the give-back, and it has
+/// already passed by the time the host turns the grant away, so the give-back
+/// is refused and the row is left leased to lapse rather than returned late.
+/// The admission is entered and held until the test has seen that, so the
+/// give-back it drives is ordered after the grant rather than after a
+/// wall-clock window. The control is the same grant turned away with its
+/// give-back deadline ahead, which returns its row.
 async fn give_back_past_its_deadline(fixture: &Fixture) {
-    let zone = Zone::new(fixture).await;
-    let (cursor, apps) = zone.apps(2).await;
-    let [cut, prompt] = <[AppId; 2]>::try_from(apps).unwrap();
-    let stranded = zone.job(&cut).await;
-    let returned = zone.job(&prompt).await;
+    let cut = Zone::new(fixture).await;
+    let (cursor, apps) = cut.apps(1).await;
+    let stranded = cut.job(&apps[0]).await;
     let worker = WorkerId::mint();
-    let ask = request(2, Some(&cursor), Vec::new());
-    for (app, job, stalls) in [(&cut, &stranded, true), (&prompt, &returned, false)] {
-        let claim = ZoneClaim {
-            worker: &worker,
-            zone: &zone.id,
-            request: &ask,
-            deadline: ClaimDeadline::at(Instant::now() + Duration::from_millis(500)),
-        };
-        let (batch, report): (ClaimBatch<()>, ClaimReport) = zone
-            .coordinator
-            .claim_in_zone(
-                &claim,
-                zone.policies.as_ref(),
-                || ready(Ok(worker.clone())),
-                |grant| {
-                    let stall = stalls && grant.delivery().job.app_id == *app;
-                    async move {
-                        if stall {
-                            pending::<()>().await;
-                        }
-                        Admission::GiveBack {
-                            reason: ClaimSkipReason::Deferred,
-                            defer: zeroship_workflow_manager::GiveBack::Unsent,
-                        }
-                    }
-                },
-            )
-            .await
-            .unwrap();
-        assert!(batch.grants.is_empty(), "{batch:?}");
-        let row = stored(fixture, job).await;
-        if stalls {
-            assert_eq!(report.lapsing, [(app.clone(), Error::Timeout)], "{report:?}");
-            assert_eq!(row["state"], value!("leased"));
-        } else {
-            assert!(report.lapsing.is_empty(), "{report:?}");
-            assert_eq!(row["state"], value!("ready"));
-        }
-    }
+    let ask = request(1, Some(&cursor), Vec::new());
+    let (entered_tx, entered_rx) = futures::channel::oneshot::channel();
+    let (resume_tx, resume_rx) = futures::channel::oneshot::channel();
+    let entered = std::cell::Cell::new(Some(entered_tx));
+    let resume = std::cell::Cell::new(Some(resume_rx));
+    let claim = ZoneClaim {
+        worker: &worker,
+        zone: &cut.id,
+        request: &ask,
+        deadline: ClaimDeadline {
+            attempts: unbounded(),
+            give_backs: Instant::now(),
+        },
+    };
+    let claimed = cut.coordinator.claim_in_zone(
+        &claim,
+        cut.policies.as_ref(),
+        || ready(Ok(worker.clone())),
+        |_| {
+            let entered = entered.take();
+            let resume = resume.take();
+            async move {
+                if let Some(entered) = entered {
+                    entered.send(()).expect("the test holds the entered receiver");
+                }
+                if let Some(resume) = resume {
+                    resume.await.expect("the test resumes the admission");
+                }
+                Admission::<()>::GiveBack {
+                    reason: ClaimSkipReason::Deferred,
+                    defer: zeroship_workflow_manager::GiveBack::Unsent,
+                }
+            }
+        },
+    );
+    let turned_away = async {
+        entered_rx.await.expect("the admission is entered for the cut app");
+        resume_tx.send(()).expect("the admission is still held");
+    };
+    let (claimed, ()) = futures::join!(claimed, turned_away);
+    let (batch, report) = claimed.unwrap();
+    assert!(batch.grants.is_empty(), "{batch:?}");
+    assert_eq!(report.lapsing, [(apps[0].clone(), Error::Timeout)], "{report:?}");
+    assert_eq!(stored(fixture, &stranded).await["state"], value!("leased"));
+
+    // The control: the same grant turned away with its give-back deadline
+    // ahead returns its row.
+    let prompt = cut.beside();
+    let (cursor, apps) = prompt.apps(1).await;
+    let returned = prompt.job(&apps[0]).await;
+    let ask = request(1, Some(&cursor), Vec::new());
+    let claim = ZoneClaim {
+        worker: &worker,
+        zone: &prompt.id,
+        request: &ask,
+        deadline: ClaimDeadline::at(unbounded()),
+    };
+    let (batch, report): (ClaimBatch<()>, ClaimReport) = prompt
+        .coordinator
+        .claim_in_zone(
+            &claim,
+            prompt.policies.as_ref(),
+            || ready(Ok(worker.clone())),
+            |_| {
+                ready(Admission::GiveBack {
+                    reason: ClaimSkipReason::Deferred,
+                    defer: zeroship_workflow_manager::GiveBack::Unsent,
+                })
+            },
+        )
+        .await
+        .unwrap();
+    assert!(batch.grants.is_empty(), "{batch:?}");
+    assert!(report.lapsing.is_empty(), "{report:?}");
+    assert_eq!(stored(fixture, &returned).await["state"], value!("ready"));
 }
 
 /// A grant whose lease its admission spent is not given back, even when the
