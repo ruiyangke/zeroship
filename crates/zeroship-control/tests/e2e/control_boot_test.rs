@@ -114,14 +114,127 @@ fn arbiter_ids(log: &str) -> std::collections::BTreeSet<u32> {
 /// Control logs the address it was CONFIGURED with rather than the one it
 /// bound, so `--port 0` announces `127.0.0.1:0` and the real port cannot be
 /// recovered from the log. The port comes from a probe listener instead, which
-/// the caller releases immediately before spawning; a collision fails loudly
-/// rather than silently, printing the log that names the address in use.
+/// the caller releases immediately before spawning; a child that loses the port
+/// to another process exits naming the address in use, and the caller
+/// relaunches on a fresh port.
 fn free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("probe listener");
     listener
         .local_addr()
         .expect("probe listener address")
         .port()
+}
+
+/// How a spawned Control's readiness wait ended.
+enum Started {
+    Ready,
+    /// The child exited because another process already owns the reserved
+    /// port, so the caller reserves a different one.
+    AddressInUse,
+}
+
+/// Whether `child` answers `/readyz` with 200 from the socket it owns and is
+/// still running: the check a readiness wait accepts.
+///
+/// An answer alone does not prove it: the port is reserved and released so
+/// this child can bind it, and another process can take it in between and
+/// answer `/readyz` exactly as this child does.
+fn child_serves_ready(child: &mut std::process::Child, port: u16) -> bool {
+    get(port, "/readyz").is_some_and(|(status, _)| status == 200)
+        && zeroship_testkit::listen::child_listens(child.id(), port)
+        && child.try_wait().expect("poll zeroship-control").is_none()
+}
+
+/// Wait until `child` owns `port` and answers `/readyz` with 200, or report
+/// why it stopped.
+fn wait_started(child: &mut std::process::Child, port: u16, log: &std::path::Path) -> Started {
+    let deadline = Instant::now() + Duration::from_mins(1);
+    loop {
+        if child.try_wait().expect("poll zeroship-control").is_some() {
+            return child_stopped(log);
+        }
+        if child_serves_ready(child, port) {
+            return Started::Ready;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "control never answered /readyz with 200; log:\n{}",
+            std::fs::read_to_string(log).unwrap_or_default()
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// How a readiness wait ends when its child has already stopped.
+fn child_stopped(log: &std::path::Path) -> Started {
+    let text = std::fs::read_to_string(log).unwrap_or_default();
+    if text.contains("Address already in use") {
+        Started::AddressInUse
+    } else {
+        panic!("zeroship-control exited before it was ready:\n{text}")
+    }
+}
+
+/// Spawn a Control child on a freshly reserved port, returning it with that
+/// port once it owns the port and answers `/readyz`.
+///
+/// Another process can take the reserved port before the child binds it, so a
+/// collision reserves a fresh one and launches again.
+fn control_on_a_free_port(
+    log: &std::path::Path,
+    spawn: impl Fn(u16) -> std::process::Child,
+) -> (std::process::Child, u16) {
+    for _ in 0..16 {
+        let port = free_port();
+        let mut child = spawn(port);
+        match wait_started(&mut child, port, log) {
+            Started::Ready => return (child, port),
+            Started::AddressInUse => {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+    panic!("every reserved port was taken before zeroship-control bound it");
+}
+
+/// A port another process holds is not this control listening: a connection to
+/// it succeeds and it answers `/readyz`, but readiness is accepted only from
+/// the child this test spawned.
+#[test]
+fn readiness_is_not_taken_from_a_port_another_process_holds() {
+    let foreign = std::net::TcpListener::bind("127.0.0.1:0").expect("hold a port");
+    let port = foreign.local_addr().expect("the held port").port();
+    std::thread::spawn(move || {
+        for stream in foreign.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut head = Vec::new();
+            let mut chunk = [0_u8; 256];
+            while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => head.extend_from_slice(&chunk[..read]),
+                }
+            }
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+            let _ = stream.flush();
+        }
+    });
+    let mut never = Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn a child that never listens");
+    assert!(
+        get(port, "/readyz").is_some_and(|(status, _)| status == 200),
+        "the foreign listener answers /readyz, so a bare answer would call control ready"
+    );
+    assert!(
+        !child_serves_ready(&mut never, port),
+        "readiness was taken from a port this child does not hold"
+    );
+    let _ = never.kill();
+    let _ = never.wait();
 }
 
 #[test]
@@ -156,59 +269,51 @@ fn control_serves_readyz_on_an_owned_database() {
     )
     .expect("service peers file");
 
-    let port = free_port();
     let log_path = scratch.path().join("control.log");
-    let sink = std::fs::File::create(&log_path).expect("control log");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_zeroship-control"))
-        .env_clear()
-        .env("ZEROSHIP_CONTROL_KEY", STRONG_HEX)
-        .env("ZEROSHIP_PAIRWISE_SALT", STRONG_HEX)
-        .env("ZEROSHIP_CONTROL_MASTER_KEY", STRONG_HEX)
-        .env("ZEROSHIP_CONTROL_DATABASE_URL", database.url())
-        .arg("--no-config")
-        .arg("--auth-platform-issuer")
-        .arg(issuer_of(&platform.jwks_url()))
-        .arg("--service-key-file")
-        .arg(&key_path)
-        .arg("--service-peers-file")
-        .arg(&peers_path)
-        // The default billing provider is evaluation-grade and refuses to run
-        // without an explicit opt-in. This suite exercises serving, not billing,
-        // so it takes the documented escape rather than standing up a provider.
-        .arg("--allow-unsupported-billing")
-        // ONE SERVING THREAD, and the assertion below reads back how many the
-        // process actually built. Each ntex arbiter creates its own compio
-        // io_uring runtime, so an unbounded default makes this fixture claim
-        // one ring per core from a budget (`ulimit -l`) the whole host shares -
-        // which is how a boot on an idle machine fails with
-        // `Cannot allocate memory (os error 12)`.
-        .arg("--threads")
-        .arg("1")
-        .arg("--port")
-        .arg(port.to_string())
-        .arg("--blob-store")
-        .arg(scratch.path().join("blobs"))
-        .arg("--deploy-tmp-dir")
-        .arg(scratch.path().join("deploy"))
-        .stdout(Stdio::from(sink.try_clone().expect("clone the log")))
-        .stderr(Stdio::from(sink))
-        .spawn()
-        .expect("spawn zeroship-control");
-
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let mut last = None;
-    while Instant::now() < deadline {
-        last = get(port, "/readyz");
-        if last.as_ref().is_some_and(|(status, _)| *status == 200) {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    }
+    let (mut child, port) = control_on_a_free_port(&log_path, |port| {
+        let sink = std::fs::File::create(&log_path).expect("control log");
+        Command::new(env!("CARGO_BIN_EXE_zeroship-control"))
+            .env_clear()
+            .env("ZEROSHIP_CONTROL_KEY", STRONG_HEX)
+            .env("ZEROSHIP_PAIRWISE_SALT", STRONG_HEX)
+            .env("ZEROSHIP_CONTROL_MASTER_KEY", STRONG_HEX)
+            .env("ZEROSHIP_CONTROL_DATABASE_URL", database.url())
+            .arg("--no-config")
+            .arg("--auth-platform-issuer")
+            .arg(issuer_of(&platform.jwks_url()))
+            .arg("--service-key-file")
+            .arg(&key_path)
+            .arg("--service-peers-file")
+            .arg(&peers_path)
+            // The default billing provider is evaluation-grade and refuses to run
+            // without an explicit opt-in. This suite exercises serving, not billing,
+            // so it takes the documented escape rather than standing up a provider.
+            .arg("--allow-unsupported-billing")
+            // ONE SERVING THREAD, and the assertion below reads back how many the
+            // process actually built. Each ntex arbiter creates its own compio
+            // io_uring runtime, so an unbounded default makes this fixture claim
+            // one ring per core from a budget (`ulimit -l`) the whole host shares -
+            // which is how a boot on an idle machine fails with
+            // `Cannot allocate memory (os error 12)`.
+            .arg("--threads")
+            .arg("1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--blob-store")
+            .arg(scratch.path().join("blobs"))
+            .arg("--deploy-tmp-dir")
+            .arg(scratch.path().join("deploy"))
+            .stdout(Stdio::from(sink.try_clone().expect("clone the log")))
+            .stderr(Stdio::from(sink))
+            .spawn()
+            .expect("spawn zeroship-control")
+    });
 
     // Control's routes are /api, /internal, /healthz and /readyz. The edge sends
     // the whole /v1/* namespace to the migration service, so a route here would
     // be shadowed and unreachable: an unknown path and a /v1 path must answer
     // identically. Probed while the child is still serving.
+    let last = get(port, "/readyz");
     let unknown = get(port, "/no-such-route").expect("control answers an unknown path");
     let v1 = get(port, "/v1/apps").expect("control answers a /v1 path");
 
@@ -340,7 +445,6 @@ impl Census {
 /// A serving Control child, killed when dropped.
 struct Serving {
     child: std::process::Child,
-    port: u16,
     log: std::path::PathBuf,
 }
 
@@ -383,11 +487,10 @@ fn boot_and_count(threads: usize) -> Held {
     let platform = crate::support::PlatformJwks::start();
     let scratch = tempfile::tempdir().expect("scratch directory");
     let (key, peers) = service_identity(&scratch.path().join("keys"));
-    let port = free_port();
     let log = scratch.path().join("control.log");
-    let sink = std::fs::File::create(&log).expect("control log");
-    let serving = Serving {
-        child: Command::new(env!("CARGO_BIN_EXE_zeroship-control"))
+    let (child, _port) = control_on_a_free_port(&log, |port| {
+        let sink = std::fs::File::create(&log).expect("control log");
+        Command::new(env!("CARGO_BIN_EXE_zeroship-control"))
             .env_clear()
             .env("ZEROSHIP_CONTROL_KEY", STRONG_HEX)
             .env("ZEROSHIP_PAIRWISE_SALT", STRONG_HEX)
@@ -418,20 +521,11 @@ fn boot_and_count(threads: usize) -> Held {
             .stdout(Stdio::from(sink.try_clone().expect("clone the log")))
             .stderr(Stdio::from(sink))
             .spawn()
-            .expect("spawn zeroship-control"),
-        port,
-        log,
-    };
+            .expect("spawn zeroship-control")
+    });
+    let serving = Serving { child, log };
 
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while get(serving.port, "/readyz").is_none_or(|(status, _)| status != 200) {
-        assert!(
-            Instant::now() < deadline,
-            "control --threads {threads} never answered /readyz with 200. Log:\n{}",
-            serving.log()
-        );
-        std::thread::sleep(Duration::from_millis(200));
-    }
+    let deadline = Instant::now() + Duration::from_mins(1);
     // Every serving thread has started, so a session any thread opens as it
     // starts is already open when the census counts.
     let expected: std::collections::BTreeSet<u32> =

@@ -80,20 +80,70 @@ fn start_relay(
     )
 }
 
-/// Wait until the relay accepts a connection on `port`, failing if it exits.
-async fn until_listening(process: &mut Process, port: u16, log: &Path) {
+/// How a spawned relay's readiness wait ended.
+enum Started {
+    Ready,
+    /// The relay exited because another process already owns the reserved
+    /// port, so the caller reserves a different one.
+    AddressInUse,
+}
+
+/// Start the relay on a port this process reserves, and return it once THIS
+/// relay is listening there.
+///
+/// The reserved port is released before the relay binds it, so another case
+/// can take it first. A connection that merely succeeds on the port proves
+/// nothing then: it may reach that other process while this relay has exited
+/// on the collision. Readiness is accepted only from the relay's own pid, and
+/// a collision reserves a fresh port.
+async fn spawn_listening(
+    url: &str,
+    cert: &Path,
+    key: &Path,
+    log: &Path,
+    extra: &[&str],
+) -> (Process, u16) {
+    for _ in 0..16 {
+        let port = free_port();
+        let mut process = start_relay(url, port, cert, key, log, extra);
+        match wait_listening(&mut process, port, log).await {
+            Started::Ready => return (process, port),
+            Started::AddressInUse => {
+                let _ = process.0.kill();
+                let _ = process.0.wait();
+            }
+        }
+    }
+    panic!("could not reserve a listening port for the relay after repeated collisions");
+}
+
+/// Wait until `process` itself listens on `port`, or report why it stopped.
+///
+/// A connect alone is not readiness: the port is released before the relay
+/// binds it, so another case's service can take it and accept the connection
+/// while this relay has exited on the collision. The relay's own pid holding
+/// the LISTEN socket is what makes the connection its server.
+async fn wait_listening(process: &mut Process, port: u16, log: &Path) -> Started {
     let until = Instant::now() + Duration::from_secs(15);
     loop {
-        assert!(
-            process.0.try_wait().unwrap().is_none(),
-            "relay exited: {}",
-            std::fs::read_to_string(log).unwrap()
-        );
+        if process.0.try_wait().unwrap().is_some() {
+            let text = std::fs::read_to_string(log).unwrap_or_default();
+            if text.contains("Address already in use") {
+                return Started::AddressInUse;
+            }
+            panic!("relay exited: {text}");
+        }
         if compio::net::TcpStream::connect(("127.0.0.1", port))
             .await
             .is_ok()
+            && zeroship_testkit::listen::child_listens(process.0.id(), port)
         {
-            return;
+            // The relay that owns the socket can still have exited since,
+            // freeing the port for another case.
+            if process.0.try_wait().unwrap().is_none() {
+                return Started::Ready;
+            }
+            continue;
         }
         assert!(Instant::now() < until, "relay listener timed out");
         compio::time::sleep(Duration::from_millis(20)).await;
@@ -226,17 +276,15 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
         .with_root_certificates(roots)
         .with_no_client_auth(),
     ));
-    let port = free_port();
     let log = temp.path().join("relay.log");
-    let mut process = start_relay(
+    let (process, port) = spawn_listening(
         &platform.relay_url(),
-        port,
         &cert_path,
         &key_path,
         &log,
         &["--transaction-changes", "2"],
-    );
-    until_listening(&mut process, port, &log).await;
+    )
+    .await;
     let endpoint = format!("wss://localhost:{port}{PATH}");
     let connect = || {
         compio_ws::connect_async_tls_with_config(endpoint.as_str(), None, Some(connector.clone()))
@@ -501,10 +549,9 @@ async fn relay_refuses_to_boot_without_the_live_binding_grant() {
     for (table, columns) in &granted {
         grant_relay(&db, table, columns).await;
     }
-    let port = free_port();
     let log = temp.path().join("admitted.log");
-    let mut admitted = start_relay(&platform.relay_url(), port, &cert, &key, &log, &[]);
-    until_listening(&mut admitted, port, &log).await;
+    let (admitted, _port) =
+        spawn_listening(&platform.relay_url(), &cert, &key, &log, &[]).await;
     drop(admitted);
     drop(refused);
     db.close().await;
@@ -560,4 +607,34 @@ async fn a_malformed_database_url_is_refused_without_echoing_its_password() {
             "the relay's log must not carry the password from `{marker}`:\n{output}"
         );
     }
+}
+
+/// A port another process holds is not this relay listening: a connection to
+/// it succeeds, but the readiness wait keeps waiting for its own child.
+#[compio::test]
+async fn readiness_is_not_taken_from_a_port_another_process_holds() {
+    let foreign = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = foreign.local_addr().unwrap().port();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let mut child = Process(
+        Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn a child that never listens"),
+    );
+    assert!(
+        compio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok(),
+        "the foreign listener accepts, so a bare connect would call the relay ready"
+    );
+    let waited = compio::time::timeout(
+        Duration::from_millis(300),
+        wait_listening(&mut child, port, log.path()),
+    )
+    .await;
+    assert!(
+        waited.is_err(),
+        "readiness was accepted from a port this child does not hold"
+    );
 }

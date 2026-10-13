@@ -481,6 +481,13 @@ pub const PORTABLE: Portable = Portable {
         },
         Confined {
             binary: CLI_E2E,
+            prefix: "e2e::serve_test::readiness_is_not_taken_from_a_port_another_process_holds",
+            on: &[LINUX],
+            reason: "its readiness check reads the child's listen socket from /proc, which only \
+                     Linux has",
+        },
+        Confined {
+            binary: CLI_E2E,
             prefix: "e2e::serve_test::serve_refuses_a_cpu_limit_it_cannot_enforce",
             on: &["macos", "windows"],
             reason: "Linux enforces a CPU limit, so only the other systems refuse the flag",

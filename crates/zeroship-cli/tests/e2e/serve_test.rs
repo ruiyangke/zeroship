@@ -39,9 +39,29 @@ impl Drop for Served {
     }
 }
 
+/// Whether a connection to `port` reaches THIS child's server.
+///
+/// The reserved port is released before the child binds it, so another process
+/// can take the port and answer first: a successful connection alone does not
+/// prove the child is the server. On Linux the child's own process holding the
+/// LISTEN socket is the test, and the child that owns it can still have exited
+/// since, so it must also be running. The other systems this suite runs on have
+/// no `/proc`, so there the running child and the connection are the evidence
+/// available.
+fn child_serves(child: &mut Child, port: u16) -> bool {
+    #[cfg(target_os = "linux")]
+    let owned = zeroship_testkit::listen::child_listens(child.id(), port);
+    #[cfg(not(target_os = "linux"))]
+    let owned = true;
+    TcpStream::connect(("127.0.0.1", port)).is_ok()
+        && owned
+        && child.try_wait().expect("poll the serve child").is_none()
+}
+
 /// Serve `app.js` from `dir` with `flags` on a fresh port, relaunching on a new
 /// one when a parallel process took the reserved port before the child bound
-/// it. Readiness is a connection that succeeds while the child is running.
+/// it. Readiness is a connection that reaches the child's own listening socket
+/// while that child is still running.
 fn serve(dir: &Path, flags: &[&str]) -> Served {
     for _ in 0..16 {
         let port = reserve_port();
@@ -64,7 +84,7 @@ fn serve(dir: &Path, flags: &[&str]) -> Served {
         };
         let deadline = Instant::now() + Duration::from_mins(1);
         loop {
-            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            if child_serves(&mut served.child, port) {
                 return served;
             }
             if !served.output.open_after(Duration::from_millis(50)) {
@@ -152,6 +172,30 @@ fn serve_answers_a_request_with_what_the_script_returns() {
         served.output.text()
     );
     assert_eq!(body, nonce, "the body must be the script's; output:\n{}", served.output.text());
+}
+
+/// A port another process holds is not this server: a connection to it
+/// succeeds, but readiness requires the child this suite spawned to own the
+/// listening socket.
+#[cfg(target_os = "linux")]
+#[test]
+fn readiness_is_not_taken_from_a_port_another_process_holds() {
+    let foreign = TcpListener::bind("127.0.0.1:0").expect("hold a port");
+    let port = foreign.local_addr().expect("the held port").port();
+    let mut never = Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn a child that never listens");
+    assert!(
+        TcpStream::connect(("127.0.0.1", port)).is_ok(),
+        "the foreign listener accepts, so a bare connection would call the child ready"
+    );
+    assert!(
+        !child_serves(&mut never, port),
+        "readiness was taken from a port this child does not hold"
+    );
+    let _ = never.kill();
+    let _ = never.wait();
 }
 
 /// On Linux the flag is accepted and enforced: a handler that never returns is
