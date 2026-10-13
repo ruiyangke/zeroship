@@ -605,10 +605,36 @@ fn expires_in(expires: Instant) -> Result<Duration, WorkflowServiceError> {
         .ok_or(WorkflowServiceError::Timeout)
 }
 
+/// The clock a captured deadline is measured against. A test installs a
+/// caller-owned clock so it can advance a deadline on command; every host reads
+/// the system clock, so the value carries nothing.
+#[cfg(test)]
+pub(super) type DeadlineClock = Option<std::rc::Rc<std::cell::Cell<Instant>>>;
+
+/// The instant a captured deadline is measured against, on the system clock.
+#[cfg(not(test))]
+fn deadline_now() -> Instant {
+    Instant::now()
+}
+
+/// The instant a captured deadline is measured against: the caller-owned clock
+/// a test installs, and the system clock when none is installed.
+#[cfg(test)]
+fn deadline_now(clock: &DeadlineClock) -> Instant {
+    clock
+        .as_ref()
+        .map_or_else(Instant::now, |clock| clock.get())
+}
+
 pub(super) struct CapturedLease {
     delivery: Delivery,
     expires: Instant,
     policy: PolicyAuthority,
+    /// The clock `expires` is measured against. A test installs a caller-owned
+    /// clock so it can advance the deadline on command; absent in every host,
+    /// where [`deadline_now`] reads the system clock.
+    #[cfg(test)]
+    clock: DeadlineClock,
 }
 impl CapturedLease {
     pub(super) fn bind(&self, scope: &AppWorkflows) -> Result<AppWorkflows, WorkflowServiceError> {
@@ -620,7 +646,12 @@ impl CapturedLease {
         scope: &AppWorkflows,
         lease: &impl JobLease,
     ) -> Result<Self, WorkflowServiceError> {
-        let started = Instant::now();
+        #[cfg(test)]
+        let clock = scope.service.deadline_clock.clone();
+        #[cfg(test)]
+        let started = deadline_now(&clock);
+        #[cfg(not(test))]
+        let started = deadline_now();
         let duration = remaining(lease)?;
         let policy = scope.capture_policy().authority()?.clone();
         let duration = duration.min(Duration::from_millis(
@@ -636,6 +667,8 @@ impl CapturedLease {
             delivery: lease.delivery().clone(),
             expires,
             policy,
+            #[cfg(test)]
+            clock,
         })
     }
     pub(super) fn check(&self, scope: &AppWorkflows) -> Result<(), WorkflowServiceError> {
@@ -662,8 +695,12 @@ impl JobLease for CapturedLease {
     }
     fn remaining(&self) -> Option<Duration> {
         self.policy.check().ok()?;
+        #[cfg(test)]
+        let now = deadline_now(&self.clock);
+        #[cfg(not(test))]
+        let now = deadline_now();
         self.expires
-            .checked_duration_since(Instant::now())
+            .checked_duration_since(now)
             .filter(|duration| !duration.is_zero())
     }
     fn attempt_remaining(&self) -> Option<Duration> {
@@ -1303,7 +1340,12 @@ pub(super) fn attempt_budget(
     let Some(lease) = lease else {
         return ATTEMPT_IO_CEILING;
     };
-    let remaining = lease.expires.saturating_duration_since(Instant::now());
+    #[cfg(test)]
+    let remaining = lease
+        .expires
+        .saturating_duration_since(deadline_now(&lease.clock));
+    #[cfg(not(test))]
+    let remaining = lease.expires.saturating_duration_since(deadline_now());
     task.map_or_else(
         || ATTEMPT_IO_CEILING.min(remaining),
         |task| {

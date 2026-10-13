@@ -37,6 +37,11 @@ pub struct WorkflowService {
     /// leave an unpublished intent. Absent for a host that publishes another
     /// way, and carries no customer data and no authority.
     commit_hint: Option<super::CommitHint>,
+    /// A caller-owned monotonic clock the captured deadlines are measured
+    /// against, installed only by a test so it can advance a grant past its
+    /// deadline on command; absent everywhere else.
+    #[cfg(test)]
+    pub(crate) deadline_clock: super::delivery::DeadlineClock,
 }
 impl std::fmt::Debug for WorkflowService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -72,12 +77,26 @@ impl WorkflowService {
             signal_authority: None,
             ingress: None,
             commit_hint: None,
+            #[cfg(test)]
+            deadline_clock: None,
         })
     }
     /// The host policy registry this service admits work against.
     #[must_use]
     pub const fn policies(&self) -> &Arc<super::HostPolicies> {
         &self.policies
+    }
+    /// Measure captured deadlines against a caller-owned clock instead of the
+    /// system clock, so a test can advance a grant past its deadline on command
+    /// rather than race wall time.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_deadline_clock_for_test(
+        mut self,
+        clock: std::rc::Rc<std::cell::Cell<std::time::Instant>>,
+    ) -> Self {
+        self.deadline_clock = Some(clock);
+        self
     }
     #[must_use]
     pub fn with_signal_authority(mut self, authority: Arc<super::SignalAuthority>) -> Self {

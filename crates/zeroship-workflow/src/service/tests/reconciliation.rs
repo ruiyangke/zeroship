@@ -60,7 +60,6 @@ struct Publisher {
     app: AppId,
     manager: publication::Manager,
     calls: RefCell<Vec<JobId>>,
-    hang: Option<JobId>,
     barrier: Option<(flume::Sender<()>, flume::Receiver<()>)>,
     lose_reply: Cell<bool>,
 }
@@ -70,7 +69,6 @@ impl Publisher {
             app: app.clone(),
             manager: publication::Manager::new(app).await,
             calls: RefCell::new(Vec::new()),
-            hang: None,
             barrier: None,
             lose_reply: Cell::new(false),
         }
@@ -82,9 +80,6 @@ impl JobPublisher for Publisher {
     }
     async fn submit(&self, job: &JobSpec) -> Result<JobSpec, WorkflowServiceError> {
         self.calls.borrow_mut().push(job.id.clone());
-        if self.hang.as_ref() == Some(&job.id) {
-            std::future::pending::<()>().await;
-        }
         let job = self
             .manager
             .queue
@@ -321,24 +316,42 @@ async fn assert_explicit_empty_phase_transitions(
     );
 }
 
+/// A reconciliation whose grant lapses inside a held publication makes no
+/// receipt for itself, leaves the held intent unconfirmed, and resumes past it
+/// on the next delivery.
+///
+/// The grant outlives the page's whole setup, so reaching the publish does not
+/// race a wall-clock window: the publication is entered and held, the test
+/// advances the service's deadline clock past the grant, and releasing the hold
+/// lets the attempt observe the lapse at the publication it cut rather than at
+/// its next step.
 async fn timeout_progress(store: Rc<OrmStore>) {
     let (service, app, _, _deployments) = registered_service(store).await;
+    let clock: Rc<Cell<Instant>> = Rc::new(Cell::new(Instant::now()));
+    let service = service.with_deadline_clock_for_test(clock.clone());
     let scope = service.fixture_app(app.clone());
     let jobs = start(&scope, 2).await;
     let mut publisher = Publisher::new(&app).await;
-    publisher.hang = Some(jobs[0].id.clone());
-    let mut grant = Grant::new(&jobs[0]);
-    grant.expires = Instant::now() + Duration::from_millis(300);
-    assert!(matches!(
-        scope.reconcile_job(&grant, &publisher, options(2)).await,
-        Err(WorkflowServiceError::Timeout)
-    ));
+    let (entered, held) = flume::bounded(1);
+    let (resume, gate) = flume::bounded(1);
+    publisher.barrier = Some((entered, gate));
+    let grant = Grant::new(&jobs[0]);
+    let attempt = scope.reconcile_job(&grant, &publisher, options(2));
+    let lapse = async {
+        held.recv_async().await.unwrap();
+        clock.set(clock.get() + Duration::from_secs(3601));
+        resume.send_async(()).await.unwrap();
+    };
+    let (result, ()) = futures::join!(attempt, lapse);
+    publisher.barrier = None;
+    assert!(matches!(result, Err(WorkflowServiceError::Timeout)));
     assert_eq!(publisher.calls.borrow().as_slice(), &[jobs[0].id.clone()]);
     assert!(scope
         .job_receipt(&grant.delivery.job)
         .await
         .unwrap()
         .is_none());
+    clock.set(Instant::now());
     assert_eq!(
         scope
             .reconcile_job(&grant.retry(), &publisher, options(2))
@@ -353,7 +366,6 @@ async fn timeout_progress(store: Rc<OrmStore>) {
     );
     assert!(!confirmed(&service, &app, &jobs[0].id).await);
     assert!(confirmed(&service, &app, &jobs[1].id).await);
-    publisher.hang = None;
     assert_eq!(
         scope
             .reconcile_job(&Grant::new(&jobs[0]), &publisher, options(2))
