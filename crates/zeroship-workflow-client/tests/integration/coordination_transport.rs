@@ -174,6 +174,10 @@ fn response(body: &[u8]) -> Vec<u8> {
     bytes
 }
 
+/// How long the untrusted-certificate peer waits before its handshake: longer
+/// than [`claim`]'s wait, far inside the client's generic exchange bound.
+const SLOW_HANDSHAKE: Duration = Duration::from_millis(300);
+
 #[compio::test]
 async fn untrusted_tls_certificate_is_rejected_before_http_authorization() {
     let certificate = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
@@ -222,6 +226,9 @@ async fn untrusted_tls_certificate_is_rejected_before_http_authorization() {
 
         let (stream, _) = listener.accept().await.unwrap();
         connections += 1;
+        // A slow peer: the handshake starts later than the claim's own wait
+        // would allow, so only the exchange bound below decides the outcome.
+        compio::time::sleep(SLOW_HANDSHAKE).await;
         assert!(
             acceptor.accept(stream).await.is_err(),
             "untrusted certificate was accepted before HTTP authorization"
@@ -243,8 +250,19 @@ async fn untrusted_tls_certificate_is_rejected_before_http_authorization() {
         read.unwrap();
         assert_eq!(received, reply);
         drop(tls);
+        // A claim's exchange is bounded by its own wait, and this case is about
+        // how a rejected certificate is classified, not about that wait: give
+        // the claim the client's generic exchange bound, so a handshake that is
+        // merely slow is still answered as the rejection it is.
+        let bounded = ClaimJobs {
+            wait_ms: NonZeroU64::new(
+                u64::try_from(Options::default().timeout.as_millis()).unwrap(),
+            )
+            .unwrap(),
+            ..claim()
+        };
         assert_eq!(
-            client.claim_jobs::<JsonJournal>(&claim()).await.unwrap_err(),
+            client.claim_jobs::<JsonJournal>(&bounded).await.unwrap_err(),
             Error::Unavailable
         );
     };
