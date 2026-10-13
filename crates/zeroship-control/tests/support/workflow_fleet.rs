@@ -72,28 +72,16 @@ async fn execute(url: &str, sql: &str) {
     driver.await.expect("fleet database task").expect("driver");
 }
 
-/// Port reservations held from [`port`] until [`release`], keyed by port.
+/// Port reservations held from [`ReservedPorts::reserve`] until [`release`],
+/// keyed by port.
 static RESERVED: std::sync::Mutex<Vec<(u16, TcpListener)>> =
     std::sync::Mutex::new(Vec::new());
 
-/// A port reserved for one fleet child, held until that child is spawned.
-///
-/// A port picked and released immediately can be handed to a sibling process
-/// between the pick and the child's bind, which is how a fleet's child dies
-/// with `Address already in use` before its readiness poll. The reservation
-/// holds the listener until [`release`] drops it: two picks for one fleet are
-/// distinct, and the window a sibling can take a port is the spawn itself.
-pub fn port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("reserve a fleet port");
-    let port = listener.local_addr().expect("reserved port").port();
-    RESERVED
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .push((port, listener));
-    port
-}
-
 /// Drop the reservation for `port` so the child about to bind it can.
+///
+/// Only called by the attempt that reserved `port`, so the listener dropped is
+/// that attempt's own. A port another attempt reserved after this one released
+/// it is not in this attempt's list and is never touched.
 fn release(port: u16) {
     let mut reserved = RESERVED
         .lock()
@@ -101,6 +89,111 @@ fn release(port: u16) {
     if let Some(index) = reserved.iter().position(|(held, _)| *held == port) {
         reserved.swap_remove(index);
     }
+}
+
+/// The ports some fleet attempt is holding reserved in this process right now.
+///
+/// For a test that proves a launch which lost its race left nothing behind. A
+/// process that runs one case at a time sees only that case's attempts.
+pub fn reserved_ports() -> Vec<u16> {
+    RESERVED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .map(|(port, _)| *port)
+        .collect()
+}
+
+/// The ports one launch attempt has reserved and not yet released.
+///
+/// A port reserved for one fleet child is held in the process-wide [`RESERVED`]
+/// until [`Self::release`] drops it, so a sibling process cannot take it between
+/// the pick and the child's bind. Tracking the same ports here is what lets a
+/// launch attempt that stops early release exactly what it still holds when it
+/// drops, rather than leave those listeners held for the rest of the process.
+///
+/// A port a test seam supplied is not reserved and so is never tracked.
+#[derive(Debug, Default)]
+struct ReservedPorts {
+    ports: Vec<u16>,
+}
+
+impl ReservedPorts {
+    /// Reserve a port for one child, held until [`Self::release`] or this
+    /// value's drop.
+    fn reserve(&mut self) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("reserve a fleet port");
+        let port = listener.local_addr().expect("reserved port").port();
+        RESERVED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((port, listener));
+        self.ports.push(port);
+        port
+    }
+
+    /// Drop this attempt's hold on `port` so the child about to bind it can.
+    ///
+    /// A no-op when this attempt does not hold `port` - a seam port, or one it
+    /// already released - so a release never touches a listener another attempt
+    /// reserved after this one let it go.
+    fn release(&mut self, port: u16) {
+        if let Some(index) = self.ports.iter().position(|held| *held == port) {
+            self.ports.swap_remove(index);
+            release(port);
+        }
+    }
+
+    /// The ports this attempt still holds.
+    fn held(&self) -> Vec<u16> {
+        self.ports.clone()
+    }
+}
+
+impl Drop for ReservedPorts {
+    fn drop(&mut self) {
+        // A launch that stopped early never reached some of these children.
+        // Release exactly what this attempt still holds, so a partial fleet
+        // does not keep them out of every later attempt's reach.
+        for port in self.ports.drain(..) {
+            release(port);
+        }
+    }
+}
+
+/// How many times a launch rebuilds the whole fleet after a child loses its
+/// port to another process before it can bind it.
+///
+/// A port is reserved, released, then bound by the child; the kernel can hand
+/// the released port to a sibling process in between. That is not a failure of
+/// the fleet, but every service URL is written into the other services'
+/// configuration before launch, so one child cannot move to a fresh port alone:
+/// the whole fleet is built again. The bound is the tail of the collision
+/// distribution - a port something outside the fleet genuinely holds exhausts
+/// it and fails naming what happened rather than looping.
+const LAUNCH_ATTEMPTS: u32 = 16;
+
+/// One launch attempt's abort: a child lost the race for its port to another
+/// process, so the whole fleet rebuilds on fresh ports.
+///
+/// `log` is the child's own log, the file that named the collision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LaunchRace {
+    log: PathBuf,
+}
+
+/// How a fleet readiness wait ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Readiness {
+    /// The child owns the reserved port and answered its probe.
+    Ready,
+    /// The child exited and its own log names an address collision: another
+    /// process took the port between its reservation's release and its bind.
+    /// A launch rebuilds the whole fleet; a wait outside launch reports it.
+    LostRace,
+    /// The deadline passed with the child still running and its ownership of
+    /// the reserved port unproven.
+    TimedOut,
 }
 
 /// What this fleet runs beyond the always-present services.
@@ -114,6 +207,16 @@ pub struct FleetOptions {
     /// started through the first worker's dispatch frame and finished by a
     /// worker the gateway routes to but that never ran the app.
     pub deferred_second_worker: bool,
+    /// Bind Control on exactly this port on the FIRST launch attempt, so a test
+    /// that holds the address can drive the whole-fleet relaunch a lost port
+    /// produces. Later attempts pick a fresh port, so the relaunch can succeed.
+    pub first_launch_control_port: Option<u16>,
+    /// Bind the workflow manager on exactly this port on the FIRST launch
+    /// attempt. The manager is spawned before Control but awaited after it, so
+    /// a test that holds this address makes the manager exit while Control's
+    /// readiness wait runs: a sibling lost race. Later attempts pick fresh
+    /// ports.
+    pub first_launch_workflow_port: Option<u16>,
 }
 
 #[derive(Debug)]
@@ -122,6 +225,11 @@ pub struct Fleet {
     _issuer: Container<GenericImage>,
     issuer_url: String,
     children: Vec<(String, Child)>,
+    /// The ports this attempt reserved and has not released. [`Fleet::release`]
+    /// removes a port here as it frees it, and the value's own drop releases
+    /// exactly the ports this attempt still holds - never one another attempt
+    /// reserved.
+    reserved: ReservedPorts,
     pub logs: PathBuf,
     pub database: Database,
     pub control_url: String,
@@ -159,6 +267,8 @@ impl Fleet {
         Self::with(FleetOptions {
             workflow_manager: true,
             deferred_second_worker: false,
+            first_launch_control_port: None,
+            first_launch_workflow_port: None,
         })
     }
 
@@ -168,20 +278,70 @@ impl Fleet {
         Self::with(FleetOptions {
             workflow_manager: true,
             deferred_second_worker: true,
+            first_launch_control_port: None,
+            first_launch_workflow_port: None,
         })
     }
 
     pub fn with(options: FleetOptions) -> Self {
+        Self::with_race_log(options).0
+    }
+
+    /// As [`Self::with`], returning the log each attempt wrote when it lost a
+    /// port, in launch order.
+    ///
+    /// A test that forces a collision reads the first entry to prove the launch
+    /// really lost that port rather than merely landing on a different one.
+    pub fn with_race_log(options: FleetOptions) -> (Self, Vec<PathBuf>) {
         std::thread::spawn(move || {
             compio::runtime::Runtime::new()
                 .expect("fleet runtime")
-                .block_on(Self::launch(options))
+                .block_on(Self::launch_retrying(options))
         })
         .join()
         .unwrap_or_else(|error| std::panic::resume_unwind(error))
     }
 
-    async fn launch(options: FleetOptions) -> Self {
+    /// Launch `options`, rebuilding the whole fleet on fresh ports when a child
+    /// loses its port to another process before it can bind it.
+    ///
+    /// Every service URL is written into the other services' configuration
+    /// before launch - the workflow manager is told Control's URL and Control
+    /// the manager's - so a child that lost its port cannot be relaunched alone.
+    /// The attempt that lost the race is dropped whole, releasing its children,
+    /// its database, its issuer container, its work directory and every port it
+    /// still holds, and the next attempt picks every port fresh.
+    ///
+    /// Bounded by [`LAUNCH_ATTEMPTS`]: a port something outside the fleet keeps
+    /// held fails locating the cause rather than looping.
+    async fn launch_retrying(options: FleetOptions) -> (Self, Vec<PathBuf>) {
+        let mut first_launch_control_port = options.first_launch_control_port;
+        let mut first_launch_workflow_port = options.first_launch_workflow_port;
+        let mut races = Vec::new();
+        for _ in 0..LAUNCH_ATTEMPTS {
+            let attempt = Self::launch(
+                options,
+                first_launch_control_port.take(),
+                first_launch_workflow_port.take(),
+            )
+            .await;
+            match attempt {
+                Ok(fleet) => return (fleet, races),
+                Err(race) => races.push(race.log),
+            }
+        }
+        panic!(
+            "every fleet launch attempt lost one of its ports to another \
+             process; the fleet cannot start while a foreign process holds one \
+             of the addresses it reserves"
+        );
+    }
+
+    async fn launch(
+        options: FleetOptions,
+        first_launch_control_port: Option<u16>,
+        first_launch_workflow_port: Option<u16>,
+    ) -> Result<Self, LaunchRace> {
         let binaries = binaries();
         let database = Database::new();
         let work = tempfile::tempdir().expect("workflow fleet directory");
@@ -205,27 +365,35 @@ impl Fleet {
             issuer.get_host().unwrap(),
             issuer.get_host_port_ipv4(80).unwrap()
         );
-        let worker_port = port();
-        let second_worker_port = options.deferred_second_worker.then(port);
+        // Every port this attempt reserves is tracked first, so a launch that
+        // stops early releases what it still holds when it drops. A seam port
+        // is the test's own listener and is not reserved.
+        let mut reserved = ReservedPorts::default();
+        let worker_port = reserved.reserve();
+        let second_worker_port = options.deferred_second_worker.then(|| reserved.reserve());
+        let control_port_number = first_launch_control_port.unwrap_or_else(|| reserved.reserve());
+        let gateway_port_number = reserved.reserve();
+        let manager_port_number = options
+            .workflow_manager
+            .then(|| first_launch_workflow_port.unwrap_or_else(|| reserved.reserve()));
         let mut fleet = Self {
             _issuer: issuer,
             issuer_url,
             blob_root: work.path().join("blobs"),
             work,
             children: vec![],
+            reserved,
             logs,
             database,
-            control_url: format!("http://127.0.0.1:{}", port()),
-            gateway_url: format!("http://127.0.0.1:{}", port()),
+            control_url: format!("http://127.0.0.1:{control_port_number}"),
+            gateway_url: format!("http://127.0.0.1:{gateway_port_number}"),
             worker_url: format!("http://127.0.0.1:{worker_port}"),
             second_worker_port,
             second_worker_url: second_worker_port
                 .map(|second| format!("http://127.0.0.1:{second}")),
             relay_port: 0,
             blobs: String::new(),
-            manager_url: options
-                .workflow_manager
-                .then(|| format!("http://127.0.0.1:{}", port())),
+            manager_url: manager_port_number.map(|port| format!("http://127.0.0.1:{port}")),
             app_id: AppId::mint(),
             creator_database: DatabaseId::mint(),
             binding: BindingId::mint(),
@@ -277,10 +445,10 @@ impl Fleet {
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         fleet.secret("relay-cert.pem", cert.cert.pem().as_bytes());
         fleet.secret("relay-key.pem", cert.signing_key.serialize_pem().as_bytes());
-        let relay_port = port();
+        let relay_port = fleet.reserve();
         fleet.relay_port = relay_port;
         let relay_addr = format!("127.0.0.1:{relay_port}");
-        release(relay_port);
+        fleet.release(relay_port);
         fleet.spawn(
             "relay",
             &binaries["zeroship-data-cdc-server"],
@@ -298,24 +466,28 @@ impl Fleet {
                 fleet.role_url("zeroship_cdc"),
             )],
         );
-        let logs = fleet.logs.clone();
+        let relay_log = fleet.logs.join("relay.log");
         let relay = &mut fleet
             .children
             .iter_mut()
             .find(|(name, _)| name == "relay")
             .expect("the fleet spawned a relay")
             .1;
-        assert!(
-            await_listening(
-                relay,
-                relay_port,
-                Instant::now() + Duration::from_secs(60),
-                &logs
-            )
-            .await,
-            "CDC relay readiness; see {}",
-            logs.display()
-        );
+        match await_listening(
+            relay,
+            relay_port,
+            Instant::now() + Duration::from_secs(60),
+            &relay_log,
+        )
+        .await
+        {
+            Readiness::Ready => {}
+            Readiness::LostRace => return Err(LaunchRace { log: relay_log }),
+            Readiness::TimedOut => panic!(
+                "the CDC relay was not listening on {relay_port} before its deadline; see {}",
+                relay_log.display()
+            ),
+        }
         let control_port = url::Url::parse(&fleet.control_url)
             .unwrap()
             .port()
@@ -353,7 +525,7 @@ impl Fleet {
                 url::Url::parse(&manager_url).unwrap().port().unwrap()
             );
             let payloads = fleet.payload_store();
-            release(url::Url::parse(&manager_url).unwrap().port().unwrap());
+            fleet.release(url::Url::parse(&manager_url).unwrap().port().unwrap());
             fleet.spawn(
                 "workflow",
                 &binaries["zeroship-workflow-server"],
@@ -397,7 +569,7 @@ impl Fleet {
                 manager_url,
             ));
         }
-        release(control_port.parse().expect("control port"));
+        fleet.release(control_port.parse().expect("control port"));
         fleet.spawn(
             "control",
             &binaries["zeroship-control"],
@@ -412,13 +584,13 @@ impl Fleet {
             ],
             &control_env,
         );
-        fleet.ready("control", fleet.control_url.clone()).await;
+        fleet.ready("control", fleet.control_url.clone()).await?;
         if let Some(manager_url) = fleet.manager_url.clone() {
-            fleet.ready("workflow", manager_url).await;
+            fleet.ready("workflow", manager_url).await?;
         }
         fleet.spawn_worker("worker", &worker_port);
-        fleet.ready("worker", fleet.worker_url.clone()).await;
-        release(gateway_port.parse().expect("gateway port"));
+        fleet.ready("worker", fleet.worker_url.clone()).await?;
+        fleet.release(gateway_port.parse().expect("gateway port"));
         fleet.spawn(
             "gateway",
             &binaries["zeroship-gate"],
@@ -451,7 +623,7 @@ impl Fleet {
                 ("ZEROSHIP_GATEWAY_STASH_SIGNING_KEY", MASTER_KEY.into()),
             ],
         );
-        fleet.ready("gateway", fleet.gateway_url.clone()).await;
+        fleet.ready("gateway", fleet.gateway_url.clone()).await?;
         let bundle = fleet.work.path().join("workflow.zship");
         let schema_work = fleet.work.path().join("schema");
         let output = Command::new("node")
@@ -597,7 +769,7 @@ impl Fleet {
         drop(creator_pg);
         creator_driver.await.unwrap().unwrap();
         driver.await.unwrap().unwrap();
-        fleet
+        Ok(fleet)
     }
 
     fn path(&self, name: &str) -> String {
@@ -665,7 +837,7 @@ impl Fleet {
                 payloads.to_str().unwrap().to_owned(),
             ));
         }
-        release(worker_port.parse().expect("worker port"));
+        self.release(worker_port.parse().expect("worker port"));
         self.spawn_as(
             name,
             "worker",
@@ -687,6 +859,11 @@ impl Fleet {
     }
 
     /// Start the reserved second worker and wait for it to be ready.
+    ///
+    /// A worker started mid-test cannot rebuild the fleet: the first worker is
+    /// already serving, and the gateway and Control hold URLs that name the
+    /// services around it. A lost port here is therefore fatal and panics
+    /// naming the log rather than relaunching, unlike a launch.
     pub async fn start_second_worker(&mut self) {
         let port = self
             .second_worker_port
@@ -697,7 +874,13 @@ impl Fleet {
             .second_worker_url
             .clone()
             .expect("the fleet reserved no deferred second worker");
-        self.ready("worker-2", url).await;
+        let log = self.logs.join("worker-2.log");
+        assert!(
+            self.ready("worker-2", url).await.is_ok(),
+            "the second worker lost its port to another process, and a worker \
+             started mid-test cannot rebuild the fleet; see {}",
+            log.display()
+        );
     }
 
     pub fn role_url(&self, role: &str) -> String {
@@ -835,6 +1018,22 @@ impl Fleet {
         }
     }
 
+    /// Reserve a port for a child this attempt is about to spawn, tracking it
+    /// until [`Self::release`].
+    fn reserve(&mut self) -> u16 {
+        self.reserved.reserve()
+    }
+
+    /// Drop this attempt's hold on `port` so the child about to bind it can.
+    fn release(&mut self, port: u16) {
+        self.reserved.release(port);
+    }
+
+    /// The ports this attempt still holds reserved.
+    pub fn reserved_ports(&self) -> Vec<u16> {
+        self.reserved.held()
+    }
+
     /// Wait until the service named `name` owns the reserved port and answers
     /// `/readyz`.
     ///
@@ -842,32 +1041,84 @@ impl Fleet {
     /// the port was reserved and released so that child could bind it, and
     /// another case's service can take it in between and answer `/readyz`
     /// exactly as this child does.
-    async fn ready(&mut self, name: &str, url: String) {
-        self.assert_alive();
+    ///
+    /// The wait classifies `name`'s own exit, so nothing checks that child's
+    /// liveness first: a pre-check would read a child that lost its port as a
+    /// generic crash and mask the lost race. A sibling that exited while `name`
+    /// was awaited is classified after `name` is ready.
+    ///
+    /// Returns `Err(LaunchRace)` when the child, or a sibling, exited with its
+    /// own log naming an address collision, so a launch rebuilds the fleet on
+    /// fresh ports. Any other exit and a deadline that passes first panic,
+    /// naming the log.
+    async fn ready(&mut self, name: &str, url: String) -> Result<(), LaunchRace> {
         let port = url::Url::parse(&url)
             .expect("a fleet service URL")
             .port()
             .expect("a fleet service URL names its port");
-        let logs = self.logs.clone();
+        let log = self.logs.join(format!("{name}.log"));
         let child = &mut self
             .children
             .iter_mut()
             .find(|(child_name, _)| child_name == name)
             .unwrap_or_else(|| panic!("no fleet service named {name}"))
             .1;
-        assert!(
-            await_ready(
-                child,
-                port,
-                &url,
-                Instant::now() + Duration::from_secs(60),
-                &logs
-            )
-            .await,
-            "{url} readiness failed; see {}",
-            logs.display()
-        );
-        self.assert_alive();
+        match await_ready(
+            child,
+            port,
+            &url,
+            Instant::now() + Duration::from_secs(60),
+            &log,
+        )
+        .await
+        {
+            Readiness::Ready => {}
+            Readiness::LostRace => return Err(LaunchRace { log }),
+            Readiness::TimedOut => panic!(
+                "{url} was not ready before its deadline; see {}",
+                log.display()
+            ),
+        }
+        classify_stopped(&mut self.children, &self.logs).map_err(|log| LaunchRace { log })?;
+        Ok(())
+    }
+}
+
+/// Classify every child the fleet is not waiting on.
+///
+/// A child still running is fine. A child that exited with its own log naming
+/// an address collision lost its port while another wait ran and the whole
+/// fleet rebuilds, reported as the log it wrote; any other exit panics naming
+/// that log. The launch spawns the workflow manager before Control but awaits
+/// the manager after it, so the manager can lose its port during Control's
+/// wait and must not read as a generic crash.
+pub fn classify_stopped(children: &mut [(String, Child)], logs: &Path) -> Result<(), PathBuf> {
+    for (name, child) in children.iter_mut() {
+        if child.try_wait().unwrap().is_some() {
+            let log = logs.join(format!("{name}.log"));
+            let _ = child_stopped(&log);
+            return Err(log);
+        }
+    }
+    Ok(())
+}
+
+/// How a readiness wait ends when its child has already exited.
+///
+/// A child that lost its port to another process writes the collision to its
+/// own log, so the log is what tells a lost race from a genuine startup
+/// failure. A lost race is reported for the caller to relaunch on; any other
+/// exit panics, naming the log.
+fn child_stopped(log: &Path) -> Readiness {
+    let text = fs::read_to_string(log).unwrap_or_default();
+    if text.contains("Address already in use") {
+        Readiness::LostRace
+    } else {
+        panic!(
+            "a workflow service exited before it was ready, for a reason other \
+             than a lost port race; see {}\n{text}",
+            log.display()
+        )
     }
 }
 
@@ -877,25 +1128,22 @@ impl Fleet {
 /// released so this child could bind it, and another case's service can take it
 /// in between and answer `/readyz` exactly as this child does; accepting that
 /// answer points every request at a service holding a different database, whose
-/// first authenticated call is refused. Returns `false` when `deadline` passes
-/// first.
+/// first authenticated call is refused. `log` is the child's own log file.
 ///
 /// # Panics
-/// When the child has exited, which is what a lost race for the port looks like
-/// from here.
+/// When the child has exited for a reason other than a lost port race, naming
+/// `log`.
 pub async fn await_ready(
     child: &mut Child,
     port: u16,
     url: &str,
     deadline: Instant,
-    logs: &Path,
-) -> bool {
+    log: &Path,
+) -> Readiness {
     loop {
-        assert!(
-            child.try_wait().unwrap().is_none(),
-            "a workflow service exited before {url} was ready; see {}",
-            logs.display()
-        );
+        if child.try_wait().unwrap().is_some() {
+            return child_stopped(log);
+        }
         let ready = async {
             let response = cyper::Client::new()
                 .get(format!("{url}/readyz"))
@@ -911,10 +1159,10 @@ pub async fn await_ready(
             Ok(Ok(true))
         ) && zeroship_testkit::listen::child_listens(child.id(), port)
         {
-            return true;
+            return Readiness::Ready;
         }
         if Instant::now() >= deadline {
-            return false;
+            return Readiness::TimedOut;
         }
         compio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -926,28 +1174,30 @@ pub async fn await_ready(
 /// The CDC relay answers no `/readyz`, so its readiness probe is a connect,
 /// but the connection is still accepted only from `child`: the port was
 /// reserved and released so the relay could bind it, and another case's
-/// service can take it in between. Returns `false` when `deadline` passes
-/// first.
+/// service can take it in between. `log` is the child's own log file.
 ///
 /// # Panics
-/// When the child has exited, which is what a lost race for the port looks like
-/// from here.
-pub async fn await_listening(child: &mut Child, port: u16, deadline: Instant, logs: &Path) -> bool {
+/// When the child has exited for a reason other than a lost port race, naming
+/// `log`.
+pub async fn await_listening(
+    child: &mut Child,
+    port: u16,
+    deadline: Instant,
+    log: &Path,
+) -> Readiness {
     loop {
-        assert!(
-            child.try_wait().unwrap().is_none(),
-            "a workflow service exited before port {port} was listening; see {}",
-            logs.display()
-        );
+        if child.try_wait().unwrap().is_some() {
+            return child_stopped(log);
+        }
         if compio::net::TcpStream::connect(("127.0.0.1", port))
             .await
             .is_ok()
             && zeroship_testkit::listen::child_listens(child.id(), port)
         {
-            return true;
+            return Readiness::Ready;
         }
         if Instant::now() >= deadline {
-            return false;
+            return Readiness::TimedOut;
         }
         compio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -959,6 +1209,8 @@ impl Drop for Fleet {
             let _ = child.kill();
             let _ = child.wait();
         }
+        // `self.reserved` drops after this body and releases every port this
+        // attempt still holds, so a partial fleet keeps nothing reserved.
     }
 }
 
@@ -1065,4 +1317,56 @@ async fn declare_creator_database(
     )
     .await
     .expect("bind the fleet app to its creator database");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{reserved_ports, ReservedPorts};
+
+    /// A reservation set releases every port it still holds when it drops, and
+    /// only those: a port it already released is left for whoever took it next.
+    ///
+    /// This is the mechanism a partial launch's `Fleet` drop runs, so a launch
+    /// that stopped early cannot keep a sibling out of the ports it reserved.
+    #[test]
+    fn a_dropped_reservation_set_releases_every_port_it_still_holds() {
+        let mut reserved = ReservedPorts::default();
+        let released = reserved.reserve();
+        let held = reserved.reserve();
+        assert!(
+            reserved_ports().contains(&released) && reserved_ports().contains(&held),
+            "a reserved port is held until it is released"
+        );
+
+        reserved.release(released);
+        assert!(
+            !reserved_ports().contains(&released),
+            "a released port is free again"
+        );
+        assert_eq!(
+            reserved.held(),
+            vec![held],
+            "a released port leaves the set, a held one stays"
+        );
+
+        drop(reserved);
+        assert!(
+            !reserved_ports().contains(&held),
+            "a dropped reservation set releases what it still holds"
+        );
+    }
+
+    /// A release of a port this set does not hold is a no-op, so it never drops
+    /// a listener another attempt reserved after this one let the port go.
+    #[test]
+    fn releasing_a_port_another_attempt_holds_is_a_no_op() {
+        let mut mine = ReservedPorts::default();
+        let mut other_attempt = ReservedPorts::default();
+        let other = other_attempt.reserve();
+        mine.release(other);
+        assert!(
+            reserved_ports().contains(&other),
+            "releasing a port this attempt does not hold must leave the holder's reservation alone"
+        );
+    }
 }
