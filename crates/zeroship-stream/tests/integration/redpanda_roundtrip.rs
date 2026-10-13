@@ -16,7 +16,7 @@ use rdkafka::config::ClientConfig;
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 use serde_json::json;
 use zeroship_stream::adapters;
-use zeroship_stream::{StreamConfig, StreamOffset, StreamRegistry};
+use zeroship_stream::{StreamConfig, StreamError, StreamOffset, StreamRegistry};
 
 /// The brokers string of the worktree's shared broker.
 fn brokers() -> String {
@@ -382,6 +382,133 @@ fn redpanda_end_offsets_name_the_last_record_of_every_partition() {
         assert_eq!(before, None, "the moved partition was the empty one");
         assert_eq!(after, Some(0), "the moved end names the newly appended record");
     });
+}
+
+/// The smallest `session.timeout.ms` Redpanda's `group.min.session.timeout.ms`
+/// accepts, and - because librdkafka requires `max.poll.interval.ms` to be at
+/// least it - the smallest `max.poll.interval.ms` a classic-protocol consumer
+/// can carry. The idle the eviction case waits out is only as long as this
+/// value forces.
+const SESSION_TIMEOUT_MS: u64 = 6_000;
+
+/// How long the consumer is left idle before its next poll: a full second past
+/// `max.poll.interval.ms`, longer than the 500ms interval librdkafka's
+/// max-poll check timer runs at, so the eviction has fired by the time the poll
+/// runs.
+const IDLE_PAST_MAX_POLL_MS: u64 = SESSION_TIMEOUT_MS + 1_000;
+
+/// The transport settings for `group` against `topic` with `session.timeout.ms`
+/// and `max.poll.interval.ms` lowered to [`SESSION_TIMEOUT_MS`], the smallest
+/// the broker accepts. `poll_timeout_ms` is the same one `config` uses: the
+/// rejoin runs at the transport's ordinary poll timeout, not a widened one.
+fn rejoin_config(brokers: &str, topic: &str, group: &str, client: &str) -> StreamConfig {
+    StreamConfig::from(json!({
+        "brokers": brokers,
+        "topic": topic,
+        "group.id": group,
+        "client_id": client,
+        "message_timeout_ms": 10000,
+        "publish_timeout_ms": 10000,
+        "poll_timeout_ms": 250,
+        "auto_offset_reset": "earliest",
+        "session.timeout.ms": SESSION_TIMEOUT_MS,
+        "max.poll.interval.ms": SESSION_TIMEOUT_MS
+    }))
+}
+
+/// A consumer left idle past `max.poll.interval.ms` is evicted from its group,
+/// and the FIRST poll it makes after the idle is that eviction: librdkafka
+/// queues `PollExceeded` while the member sits idle and the next call returns it
+/// instead of a record. The polls after it rejoin and read the records again.
+///
+/// This drives the transport's `poll` directly, with no `rewind` between the
+/// idle and the first poll. `rewind` polls the same consumer while it seeks,
+/// and that polling can serve the queued eviction before the caller ever polls,
+/// so a full-cycle case through `rewind` cannot pin the error to a call. Only
+/// driving `poll` directly does.
+///
+/// WHAT IT CATCHES: classifying the eviction as the generic Kafka error. A
+/// caller then cannot tell an expected rejoin from a genuinely broken broker,
+/// and any rejoin arm keyed on `PollExceeded` never runs. The first poll after
+/// the idle must carry `StreamError::PollExceeded`; the rejoin after it must
+/// read the records.
+#[compio::test]
+async fn redpanda_idle_member_evicted_poll_exceeded_then_rejoins() {
+    let brokers = brokers();
+
+    let budget = Duration::from_millis(IDLE_PAST_MAX_POLL_MS + 30_000);
+    let finished = compio::time::timeout(
+        budget,
+        Box::pin(async move {
+            let suffix = unique_suffix();
+            let topic = format!("zeroship-stream-rejoin-{suffix}");
+            let group = format!("zeroship-stream-rejoin-group-{suffix}");
+            let client = format!("zeroship-stream-rejoin-test-{suffix}");
+
+            let mut registry = StreamRegistry::default();
+            adapters::register_builtin(&mut registry);
+
+            let events = [
+                ("subject-a", 0),
+                ("subject-a", 1),
+                ("subject-b", 0),
+                ("subject-b", 1),
+            ];
+            let published = events.len();
+            publish(&registry, &brokers, &topic, &group, &client, &events).await;
+
+            let transport = registry
+                .build("redpanda", &rejoin_config(&brokers, &topic, &group, &client))
+                .expect("redpanda transport builds");
+
+            // Join the group and read to the end, so the member is a member and
+            // its fetch position sits past every record.
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let mut first = Vec::new();
+            while first.len() < published && Instant::now() < deadline {
+                first.extend(transport.poll(published).await.expect("first cycle poll"));
+            }
+            assert_eq!(
+                first.len(),
+                published,
+                "the first cycle reads every published record"
+            );
+
+            // Idle past `max.poll.interval.ms`: the broker's own eviction timer
+            // fires, the same gap a recompute interval longer than the poll
+            // interval produces.
+            compio::time::sleep(Duration::from_millis(IDLE_PAST_MAX_POLL_MS)).await;
+
+            // The first poll after the idle is the queued eviction, not a
+            // record.
+            let evicted = transport.poll(published).await;
+            assert!(
+                matches!(evicted, Err(StreamError::PollExceeded)),
+                "the first poll after the idle must surface the eviction as \
+                 PollExceeded, got {evicted:?}"
+            );
+
+            // Continuing to poll is the rejoin: the group re-delivers from the
+            // reset point and the same records come back.
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let mut rejoined = Vec::new();
+            while rejoined.len() < published && Instant::now() < deadline {
+                rejoined.extend(transport.poll(published).await.expect("rejoin poll"));
+            }
+            assert_eq!(
+                rejoined.len(),
+                published,
+                "the rejoined member reads the retained records again"
+            );
+            drop(transport);
+        }),
+    )
+    .await
+    .is_ok();
+    assert!(
+        finished,
+        "the idle-eviction case did not finish within its {budget:?} budget"
+    );
 }
 
 fn unique_suffix() -> String {

@@ -14,7 +14,7 @@ use std::time::Duration;
 use zeroship_core::app_id::AppId;
 use zeroship_core::usage_event::UsageEvent;
 use zeroship_stream::{
-    unless_stalled, Clock, PartitionEnd, StreamRecord, StreamTransport, SystemClock,
+    unless_stalled, Clock, PartitionEnd, StreamError, StreamRecord, StreamTransport, SystemClock,
 };
 
 use crate::metering::{period_start_unix, Metering, UsageAggregate};
@@ -419,7 +419,14 @@ pub fn periods_to_recompute(now_unix: i64, settle_window: Duration) -> Vec<i64> 
 /// configured poll timeout. A transport with no stall timeout answers every
 /// poll at once, so one poll that advances nothing ends the scan there. In each
 /// case the scan returns [`SpendRecomputeError::Stalled`] and nothing is
-/// written.
+/// written. A `PollExceeded` - the consumer evicted for idling past
+/// `max.poll.interval.ms` - carries no records and so is not progress either:
+/// the scan polls through the rejoin under the same stall budget, and a rejoin
+/// that does not land inside it ends the scan as a stall. Exactness across a
+/// rejoin relies on the rejoined member restarting at the earliest offset - the
+/// recompute commits no offsets and [`BillingStreamConfig`](crate::BillingStreamConfig)
+/// forces `auto.offset.reset=earliest` - together with the scan skipping
+/// offsets it already read.
 ///
 /// TODO(OQ-7): this intentionally performs a full retained-stream scan each
 /// cadence. A later slice should add rolling per-partition slices or an
@@ -447,7 +454,17 @@ pub async fn recompute_usage_aggregates(
                     return Err(scan.stalled(stall));
                 }
                 match unless_stalled(stream.poll(batch_max), compio::time::sleep(left)).await {
-                    Some(polled) => polled?,
+                    Some(Ok(records)) => records,
+                    // The consumer idled past librdkafka's `max.poll.interval.ms`
+                    // and was evicted from its group; librdkafka queues this once
+                    // and the following polls rejoin and re-deliver from the reset
+                    // point. Treat it as the expected rejoin rather than a scan
+                    // failure. The stall clock is deliberately NOT restarted: a
+                    // rejoin that does not land within the stall bound still ends
+                    // the scan as a stall, and every OTHER error still fails the
+                    // cycle.
+                    Some(Err(StreamError::PollExceeded)) => continue,
+                    Some(Err(other)) => return Err(other.into()),
                     None => return Err(scan.stalled(stall)),
                 }
             }
@@ -804,6 +821,7 @@ mod tests {
 #[cfg(test)]
 mod live_db_tests {
     use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
     use std::time::Instant;
 
@@ -1327,6 +1345,22 @@ mod live_db_tests {
         /// fire around a loop over such a poll, so the stream is its own
         /// watchdog: polled long past its stall timeout, it panics by name.
         Blocking(usize),
+        /// Answer the first poll with [`StreamError::PollExceeded`], then hand
+        /// over the log like `Delivers`: a consumer this scan kept across an
+        /// idle longer than its `max.poll.interval.ms`, which librdkafka
+        /// evicted from its group.
+        PollExceededOnce,
+        /// Answer EVERY poll with [`StreamError::PollExceeded`], advancing
+        /// [`ScriptedStream::clock`] by this much first, like
+        /// [`Script::Paced`]: a consumer that stayed evicted for its whole
+        /// idle interval and never rejoined. No poll carries a record, so none
+        /// is progress and none may restart the stall clock: the scan must run
+        /// out the stall budget it started with and give up.
+        PollExceededPaced(Duration),
+        /// Answer every poll with a genuine consumer failure, distinct from
+        /// the idle eviction: a broker that is broken for a reason the scan
+        /// must NOT swallow.
+        Fails,
     }
 
     /// A stream whose log the test writes and whose `poll` follows a
@@ -1344,6 +1378,9 @@ mod live_db_tests {
         /// What `end_offsets` reports instead of the log's own ends.
         ends: Option<Vec<PartitionEnd>>,
         created: Instant,
+        /// Set once a `PollExceededOnce` script has served its one error, so
+        /// the next poll delivers records instead of reporting it again.
+        poll_exceeded_served: AtomicBool,
         /// Advanced by [`Script::Paced`] on every simulated delivery. Unused
         /// by every other script. A test that wants a [`SpendRecomputeConfig`]
         /// to read elapsed time from this SAME clock retrieves it via
@@ -1367,6 +1404,7 @@ mod live_db_tests {
                 },
                 ends: None,
                 created: Instant::now(),
+                poll_exceeded_served: AtomicBool::new(false),
                 clock: Arc::new(FakeClock::new()),
             }
         }
@@ -1444,6 +1482,19 @@ mod live_db_tests {
                     );
                     Ok(self.next(max, count))
                 }
+                Script::PollExceededOnce => {
+                    yield_to_runtime().await;
+                    if !self.poll_exceeded_served.swap(true, Ordering::SeqCst) {
+                        return Err(StreamError::PollExceeded);
+                    }
+                    Ok(self.next(max, usize::MAX))
+                }
+                Script::PollExceededPaced(pace) => {
+                    yield_to_runtime().await;
+                    self.clock.advance(pace);
+                    Err(StreamError::PollExceeded)
+                }
+                Script::Fails => Err(StreamError::Kafka("broker went away".to_string())),
             }
         }
 
@@ -1818,6 +1869,147 @@ mod live_db_tests {
                 assert_eq!(unfinished.len(), 1);
             }
             other => panic!("expected the blocking scan to stall, got {other:?}"),
+        }
+        assert_total(&client, &base.app, base.period, base.total).await;
+    }
+
+    /// A consumer that was evicted from its group for idling past its
+    /// `max.poll.interval.ms` reports that once, and the scan treats it as the
+    /// rejoin it is: the loop keeps polling, reads the stream to the captured
+    /// ends, and writes the snapshot, all in the same cycle.
+    ///
+    /// WHAT IT CATCHES: propagating `PollExceeded` like any other stream
+    /// error. A recompute interval longer than librdkafka's default poll
+    /// interval then loses the cycle after every idle gap, and with it the
+    /// spend enforcement that cycle drives.
+    #[compio::test]
+    async fn a_consumer_evicted_for_idling_rejoins_and_completes_the_cycle() {
+        let fresh = fresh_database();
+        let url = fresh.admin_url().to_string();
+        let client = pg(&url).await;
+        let registry = Registry::new(&url).await.expect("registry");
+        let base = snapshotted(&client, &[100, 50]).await;
+        let stream = ScriptedStream::new(
+            base.records.clone(),
+            Script::PollExceededOnce,
+            Some(Duration::from_secs(1)),
+        );
+
+        let cycle = compio::time::timeout(
+            Duration::from_secs(25),
+            Box::pin(recompute_usage_aggregates(
+                &registry,
+                &stream,
+                base.period,
+                &scan_cfg(8),
+            )),
+        )
+        .await
+        .expect("the scan did not return within its test budget")
+        .expect("an idle eviction is a rejoin, not a cycle failure");
+        assert_eq!(
+            cycle.polled,
+            base.records.len(),
+            "the rejoin re-read the whole captured range: {cycle:?}"
+        );
+        assert_eq!(cycle.written, 1);
+        assert_total(&client, &base.app, base.period, base.total).await;
+    }
+
+    /// An eviction is NOT progress. A consumer evicted for idling that never
+    /// rejoins reports `PollExceeded` on every poll; each one advances the
+    /// injected clock toward the stall deadline, but no poll carries a record
+    /// and so none advances a partition. The scan runs out the stall budget it
+    /// started with, returns [`SpendRecomputeError::Stalled`], and writes
+    /// nothing, so the snapshot already stored stays in force.
+    ///
+    /// Deterministic by construction, like the paced backlog case: every poll
+    /// advances a [`FakeClock`] by a fixed pace and the scan reads elapsed time
+    /// from that SAME clock via [`SpendRecomputeConfig::with_clock`] - never a
+    /// real timer - so the deadline is reached after a fixed number of polls
+    /// with no dependence on how promptly this process actually gets scheduled.
+    ///
+    /// WHAT IT CATCHES: restarting the stall clock when a `PollExceeded`
+    /// arrives. Then every eviction resets the deadline, `left` never falls to
+    /// zero, and the scan spins on a consumer that never rejoins until the
+    /// test's own timeout fails it by name.
+    #[compio::test]
+    async fn a_stream_that_only_evicts_the_consumer_stalls_and_writes_nothing() {
+        let fresh = fresh_database();
+        let url = fresh.admin_url().to_string();
+        let client = pg(&url).await;
+        let registry = Registry::new(&url).await.expect("registry");
+        let base = snapshotted(&client, &[100, 50]).await;
+        let stall = Duration::from_millis(200);
+        let pace = stall / 5;
+        let stream = ScriptedStream::new(
+            base.records.clone(),
+            Script::PollExceededPaced(pace),
+            Some(stall),
+        );
+        let cfg = scan_cfg(8).with_clock(stream.fake_clock());
+
+        let outcome = compio::time::timeout(
+            stall * 25,
+            Box::pin(recompute_usage_aggregates(&registry, &stream, base.period, &cfg)),
+        )
+        .await
+        .expect("the scan did not return within its test budget: an eviction restarted the stall clock");
+        match outcome {
+            Err(SpendRecomputeError::Stalled { stall_ms, unfinished }) => {
+                assert_eq!(stall_ms, 200, "the error names the transport's stall timeout");
+                assert_eq!(unfinished.len(), 1, "partition 0 is short of its captured end");
+                assert_eq!(
+                    unfinished[0],
+                    UnfinishedPartition {
+                        partition: 0,
+                        captured_end: 1,
+                        last_read: None,
+                    },
+                    "an eviction reads nothing, so no partition advanced: {unfinished:?}"
+                );
+            }
+            other => panic!("expected a consumer that never rejoins to stall, got {other:?}"),
+        }
+        assert_total(&client, &base.app, base.period, base.total).await;
+    }
+
+    /// Every stream error that is NOT the idle eviction is still a genuine
+    /// consumer failure: the scan returns it and writes nothing.
+    ///
+    /// WHAT IT CATCHES: broadening the rejoin arm to every `StreamError`, so a
+    /// dead broker reads as a rejoin, the scan spins out its budget, and no
+    /// cycle ever reports the real failure.
+    #[compio::test]
+    async fn a_genuine_poll_error_still_fails_the_cycle() {
+        let fresh = fresh_database();
+        let url = fresh.admin_url().to_string();
+        let client = pg(&url).await;
+        let registry = Registry::new(&url).await.expect("registry");
+        let base = snapshotted(&client, &[100, 50]).await;
+        let stream = ScriptedStream::new(
+            base.records.clone(),
+            Script::Fails,
+            Some(Duration::from_secs(1)),
+        );
+
+        let outcome = compio::time::timeout(
+            Duration::from_secs(25),
+            Box::pin(recompute_usage_aggregates(
+                &registry,
+                &stream,
+                base.period,
+                &scan_cfg(8),
+            )),
+        )
+        .await
+        .expect("the scan did not return within its test budget");
+        match outcome {
+            Err(SpendRecomputeError::Stream(StreamError::Kafka(message))) => assert!(
+                message.contains("broker went away"),
+                "the genuine failure reaches the caller unchanged: {message}"
+            ),
+            other => panic!("expected a genuine stream error, got {other:?}"),
         }
         assert_total(&client, &base.app, base.period, base.total).await;
     }

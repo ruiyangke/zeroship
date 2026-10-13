@@ -8700,6 +8700,7 @@ name = "zeroship-stream"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "compio",
  "futures",
  "rdkafka",
  "serde",

@@ -300,6 +300,11 @@ impl OrganizationResolver for PgOrganizationResolver {
 
 /// Run forever. Transient provider/stream failures retry with bounded backoff;
 /// offsets are not committed for transient failures.
+///
+/// A `PollExceeded` - this consumer evicted for idling past
+/// `max.poll.interval.ms` - is one of those transient stream failures: the
+/// cycle surfaces it as an `Err` and the loop's next attempt polls again,
+/// rejoining the group before it reads.
 #[allow(clippy::future_not_send)]
 pub async fn run(
     stream: Arc<dyn StreamTransport>,

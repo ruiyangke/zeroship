@@ -19,6 +19,10 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 futures = { workspace = true }
+# The idle-eviction case waits out librdkafka's own `max.poll.interval.ms`
+# timer; the wait is a `compio::time::sleep` on a compio runtime rather than a
+# thread sleep, so the broker's timer is the only clock the case rides.
+compio = { workspace = true }
 # The worktree's shared broker this binary runs against, and the lifetime
 # measurements of its recipe.
 zeroship-testkit = { workspace = true }

@@ -11,6 +11,7 @@
 //! spend evaluator work together against a real broker and real Postgres, rather
 //! than each in isolation with a fake stream.
 
+use std::collections::BTreeMap;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -183,6 +184,37 @@ fn redpanda_config(brokers: &str, topic: &str, group: &str) -> StreamConfig {
         "publish_timeout_ms": PUBLISH_TIMEOUT_MS,
         "poll_timeout_ms": POLL_TIMEOUT_MS,
         "auto_offset_reset": "earliest"
+    }))
+}
+
+/// The smallest `session.timeout.ms` the broker's `group.min.session.timeout.ms`
+/// accepts, and - because librdkafka requires `max.poll.interval.ms` to be at
+/// least it - the smallest `max.poll.interval.ms` a classic-protocol consumer
+/// can carry. The idle-rejoin case is only as slow as this value forces.
+const SESSION_TIMEOUT_MS: u64 = 6_000;
+const MAX_POLL_INTERVAL_MS: u64 = SESSION_TIMEOUT_MS;
+
+/// How long the recompute consumer is left idle between the two cycles, a full
+/// second past its `max.poll.interval.ms`. librdkafka checks the interval twice
+/// a second, so a full second past the deadline leaves no race with the check
+/// timer: the eviction has fired before the second cycle begins.
+const IDLE_BETWEEN_CYCLES_MS: u64 = MAX_POLL_INTERVAL_MS + 1_000;
+
+/// A recompute consumer whose group membership lapses if it is left idle for
+/// longer than [`MAX_POLL_INTERVAL_MS`], the way the cron's long-lived consumer
+/// does between hourly cycles.
+fn rejoin_config(brokers: &str, topic: &str, group: &str) -> StreamConfig {
+    StreamConfig::from(serde_json::json!({
+        "brokers": brokers,
+        "topic": topic,
+        "group.id": group,
+        "client_id": format!("zeroship-rejoin-{}", Uuid::new_v4().simple()),
+        "message_timeout_ms": MESSAGE_TIMEOUT_MS,
+        "publish_timeout_ms": PUBLISH_TIMEOUT_MS,
+        "poll_timeout_ms": POLL_TIMEOUT_MS,
+        "auto_offset_reset": "earliest",
+        "session.timeout.ms": SESSION_TIMEOUT_MS,
+        "max.poll.interval.ms": MAX_POLL_INTERVAL_MS
     }))
 }
 
@@ -397,6 +429,149 @@ async fn producer_to_redpanda_to_recompute_to_spend_block_end_to_end() {
     assert!(
         finished,
         "the billing pipeline did not finish within its {budget:?} async budget; it was {} \
+         when the budget ran out",
+        get_phase(&phase)
+    );
+}
+
+/// The budget for the idle-rejoin case: the idle itself plus, for each of the
+/// two recompute cycles, the same rewind/end-capture/scan bounds the pipeline
+/// budget carries, and one publish for the event both cycles read.
+const fn rejoin_budget() -> Duration {
+    Duration::from_millis(
+        IDLE_BETWEEN_CYCLES_MS
+            + PUBLISH_TIMEOUT_MS
+            + 6 * MESSAGE_TIMEOUT_MS
+            + 2 * POLL_TIMEOUT_MS,
+    )
+}
+
+/// An end-to-end smoke across an idle longer than the consumer's
+/// `max.poll.interval.ms`: a recompute consumer kept between cycles completes
+/// its next full cycle against a real broker and real Postgres, rejoin and all.
+///
+/// The cron drives `spend_recompute::run` every interval on ONE consumer, and
+/// production's interval is far longer than librdkafka's default
+/// `max.poll.interval.ms`. This case lowers both the session timeout and the
+/// poll interval to the smallest the broker accepts, runs one full cycle, idles
+/// past the interval, and runs a second. What it proves is that the pipeline
+/// completes; it does not pin the eviction to the call that surfaces it,
+/// because `rewind` polls the same consumer while it seeks and can serve the
+/// queued eviction first. The case that pins the first poll after the idle to
+/// `StreamError::PollExceeded` is `zeroship-stream`'s
+/// `redpanda_idle_member_evicted_poll_exceeded_then_rejoins`, which drives
+/// `poll` directly.
+///
+/// The stimulus is librdkafka's own timer, waited out on the compio runtime;
+/// the case as a whole is bounded by the async budget below and the OS-level
+/// watchdog that mirrors the pipeline case's.
+#[compio::test(crate = "crate::support::live")]
+async fn a_recompute_cycle_rejoins_after_the_consumer_idles_past_max_poll() {
+    use zeroship_core::usage_event::{UsageEvent, UsageSubject};
+
+    let budget = rejoin_budget();
+    let phase = Arc::new(Mutex::new("joining the shared redpanda broker fixture"));
+
+    let brokers = brokers();
+    let url = db_url();
+    let watchdog_budget = budget + Duration::from_millis(MESSAGE_TIMEOUT_MS);
+    let _watchdog = Watchdog::start(watchdog_budget, Arc::clone(&phase));
+
+    let pipeline = async {
+        set_phase(&phase, "connecting to PostgreSQL");
+        let client = pg(&url).await;
+        let registry = Registry::new(&url).await.expect("registry");
+        let period = current_period_start_unix();
+        set_phase(&phase, "seeding the priced app");
+        let plan_id = seed_pricing(&client).await;
+        let app = seed_priced_app(&client, &plan_id).await;
+
+        let suffix = Uuid::new_v4().simple().to_string();
+        let topic = format!("zeroship-recompute-rejoin-{suffix}");
+
+        let event = UsageEvent {
+            event_id: format!("evt-rejoin-{suffix}"),
+            source: "worker-e2e".to_string(),
+            subject: UsageSubject {
+                app: Some(app.clone()),
+                organization: Some(zeroship_core::typed_id::generate("org")),
+            },
+            meter: "requests".to_string(),
+            value: 100,
+            event_time: period + 10,
+            dims: BTreeMap::new(),
+        };
+
+        set_phase(&phase, "publishing the usage event");
+        let mut producer_registry = StreamRegistry::default();
+        adapters::register_builtin(&mut producer_registry);
+        let producer = producer_registry
+            .build(
+                "redpanda",
+                &redpanda_config(&brokers, &topic, &format!("rejoin-producer-{suffix}")),
+            )
+            .expect("redpanda producer transport");
+        producer
+            .publish(
+                &topic,
+                app.as_str().as_bytes(),
+                &serde_json::to_vec(&event).expect("usage event serializes"),
+            )
+            .await
+            .expect("publish the usage event");
+        drop(producer);
+
+        set_phase(&phase, "running the first recompute cycle");
+        let mut consumer_registry = StreamRegistry::default();
+        adapters::register_builtin(&mut consumer_registry);
+        let recompute_stream = consumer_registry
+            .build(
+                "redpanda",
+                &rejoin_config(&brokers, &topic, &format!("rejoin-recompute-{suffix}")),
+            )
+            .expect("redpanda recompute transport");
+        let cfg = SpendRecomputeConfig {
+            interval: Duration::from_secs(1),
+            settle_window: Duration::from_secs(DEFAULT_SETTLE_WINDOW_SECS),
+            batch_max: 16,
+            ..Default::default()
+        };
+
+        let first = recompute_usage_aggregates(&registry, recompute_stream.as_ref(), period, &cfg)
+            .await
+            .expect("first recompute cycle");
+        assert_eq!(
+            first.polled, 1,
+            "the first cycle reads the one published record: {first:?}"
+        );
+        assert_eq!(usage_total(&client, &app).await, 100);
+
+        // The consumer now sits idle past max.poll.interval.ms, the way the
+        // cron leaves it between cycles.
+        set_phase(&phase, "idling past the consumer's max poll interval");
+        compio::time::sleep(Duration::from_millis(IDLE_BETWEEN_CYCLES_MS)).await;
+
+        set_phase(&phase, "running the second recompute cycle after the idle");
+        let second = recompute_usage_aggregates(&registry, recompute_stream.as_ref(), period, &cfg)
+            .await
+            .expect("the second recompute cycle rejoins its group and completes");
+        assert_eq!(
+            second.polled, 1,
+            "the rejoin re-reads the record to the captured end: {second:?}"
+        );
+        assert_eq!(
+            usage_total(&client, &app).await,
+            100,
+            "the rejoin must leave the same snapshot the first cycle wrote"
+        );
+
+        set_phase(&phase, "dropping the broker clients");
+        drop(recompute_stream);
+    };
+    let finished = compio::time::timeout(budget, Box::pin(pipeline)).await.is_ok();
+    assert!(
+        finished,
+        "the idle-rejoin case did not finish within its {budget:?} async budget; it was {} \
          when the budget ran out",
         get_phase(&phase)
     );

@@ -170,6 +170,29 @@ pub struct RedpandaConfig {
     pub poll_timeout_ms: u64,
     #[serde(default = "default_auto_offset_reset")]
     pub auto_offset_reset: String,
+    /// librdkafka's `session.timeout.ms`: how long the broker waits for a
+    /// heartbeat from this member before removing it from the group. The
+    /// broker refuses a value below its `group.min.session.timeout.ms` at join
+    /// time. Exposed so a test can lower it enough to lower
+    /// `max.poll.interval.ms` with it, because librdkafka requires the two to
+    /// be ordered (see [`Self::validate`]).
+    #[serde(
+        default = "default_session_timeout_ms",
+        rename = "session.timeout.ms",
+        alias = "session_timeout_ms"
+    )]
+    pub session_timeout_ms: u64,
+    /// librdkafka's `max.poll.interval.ms`: the longest the application may go
+    /// between `poll` calls before librdkafka treats the member as failed,
+    /// leaves the group, and queues a [`crate::StreamError::PollExceeded`] for
+    /// the next poll. The recompute cron keeps one consumer across its cycles
+    /// and may idle longer than this between them.
+    #[serde(
+        default = "default_max_poll_interval_ms",
+        rename = "max.poll.interval.ms",
+        alias = "max_poll_interval_ms"
+    )]
+    pub max_poll_interval_ms: u64,
 }
 
 fn default_message_timeout_ms() -> u64 {
@@ -188,6 +211,14 @@ fn default_auto_offset_reset() -> String {
     "earliest".to_string()
 }
 
+const fn default_session_timeout_ms() -> u64 {
+    45_000
+}
+
+const fn default_max_poll_interval_ms() -> u64 {
+    300_000
+}
+
 impl RedpandaConfig {
     fn validate(&self) -> Result<(), StreamError> {
         require_non_empty("redpanda: brokers", &self.brokers)?;
@@ -196,6 +227,18 @@ impl RedpandaConfig {
         require_non_zero("redpanda: message_timeout_ms", self.message_timeout_ms)?;
         require_non_zero("redpanda: publish_timeout_ms", self.publish_timeout_ms)?;
         require_non_zero("redpanda: poll_timeout_ms", self.poll_timeout_ms)?;
+        require_non_zero("redpanda: session.timeout.ms", self.session_timeout_ms)?;
+        require_non_zero("redpanda: max.poll.interval.ms", self.max_poll_interval_ms)?;
+        // librdkafka refuses to build a classic-protocol consumer where
+        // `max.poll.interval.ms` is below `session.timeout.ms`; surfaced here so
+        // the caller gets the constraint by name instead of a client-creation
+        // error, and so an operator lowering one knows to lower the other.
+        if self.max_poll_interval_ms < self.session_timeout_ms {
+            return Err(StreamError::Config(format!(
+                "redpanda: max.poll.interval.ms ({}) must be >= session.timeout.ms ({})",
+                self.max_poll_interval_ms, self.session_timeout_ms
+            )));
+        }
         Ok(())
     }
 }
@@ -277,6 +320,11 @@ impl RedpandaTransport {
             .set("enable.auto.offset.store", "false")
             .set("enable.partition.eof", "false")
             .set("auto.offset.reset", config.auto_offset_reset.trim())
+            .set("session.timeout.ms", config.session_timeout_ms.to_string())
+            .set(
+                "max.poll.interval.ms",
+                config.max_poll_interval_ms.to_string(),
+            )
             .set_log_level(RDKafkaLogLevel::Warning);
         if let Some(client_id) = config.client_id.as_deref().filter(|s| !s.trim().is_empty()) {
             consumer_config.set("client.id", format!("{client_id}-consumer"));
@@ -648,5 +696,87 @@ mod tests {
                 "the stall timeout must follow the configured message timeout"
             );
         }
+    }
+
+    fn config_with(json: serde_json::Value) -> crate::StreamConfig {
+        crate::StreamConfig::from(json)
+    }
+
+    /// librdkafka's local `max.poll.interval.ms` eviction arrives as a
+    /// `MessageConsumption(PollExceeded)`, and that exact variant AND code pair
+    /// is the ONLY thing mapped to [`StreamError::PollExceeded`]: a caller that
+    /// treats the variant as an expected rejoin still has to fail on a broker
+    /// that is genuinely broken, and those arrive under the same
+    /// `MessageConsumption` variant with a different code, or under
+    /// `MessageConsumptionFatal` carrying the same poll code.
+    #[test]
+    fn only_the_max_poll_code_maps_to_poll_exceeded() {
+        let poll_exceeded = rdkafka::error::KafkaError::MessageConsumption(
+            rdkafka::error::RDKafkaErrorCode::PollExceeded,
+        );
+        assert!(
+            matches!(
+                StreamError::from(poll_exceeded),
+                StreamError::PollExceeded
+            ),
+            "the max.poll.interval.ms code must map to the rejoin variant"
+        );
+
+        let transport_failure = rdkafka::error::KafkaError::MessageConsumption(
+            rdkafka::error::RDKafkaErrorCode::BrokerTransportFailure,
+        );
+        assert!(
+            matches!(
+                StreamError::from(transport_failure),
+                StreamError::Kafka(_)
+            ),
+            "every other consumption error must stay a genuine Kafka failure"
+        );
+
+        let fatal_poll_exceeded = rdkafka::error::KafkaError::MessageConsumptionFatal(
+            rdkafka::error::RDKafkaErrorCode::PollExceeded,
+        );
+        assert!(
+            matches!(
+                StreamError::from(fatal_poll_exceeded),
+                StreamError::Kafka(_)
+            ),
+            "a fatal consumption error keeps its identity even when it carries the poll code"
+        );
+    }
+
+    /// The consumer interval settings reach the client: a config whose
+    /// `max.poll.interval.ms` is below its `session.timeout.ms` is refused by
+    /// name (librdkafka would refuse it at client creation), and a valid
+    /// ordered pair builds. No socket is opened either way.
+    #[test]
+    fn max_poll_interval_must_not_be_below_the_session_timeout() {
+        let base = |session: u64, max_poll: u64| {
+            config_with(serde_json::json!({
+                "brokers": "127.0.0.1:1",
+                "topic": "t",
+                "group.id": "g",
+                "session.timeout.ms": session,
+                "max.poll.interval.ms": max_poll,
+            }))
+        };
+
+        let refused = factory(&base(6_000, 5_999));
+        match refused {
+            Err(StreamError::Config(message)) => assert!(
+                message.contains("max.poll.interval.ms"),
+                "the refusal names the setting: {message}"
+            ),
+            Err(other) => panic!(
+                "the adapter must refuse max.poll.interval.ms below session.timeout.ms by \
+                 config, not leave it to librdkafka: {other:?}"
+            ),
+            Ok(_) => panic!(
+                "the adapter must refuse max.poll.interval.ms below session.timeout.ms"
+            ),
+        }
+
+        factory(&base(6_000, 6_000))
+            .expect("a max.poll interval at the session timeout builds");
     }
 }
