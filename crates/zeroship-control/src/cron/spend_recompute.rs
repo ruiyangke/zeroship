@@ -13,7 +13,9 @@ use std::time::Duration;
 
 use zeroship_core::app_id::AppId;
 use zeroship_core::usage_event::UsageEvent;
-use zeroship_stream::{StreamRecord, StreamTransport};
+use zeroship_stream::{
+    unless_stalled, Clock, PartitionEnd, StreamRecord, StreamTransport, SystemClock,
+};
 
 use crate::metering::{period_start_unix, Metering, UsageAggregate};
 use crate::registry::{Registry, RegistryError};
@@ -22,16 +24,19 @@ use crate::AppState;
 pub const DEFAULT_RECOMPUTE_INTERVAL_SECS: u64 = 60 * 60;
 pub const DEFAULT_BATCH_MAX: usize = 10_000;
 
-/// Consecutive empty polls that conclude the retained stream is fully drained
-/// for one recompute cycle. A Kafka-wire broker's fetch is async, so a single
-/// empty poll right after `rewind` does not mean the topic is empty.
-const RECOMPUTE_DRAIN_EMPTY_ROUNDS: u32 = 3;
-
 #[derive(Debug, Clone)]
 pub struct SpendRecomputeConfig {
     pub interval: Duration,
     pub settle_window: Duration,
     pub batch_max: usize,
+    /// Source of elapsed time for the stall-timeout decision in
+    /// [`recompute_usage_aggregates`]. [`SystemClock`] by default; a test
+    /// overrides it with a clock it advances itself, to drive that decision
+    /// deterministically instead of depending on real timer latency under
+    /// load. Carried here, on the scan's caller, rather
+    /// than on the [`StreamTransport`] every adapter implements, since only
+    /// the scan itself needs it. Public like this struct's other fields.
+    pub clock: Arc<dyn Clock>,
 }
 
 impl Default for SpendRecomputeConfig {
@@ -42,12 +47,30 @@ impl Default for SpendRecomputeConfig {
                 super::billing_reconcile::DEFAULT_SETTLE_WINDOW_SECS,
             ),
             batch_max: DEFAULT_BATCH_MAX,
+            clock: Arc::new(SystemClock),
         }
+    }
+}
+
+impl SpendRecomputeConfig {
+    /// Override the clock [`recompute_usage_aggregates`] reads elapsed time
+    /// from. Production never calls this; a test injects a clock it advances
+    /// itself, so a scripted stream that paces delivery can make the
+    /// stall-timeout decision deterministic instead of exposed to real
+    /// scheduler latency under load.
+    #[cfg(test)]
+    #[must_use]
+    fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = clock;
+        self
     }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SpendRecomputeCycle {
+    /// Records read inside the ends captured when the scan started, each
+    /// offset once. A record appended after the capture, or delivered again
+    /// for an offset already read, is not counted.
     pub polled: usize,
     pub decoded: usize,
     /// Events read but not applied to this period's totals, split by CAUSE.
@@ -107,6 +130,56 @@ pub enum SpendRecomputeError {
     },
     #[error("registry: {0}")]
     Registry(String),
+    /// The full-period scan went the transport's stall timeout without reading
+    /// a record that brought a partition closer to the end captured when the
+    /// scan started: a poll that parked, or polls that kept answering without
+    /// advancing. The scan is abandoned and writes nothing, so the last
+    /// written snapshot stays in force; the enforcement loop logs this and
+    /// runs a fresh scan on its next interval.
+    ///
+    /// `stall_ms` is the transport's stall timeout. It is zero for an
+    /// in-process transport, where one poll that advanced nothing is already
+    /// the stall. `unfinished` names every partition still short of its
+    /// captured end, with the end this scan captured and how far it actually
+    /// got, so a log line tells an operator where the scan stopped rather than
+    /// only how many partitions were left.
+    #[error(
+        "stream scan stalled: no record advanced toward the captured end within {stall_ms}ms; \
+         unfinished partitions: {}; the snapshot was not written",
+        format_unfinished_partitions(.unfinished)
+    )]
+    Stalled {
+        stall_ms: u64,
+        unfinished: Vec<UnfinishedPartition>,
+    },
+}
+
+/// Where one still-unfinished partition sat when a scan gave up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnfinishedPartition {
+    pub partition: i32,
+    /// The captured offset of the partition's last record: the scan's end.
+    pub captured_end: i64,
+    /// The highest offset folded so far, `None` before the first.
+    pub last_read: Option<i64>,
+}
+
+impl std::fmt::Display for UnfinishedPartition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "partition {} (captured end {}, ", self.partition, self.captured_end)?;
+        match self.last_read {
+            Some(read) => write!(f, "last read {read})"),
+            None => write!(f, "nothing read yet)"),
+        }
+    }
+}
+
+fn format_unfinished_partitions(unfinished: &[UnfinishedPartition]) -> String {
+    unfinished
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 impl From<RegistryError> for SpendRecomputeError {
@@ -115,26 +188,19 @@ impl From<RegistryError> for SpendRecomputeError {
     }
 }
 
-/// Cron entry point. A transient stream/PG error is logged and retried after
-/// the next cadence.
+/// Cron entry point. A stream or database error, or a scan that stalls, is
+/// logged and retried after the next cadence.
 ///
-/// This function does not know whether a scan completed. The drain loop's
-/// ONLY exit is `RECOMPUTE_DRAIN_EMPTY_ROUNDS` consecutive empty polls, and
-/// `replace_period_snapshot` DELETEs the whole period and rewrites it from
-/// whatever that scan happened to see - so a partial snapshot is written on
-/// every cycle that reads anything at all. The `polled == 0` guard below covers
-/// the read-nothing case and nothing else.
-///
-/// The empty-poll heuristic measures LATENCY, not end-of-stream: the redpanda
-/// adapter returns immediately once it has any record and only blocks
-/// `poll_timeout_ms` when it has none, so three empty rounds is roughly
-/// `3 x poll_timeout_ms` of tolerance. A mid-scan fetch stall longer than that -
-/// a partition leader failover, a broker pause - reads as "the topic ended
-/// here", and the period is rewritten from the truncated read.
-///
-/// No test can currently distinguish the two: every stream double in this
-/// repository is empty-forever once drained, so one empty poll IS end-of-stream
-/// for all of them and the constant could be 1 without any test noticing.
+/// Every cycle's scan either completes or writes nothing.
+/// [`recompute_usage_aggregates`] captures each partition's end right after
+/// rewinding and reads every partition up to that captured end;
+/// `replace_period_snapshot`, which DELETEs the whole period and rewrites it,
+/// runs only once every partition got there. Records produced after the
+/// capture belong to the next cycle, so a producer writing as fast as the scan
+/// reads cannot stretch it, and a scan of any size that keeps advancing runs
+/// to the end. A scan that goes the transport's stall timeout without
+/// advancing returns [`SpendRecomputeError::Stalled`] and leaves the last
+/// written snapshot in force.
 #[allow(clippy::future_not_send)]
 pub async fn run(
     state: Arc<AppState>,
@@ -235,21 +301,57 @@ pub async fn tick(
 /// The lock-held body. Separate so the lock in [`tick`] wraps exactly this and
 /// so an integration test can drive the work directly, bypassing the
 /// single-flight - the same split `billing_notify` uses.
+///
+/// `spend_reconcile::tick` runs whatever the recompute returned, not only when
+/// it succeeds: a scan that stalls still leaves the last written snapshot in
+/// force, and a limit lowered below that snapshot's usage must not wait on a
+/// future complete scan to take effect. The recompute's own error, if any, is
+/// still returned once the evaluator has run, so a stall stays visible to the
+/// cron loop's logging instead of reading as a quiet success - and if the
+/// evaluator ALSO fails, only its error can propagate from this function, so
+/// the recompute's own error (a stall's partition detail included) is logged
+/// here first rather than silently dropped.
 #[allow(clippy::future_not_send)]
 pub async fn recompute_and_reconcile(
     state: &AppState,
     stream: &dyn StreamTransport,
     cfg: &SpendRecomputeConfig,
 ) -> Result<SpendRecomputeCycle, SpendRecomputeError> {
-    let mut cycle = recompute_unsettled_period_snapshots(
+    let recomputed = recompute_unsettled_period_snapshots(
         &state.registry,
         stream,
         chrono::Utc::now().timestamp(),
         cfg,
     )
-    .await?;
-    cycle.transitions = super::spend_reconcile::tick(state).await?;
+    .await;
+    let transitions = match super::spend_reconcile::tick(state).await {
+        Ok(transitions) => transitions,
+        Err(evaluator_error) => {
+            log_recompute_error_lost_to_evaluator_failure(&recomputed);
+            return Err(evaluator_error.into());
+        }
+    };
+    let mut cycle = recomputed?;
+    cycle.transitions = transitions;
     Ok(cycle)
+}
+
+/// Only the evaluator's error can propagate from [`recompute_and_reconcile`]
+/// when both it and the recompute fail in the same cycle - a single
+/// `Result` return has room for one. Logged here, right before that error is
+/// returned, so the recompute's own error (a stall's unfinished-partition
+/// detail included) still reaches the cron log instead of being silently
+/// dropped.
+fn log_recompute_error_lost_to_evaluator_failure(
+    recomputed: &Result<SpendRecomputeCycle, SpendRecomputeError>,
+) {
+    if let Err(error) = recomputed {
+        tracing::error!(
+            error = %error,
+            "spend-recompute: the evaluator also failed this cycle, so only its error \
+             propagates; logging the recompute's own error here so it is not lost"
+        );
+    }
 }
 
 /// Recompute the current period plus the just-closed previous period while that
@@ -290,6 +392,35 @@ pub fn periods_to_recompute(now_unix: i64, settle_window: Duration) -> Vec<i64> 
 
 /// Recompute the specified period and overwrite `usage_aggregates`.
 ///
+/// The scan reads the whole retained stream once, up to the ends captured as
+/// it starts, folding every in-period event into per-`(app, metric)` totals,
+/// and the snapshot is written only once that scan is complete. A scan that
+/// stalls, or a stream error partway through, returns its error before
+/// anything is written, so the period keeps the totals the last complete scan
+/// wrote.
+///
+/// FINITE BY CONSTRUCTION. Right after `rewind`, [`StreamTransport::end_offsets`]
+/// captures the last offset of every partition of the topic. The scan is
+/// complete when each partition has delivered a record at or past its captured
+/// offset; a partition that held nothing at the capture is complete from the
+/// start. Records past a captured end, and records from a partition the capture
+/// did not name, belong to the next cycle and are not read, so however fast
+/// producers write, the scan has a fixed amount to read.
+///
+/// BOUNDED BY STALLS, NOT BY SIZE. The only time limit is the transport's
+/// [`StreamTransport::stall_timeout`], and it bounds the gap between polls that
+/// advance a partition toward its captured end, never the scan as a whole: a
+/// period of any size completes as long as the stream keeps delivering. A
+/// `poll` that suspends is abandoned once what is left of the current gap runs
+/// out (see [`unless_stalled`]), so a poll that parks ends the scan. A `poll`
+/// that blocks its thread instead (the redpanda adapter's librdkafka calls)
+/// cannot be abandoned, so the stall clock is also checked before every poll;
+/// there the gap can overrun by one poll, which that adapter bounds by its own
+/// configured poll timeout. A transport with no stall timeout answers every
+/// poll at once, so one poll that advances nothing ends the scan there. In each
+/// case the scan returns [`SpendRecomputeError::Stalled`] and nothing is
+/// written.
+///
 /// TODO(OQ-7): this intentionally performs a full retained-stream scan each
 /// cadence. A later slice should add rolling per-partition slices or an
 /// incremental checkpoint/range-scan API to avoid O(period) work every tick.
@@ -301,67 +432,42 @@ pub async fn recompute_usage_aggregates(
     cfg: &SpendRecomputeConfig,
 ) -> Result<SpendRecomputeCycle, SpendRecomputeError> {
     stream.rewind().await?;
+    let ends = stream.end_offsets().await?;
+    let mut scan = PeriodScan::new(period_start, &ends);
 
+    let stall = stream.stall_timeout();
+    let clock = cfg.clock.as_ref();
     let batch_max = cfg.batch_max.max(1);
-    let mut cycle = SpendRecomputeCycle::default();
-    let mut totals = HashMap::<(AppId, String), i64>::new();
-    let mut seen_event_ids = HashSet::<String>::new();
-
-    // A Kafka-wire broker's fetch is asynchronous: right after `rewind`'s
-    // seek-to-beginning, the first `poll` can return empty even though the topic
-    // is non-empty (the fetch has not landed yet). A single empty poll therefore
-    // does NOT mean "fully drained" — tolerate a few consecutive empties so each
-    // cycle reads the COMPLETE retained stream, rather than replacing the period
-    // snapshot with a partial (or empty) read.
-    let mut empty_rounds = 0u32;
-    loop {
-        let records = stream.poll(batch_max).await?;
-        if records.is_empty() {
-            empty_rounds += 1;
-            if empty_rounds >= RECOMPUTE_DRAIN_EMPTY_ROUNDS {
-                break;
-            }
-            continue;
-        }
-        empty_rounds = 0;
-        cycle.polled += records.len();
-        for record in &records {
-            match decode_record(record) {
-                Ok(event) => {
-                    cycle.decoded += 1;
-                    if !seen_event_ids.insert(event.event_id.clone()) {
-                        cycle.skipped_duplicate += 1;
-                        continue;
-                    }
-                    match apply_event(&mut totals, &event, period_start) {
-                        Applied::Yes => {}
-                        Applied::OtherPeriod => cycle.skipped_other_period += 1,
-                        Applied::NoAppSubject => cycle.skipped_no_app += 1,
-                        Applied::ZeroValue => cycle.skipped_zero_value += 1,
-                    }
+    let mut last_advance = clock.now();
+    while !scan.is_complete() {
+        let records = match stall {
+            Some(stall) => {
+                let left = stall.saturating_sub(clock.elapsed(last_advance));
+                if left.is_zero() {
+                    return Err(scan.stalled(stall));
                 }
-                Err(SpendRecomputeError::Decode {
-                    partition,
-                    offset,
-                    source,
-                }) => {
-                    cycle.skipped_undecodable += 1;
-                    tracing::warn!(
-                        partition,
-                        offset,
-                        error = %source,
-                        "spend_recompute: skipping undecodable usage stream record"
-                    );
+                match unless_stalled(stream.poll(batch_max), compio::time::sleep(left)).await {
+                    Some(polled) => polled?,
+                    None => return Err(scan.stalled(stall)),
                 }
-                Err(err) => return Err(err),
             }
+            None => stream.poll(batch_max).await?,
+        };
+        if scan.fold(&records) {
+            last_advance = clock.now();
+        } else if stall.is_none() {
+            return Err(scan.stalled(Duration::ZERO));
         }
     }
+    let PeriodScan {
+        mut cycle, totals, ..
+    } = scan;
 
-    // A cycle that read NOTHING must not overwrite the snapshot: replacing it
-    // with an empty set would transiently zero out enforcement (an app would
-    // briefly look like it has no usage and escape its spend limit). Leave the
-    // last good snapshot in place until a cycle actually reads the stream.
+    // A complete scan that found no record leaves the snapshot alone. An empty
+    // stream - a topic nothing has published to yet, an in-process transport
+    // after a restart - is not evidence that nobody used anything, and
+    // replacing the snapshot with an empty set would zero enforcement until
+    // the stream refills: an over-limit app would escape its spend limit.
     if cycle.polled == 0 {
         return Ok(cycle);
     }
@@ -387,8 +493,8 @@ pub async fn recompute_usage_aggregates(
     cycle.written = write.written;
 
     // A period total that SHRANK is the only in-band evidence that this scan saw less
-    // than the last one did - the stream aged out early-period events, or a fetch
-    // stalled mid-read. The snapshot is an overwrite, so the smaller number is now what
+    // than the last one did - the stream aged out early-period events before this
+    // scan read them. The snapshot is an overwrite, so the smaller number is now what
     // spend enforcement reads: usage appears to fall and apps escape their limits.
     //
     // ERROR, not warn: this is a billing-correctness event that fails OPEN, and it is
@@ -407,6 +513,126 @@ pub async fn recompute_usage_aggregates(
         );
     }
     Ok(cycle)
+}
+
+/// One period scan in progress: the running totals and counters, and how far
+/// each unfinished partition has been read toward its captured end.
+#[derive(Debug)]
+struct PeriodScan {
+    period_start: i64,
+    cycle: SpendRecomputeCycle,
+    totals: HashMap<(AppId, String), i64>,
+    seen_event_ids: HashSet<String>,
+    /// Every partition still short of its captured end, by partition id.
+    unfinished: HashMap<i32, PartitionProgress>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PartitionProgress {
+    /// The captured offset of the partition's last record: the scan's end.
+    last: i64,
+    /// The highest offset folded so far, `None` before the first.
+    read: Option<i64>,
+}
+
+impl PeriodScan {
+    fn new(period_start: i64, ends: &[PartitionEnd]) -> Self {
+        let unfinished = ends
+            .iter()
+            .filter_map(|end| {
+                end.last_offset
+                    .map(|last| (end.partition, PartitionProgress { last, read: None }))
+            })
+            .collect();
+        Self {
+            period_start,
+            cycle: SpendRecomputeCycle::default(),
+            totals: HashMap::new(),
+            seen_event_ids: HashSet::new(),
+            unfinished,
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        self.unfinished.is_empty()
+    }
+
+    fn stalled(&self, stall: Duration) -> SpendRecomputeError {
+        let mut unfinished: Vec<UnfinishedPartition> = self
+            .unfinished
+            .iter()
+            .map(|(&partition, progress)| UnfinishedPartition {
+                partition,
+                captured_end: progress.last,
+                last_read: progress.read,
+            })
+            .collect();
+        unfinished.sort_unstable_by_key(|partition| partition.partition);
+        SpendRecomputeError::Stalled {
+            stall_ms: u64::try_from(stall.as_millis()).unwrap_or(u64::MAX),
+            unfinished,
+        }
+    }
+
+    /// Fold one polled batch. A record advances its partition when it lies
+    /// past the highest offset read there so far; one at or past the captured
+    /// end finishes the partition, and only records up to that end are read
+    /// into the totals. Records of a finished partition, or of one the capture
+    /// did not name, are passed over. Returns whether any record advanced.
+    ///
+    /// Finishing on a record PAST the end, not only at it, keeps a partition
+    /// whose captured last offset is never delivered - a transaction marker,
+    /// say - from holding the scan open once anything newer arrives.
+    fn fold(&mut self, records: &[StreamRecord]) -> bool {
+        let mut advanced = false;
+        for record in records {
+            let Some(progress) = self.unfinished.get_mut(&record.partition) else {
+                continue;
+            };
+            if progress.read.is_some_and(|read| record.offset <= read) {
+                continue;
+            }
+            progress.read = Some(record.offset);
+            let within_end = record.offset <= progress.last;
+            if record.offset >= progress.last {
+                self.unfinished.remove(&record.partition);
+            }
+            advanced = true;
+            if within_end {
+                self.read(record);
+            }
+        }
+        advanced
+    }
+
+    /// Decode one in-range record and apply it to the totals and counters.
+    fn read(&mut self, record: &StreamRecord) {
+        self.cycle.polled += 1;
+        let event = match decode_record(record) {
+            Ok(event) => event,
+            Err(error) => {
+                self.cycle.skipped_undecodable += 1;
+                tracing::warn!(
+                    partition = record.partition,
+                    offset = record.offset,
+                    error = %error,
+                    "spend_recompute: skipping undecodable usage stream record"
+                );
+                return;
+            }
+        };
+        self.cycle.decoded += 1;
+        if !self.seen_event_ids.insert(event.event_id.clone()) {
+            self.cycle.skipped_duplicate += 1;
+            return;
+        }
+        match apply_event(&mut self.totals, &event, self.period_start) {
+            Applied::Yes => {}
+            Applied::OtherPeriod => self.cycle.skipped_other_period += 1,
+            Applied::NoAppSubject => self.cycle.skipped_no_app += 1,
+            Applied::ZeroValue => self.cycle.skipped_zero_value += 1,
+        }
+    }
 }
 
 fn apply_event(
@@ -579,13 +805,14 @@ mod tests {
 mod live_db_tests {
     use std::collections::BTreeMap;
     use std::sync::Mutex;
+    use std::time::Instant;
 
     use chrono::TimeZone;
     use compio_postgres::{connect, NoTls};
     use uuid::Uuid;
     use zeroship_core::types::SpendState;
     use zeroship_core::usage_event::UsageSubject;
-    use zeroship_stream::{StreamError, StreamOffset};
+    use zeroship_stream::{Clock, StreamError, StreamOffset};
 
     use crate::metering::{current_period_start_unix, period_date};
     use crate::spend::{parse_spend_state, SpendEngine};
@@ -629,6 +856,30 @@ mod live_db_tests {
             *self.cursor.lock().expect("fake stream cursor poisoned") = 0;
             Ok(())
         }
+
+        async fn end_offsets(&self) -> Result<Vec<PartitionEnd>, StreamError> {
+            Ok(ends_of(&self.records))
+        }
+
+        /// An in-process log: every poll hands over what it holds at once.
+        fn stall_timeout(&self) -> Option<Duration> {
+            None
+        }
+    }
+
+    /// The end of every partition `records` touches: its highest offset.
+    fn ends_of(records: &[StreamRecord]) -> Vec<PartitionEnd> {
+        let mut last = BTreeMap::<i32, i64>::new();
+        for record in records {
+            let entry = last.entry(record.partition).or_insert(record.offset);
+            *entry = (*entry).max(record.offset);
+        }
+        last.into_iter()
+            .map(|(partition, last)| PartitionEnd {
+                partition,
+                last_offset: Some(last),
+            })
+            .collect()
     }
 
     /// A clone of the migrated template this case owns.
@@ -786,6 +1037,7 @@ mod live_db_tests {
                 super::super::billing_reconcile::DEFAULT_SETTLE_WINDOW_SECS,
             ),
             batch_max: 2,
+            ..Default::default()
         };
 
         let first = recompute_usage_aggregates(&registry, &stream, period, &cfg)
@@ -825,10 +1077,11 @@ mod live_db_tests {
 
     #[compio::test]
     async fn stream_recompute_empty_cycle_does_not_wipe_snapshot() {
-        // A recompute cycle that reads NOTHING (a transient empty poll — common
-        // right after a Kafka-wire rewind) must leave the last good snapshot in
-        // place, not overwrite it with zero. Otherwise enforcement flickers to
-        // "no usage" and an over-limit app briefly escapes its spend limit.
+        // A complete scan of a stream holding no record (a topic nothing has
+        // published to yet, an in-process transport after a restart) must leave
+        // the last good snapshot in place, not overwrite it with zero.
+        // Otherwise enforcement drops to "no usage" and an over-limit app
+        // escapes its spend limit until the stream refills.
         let fresh = fresh_database();
         let url = fresh.admin_url().to_string();
         let client = pg(&url).await;
@@ -843,6 +1096,7 @@ mod live_db_tests {
                 super::super::billing_reconcile::DEFAULT_SETTLE_WINDOW_SECS,
             ),
             batch_max: 8,
+            ..Default::default()
         };
 
         // Cycle 1: real usage lands.
@@ -884,6 +1138,7 @@ mod live_db_tests {
                 super::super::billing_reconcile::DEFAULT_SETTLE_WINDOW_SECS,
             ),
             batch_max: 2,
+            ..Default::default()
         };
 
         let cycle = recompute_usage_aggregates(&registry, &stream, period, &cfg)
@@ -940,6 +1195,7 @@ mod live_db_tests {
                 super::super::billing_reconcile::DEFAULT_SETTLE_WINDOW_SECS,
             ),
             batch_max: 2,
+            ..Default::default()
         };
 
         let cycle = recompute_usage_aggregates(&registry, &stream, period, &cfg)
@@ -978,6 +1234,7 @@ mod live_db_tests {
             interval: Duration::from_secs(1),
             settle_window: Duration::from_secs(3600),
             batch_max: 1,
+            ..Default::default()
         };
 
         let cycle = recompute_unsettled_period_snapshots(&registry, &stream, now, &cfg)
@@ -996,6 +1253,612 @@ mod live_db_tests {
         assert_eq!(cycle.written, 2);
         assert_total(&client, &app, previous, 41).await;
         assert_total(&client, &app, current, 59).await;
+    }
+
+    /// Hand control back to the runtime once. Every scripted stream below
+    /// suspends in `poll`, the way a real fetch does, so the test's own timeout
+    /// can always fire: a scan that lost its guard then fails by name inside
+    /// the test's budget instead of spinning until the test runner kills it.
+    async fn yield_to_runtime() {
+        let mut yielded = false;
+        std::future::poll_fn(|cx| {
+            if yielded {
+                std::task::Poll::Ready(())
+            } else {
+                yielded = true;
+                cx.waker().wake_by_ref();
+                std::task::Poll::Pending
+            }
+        })
+        .await;
+    }
+
+    /// A clock a test advances itself, so pacing is exact and immune to real
+    /// scheduler latency: nothing here ever calls `compio::time::sleep` or
+    /// otherwise waits on a real timer to simulate a gap.
+    #[derive(Debug)]
+    struct FakeClock {
+        now: Mutex<Instant>,
+    }
+
+    impl FakeClock {
+        fn new() -> Self {
+            Self {
+                now: Mutex::new(Instant::now()),
+            }
+        }
+
+        fn advance(&self, by: Duration) {
+            let mut now = self.now.lock().expect("fake clock poisoned");
+            *now += by;
+        }
+    }
+
+    impl Clock for FakeClock {
+        fn now(&self) -> Instant {
+            *self.now.lock().expect("fake clock poisoned")
+        }
+    }
+
+    /// What a [`ScriptedStream`]'s `poll` does on each call.
+    #[derive(Debug, Clone, Copy)]
+    enum Script {
+        /// Hand over the next records: a healthy broker.
+        Delivers,
+        /// Advance [`ScriptedStream::clock`] by this much, then hand over the
+        /// next records: a slow broker that keeps delivering. Simulated, not
+        /// slept, so a caller reading elapsed time from that same clock sees
+        /// an exact, reproducible gap.
+        Paced(Duration),
+        /// Append one record to the log, then hand over the next records: a
+        /// producer writing while the scan reads.
+        Growing,
+        /// Never answer: a fetch the broker accepted and went silent on.
+        Parked,
+        /// Hand over the first this-many records, then answer with nothing: a
+        /// partition that stops delivering short of its end.
+        StopsAfter(usize),
+        /// Hand over the first this-many records, then hand the last of them
+        /// over again on every call: a broker replaying an old offset.
+        ReplaysAfter(usize),
+        /// Like `StopsAfter`, but answering at once without ever suspending,
+        /// the way an adapter whose `poll` blocks its thread answers (the
+        /// redpanda adapter's librdkafka calls). A test's own timeout cannot
+        /// fire around a loop over such a poll, so the stream is its own
+        /// watchdog: polled long past its stall timeout, it panics by name.
+        Blocking(usize),
+    }
+
+    /// A stream whose log the test writes and whose `poll` follows a
+    /// [`Script`]. `end_offsets` reports the log as it stands at the call,
+    /// like a broker's watermark, unless the test overrides it in `ends`;
+    /// `stall_timeout` is the test's.
+    #[derive(Debug)]
+    struct ScriptedStream {
+        log: Mutex<Vec<StreamRecord>>,
+        cursor: Mutex<usize>,
+        script: Script,
+        stall: Option<Duration>,
+        /// Builds the record a `Growing` script appends at an offset.
+        appended: fn(i64) -> StreamRecord,
+        /// What `end_offsets` reports instead of the log's own ends.
+        ends: Option<Vec<PartitionEnd>>,
+        created: Instant,
+        /// Advanced by [`Script::Paced`] on every simulated delivery. Unused
+        /// by every other script. A test that wants a [`SpendRecomputeConfig`]
+        /// to read elapsed time from this SAME clock retrieves it via
+        /// [`Self::fake_clock`] and passes it to
+        /// [`SpendRecomputeConfig::with_clock`].
+        clock: Arc<FakeClock>,
+    }
+
+    impl ScriptedStream {
+        fn new(records: Vec<StreamRecord>, script: Script, stall: Option<Duration>) -> Self {
+            Self {
+                log: Mutex::new(records),
+                cursor: Mutex::new(0),
+                script,
+                stall,
+                appended: |offset| StreamRecord {
+                    partition: 0,
+                    offset,
+                    key: Vec::new(),
+                    payload: b"{appended after the capture".to_vec(),
+                },
+                ends: None,
+                created: Instant::now(),
+                clock: Arc::new(FakeClock::new()),
+            }
+        }
+
+        fn fake_clock(&self) -> Arc<FakeClock> {
+            Arc::clone(&self.clock)
+        }
+
+        fn next(&self, max: usize, limit: usize) -> Vec<StreamRecord> {
+            let log = self.log.lock().expect("scripted log poisoned");
+            let (start, end) = {
+                let mut cursor = self.cursor.lock().expect("scripted cursor poisoned");
+                let start = *cursor;
+                *cursor = (start + max).min(limit).min(log.len());
+                (start, *cursor)
+            };
+            log[start..end].to_vec()
+        }
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl StreamTransport for ScriptedStream {
+        fn id(&self) -> &'static str {
+            "scripted"
+        }
+
+        async fn publish(
+            &self,
+            _topic: &str,
+            _partition_key: &[u8],
+            _payload: &[u8],
+        ) -> Result<(), StreamError> {
+            Ok(())
+        }
+
+        async fn poll(&self, max: usize) -> Result<Vec<StreamRecord>, StreamError> {
+            match self.script {
+                Script::Delivers => {
+                    yield_to_runtime().await;
+                    Ok(self.next(max, usize::MAX))
+                }
+                Script::Paced(pace) => {
+                    self.clock.advance(pace);
+                    Ok(self.next(max, usize::MAX))
+                }
+                Script::Growing => {
+                    yield_to_runtime().await;
+                    {
+                        let mut log = self.log.lock().expect("scripted log poisoned");
+                        let offset = i64::try_from(log.len()).expect("offset fits i64");
+                        log.push((self.appended)(offset));
+                    }
+                    Ok(self.next(max, usize::MAX))
+                }
+                Script::Parked => std::future::pending().await,
+                Script::StopsAfter(count) => {
+                    yield_to_runtime().await;
+                    Ok(self.next(max, count))
+                }
+                Script::ReplaysAfter(count) => {
+                    yield_to_runtime().await;
+                    let next = self.next(max, count);
+                    if next.is_empty() {
+                        let log = self.log.lock().expect("scripted log poisoned");
+                        return Ok(vec![log[count - 1].clone()]);
+                    }
+                    Ok(next)
+                }
+                Script::Blocking(count) => {
+                    let watchdog = self.stall.expect("a blocking script has a stall timeout") * 25;
+                    assert!(
+                        self.created.elapsed() < watchdog,
+                        "the scan kept polling a stream that answers at once without advancing \
+                         long past its stall timeout"
+                    );
+                    Ok(self.next(max, count))
+                }
+            }
+        }
+
+        async fn commit(&self, _offsets: &[StreamOffset]) -> Result<(), StreamError> {
+            Ok(())
+        }
+
+        async fn rewind(&self) -> Result<(), StreamError> {
+            *self.cursor.lock().expect("scripted cursor poisoned") = 0;
+            Ok(())
+        }
+
+        async fn end_offsets(&self) -> Result<Vec<PartitionEnd>, StreamError> {
+            Ok(self
+                .ends
+                .clone()
+                .unwrap_or_else(|| ends_of(&self.log.lock().expect("scripted log poisoned"))))
+        }
+
+        fn stall_timeout(&self) -> Option<Duration> {
+            self.stall
+        }
+    }
+
+    fn scan_cfg(batch_max: usize) -> SpendRecomputeConfig {
+        SpendRecomputeConfig {
+            interval: Duration::from_secs(1),
+            settle_window: Duration::from_secs(
+                super::super::billing_reconcile::DEFAULT_SETTLE_WINDOW_SECS,
+            ),
+            batch_max,
+            ..Default::default()
+        }
+    }
+
+    /// One priced app with one in-period usage record per value, and those
+    /// records' total already stored as the period's snapshot, so a later scan
+    /// that must not write can be seen not to have. The snapshot is seeded
+    /// with SQL rather than by a scan, so the starting state does not depend
+    /// on the code under test.
+    struct Snapshotted {
+        app: AppId,
+        period: i64,
+        records: Vec<StreamRecord>,
+        total: i64,
+    }
+
+    async fn snapshotted(client: &compio_postgres::Client, values: &[u64]) -> Snapshotted {
+        let period = current_period_start_unix();
+        let plan_id = seed_pricing(client).await;
+        let app = seed_priced_app(client, &plan_id, "recompute-scan").await;
+        let organization = zeroship_core::typed_id::generate("org");
+        let records: Vec<StreamRecord> = values
+            .iter()
+            .enumerate()
+            .map(|(offset, value)| {
+                let at = i64::try_from(offset).expect("offset fits i64");
+                record_from_event(
+                    at,
+                    event(&format!("evt_scan_{at}"), &app, &organization, *value, period + 10 + at),
+                )
+            })
+            .collect();
+        let total: i64 = values
+            .iter()
+            .map(|value| i64::try_from(*value).expect("value fits i64"))
+            .sum();
+        client
+            .execute(
+                "INSERT INTO zeroship.usage_aggregates (app_id, period, metric, total, updated_at) \
+                 VALUES ($1, $2::date, 'requests', $3, NOW())",
+                &[&app.as_str(), &period_date(period), &total],
+            )
+            .await
+            .expect("seed the starting snapshot");
+        assert_total(client, &app, period, total).await;
+        Snapshotted {
+            app,
+            period,
+            records,
+            total,
+        }
+    }
+
+    /// THE STARVATION CASE. A period whose scan takes longer than one stall
+    /// timeout, while the stream keeps delivering, completes and writes its
+    /// snapshot. The stall timeout bounds the gap between records that
+    /// advance, not the scan, so a large backlog is never cut off.
+    ///
+    /// Deterministic by construction: `Script::Paced` advances a [`FakeClock`]
+    /// by `pace` per delivered batch, and the scan reads elapsed time from
+    /// that SAME clock via [`SpendRecomputeConfig::with_clock`] - never a
+    /// real timer - so the scan's simulated total can exceed one stall
+    /// timeout with no dependence on how promptly this process actually gets
+    /// scheduled. A version paced with a real `compio::time::sleep` per batch
+    /// flakes under load: a 200ms real timer can fire well after 200ms when
+    /// the host is busy, and a single overrun gap past the 1s stall then
+    /// looks exactly like a stalled broker.
+    ///
+    /// WHAT IT CATCHES: measuring the timeout from the start of the scan
+    /// instead of from the last advance. Then every cycle of a period this
+    /// large would stall at the same point, write nothing, and start over, and
+    /// enforcement would never move.
+    #[compio::test]
+    async fn a_backlog_longer_than_one_stall_timeout_completes_while_it_advances() {
+        let values: [u64; 8] = [10, 20, 30, 40, 50, 60, 70, 80];
+        let fresh = fresh_database();
+        let url = fresh.admin_url().to_string();
+        let client = pg(&url).await;
+        let registry = Registry::new(&url).await.expect("registry");
+        let base = snapshotted(&client, &values[..1]).await;
+        let stall = Duration::from_secs(1);
+        let pace = stall / 5;
+        assert!(
+            pace * u32::try_from(values.len()).expect("small backlog") > stall,
+            "the scan must outlast one stall timeout or this proves nothing"
+        );
+        let organization = zeroship_core::typed_id::generate("org");
+        let records: Vec<StreamRecord> = values
+            .iter()
+            .enumerate()
+            .map(|(offset, value)| {
+                let at = i64::try_from(offset).expect("offset fits i64");
+                record_from_event(
+                    at,
+                    event(&format!("evt_backlog_{at}"), &base.app, &organization, *value, base.period + at),
+                )
+            })
+            .collect();
+        let stream = ScriptedStream::new(records, Script::Paced(pace), Some(stall));
+        let cfg = scan_cfg(1).with_clock(stream.fake_clock());
+
+        let cycle = recompute_usage_aggregates(&registry, &stream, base.period, &cfg)
+            .await
+            .expect("a scan that keeps advancing must complete, however long it takes");
+        assert_eq!(cycle.polled, values.len());
+        assert_eq!(cycle.written, 1);
+        let expected = i64::try_from(values.iter().sum::<u64>()).expect("total fits i64");
+        assert_total(&client, &base.app, base.period, expected).await;
+    }
+
+    /// A producer appending while the scan reads cannot stretch it: the scan
+    /// ends at the offsets captured when it started and reads exactly the
+    /// records up to them. What is appended meanwhile belongs to the next
+    /// cycle.
+    ///
+    /// WHAT IT CATCHES: ending the scan on anything but the captured ends.
+    /// Waiting for the stream to fall idle never ends against this producer
+    /// (the test's own timeout fails it), and reading past the captured end
+    /// counts the appended records, which the exact totals refuse.
+    #[compio::test]
+    async fn a_scan_ends_at_the_offsets_captured_when_it_started() {
+        let fresh = fresh_database();
+        let url = fresh.admin_url().to_string();
+        let client = pg(&url).await;
+        let registry = Registry::new(&url).await.expect("registry");
+        let base = snapshotted(&client, &[5, 7, 11]).await;
+        let stall = Duration::from_secs(1);
+        let mut stream = ScriptedStream::new(base.records.clone(), Script::Growing, Some(stall));
+        stream.appended = |offset| {
+            let app = AppId::mint();
+            record_from_event(
+                offset,
+                event(
+                    &format!("evt_appended_{offset}"),
+                    &app,
+                    "org_appended",
+                    1_000,
+                    current_period_start_unix() + 10,
+                ),
+            )
+        };
+
+        let cycle = compio::time::timeout(
+            stall * 25,
+            Box::pin(recompute_usage_aggregates(&registry, &stream, base.period, &scan_cfg(2))),
+        )
+        .await
+        .expect("the scan did not return within its test budget: it chased the producer")
+        .expect("a scan against a live producer completes at its captured ends");
+        let appended = stream.log.lock().expect("scripted log poisoned").len() - base.records.len();
+        assert!(appended > 0, "the producer appended while the scan read, or this proves nothing");
+        assert_eq!(cycle.polled, base.records.len(), "exactly the captured records are read");
+        assert_eq!(cycle.aggregates, 1, "no appended record reached the totals: {cycle:?}");
+        assert_eq!(cycle.written, 1, "the complete scan wrote its snapshot");
+        assert_total(&client, &base.app, base.period, base.total).await;
+    }
+
+    /// A poll that parks is a stall: the scan gives up once the stall timeout
+    /// has passed without an advance, returns the named error, and writes
+    /// nothing, so the snapshot already stored stays in force.
+    ///
+    /// WHAT IT CATCHES: removing the bound around `poll`. The parked poll then
+    /// never returns and the test's own timeout fails it by name.
+    #[compio::test]
+    async fn a_poll_that_parks_is_a_stall_and_writes_nothing() {
+        let fresh = fresh_database();
+        let url = fresh.admin_url().to_string();
+        let client = pg(&url).await;
+        let registry = Registry::new(&url).await.expect("registry");
+        let base = snapshotted(&client, &[100, 50]).await;
+        let stall = Duration::from_millis(200);
+        let stream = ScriptedStream::new(base.records.clone(), Script::Parked, Some(stall));
+
+        let started = Instant::now();
+        let outcome = compio::time::timeout(
+            stall * 25,
+            Box::pin(recompute_usage_aggregates(&registry, &stream, base.period, &scan_cfg(8))),
+        )
+        .await
+        .expect("the scan did not return within its test budget: a parked poll held it open");
+        match outcome {
+            Err(SpendRecomputeError::Stalled { stall_ms, unfinished }) => {
+                assert_eq!(stall_ms, 200, "the error names the transport's stall timeout");
+                assert_eq!(unfinished.len(), 1);
+            }
+            other => panic!("expected the parked scan to stall, got {other:?}"),
+        }
+        assert!(
+            started.elapsed() >= stall,
+            "the scan gave up before the stall timeout had passed"
+        );
+        assert_total(&client, &base.app, base.period, base.total).await;
+    }
+
+    /// A scan that stops advancing partway writes nothing. Here one partition
+    /// is read to its end and the other delivers its first record and then
+    /// nothing, the shape of a fetch that stalls mid-scan or a partition this
+    /// consumer is never handed. The partial totals would undercount; the
+    /// snapshot already stored must survive instead.
+    ///
+    /// WHAT IT CATCHES: writing whatever a scan saw once the stream goes
+    /// quiet, which is what ending on idle polls does, and writing anything
+    /// at all from a scan that stalled.
+    ///
+    /// WHAT IT DOES NOT CATCH: removing the check of the stall clock between
+    /// polls. This stream's polls suspend, so the bound around each poll ends
+    /// the scan anyway; the blocking case below is the one that needs the
+    /// check.
+    #[compio::test]
+    async fn a_scan_that_stalls_partway_writes_nothing() {
+        let fresh = fresh_database();
+        let url = fresh.admin_url().to_string();
+        let client = pg(&url).await;
+        let registry = Registry::new(&url).await.expect("registry");
+        let base = snapshotted(&client, &[100, 50, 25]).await;
+        let mut records = base.records.clone();
+        // Partition 1 holds the last two records; partition 0 only the first.
+        for (offset, record) in records.iter_mut().skip(1).enumerate() {
+            record.partition = 1;
+            record.offset = i64::try_from(offset).expect("offset fits i64");
+        }
+        let stall = Duration::from_millis(200);
+        let stream = ScriptedStream::new(records, Script::StopsAfter(2), Some(stall));
+
+        let outcome = compio::time::timeout(
+            stall * 25,
+            Box::pin(recompute_usage_aggregates(&registry, &stream, base.period, &scan_cfg(1))),
+        )
+        .await
+        .expect("the scan did not return within its test budget: a quiet stream held it open");
+        match outcome {
+            Err(SpendRecomputeError::Stalled { stall_ms, unfinished }) => {
+                assert_eq!(stall_ms, 200);
+                assert_eq!(unfinished.len(), 1, "partition 1 is short of its captured end");
+                assert_eq!(
+                    unfinished[0],
+                    UnfinishedPartition {
+                        partition: 1,
+                        captured_end: 1,
+                        last_read: Some(0),
+                    },
+                    "names the stuck partition's captured end and how far it actually got: \
+                     {unfinished:?}"
+                );
+            }
+            other => panic!("expected the scan to stall partway, got {other:?}"),
+        }
+        assert_total(&client, &base.app, base.period, base.total).await;
+    }
+
+    /// An in-process transport has no stall timeout because it answers every
+    /// poll at once, so one poll that advances nothing while partitions are
+    /// short of their ends is the stall: the scan ends there and writes
+    /// nothing.
+    ///
+    /// WHAT IT CATCHES: treating a transport without a stall timeout as one
+    /// that may be waited on forever. The scan then polls a stream that will
+    /// never deliver again without end (the test's own timeout fails it).
+    #[compio::test]
+    async fn an_in_process_scan_that_stops_short_is_a_stall_at_once() {
+        let fresh = fresh_database();
+        let url = fresh.admin_url().to_string();
+        let client = pg(&url).await;
+        let registry = Registry::new(&url).await.expect("registry");
+        let base = snapshotted(&client, &[100, 50]).await;
+        let stream = ScriptedStream::new(base.records.clone(), Script::StopsAfter(1), None);
+
+        let outcome = compio::time::timeout(
+            Duration::from_secs(5),
+            Box::pin(recompute_usage_aggregates(&registry, &stream, base.period, &scan_cfg(8))),
+        )
+        .await
+        .expect("the scan did not return within its test budget: it waited on an in-process log");
+        match outcome {
+            Err(SpendRecomputeError::Stalled { stall_ms, unfinished }) => {
+                assert_eq!(stall_ms, 0, "an in-process stall names no timeout");
+                assert_eq!(unfinished.len(), 1);
+            }
+            other => panic!("expected the short in-process scan to stall, got {other:?}"),
+        }
+        assert_total(&client, &base.app, base.period, base.total).await;
+    }
+
+    /// A broker that keeps delivering an offset the scan already read is not
+    /// advancing: only a record past a partition's highest read offset
+    /// restarts the stall clock, so the replay ends the scan at the stall
+    /// timeout and nothing is written.
+    ///
+    /// WHAT IT CATCHES: counting any delivered record as progress. Then the
+    /// replay restarts the clock on every poll and the scan never ends (the
+    /// test's own timeout fails it).
+    #[compio::test]
+    async fn a_stream_replaying_an_offset_already_read_is_a_stall() {
+        let fresh = fresh_database();
+        let url = fresh.admin_url().to_string();
+        let client = pg(&url).await;
+        let registry = Registry::new(&url).await.expect("registry");
+        let base = snapshotted(&client, &[100, 50]).await;
+        let stall = Duration::from_millis(200);
+        let stream = ScriptedStream::new(base.records.clone(), Script::ReplaysAfter(1), Some(stall));
+
+        let outcome = compio::time::timeout(
+            stall * 25,
+            Box::pin(recompute_usage_aggregates(&registry, &stream, base.period, &scan_cfg(8))),
+        )
+        .await
+        .expect("the scan did not return within its test budget: the replay held it open");
+        match outcome {
+            Err(SpendRecomputeError::Stalled { unfinished, .. }) => {
+                assert_eq!(unfinished.len(), 1);
+            }
+            other => panic!("expected the replayed scan to stall, got {other:?}"),
+        }
+        assert_total(&client, &base.app, base.period, base.total).await;
+    }
+
+    /// A poll that blocks its thread and answers at once without advancing -
+    /// how the redpanda adapter answers once it has nothing new - never
+    /// suspends, so no timeout around it can fire. The scan's own check of the
+    /// stall clock between polls is what ends it, with the named error and no
+    /// write.
+    ///
+    /// WHAT IT CATCHES: removing that check and relying on the timeout around
+    /// `poll` alone. The loop then spins on the blocking poll, and the
+    /// stream's watchdog fails the test by name.
+    #[compio::test]
+    async fn a_poll_that_answers_at_once_without_advancing_is_a_stall() {
+        let fresh = fresh_database();
+        let url = fresh.admin_url().to_string();
+        let client = pg(&url).await;
+        let registry = Registry::new(&url).await.expect("registry");
+        let base = snapshotted(&client, &[100, 50]).await;
+        let stall = Duration::from_millis(200);
+        let stream = ScriptedStream::new(base.records.clone(), Script::Blocking(1), Some(stall));
+
+        let outcome = recompute_usage_aggregates(&registry, &stream, base.period, &scan_cfg(8))
+            .await;
+        match outcome {
+            Err(SpendRecomputeError::Stalled { stall_ms, unfinished }) => {
+                assert_eq!(stall_ms, 200);
+                assert_eq!(unfinished.len(), 1);
+            }
+            other => panic!("expected the blocking scan to stall, got {other:?}"),
+        }
+        assert_total(&client, &base.app, base.period, base.total).await;
+    }
+
+    /// A partition is finished by any record at or past its captured end, and
+    /// only records up to that end are read. Here the captured last offset is
+    /// never delivered (the shape of a transaction marker) and the next record
+    /// arrives past it: the scan completes without reading that later record.
+    ///
+    /// WHAT IT CATCHES: finishing a partition only on a record exactly at its
+    /// captured end (the scan then stalls on the missing offset every cycle),
+    /// and reading the record past the end into the totals.
+    #[compio::test]
+    async fn a_record_past_the_captured_end_finishes_its_partition_unread() {
+        let fresh = fresh_database();
+        let url = fresh.admin_url().to_string();
+        let client = pg(&url).await;
+        let registry = Registry::new(&url).await.expect("registry");
+        let base = snapshotted(&client, &[100, 50]).await;
+        let organization = zeroship_core::typed_id::generate("org");
+        let mut records = base.records.clone();
+        records.push(record_from_event(
+            3,
+            event("evt_past_the_end", &base.app, &organization, 25, base.period + 20),
+        ));
+        let mut stream = ScriptedStream::new(records, Script::Delivers, Some(Duration::from_secs(1)));
+        stream.ends = Some(vec![PartitionEnd {
+            partition: 0,
+            last_offset: Some(2),
+        }]);
+
+        let cycle = compio::time::timeout(
+            Duration::from_secs(25),
+            Box::pin(recompute_usage_aggregates(&registry, &stream, base.period, &scan_cfg(8))),
+        )
+        .await
+        .expect("the scan did not return within its test budget")
+        .expect("a record past the captured end finishes the partition");
+        assert_eq!(cycle.polled, 2, "only the records up to the captured end are read");
+        assert_eq!(cycle.written, 1);
+        assert_total(&client, &base.app, base.period, base.total).await;
     }
 
     impl FakeStream {

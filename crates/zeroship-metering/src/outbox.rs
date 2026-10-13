@@ -35,7 +35,9 @@ use std::time::Duration;
 
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition, TableError};
 use zeroship_core::usage_event::UsageEvent;
-use zeroship_stream::{StreamConfig, StreamRegistry, StreamTransport};
+use zeroship_stream::{
+    unless_stalled, Clock, StreamConfig, StreamError, StreamRegistry, StreamTransport, SystemClock,
+};
 
 use crate::Meter;
 
@@ -284,6 +286,11 @@ pub struct UsageOutbox {
     /// must see the same backlog. Oldest first.
     retained: Arc<Mutex<VecDeque<UsageEvent>>>,
     max_retained: usize,
+    /// Source of elapsed time for the stall-timeout decision in
+    /// [`Self::publish_events`]. [`SystemClock`] in production; a test
+    /// overrides it with [`Self::with_clock`] to drive that decision
+    /// deterministically instead of depending on real timer latency.
+    clock: Arc<dyn Clock>,
 }
 
 impl std::fmt::Debug for UsageOutbox {
@@ -293,7 +300,7 @@ impl std::fmt::Debug for UsageOutbox {
             .field("topic", &self.topic)
             .field("wal_path", &self.wal.path)
             .field("retained", &self.retained_len())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -309,6 +316,7 @@ impl UsageOutbox {
             wal: Arc::new(UsageWal::open(wal_path)?),
             retained: Arc::new(Mutex::new(VecDeque::new())),
             max_retained: DEFAULT_MAX_RETAINED_EVENTS,
+            clock: Arc::new(SystemClock),
         })
     }
 
@@ -317,6 +325,19 @@ impl UsageOutbox {
     #[must_use]
     pub fn with_max_retained_events(mut self, max_retained: usize) -> Self {
         self.max_retained = max_retained;
+        self
+    }
+
+    /// Override the clock [`Self::publish_events`] reads elapsed time from.
+    /// Production never calls this and the only caller is this module's own
+    /// `mod tests`, so it is both `#[cfg(test)]` and unexported rather than
+    /// `pub`: a test injects a clock it advances itself, so a double that
+    /// paces delivery can make the stall-timeout decision deterministic
+    /// instead of exposed to real scheduler latency under load.
+    #[cfg(test)]
+    #[must_use]
+    fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = clock;
         self
     }
 
@@ -403,6 +424,7 @@ impl UsageOutbox {
     /// `events` is joined by any backlog a previous failed append left in
     /// memory, so a caller that has nothing new still flushes that backlog.
     pub async fn publish_events(&self, events: &[UsageEvent]) -> OutboxPublishResult {
+        let clock = Arc::clone(&self.clock);
         let batch = self.batch_with_retained(events);
         if let Err(error) = self.enqueue_events(&batch) {
             // The caller drained its counters to build `events`, so this batch
@@ -430,6 +452,7 @@ impl UsageOutbox {
                 attempted,
                 published: 0,
                 failed,
+                deferred: 0,
             };
         }
         let pending = match self.wal.load_pending() {
@@ -455,6 +478,7 @@ impl UsageOutbox {
                             error: format!("wal read: {error}"),
                         })
                         .collect(),
+                    deferred: 0,
                 };
             }
         };
@@ -471,13 +495,37 @@ impl UsageOutbox {
             }
         }
         let pending = pending.pending;
+        let backlog = pending.len();
 
-        let mut result = OutboxPublishResult {
-            attempted: pending.len(),
-            ..OutboxPublishResult::default()
-        };
+        let mut result = OutboxPublishResult::default();
 
-        for pending_event in pending {
+        // The batch is bounded by progress, not by size. Each publish is
+        // bounded by the adapter, but a WAL backlog against a broker that has
+        // stopped acknowledging would otherwise cost one adapter ceiling per
+        // event before the call returns. So the loop stops once the broker
+        // has gone the transport's stall timeout without acknowledging a
+        // publish, and a publish that parks is cut at the same point. Every
+        // acknowledgement restarts the clock, so a long backlog against a
+        // healthy broker drains in one call. What the loop does not reach
+        // stays in the WAL for the next drain and is counted as `deferred`.
+        let stall = self.stream.stall_timeout();
+        let stall_ms = stall.map_or(0, |stall| u64::try_from(stall.as_millis()).unwrap_or(u64::MAX));
+        let mut last_ack = clock.now();
+
+        for (index, pending_event) in pending.into_iter().enumerate() {
+            if stall.is_some_and(|stall| clock.elapsed(last_ack) >= stall) {
+                result.deferred = backlog - index;
+                tracing::warn!(
+                    stream = self.stream.id(),
+                    topic = %self.topic,
+                    deferred = result.deferred,
+                    stall_ms,
+                    "meter outbox stopped publishing: the broker acknowledged nothing within \
+                     the transport's stall timeout; the rest stay in the WAL for the next drain"
+                );
+                break;
+            }
+            result.attempted += 1;
             let event = &pending_event.event;
             let Some(app_id) = event.subject.app.clone() else {
                 let failure = OutboxFailure {
@@ -521,12 +569,19 @@ impl UsageOutbox {
             // one app's usage stays on one partition and the consumer keeps per-app
             // ordering.
             let key = app_id.as_str();
-            match self
-                .stream
-                .publish(&self.topic, key.as_bytes(), &payload)
-                .await
-            {
+            let publish = self.stream.publish(&self.topic, key.as_bytes(), &payload);
+            let published = match stall {
+                Some(stall) => {
+                    let left = compio::time::sleep(stall.saturating_sub(clock.elapsed(last_ack)));
+                    unless_stalled(publish, left)
+                        .await
+                        .unwrap_or(Err(StreamError::PublishTimeout { timeout_ms: stall_ms }))
+                }
+                None => publish.await,
+            };
+            match published {
                 Ok(()) => {
+                    last_ack = clock.now();
                     match self.wal.remove(pending_event.seq) {
                         Ok(()) => {
                             result.published += 1;
@@ -757,9 +812,25 @@ fn is_missing_table(err: &TableError) -> bool {
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct OutboxPublishResult {
+    /// Events this call tried to publish: each one either `published` or
+    /// listed in `failed`.
     pub attempted: usize,
     pub published: usize,
     pub failed: Vec<OutboxFailure>,
+    /// Events left in the WAL without an attempt, because the broker went the
+    /// transport's stall timeout without acknowledging a publish. The next
+    /// drain replays them. Non-zero means the call ended early, whatever
+    /// `failed` says.
+    pub deferred: usize,
+}
+
+impl OutboxPublishResult {
+    /// Whether every event this call owned reached the broker: nothing failed
+    /// and nothing was deferred.
+    #[must_use]
+    pub const fn is_clean(&self) -> bool {
+        self.failed.is_empty() && self.deferred == 0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -782,7 +853,7 @@ pub fn spawn_outbox_task(meter: Arc<Meter>, outbox: UsageOutbox, config: OutboxC
                 continue;
             }
             let result = outbox.publish_events(&events).await;
-            if result.failed.is_empty() {
+            if result.is_clean() {
                 tracing::debug!(
                     events = result.published,
                     topic = %outbox.topic(),
@@ -793,6 +864,7 @@ pub fn spawn_outbox_task(meter: Arc<Meter>, outbox: UsageOutbox, config: OutboxC
                     attempted = result.attempted,
                     published = result.published,
                     failed = result.failed.len(),
+                    deferred = result.deferred,
                     topic = %outbox.topic(),
                     "meter outbox completed with publish failures"
                 );
@@ -842,9 +914,10 @@ pub fn spawn_disabled_drain_task(meter: Arc<Meter>, interval: Duration, reason: 
 mod tests {
     use zeroship_core::app_id::AppId;
     use std::sync::Mutex;
+    use std::time::Instant;
 
     use uuid::Uuid;
-    use zeroship_stream::{StreamError, StreamOffset, StreamRecord};
+    use zeroship_stream::{PartitionEnd, StreamError, StreamOffset, StreamRecord};
 
     use super::*;
 
@@ -898,6 +971,16 @@ mod tests {
 
         async fn rewind(&self) -> Result<(), StreamError> {
             Ok(())
+        }
+
+        /// A publish-only double: `poll` hands nothing back, so there is no
+        /// partition to end.
+        async fn end_offsets(&self) -> Result<Vec<PartitionEnd>, StreamError> {
+            Ok(Vec::new())
+        }
+
+        fn stall_timeout(&self) -> Option<Duration> {
+            None
         }
     }
 
@@ -1392,6 +1475,238 @@ mod tests {
             "the undecodable entry was not reported for removal"
         );
         println!("ruled on 1 healthy and 1 poisoned entry");
+    }
+
+    /// A clock a test advances itself, so pacing is exact and immune to real
+    /// scheduler latency: nothing here ever calls `compio::time::sleep` or
+    /// otherwise waits on a real timer to simulate a gap.
+    #[derive(Debug)]
+    struct FakeClock {
+        now: Mutex<Instant>,
+    }
+
+    impl FakeClock {
+        fn new() -> Self {
+            Self {
+                now: Mutex::new(Instant::now()),
+            }
+        }
+
+        fn advance(&self, by: Duration) {
+            let mut now = self.now.lock().expect("fake clock poisoned");
+            *now += by;
+        }
+    }
+
+    impl Clock for FakeClock {
+        fn now(&self) -> Instant {
+            *self.now.lock().expect("fake clock poisoned")
+        }
+    }
+
+    /// How a [`PacedPublishStream`] answers each publish.
+    #[derive(Debug, Clone, Copy)]
+    enum Ack {
+        /// Never: the publish parks, the shape of a broker that took the
+        /// record and went silent.
+        Never,
+        /// After this long, every time: a slow broker that keeps acknowledging.
+        /// The pace is simulated by advancing [`PacedPublishStream::clock`],
+        /// never by actually waiting, so a caller reading elapsed time from
+        /// that same clock sees an exact, reproducible gap.
+        After(Duration),
+    }
+
+    /// A broker-backed stream double with a stall timeout, whose publishes
+    /// either park (a real suspension, so the test's own timeout can fire
+    /// around it) or acknowledge at a fixed simulated pace (no suspension, no
+    /// real elapsed time - see [`Ack::After`]).
+    #[derive(Debug)]
+    struct PacedPublishStream {
+        stall: Duration,
+        ack: Ack,
+        acked: Mutex<usize>,
+        /// Advanced by [`Ack::After`] on every simulated acknowledgement.
+        /// Unused by [`Ack::Never`], which never reaches that branch; a
+        /// caller that wants the SAME notion of elapsed time the stream uses
+        /// shares this clock, via [`Self::clock`].
+        clock: Arc<FakeClock>,
+    }
+
+    impl PacedPublishStream {
+        fn new(stall: Duration, ack: Ack) -> Self {
+            Self {
+                stall,
+                ack,
+                acked: Mutex::new(0),
+                clock: Arc::new(FakeClock::new()),
+            }
+        }
+
+        fn clock(&self) -> Arc<FakeClock> {
+            Arc::clone(&self.clock)
+        }
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl StreamTransport for PacedPublishStream {
+        fn id(&self) -> &'static str {
+            "paced-publish"
+        }
+
+        async fn publish(
+            &self,
+            _topic: &str,
+            _partition_key: &[u8],
+            _payload: &[u8],
+        ) -> Result<(), StreamError> {
+            match self.ack {
+                Ack::Never => std::future::pending().await,
+                Ack::After(pace) => {
+                    self.clock.advance(pace);
+                    *self.acked.lock().unwrap() += 1;
+                    Ok(())
+                }
+            }
+        }
+
+        async fn poll(&self, _max: usize) -> Result<Vec<StreamRecord>, StreamError> {
+            Ok(Vec::new())
+        }
+
+        async fn commit(&self, _offsets: &[StreamOffset]) -> Result<(), StreamError> {
+            Ok(())
+        }
+
+        async fn rewind(&self) -> Result<(), StreamError> {
+            Ok(())
+        }
+
+        async fn end_offsets(&self) -> Result<Vec<PartitionEnd>, StreamError> {
+            Ok(Vec::new())
+        }
+
+        fn stall_timeout(&self) -> Option<Duration> {
+            Some(self.stall)
+        }
+    }
+
+    /// `count` usage events for distinct apps, as a drain would hand them over.
+    fn backlog(count: usize) -> Vec<UsageEvent> {
+        (0..count)
+            .map(|_| usage_event(&AppId::mint(), "requests", 1))
+            .collect()
+    }
+
+    /// A broker that stops acknowledging ends the batch at the transport's
+    /// stall timeout: the publish in flight is cut and reported failed, the
+    /// rest are not attempted and come back as `deferred`, and every one of
+    /// them stays in the WAL for the next drain.
+    ///
+    /// WHAT IT CATCHES: removing the per-publish bound (the parked publish
+    /// never returns, and the test's own timeout fails it by name), and
+    /// removing the stop between events (every remaining event is attempted
+    /// and reported failed instead of deferred).
+    #[test]
+    fn a_broker_that_stops_acknowledging_ends_the_batch_and_defers_the_rest() {
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let events = backlog(3);
+            let dir = tempfile::tempdir().expect("tempdir");
+            let wal_path = dir.path().join("outbox.redb");
+            let stall = Duration::from_millis(200);
+            let outbox = UsageOutbox::new(
+                Arc::new(PacedPublishStream::new(stall, Ack::Never)),
+                "usage-events-test",
+                &wal_path,
+            )
+            .expect("open outbox WAL");
+
+            let result = compio::time::timeout(stall * 25, outbox.publish_events(&events))
+                .await
+                .expect(
+                    "publish_events did not return within its test budget; a parked publish \
+                     held the batch open",
+                );
+            assert_eq!(result.attempted, 1, "only the first event was tried: {result:?}");
+            assert_eq!(result.published, 0);
+            assert_eq!(result.failed.len(), 1, "{result:?}");
+            assert!(
+                result.failed[0].error.contains("timed out"),
+                "the failure names the publish timeout: {}",
+                result.failed[0].error
+            );
+            assert_eq!(result.deferred, 2, "the untried events are deferred: {result:?}");
+            assert!(!result.is_clean(), "a batch that ended early is not clean");
+            drop(outbox);
+
+            let good = Arc::new(FakeStream::default());
+            let restarted = UsageOutbox::new(good.clone(), "usage-events-test", &wal_path)
+                .expect("reopen outbox WAL");
+            let flush = restarted.publish_events(&[]).await;
+            assert!(flush.is_clean(), "{flush:?}");
+            let mut replayed: Vec<String> = good
+                .published
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|published| published.event.event_id.clone())
+                .collect();
+            let mut expected: Vec<String> =
+                events.iter().map(|event| event.event_id.clone()).collect();
+            replayed.sort();
+            expected.sort();
+            assert_eq!(
+                replayed, expected,
+                "the failed and the deferred events all stayed in the WAL and replay verbatim"
+            );
+        });
+    }
+
+    /// The stall timeout bounds the gap between acknowledgements, not the
+    /// batch: a backlog that takes longer than one stall timeout to publish
+    /// still drains in one call while the broker keeps acknowledging.
+    ///
+    /// Deterministic by construction: the double advances a [`FakeClock`] by
+    /// `pace` per simulated acknowledgement, and the outbox, primed with that
+    /// same clock via [`UsageOutbox::with_clock`], reads elapsed time from it.
+    /// No real timer is ever involved, so the backlog's simulated total can
+    /// exceed one stall timeout with no dependence on how promptly this
+    /// process actually gets scheduled. A version paced with a real
+    /// `compio::time::sleep` per acknowledgement flakes under load: a 200ms
+    /// real timer can fire well after 200ms when the host is busy, and a
+    /// single overrun gap past the 1s stall then looks exactly like a stalled
+    /// broker.
+    ///
+    /// WHAT IT CATCHES: measuring the timeout from the start of the batch
+    /// instead of from the last acknowledgement. The backlog needs several
+    /// stall timeouts in total and never comes near one between two events.
+    #[test]
+    fn a_backlog_longer_than_one_stall_timeout_drains_while_the_broker_acknowledges() {
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let stall = Duration::from_secs(1);
+            let pace = stall / 5;
+            let events = backlog(8);
+            assert!(
+                pace * u32::try_from(events.len()).expect("small backlog") > stall,
+                "the backlog must outlast one stall timeout or this proves nothing"
+            );
+            let dir = tempfile::tempdir().expect("tempdir");
+            let stream = Arc::new(PacedPublishStream::new(stall, Ack::After(pace)));
+            let clock = stream.clock();
+            let outbox = UsageOutbox::new(
+                stream.clone(),
+                "usage-events-test",
+                dir.path().join("outbox.redb"),
+            )
+            .expect("open outbox WAL")
+            .with_clock(clock);
+
+            let result = outbox.publish_events(&events).await;
+            assert!(result.is_clean(), "a progressing backlog was cut short: {result:?}");
+            assert_eq!(result.published, events.len());
+            assert_eq!(result.attempted, events.len());
+            assert_eq!(*stream.acked.lock().unwrap(), events.len());
+        });
     }
 
     fn usage_event(app_id: &AppId, meter: &str, value: u64) -> UsageEvent {

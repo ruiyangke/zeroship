@@ -184,8 +184,7 @@ impl BillingStreamConfig {
     /// correct for the case that produces it (one control process on a box) and
     /// WRONG if someone runs two replicas on one host with no hostname set.
     /// That is a narrow gap and it is named here rather than papered over: the
-    /// symptom would be the same partial-snapshot defect this split exists to
-    /// close.
+    /// symptom would be the shared-group stall this split exists to prevent.
     pub fn new(
         registry: Arc<StreamRegistry>,
         transport_id: impl Into<String>,
@@ -221,11 +220,12 @@ impl BillingStreamConfig {
     ///     partitions between them. A per-replica group would forward each
     ///     event once per replica.
     ///   * the RECOMPUTE is a witness. It rewinds, reads the COMPLETE retained
-    ///     stream, and calls `replace_period_snapshot`, which DELETEs the
-    ///     period and rewrites it. Two replicas in one group each receive a
-    ///     subset of partitions, each computes a partial total, and each
-    ///     overwrites the other. The month total silently lands below the
-    ///     truth and spend enforcement reads that number.
+    ///     stream to the end of every partition, and only then calls
+    ///     `replace_period_snapshot`, which DELETEs the period and rewrites it.
+    ///     Two replicas in one group each receive a subset of partitions, so
+    ///     neither scan can reach the end of the partitions the other holds:
+    ///     every cycle on both stalls and writes nothing, and spend
+    ///     enforcement stops following usage.
     ///
     /// So the recompute group is suffixed per replica, making each replica the
     /// sole member of its own group and therefore the owner of every partition.
@@ -299,8 +299,47 @@ impl BillingStreamConfig {
         self.build_for_group(&self.forwarder_group_id)
     }
 
+    /// Build the recompute consumer, forced to start from the retained
+    /// beginning regardless of what `auto_offset_reset` the shared
+    /// `base_config` carries.
+    ///
+    /// Completeness depends on every partition reading from its retained
+    /// beginning: the scan folds every record a `poll` hands it up to the end
+    /// [`StreamTransport::end_offsets`] captured, and a partition that never
+    /// delivers a record at or past that captured offset keeps the scan open
+    /// rather than reporting complete. Under `latest`, a partition this
+    /// consumer group is assigned for the first time after `rewind` starts at
+    /// the broker's current high watermark instead - already past its own
+    /// captured end - so it completes only once the FIRST record published
+    /// after the capture arrives there (its offset is past the captured end
+    /// too, which is what the scan's completion check requires), silently
+    /// skipping whatever the partition held before that watermark. A
+    /// partition that stays quiet instead - the common case, since the
+    /// capture and the reset both land at the same empty tail - never
+    /// delivers anything to complete on, so the scan stalls there rather than
+    /// reporting a falsely-complete, under-counted snapshot.
+    ///
+    /// The override is keyed to the `redpanda` transport, the only adapter
+    /// whose config schema has an `auto_offset_reset` field at all - the
+    /// in-process `memory` adapter's config is `deny_unknown_fields` and has
+    /// no such field, because its `rewind` always seeks the retained
+    /// beginning unconditionally and has no reset policy to override.
     pub fn build_recompute(&self) -> Result<Arc<dyn StreamTransport>, StreamError> {
-        self.build_for_group(&self.recompute_group_id)
+        let config = self.recompute_config()?;
+        self.registry.build(&self.transport_id, &config)
+    }
+
+    /// The recompute consumer's effective config: the per-replica group id
+    /// from [`Self::build_recompute`], plus the forced `earliest` reset
+    /// documented there. Split out so a test can inspect the config without
+    /// building a live transport.
+    fn recompute_config(&self) -> Result<StreamConfig, StreamError> {
+        let config = with_stream_group_id(&self.base_config, &self.recompute_group_id)?;
+        if self.transport_id == zeroship_stream::adapters::redpanda::ID {
+            with_earliest_offset_reset(&config)
+        } else {
+            Ok(config)
+        }
     }
 
     /// Override the control producer's durable WAL path. Tests should use a
@@ -341,7 +380,7 @@ impl BillingStreamConfig {
         compio::runtime::spawn(async move {
             loop {
                 let result = outbox.publish_events(&[]).await;
-                if result.failed.is_empty() {
+                if result.is_clean() {
                     if result.published > 0 {
                         tracing::debug!(
                             events = result.published,
@@ -354,6 +393,7 @@ impl BillingStreamConfig {
                         attempted = result.attempted,
                         published = result.published,
                         failed = result.failed.len(),
+                        deferred = result.deferred,
                         topic = %outbox.topic(),
                         "control usage outbox flush completed with failures"
                     );
@@ -440,6 +480,19 @@ fn with_stream_group_id(
         obj.insert(
             "group.id".to_string(),
             serde_json::Value::String(group_id.to_string()),
+        );
+    })
+}
+
+/// Force `auto_offset_reset` to `earliest`, overriding whatever the config
+/// otherwise carries. The recompute consumer is the only caller: its
+/// completeness proof depends on starting every partition at the retained
+/// beginning (see [`BillingStreamConfig::build_recompute`]).
+fn with_earliest_offset_reset(config: &StreamConfig) -> Result<StreamConfig, StreamError> {
+    config.map_object(|obj| {
+        obj.insert(
+            "auto_offset_reset".to_string(),
+            serde_json::Value::String("earliest".to_string()),
         );
     })
 }
@@ -738,15 +791,15 @@ mod billing_stream_group_tests {
         let b = config_for("control-b");
 
         // THE DEFECT. The recompute REBUILDS the whole period snapshot and
-        // calls `replace_period_snapshot`, so it must read every partition.
-        // Two replicas in ONE consumer group split partitions between them,
-        // each computes a partial total, and each overwrites the other - the
-        // month total lands somewhere below the truth with nothing logged.
+        // writes it only once it has read every partition to its end. Two
+        // replicas in ONE consumer group split partitions between them, so
+        // neither ever reaches the end of the other's: every scan stalls, no
+        // snapshot is written, and enforcement stops following usage.
         assert_ne!(
             a.recompute_group_id(),
             b.recompute_group_id(),
-            "two control replicas share a recompute group, so each sees only its \
-             assigned partitions and writes a partial snapshot over the other's"
+            "two control replicas share a recompute group, so each is handed only \
+             its assigned partitions and every scan stalls short of the others"
         );
 
         // The OPPOSITE requirement, in the same struct, which is why this is
@@ -786,6 +839,36 @@ mod billing_stream_group_tests {
         assert_ne!(
             a.forwarder_group_id(),
             DEFAULT_CONTROL_USAGE_PRODUCER_GROUP_ID
+        );
+    }
+
+    #[test]
+    fn the_recompute_config_resets_to_earliest_even_when_the_base_says_latest() {
+        let base = StreamConfig::new(serde_json::json!({
+            "topic": "zeroship.usage.events",
+            "brokers": "127.0.0.1:9092",
+            "group.id": "placeholder",
+            "auto_offset_reset": "latest",
+        }));
+        let cfg = BillingStreamConfig::new_for_replica(
+            Arc::new(StreamRegistry::default()),
+            "redpanda",
+            base,
+            DEFAULT_BILLING_FORWARDER_GROUP_ID,
+            DEFAULT_SPEND_RECOMPUTE_GROUP_ID,
+            "control-a",
+        )
+        .expect("config");
+
+        let recompute: serde_json::Value = cfg
+            .recompute_config()
+            .expect("recompute config")
+            .parse()
+            .expect("recompute config parses as JSON");
+        assert_eq!(
+            recompute["auto_offset_reset"], "earliest",
+            "the recompute consumer must start every partition at the retained beginning, \
+             whatever the shared base_config says: {recompute}"
         );
     }
 }

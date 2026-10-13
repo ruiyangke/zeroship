@@ -133,6 +133,7 @@ async fn memory_forwarder_and_recompute_consumers_do_not_interfere() {
         interval: Duration::from_secs(1),
         settle_window: Duration::from_secs(1),
         batch_max: 2,
+        ..Default::default()
     };
     let recomputed = spend_recompute::recompute_usage_aggregates(
         &registry,
@@ -261,6 +262,7 @@ async fn control_direct_usage_event_survives_repeated_snapshot_recompute() {
         interval: Duration::from_secs(1),
         settle_window: Duration::from_secs(1),
         batch_max: 10,
+        ..Default::default()
     };
     let first = spend_recompute::recompute_usage_aggregates(
         &registry,

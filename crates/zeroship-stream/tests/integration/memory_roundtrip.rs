@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use futures::executor::block_on;
 use serde_json::json;
 use zeroship_stream::adapters;
-use zeroship_stream::{StreamConfig, StreamOffset, StreamRegistry};
+use zeroship_stream::{PartitionEnd, StreamConfig, StreamOffset, StreamRegistry};
 
 #[test]
 fn memory_roundtrip_preserves_per_key_order_and_commits_offsets() {
@@ -128,6 +128,93 @@ fn memory_rewind_replays_from_retained_beginning_after_commit() {
             replay.iter().map(|r| r.offset).collect::<Vec<_>>(),
             vec![0, 1, 2],
             "rewind must seek back to the retained beginning"
+        );
+    });
+}
+
+/// `end_offsets` names every partition of the topic with the offset of the
+/// last record it holds at the moment of the call - the record a reader stops
+/// at - and nothing for a partition that holds none. A later publish moves
+/// only a later capture.
+#[test]
+fn memory_end_offsets_name_the_last_record_of_every_partition() {
+    block_on(async move {
+        let suffix = unique_suffix();
+        let topic = format!("zeroship-memory-ends-{suffix}");
+        let group = format!("zeroship-memory-ends-group-{suffix}");
+
+        let mut registry = StreamRegistry::default();
+        adapters::register_builtin(&mut registry);
+        let config = StreamConfig::from(json!({
+            "topic": topic.clone(),
+            "group.id": group,
+            "partitions": 4
+        }));
+        let transport = registry
+            .build("memory", &config)
+            .expect("memory transport builds");
+        assert_eq!(
+            transport.stall_timeout(),
+            None,
+            "the in-process log answers every poll at once and declares no stall bound"
+        );
+        assert!(
+            transport
+                .end_offsets()
+                .await
+                .expect("capture before any publish")
+                .is_empty(),
+            "a topic nothing has published to has no partitions"
+        );
+
+        for (key, seq) in [("subject-a", 0), ("subject-b", 0), ("subject-a", 1)] {
+            transport
+                .publish(&topic, key.as_bytes(), format!("{key}:{seq}").as_bytes())
+                .await
+                .expect("publish memory test event");
+        }
+        let captured = transport.end_offsets().await.expect("capture ends");
+
+        // The truth the capture must agree with: what a reader actually gets.
+        let records = transport.poll(16).await.expect("poll every record");
+        assert_eq!(records.len(), 3, "every published record is readable");
+        let mut last_read = BTreeMap::<i32, i64>::new();
+        for record in &records {
+            let last = last_read.entry(record.partition).or_insert(record.offset);
+            *last = (*last).max(record.offset);
+        }
+        let expected: Vec<PartitionEnd> = (0..4)
+            .map(|partition| PartitionEnd {
+                partition,
+                last_offset: last_read.get(&partition).copied(),
+            })
+            .collect();
+        assert_eq!(
+            captured, expected,
+            "each partition's captured end is the offset of the last record a reader is handed"
+        );
+        assert!(
+            captured.iter().any(|end| end.last_offset.is_none()),
+            "two keys over four partitions leave an empty partition, which names no end"
+        );
+
+        transport
+            .publish(&topic, b"subject-a", b"subject-a:2")
+            .await
+            .expect("publish after the capture");
+        let later = transport.end_offsets().await.expect("capture again");
+        let moved: Vec<_> = captured
+            .iter()
+            .zip(&later)
+            .filter(|(before, after)| before != after)
+            .map(|(before, after)| (before.partition, before.last_offset, after.last_offset))
+            .collect();
+        assert_eq!(moved.len(), 1, "one publish moves one partition's end: {moved:?}");
+        let (_, before, after) = moved[0];
+        assert_eq!(
+            after,
+            Some(before.map_or(0, |offset| offset + 1)),
+            "the moved end names the newly appended record"
         );
     });
 }

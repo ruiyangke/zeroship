@@ -532,7 +532,7 @@ mod tests {
         AggregateQuery, Capabilities, DedupContract, DedupKey, DedupTtl, IngestAck, Meter,
         MeteringProvider, UsageSubject,
     };
-    use zeroship_stream::{StreamError, StreamOffset, StreamRecord};
+    use zeroship_stream::{PartitionEnd, StreamError, StreamOffset, StreamRecord};
 
     use super::*;
 
@@ -572,6 +572,27 @@ mod tests {
 
         async fn rewind(&self) -> Result<(), StreamError> {
             Ok(())
+        }
+
+        /// Each partition the held records touch, ending at its highest offset.
+        async fn end_offsets(&self) -> Result<Vec<PartitionEnd>, StreamError> {
+            let mut last = BTreeMap::<i32, i64>::new();
+            for record in self.records.lock().expect("fake stream records poisoned").iter() {
+                let entry = last.entry(record.partition).or_insert(record.offset);
+                *entry = (*entry).max(record.offset);
+            }
+            Ok(last
+                .into_iter()
+                .map(|(partition, last)| PartitionEnd {
+                    partition,
+                    last_offset: Some(last),
+                })
+                .collect())
+        }
+
+        /// An in-memory double: every poll hands over what it holds at once.
+        fn stall_timeout(&self) -> Option<Duration> {
+            None
         }
     }
 

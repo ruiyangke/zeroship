@@ -10,13 +10,12 @@ use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer};
 use rdkafka::message::{DeliveryResult, Message};
 use rdkafka::producer::{BaseProducer, BaseRecord, ProducerContext};
 use rdkafka::topic_partition_list::{Offset, TopicPartitionList};
+use rdkafka::types::RDKafkaRespErr;
 use serde::Deserialize;
 
-use crate::{StreamConfig, StreamError, StreamOffset, StreamRecord, StreamTransport};
-
-/// Upper bound on how long `rewind` waits for a group assignment to settle and
-/// for a cold-start partition to become seekable before surfacing the error.
-const REWIND_DEADLINE: Duration = Duration::from_secs(10);
+use crate::{
+    PartitionEnd, StreamConfig, StreamError, StreamOffset, StreamRecord, StreamTransport,
+};
 
 /// Drain up to `max` records, then decide what to do with an error that ends
 /// the drain early.
@@ -155,6 +154,14 @@ pub struct RedpandaConfig {
     pub group_id: String,
     #[serde(default)]
     pub client_id: Option<String>,
+    /// librdkafka's PRODUCER setting (`message.timeout.ms`): the longest a
+    /// produced record may go unacknowledged before the producer gives up on
+    /// it. This transport also reuses the same number as the stall bound it
+    /// reports from [`StreamTransport::stall_timeout`] for its blocking
+    /// consumer-side waits - there is no separate consumer-side timeout to
+    /// configure instead, so tuning this one tunes both. See
+    /// [`RedpandaTransport`]'s `stall_timeout` field for what that implies for
+    /// a caller running on a single executor thread.
     #[serde(default = "default_message_timeout_ms")]
     pub message_timeout_ms: u64,
     #[serde(default = "default_publish_timeout_ms")]
@@ -209,12 +216,36 @@ fn require_non_zero(name: &str, value: u64) -> Result<(), StreamError> {
     }
 }
 
+/// This adapter's [`StreamTransport::id`] and [`crate::StreamRegistry::register`] key.
+///
+/// The one spelling, named once so a caller that must recognize this
+/// specific adapter (rather than go through the registry) compares against
+/// it instead of a repeated string literal.
+pub const ID: &str = "redpanda";
+
 pub struct RedpandaTransport {
     producer: BaseProducer<DeliveryContext>,
     consumer: Mutex<BaseConsumer>,
     topic: String,
     publish_timeout: Duration,
     poll_timeout: Duration,
+    /// `message_timeout_ms`: a PRODUCER setting - librdkafka's own
+    /// `message.timeout.ms`, the longest a produced record may go
+    /// unacknowledged before the producer gives up on it - that this
+    /// transport also reuses as the STALL bound for its blocking
+    /// consumer-side waits: `rewind`'s group join and seek, `end_offsets`'s
+    /// metadata and watermark queries, and the gap between polls that advance
+    /// a scan. There is no separate consumer-side timeout to configure
+    /// instead, so raising or lowering this one value changes both. Reported
+    /// as [`StreamTransport::stall_timeout`], the gap without progress after
+    /// which a caller treats the broker as stalled.
+    ///
+    /// Every one of those calls is SYNCHRONOUS and blocks the calling thread
+    /// until librdkafka answers - the thread the caller's scan runs on, as
+    /// `spend_recompute`'s period scan does - leaving it unresponsive to
+    /// everything else it would otherwise run for up to this long, once per
+    /// period the scan reads, whenever one of those calls stalls.
+    stall_timeout: Duration,
 }
 
 pub fn factory(config: &StreamConfig) -> Result<std::sync::Arc<dyn StreamTransport>, StreamError> {
@@ -261,6 +292,7 @@ impl RedpandaTransport {
             topic: config.topic,
             publish_timeout: Duration::from_millis(config.publish_timeout_ms),
             poll_timeout: Duration::from_millis(config.poll_timeout_ms),
+            stall_timeout: Duration::from_millis(config.message_timeout_ms),
         })
     }
 }
@@ -271,6 +303,7 @@ impl std::fmt::Debug for RedpandaTransport {
             .field("topic", &self.topic)
             .field("publish_timeout", &self.publish_timeout)
             .field("poll_timeout", &self.poll_timeout)
+            .field("stall_timeout", &self.stall_timeout)
             .finish_non_exhaustive()
     }
 }
@@ -278,7 +311,7 @@ impl std::fmt::Debug for RedpandaTransport {
 #[async_trait(?Send)]
 impl StreamTransport for RedpandaTransport {
     fn id(&self) -> &str {
-        "redpanda"
+        ID
     }
 
     async fn publish(
@@ -395,8 +428,10 @@ impl StreamTransport for RedpandaTransport {
         // A freshly-subscribed group consumer has no assignment until it has
         // polled AND the group rebalance has settled — that can take longer than
         // a single poll cycle against a real broker. Poll until partitions are
-        // assigned, bounded by REWIND_DEADLINE.
-        let deadline = Instant::now() + REWIND_DEADLINE;
+        // assigned, bounded by the transport's stall timeout
+        // (`message_timeout_ms`), so a group join that never lands ends the
+        // wait rather than blocking it.
+        let deadline = Instant::now() + self.stall_timeout;
         let mut assignment = consumer.assignment().map_err(StreamError::from)?;
         while assignment.count() == 0 && Instant::now() < deadline {
             let _ = consumer.poll(self.poll_timeout);
@@ -435,6 +470,61 @@ impl StreamTransport for RedpandaTransport {
                 }
             }
         }
+    }
+
+    /// The topic's partitions come from the broker's metadata, not from this
+    /// consumer's assignment, so a partition another group member holds, or
+    /// one whose assignment has not landed yet, is still named. Each
+    /// partition's end is its high watermark, the offset the next appended
+    /// record will take; the last record sits one below it. That holds because
+    /// this transport's producer is idempotent but not transactional, so no
+    /// transaction marker occupies an offset a consumer is never handed.
+    ///
+    /// The metadata and watermark queries share one deadline, the stall
+    /// timeout, so the capture as a whole is bounded however many partitions
+    /// the topic has.
+    async fn end_offsets(&self) -> Result<Vec<PartitionEnd>, StreamError> {
+        let consumer = self
+            .consumer
+            .lock()
+            .map_err(|_| StreamError::Unavailable("redpanda consumer mutex poisoned"))?;
+        let deadline = Instant::now() + self.stall_timeout;
+        let remaining = || deadline.saturating_duration_since(Instant::now());
+
+        let metadata = consumer
+            .fetch_metadata(Some(&self.topic), remaining())
+            .map_err(StreamError::from)?;
+        let Some(topic) = metadata.topics().iter().find(|t| t.name() == self.topic) else {
+            return Ok(Vec::new());
+        };
+        match topic.error() {
+            None => {}
+            Some(RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN_TOPIC_OR_PART) => return Ok(Vec::new()),
+            Some(error) => {
+                return Err(StreamError::Kafka(format!(
+                    "metadata for topic '{}': {error:?}",
+                    self.topic
+                )));
+            }
+        }
+
+        let mut ends = Vec::with_capacity(topic.partitions().len());
+        for partition in topic.partitions() {
+            let (low, high) = consumer
+                .fetch_watermarks(&self.topic, partition.id(), remaining())
+                .map_err(StreamError::from)?;
+            ends.push(PartitionEnd {
+                partition: partition.id(),
+                last_offset: (high > low).then_some(high - 1),
+            });
+        }
+        drop(consumer);
+        ends.sort_unstable_by_key(|end| end.partition);
+        Ok(ends)
+    }
+
+    fn stall_timeout(&self) -> Option<Duration> {
+        Some(self.stall_timeout)
     }
 }
 
@@ -528,5 +618,35 @@ mod tests {
         let (out, calls) = drain(vec![None], 10);
         assert!(out.expect("ok").is_empty());
         assert_eq!(calls, 1);
+    }
+
+    /// The stall bound a caller holds the broker to is the operator's
+    /// configured `message_timeout_ms`, not a constant and not one of the
+    /// other two timeouts, which are set to different values here so a swap
+    /// shows.
+    ///
+    /// Building the transport opens no socket: librdkafka connects lazily and
+    /// `subscribe` only records the subscription, so no broker is needed.
+    #[test]
+    fn the_stall_timeout_is_the_configured_message_timeout() {
+        let config = |message_timeout_ms: u64| {
+            crate::StreamConfig::from(serde_json::json!({
+                "brokers": "127.0.0.1:1",
+                "topic": "t",
+                "group.id": "g",
+                "message_timeout_ms": message_timeout_ms,
+                "publish_timeout_ms": 4321,
+                "poll_timeout_ms": 25,
+            }))
+        };
+        for message_timeout_ms in [1234, 98_765] {
+            let transport = factory(&config(message_timeout_ms))
+                .expect("redpanda transport builds without a live broker");
+            assert_eq!(
+                transport.stall_timeout(),
+                Some(Duration::from_millis(message_timeout_ms)),
+                "the stall timeout must follow the configured message timeout"
+            );
+        }
     }
 }

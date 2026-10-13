@@ -9,11 +9,14 @@ use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use crate::{StreamConfig, StreamError, StreamOffset, StreamRecord, StreamTransport};
+use crate::{
+    PartitionEnd, StreamConfig, StreamError, StreamOffset, StreamRecord, StreamTransport,
+};
 
 const DEFAULT_PARTITIONS: usize = 8;
 
@@ -121,6 +124,20 @@ impl StreamTransport for MemoryTransport {
             .map_err(|_| StreamError::Unavailable("memory broker mutex poisoned"))?;
         broker.rewind(&self.topic, &self.group_id);
         Ok(())
+    }
+
+    async fn end_offsets(&self) -> Result<Vec<PartitionEnd>, StreamError> {
+        let broker = self
+            .broker
+            .lock()
+            .map_err(|_| StreamError::Unavailable("memory broker mutex poisoned"))?;
+        Ok(broker.end_offsets(&self.topic))
+    }
+
+    /// The in-process log hands every available record to `poll` at once, so
+    /// a poll that delivers nothing new is already the stall.
+    fn stall_timeout(&self) -> Option<Duration> {
+        None
     }
 }
 
@@ -234,6 +251,23 @@ impl MemoryBroker {
                 .or_insert(next);
         }
         Ok(())
+    }
+
+    /// Every partition of `topic` with the offset of its last record. A topic
+    /// nothing has published to has no log yet, and so no partitions.
+    fn end_offsets(&self, topic: &str) -> Vec<PartitionEnd> {
+        let Some(topic_log) = self.topics.get(topic) else {
+            return Vec::new();
+        };
+        topic_log
+            .partitions
+            .iter()
+            .enumerate()
+            .map(|(partition, log)| PartitionEnd {
+                partition: i32::try_from(partition).expect("memory partition fits i32"),
+                last_offset: log.last().map(|record| record.offset),
+            })
+            .collect()
     }
 
     fn rewind(&mut self, topic: &str, group_id: &str) {

@@ -11,15 +11,18 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use uuid::Uuid;
 
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
+use zeroship_control::cron::spend_recompute::{self, SpendRecomputeConfig, SpendRecomputeError};
 use zeroship_control::cron::spend_reconcile;
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
 use zeroship_core::AppId;
+use zeroship_stream::{PartitionEnd, StreamError, StreamOffset, StreamRecord, StreamTransport};
 
 fn db_url() -> String {
     crate::support::isolated_control_db()
@@ -446,4 +449,278 @@ async fn reconcile_walks_spend_bands_and_holds_deadband() {
         1,
         "exactly one →block transition"
     );
+}
+
+/// A one-partition stream whose captured end is never reached: every poll
+/// answers with nothing new, so a scan against it goes the whole stall
+/// timeout without advancing and [`spend_recompute::recompute_and_reconcile`]
+/// returns [`SpendRecomputeError::Stalled`].
+#[derive(Debug)]
+struct NeverAdvancesStream {
+    stall: Duration,
+}
+
+#[async_trait::async_trait(?Send)]
+impl StreamTransport for NeverAdvancesStream {
+    fn id(&self) -> &'static str {
+        "never-advances-test"
+    }
+
+    async fn publish(
+        &self,
+        _topic: &str,
+        _partition_key: &[u8],
+        _payload: &[u8],
+    ) -> Result<(), StreamError> {
+        Ok(())
+    }
+
+    async fn poll(&self, _max: usize) -> Result<Vec<StreamRecord>, StreamError> {
+        compio::time::sleep(Duration::from_millis(5)).await;
+        Ok(Vec::new())
+    }
+
+    async fn commit(&self, _offsets: &[StreamOffset]) -> Result<(), StreamError> {
+        Ok(())
+    }
+
+    async fn rewind(&self) -> Result<(), StreamError> {
+        Ok(())
+    }
+
+    async fn end_offsets(&self) -> Result<Vec<PartitionEnd>, StreamError> {
+        Ok(vec![PartitionEnd {
+            partition: 0,
+            last_offset: Some(0),
+        }])
+    }
+
+    fn stall_timeout(&self) -> Option<Duration> {
+        Some(self.stall)
+    }
+}
+
+/// A recompute scan that stalls must not also skip spend evaluation: the
+/// evaluator has to run against whatever the last successful scan wrote,
+/// whether or not THIS cycle's scan completed. Here a limit is lowered below
+/// usage already on record (written directly, not by a scan), and only the
+/// evaluator - not the stalled scan - can act on that.
+///
+/// WHAT IT CATCHES: applying `?` to the recompute step before running
+/// `spend_reconcile::tick`, so a stalled scan also skips evaluation and the
+/// lowered limit would wait on a future complete scan to take effect.
+#[compio::test(crate = "crate::support::live")]
+async fn a_stalled_recompute_still_runs_the_evaluator() {
+    let url = db_url();
+    let fx = build_state(&url, "stalled-recompute").await;
+
+    // 1000-cent default limit, well above the usage seeded below.
+    let app = make_over_limit_app(&fx.state, 1000).await;
+    let period = zeroship_control::metering::current_period_start_unix();
+    crate::support::seed_usage_delta(&fx.state.control_pg, &app, period, "requests", 100).await;
+
+    // Lower the override below the usage already on record.
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.app_spend_limit (app_id, spend_limit_cents, updated_at) \
+             VALUES ($1, $2, NOW()) \
+             ON CONFLICT (app_id) DO UPDATE SET spend_limit_cents = EXCLUDED.spend_limit_cents, \
+               updated_at = NOW()",
+            &[&app.as_str(), &50i64],
+        )
+        .await
+        .expect("set app_spend_limit override");
+
+    let stall = Duration::from_millis(100);
+    let stream: Arc<dyn StreamTransport> = Arc::new(NeverAdvancesStream { stall });
+    let cfg = SpendRecomputeConfig {
+        interval: Duration::from_secs(1),
+        settle_window: Duration::from_secs(
+            zeroship_control::cron::billing_reconcile::DEFAULT_SETTLE_WINDOW_SECS,
+        ),
+        batch_max: 16,
+        ..Default::default()
+    };
+
+    let outcome = compio::time::timeout(
+        stall * 25,
+        Box::pin(spend_recompute::recompute_and_reconcile(
+            &fx.state,
+            stream.as_ref(),
+            &cfg,
+        )),
+    )
+    .await
+    .expect("recompute_and_reconcile did not return within its test budget");
+    match outcome {
+        Err(SpendRecomputeError::Stalled { .. }) => {}
+        other => panic!("expected the recompute to stall, got {other:?}"),
+    }
+
+    let state: Option<String> = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT state::text AS s FROM zeroship.app_spend_state WHERE app_id = $1",
+            &[&app.as_str()],
+        )
+        .await
+        .expect("read state")
+        .first()
+        .map(|r| r.get::<_, String>("s"));
+    assert_eq!(
+        state.as_deref(),
+        Some("block"),
+        "the evaluator ran against the existing snapshot despite the stalled scan"
+    );
+}
+
+/// When the evaluator ALSO fails, only its error can propagate from
+/// `recompute_and_reconcile` - a single `Result` has room for one - so the
+/// recompute's own error, with a stall's unfinished-partition detail, must be
+/// logged there instead of silently dropped. The evaluator is broken with a
+/// genuine SQL error (the table its first query reads is gone, on this case's
+/// own disposable database), not a mock, while the scan stalls on a stream
+/// that never advances.
+///
+/// WHAT IT CATCHES: returning only the evaluator's error with nothing logged
+/// for the recompute's own stall, which would leave an operator staring at
+/// "evaluator failed" with no sign the scan never completed either, or which
+/// partition it stalled on.
+#[compio::test(crate = "crate::support::live")]
+async fn a_double_failure_still_logs_the_recompute_stall() {
+    let url = db_url();
+    let fx = build_state(&url, "double-failure").await;
+
+    // Breaks `SpendEngine::evaluate_all`'s very first query
+    // (`SELECT id FROM zeroship.apps`) with a genuine, deterministic SQL
+    // error.
+    fx.state
+        .control_pg
+        .execute("DROP TABLE zeroship.apps CASCADE", &[])
+        .await
+        .expect("drop the apps table");
+
+    let stall = Duration::from_millis(100);
+    let stream: Arc<dyn StreamTransport> = Arc::new(NeverAdvancesStream { stall });
+    let cfg = SpendRecomputeConfig {
+        interval: Duration::from_secs(1),
+        settle_window: Duration::from_secs(
+            zeroship_control::cron::billing_reconcile::DEFAULT_SETTLE_WINDOW_SECS,
+        ),
+        batch_max: 16,
+        ..Default::default()
+    };
+
+    let (guard, events) = log_capture::capture_log();
+    let outcome = compio::time::timeout(
+        stall * 25,
+        Box::pin(spend_recompute::recompute_and_reconcile(
+            &fx.state,
+            stream.as_ref(),
+            &cfg,
+        )),
+    )
+    .await
+    .expect("recompute_and_reconcile did not return within its test budget");
+    drop(guard);
+
+    // The evaluator's error is what propagates: there is room for only one.
+    match outcome {
+        Err(SpendRecomputeError::Registry(_)) => {}
+        other => panic!("expected the evaluator's registry error to propagate, got {other:?}"),
+    }
+
+    // The recompute's own stall, with its unfinished-partition detail, must
+    // still have reached the log.
+    let logged = {
+        let events = events.lock().expect("captured log mutex poisoned");
+        events
+            .iter()
+            .find_map(|fields| fields.get("error").cloned())
+            .unwrap_or_else(|| panic!("the recompute's own error was logged: {events:?}"))
+    };
+    assert!(
+        logged.contains("stream scan stalled"),
+        "the logged error names the stall: {logged}"
+    );
+    assert!(
+        logged.contains("partition 0"),
+        "the logged error names the unfinished partition: {logged}"
+    );
+}
+
+/// Capture `tracing` events raised during a test, so an assertion can read
+/// what reached the log without parsing stdout or sleeping for a flush.
+/// Local to this file (rather than a shared `tests/support` fixture) because
+/// this is its only caller: a helper added to that shared tree compiles into
+/// every test binary that links it, and one with no caller in a GIVEN binary
+/// is dead code there even though another binary uses it.
+mod log_capture {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use tracing::field::{Field, Visit};
+    use tracing::{Event, Subscriber};
+    use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+    use tracing_subscriber::registry::LookupSpan;
+
+    #[derive(Default)]
+    struct FieldVisitor {
+        fields: HashMap<String, String>,
+    }
+
+    impl Visit for FieldVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+    }
+
+    /// One captured event's fields, by field name.
+    type CapturedEvent = HashMap<String, String>;
+
+    /// Every event captured so far, shared with the layer still recording
+    /// into it.
+    pub(super) type CapturedEvents = Arc<Mutex<Vec<CapturedEvent>>>;
+
+    struct CaptureLayer {
+        events: CapturedEvents,
+    }
+
+    impl<S> Layer<S> for CaptureLayer
+    where
+        S: Subscriber + for<'lookup> LookupSpan<'lookup>,
+    {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            let mut visitor = FieldVisitor::default();
+            event.record(&mut visitor);
+            self.events
+                .lock()
+                .expect("captured log event buffer mutex poisoned")
+                .push(visitor.fields);
+        }
+    }
+
+    /// Set the capturing subscriber as the thread-local default and return a
+    /// guard that keeps it active until dropped. A guard (rather than
+    /// `tracing::subscriber::with_default`'s single synchronous call) is what
+    /// a caller needs to hold the capture across an `.await`: the call it is
+    /// capturing may suspend and resume on the same thread, and the guard
+    /// stays in scope for all of it.
+    #[must_use]
+    pub(super) fn capture_log() -> (tracing::subscriber::DefaultGuard, CapturedEvents) {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer {
+            events: Arc::clone(&events),
+        });
+        let guard = tracing::subscriber::set_default(subscriber);
+        (guard, events)
+    }
 }

@@ -11,4 +11,6 @@ pub mod transport;
 
 pub use error::StreamError;
 pub use registry::{StreamConfig, StreamFactory, StreamRegistry};
-pub use transport::{StreamOffset, StreamRecord, StreamTransport};
+pub use transport::{
+    unless_stalled, Clock, PartitionEnd, StreamOffset, StreamRecord, StreamTransport, SystemClock,
+};
