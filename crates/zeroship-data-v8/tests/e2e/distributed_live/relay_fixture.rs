@@ -72,11 +72,6 @@ impl RelayFixture {
         let private = files.path().join("key.pem");
         std::fs::write(&cert, certificate.cert.pem()).unwrap();
         std::fs::write(&private, certificate.signing_key.serialize_pem()).unwrap();
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
         let relay_url = platform.relay_url();
         let binary = std::env::current_exe()
             .unwrap()
@@ -87,22 +82,7 @@ impl RelayFixture {
             .join("zeroship-data-cdc-server");
         assert!(binary.is_file(), "build the required relay with cargo build -p zeroship-data-cdc-server before running V8 integration tests");
         let log_path = files.path().join("relay.log");
-        let log = std::fs::File::create(&log_path).unwrap();
-        let process = Command::new(binary)
-            .args([
-                "--no-config",
-                "--listen",
-                &format!("127.0.0.1:{port}"),
-                "--tls-cert-file",
-            ])
-            .arg(&cert)
-            .arg("--tls-key-file")
-            .arg(&private)
-            .env("ZEROSHIP_DATA_CDC_SERVER_DATABASE_URL", &relay_url)
-            .stdout(Stdio::from(log.try_clone().unwrap()))
-            .stderr(Stdio::from(log))
-            .spawn()
-            .expect("start required relay");
+        let (process, port) = spawn_listening(&binary, &cert, &private, &relay_url, &log_path).await;
         let keyring = ServiceKeyring::from_parts(
             ServiceIssuer::parse(&format!("spiffe://zeroship.ai/svc/worker/{instance}")).unwrap(),
             key,
@@ -121,28 +101,121 @@ impl RelayFixture {
         .unwrap()
         .with_ca_file(&cert)
         .unwrap();
-        let mut fixture = Self {
+        Self {
             process,
             _files: files,
             worker_url: platform.worker_url(),
             config,
-        };
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            assert!(
-                fixture.process.try_wait().unwrap().is_none(),
-                "relay exited: {}",
-                std::fs::read_to_string(&log_path).unwrap()
-            );
-            if compio::net::TcpStream::connect(("127.0.0.1", port))
-                .await
-                .is_ok()
-            {
-                break;
-            }
-            assert!(Instant::now() < deadline, "relay listener timed out");
-            compio::time::sleep(Duration::from_millis(20)).await;
         }
-        fixture
     }
+}
+
+/// How a spawned relay's readiness wait ended.
+enum Started {
+    Ready,
+    /// The relay exited because another process already owns the reserved
+    /// port, so the caller reserves a different one.
+    AddressInUse,
+}
+
+/// Start the relay on a port this process reserves, and return it once THIS
+/// relay is listening there.
+///
+/// The reserved port is released before the relay binds it, so another case
+/// can take it first. A connection that merely succeeds on the port proves
+/// nothing then: it may reach that other process while this relay has exited
+/// on the collision, and the first subscription later fails as "CDC relay
+/// connection failed". Readiness is accepted only from the relay's own pid,
+/// and a collision reserves a fresh port.
+async fn spawn_listening(
+    binary: &std::path::Path,
+    cert: &std::path::Path,
+    private: &std::path::Path,
+    relay_url: &str,
+    log_path: &std::path::Path,
+) -> (Child, u16) {
+    for _ in 0..16 {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let log = std::fs::File::create(log_path).unwrap();
+        let mut process = Command::new(binary)
+            .args([
+                "--no-config",
+                "--listen",
+                &format!("127.0.0.1:{port}"),
+                "--tls-cert-file",
+            ])
+            .arg(cert)
+            .arg("--tls-key-file")
+            .arg(private)
+            .env("ZEROSHIP_DATA_CDC_SERVER_DATABASE_URL", relay_url)
+            .stdout(Stdio::from(log.try_clone().unwrap()))
+            .stderr(Stdio::from(log))
+            .spawn()
+            .expect("start required relay");
+        match wait_listening(&mut process, port, log_path).await {
+            Started::Ready => return (process, port),
+            Started::AddressInUse => {
+                let _ = process.kill();
+                let _ = process.wait();
+            }
+        }
+    }
+    panic!("could not reserve a listening port for the relay after repeated collisions");
+}
+
+/// Wait until `process` itself listens on `port`, or report why it stopped.
+///
+/// # Panics
+/// When the relay exits for any reason other than an address collision, or
+/// does not listen within the wait.
+async fn wait_listening(process: &mut Child, port: u16, log_path: &std::path::Path) -> Started {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if process.try_wait().unwrap().is_some() {
+            let log = std::fs::read_to_string(log_path).unwrap_or_default();
+            if log.contains("Address already in use") {
+                return Started::AddressInUse;
+            }
+            panic!("relay exited: {log}");
+        }
+        if zeroship_testkit::listen::child_listens(process.id(), port) {
+            // The relay that owns the socket can still have exited since,
+            // freeing the port for another case.
+            if process.try_wait().unwrap().is_none() {
+                return Started::Ready;
+            }
+            continue;
+        }
+        assert!(Instant::now() < deadline, "relay listener timed out");
+        compio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// A port another process holds is not this relay listening: a connection to
+/// it succeeds, but the readiness wait keeps waiting for its own child.
+#[compio::test]
+async fn readiness_is_not_taken_from_a_port_another_process_holds() {
+    let foreign = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = foreign.local_addr().unwrap().port();
+    let mut child = Command::new("sleep").arg("30").spawn().expect("spawn a child that never listens");
+    let log = tempfile::NamedTempFile::new().unwrap();
+    assert!(
+        compio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok(),
+        "the foreign listener accepts, so a bare connect would call the relay ready"
+    );
+    let waited = compio::time::timeout(
+        Duration::from_millis(300),
+        wait_listening(&mut child, port, log.path()),
+    )
+    .await;
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(
+        waited.is_err(),
+        "readiness was accepted from a port this child does not hold"
+    );
 }
