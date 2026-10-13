@@ -304,6 +304,18 @@ async fn until(instant: Instant) {
     }
 }
 
+/// The instant by which the cache has passed `observation`'s refresh point,
+/// given an instant read after the cache stored it.
+///
+/// The cache sets the refresh point when it stores the observation, halfway
+/// from that moment to the observation's expiry. That moment is after the
+/// observation was built, so half its validity counted from construction ends
+/// before the refresh point. Counted from `stored`, read after the store
+/// returned, it ends at or after it.
+fn past_half(stored: Instant, observation: &PolicyObservation) -> Instant {
+    stored + observation.expires_at().saturating_duration_since(stored) / 2
+}
+
 /// An observation is read again once half its validity has passed, while it is
 /// still valid, so no grant is capped by an observation about to expire. Until
 /// that point it is served from the cache, and while the read is in flight
@@ -313,15 +325,19 @@ async fn an_observation_is_read_again_halfway_through_its_validity() {
     let cache = cache(1);
     let app = AppId::mint();
     let validity = Duration::from_millis(400);
-    let first = reserve(&cache, &app)
-        .complete(valid_for(&app, validity))
-        .unwrap();
+    // A gap between building the observation and storing it, as any caller
+    // has: the refresh point is set from the store, so the wait below must be
+    // counted from there too.
+    let built = valid_for(&app, validity);
+    compio::time::sleep(validity / 8).await;
+    let first = reserve(&cache, &app).complete(built).unwrap();
+    let stored = Instant::now();
     let Reservation::Cached(early) = cache.reserve(&app).unwrap() else {
         panic!("an observation inside the first half of its validity is served as it is");
     };
     assert!(early.same_observation(&first));
 
-    until(first.expires_at().checked_sub(validity / 2).unwrap()).await;
+    until(past_half(stored, &first)).await;
     let Reservation::Ahead(ticket, current) = cache.reserve(&app).unwrap() else {
         panic!("an observation past half its validity is read again");
     };
@@ -352,7 +368,8 @@ async fn a_failed_read_ahead_of_expiry_keeps_the_current_observation() {
     let first = reserve(&cache, &app)
         .complete(valid_for(&app, validity))
         .unwrap();
-    until(first.expires_at().checked_sub(validity / 2).unwrap()).await;
+    let stored = Instant::now();
+    until(past_half(stored, &first)).await;
     let Reservation::Ahead(ticket, _) = cache.reserve(&app).unwrap() else {
         panic!("an observation past half its validity is read again");
     };
