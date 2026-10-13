@@ -24,11 +24,7 @@ use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt};
 use serde::Serialize;
 use serde_json::{value::RawValue, Value};
-use std::{
-    cell::RefCell,
-    rc::Rc,
-    task::{Poll, Waker},
-};
+use std::{cell::RefCell, rc::Rc};
 use zeroship_bundle::LoadedWorker;
 use zeroship_core::{
     app_id::AppId,
@@ -202,7 +198,6 @@ pub struct TaskPayloadReader {
     invocation: WorkflowInvocation,
     max_bytes: usize,
     failure: RefCell<Option<WorkflowServiceError>>,
-    failure_waker: RefCell<Option<Waker>>,
 }
 impl std::fmt::Debug for TaskPayloadReader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -245,7 +240,6 @@ impl TaskPayloadReader {
             invocation: assignment.invocation.clone(),
             max_bytes,
             failure: RefCell::new(None),
-            failure_waker: RefCell::new(None),
         })
     }
 
@@ -267,23 +261,6 @@ impl TaskPayloadReader {
     /// new journal outcome. A fresh task attempt receives a fresh reader.
     pub fn check(&self) -> Result<(), WorkflowServiceError> {
         self.failure.borrow().clone().map_or(Ok(()), Err)
-    }
-
-    /// Wait for a failed replay dependency.
-    ///
-    /// The execution host owns this waiter
-    /// and races it against the runtime result; stopping V8 need not settle its
-    /// JavaScript promises.
-    pub async fn failed(&self) -> WorkflowServiceError {
-        std::future::poll_fn(|cx| {
-            if let Err(error) = self.check() {
-                Poll::Ready(error)
-            } else {
-                *self.failure_waker.borrow_mut() = Some(cx.waker().clone());
-                Poll::Pending
-            }
-        })
-        .await
     }
 
     /// Hydrate only the input reference captured from this assignment.
@@ -594,16 +571,11 @@ impl TaskPayloadReader {
         result
     }
 
-    /// Hold this reader failed from now on, keeping the first failure, and
-    /// wake the host waiting in [`Self::failed`].
+    /// Hold this reader failed from now on, keeping the first failure.
     fn fail(&self, error: &WorkflowServiceError) {
         self.failure
             .borrow_mut()
             .get_or_insert_with(|| error.clone());
-        let waker = self.failure_waker.borrow_mut().take();
-        if let Some(waker) = waker {
-            waker.wake();
-        }
     }
 
     async fn read_verified(

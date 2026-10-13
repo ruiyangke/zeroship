@@ -774,47 +774,105 @@ fn js_fetch_settles_with_the_response_a_network_error_or_the_abort_reason() {
 const VICTIM_TOKEN: &str = "VICTIM-UPSTREAM-TOKEN";
 const VICTIM_BODY: &str = "VICTIM-UPSTREAM-BODY";
 
-/// A loopback upstream that answers one request only once released, so a test
-/// can act while the client's fetch is in flight.
-struct HeldUpstream {
-    url: String,
-    received: futures::channel::oneshot::Receiver<()>,
-    release: std::sync::mpsc::Sender<()>,
-    server: thread::JoinHandle<usize>,
+thread_local! {
+    /// How many fetches the victim had in flight when it asked to be
+    /// interrupted.
+    static FETCHES_IN_FLIGHT_AT_ASK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Set when the victim's interrupt is raised, which happens only once its
+    /// fetch has finished.
+    static FETCH_FINISHED_BEFORE_INTERRUPT: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    /// Set when an answer the victim's pump took is delivered into its isolate.
+    static DELIVERED_TO_THE_VICTIM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-impl HeldUpstream {
-    fn start() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/", listener.local_addr().unwrap());
-        let (received_tx, received) = futures::channel::oneshot::channel();
-        let (release, release_rx) = std::sync::mpsc::channel::<()>();
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = Vec::new();
-            let mut buf = [0u8; 1024];
-            while find_double_crlf(&request).is_none() {
-                let n = stream.read(&mut buf).unwrap();
-                assert!(n > 0, "the client closed before sending its request");
-                request.extend_from_slice(&buf[..n]);
-            }
-            received_tx.send(()).unwrap();
-            release_rx.recv().unwrap();
-            let response =
-                http_response(200, "OK", &[("x-victim-token", VICTIM_TOKEN)], VICTIM_BODY.as_bytes());
-            stream.write_all(&response).unwrap();
-            response.len()
-        });
-        Self { url, received, release, server }
+/// The victim's own interrupt, which `env.probe.interruptOnceFetched()` raises.
+#[derive(Clone)]
+struct VictimInterrupt(zeroship_runtime::RuntimeInterrupt);
+
+/// An answer that records whether it reached the victim's isolate. The pump
+/// materializes it natively, running no JavaScript, so the interrupt's
+/// termination cannot hide a delivery.
+struct DeliveryProbe;
+
+impl zeroship_runtime::state::NativeValue for DeliveryProbe {
+    fn into_v8<'s>(
+        self: Box<Self>,
+        scope: &mut v8::PinScope<'s, '_>,
+    ) -> Result<v8::Local<'s, v8::Value>, zeroship_runtime::state::OpError> {
+        DELIVERED_TO_THE_VICTIM.set(true);
+        Ok(v8::undefined(scope).into())
     }
 }
 
-/// The victim: one outbound fetch, awaited.
+/// `env.probe.interruptOnceFetched()` queues a host op that waits for the
+/// isolate's fetches to finish and then interrupts the isolate, a moment a
+/// host's deadline watchdog could pick. The fetch finishes on the pump's first
+/// poll of it, and the op finishes in the pump pass that takes the finished
+/// fetch, so the pump holds both answers when it finds the isolate
+/// interrupted.
+struct InterruptOnceFetched;
+
+impl zeroship_runtime::NativePlugin for InterruptOnceFetched {
+    fn namespace(&self) -> &'static str {
+        "probe"
+    }
+
+    fn register(&self, registrar: &mut zeroship_runtime::plugin::NativeRegistrar) {
+        registrar.add("interruptOnceFetched", interrupt_once_fetched);
+    }
+}
+
+fn interrupt_once_fetched(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    use std::task::Poll;
+    use zeroship_runtime::state::{admit_op, ResolveValue, SharedState};
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+    let interrupt = scope
+        .get_slot::<VictimInterrupt>()
+        .expect("the case installs the victim's interrupt")
+        .0
+        .clone();
+    let in_flight = state.borrow().in_flight_fetches.clone();
+    FETCHES_IN_FLIGHT_AT_ASK.set(in_flight.get());
+    let resolver = v8::PromiseResolver::new(scope).expect("a resolver for the probe's promise");
+    let promise = resolver.get_promise(scope);
+    let resolver = v8::Global::new(scope, resolver);
+    let owner = admit_op(scope).expect("the victim's request is live");
+    state.borrow_mut().spawn_op(owner, async move {
+        std::future::poll_fn(|cx| {
+            if in_flight.get() == 0 {
+                Poll::Ready(())
+            } else {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+        .await;
+        FETCH_FINISHED_BEFORE_INTERRUPT.set(true);
+        interrupt.cancel();
+        zeroship_runtime::OpResult::JsValue {
+            resolver,
+            value: ResolveValue::Native(Box::new(DeliveryProbe)),
+        }
+    });
+    rv.set(promise.into());
+}
+
+/// The victim: one outbound fetch, still in flight when it asks to be
+/// interrupted once its fetches finish.
 const FETCH_VICTIM_APP: &str = r#"
 export default {
-    async fetch(request) {
-        const upstream = await fetch(request.headers.get("x-upstream"));
-        return new Response(await upstream.text());
+    async fetch(request, env) {
+        const upstream = fetch(request.headers.get("x-upstream"));
+        await env.probe.interruptOnceFetched();
+        return new Response(await (await upstream).text());
     },
 };
 "#;
@@ -871,25 +929,33 @@ fn resident_runtime(
     runtime
 }
 
-/// The host's deadline watchdog interrupts the victim while its fetch is in
-/// flight, so the victim's pump takes the finished fetch and drops it
-/// unsettled, and the victim's isolate is then torn down. Another isolate on
-/// the same thread must not be able to claim that result by resolving bytes
-/// that name it.
+
+/// The victim's fetch finishes and its isolate is interrupted in one pump
+/// pass, so the pump takes the finished fetch for an isolate it finds
+/// interrupted: it drops the answer unsettled, answers the victim's request
+/// with the interruption's error, and stops the isolate, which is then torn
+/// down. Another isolate on the same thread must not be able to claim that
+/// result by resolving bytes that name it.
 #[test]
 fn a_fetch_its_isolate_never_settled_is_unreachable_from_another_isolate() {
     use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, RequestCtx, SettledFetch};
 
-    let upstream = HeldUpstream::start();
     let body = run(async move {
         init_v8();
-        let victim = resident_runtime(FETCH_VICTIM_APP, Vec::new());
+        let victim = resident_runtime(FETCH_VICTIM_APP, vec![Arc::new(InterruptOnceFetched)]);
         let attacker = resident_runtime(
             BYTE_PROBE_APP,
-            vec![std::sync::Arc::new(super::v8_async_method_smoke::AsyncTestPlugin)],
+            vec![Arc::new(super::v8_async_method_smoke::AsyncTestPlugin)],
         );
+        let interrupt = VictimInterrupt(victim.interrupt_handle());
+        victim.with_scope(|scope| {
+            scope.set_slot(interrupt);
+        });
 
-        let headers = [("x-upstream".to_owned(), upstream.url.clone())];
+        let headers = [(
+            "x-upstream".to_owned(),
+            format!("data:text/plain,{VICTIM_TOKEN}.{VICTIM_BODY}"),
+        )];
         victim.enter_isolate();
         let outcome = victim.call_fetch_handler(
             "GET",
@@ -903,25 +969,6 @@ fn a_fetch_its_isolate_never_settled_is_unreachable_from_another_isolate() {
         let FetchOutcome::Pending { rx: victim_reply, .. } = outcome else {
             panic!("the victim's handler must be waiting on its fetch");
         };
-        compio::time::timeout(Duration::from_secs(10), upstream.received)
-            .await
-            .expect("the victim's fetch never reached the upstream")
-            .expect("the upstream stopped before reading the victim's request");
-
-        victim.interrupt_handle().cancel();
-        upstream.release.send(()).unwrap();
-        let written = upstream.server.join().expect("the upstream panicked");
-        assert!(written > VICTIM_BODY.len(), "the upstream must have answered the victim");
-        compio::time::timeout(Duration::from_secs(10), async {
-            while victim.state().borrow().in_flight_fetches.get() != 0 {
-                compio::time::sleep(Duration::from_millis(1)).await;
-            }
-        })
-        .await
-        .expect("the victim's pump never took its finished fetch");
-        compio::time::timeout(Duration::from_secs(10), victim.shutdown())
-            .await
-            .expect("the victim's shutdown never finished");
         let victim_reply = compio::time::timeout(Duration::from_secs(10), victim_reply.recv())
             .await
             .expect("the victim's reply never arrived");
@@ -932,10 +979,27 @@ fn a_fetch_its_isolate_never_settled_is_unreachable_from_another_isolate() {
             ),
         };
         assert_eq!(
-            error.message, "Request timed out",
+            error.message, "runtime execution interrupted",
             "the victim's reply must be the interruption error, not a fetch result"
         );
         assert_eq!(error.status, 500, "the interruption is an internal dispatch error");
+        assert_eq!(
+            FETCHES_IN_FLIGHT_AT_ASK.get(),
+            1,
+            "the victim's fetch is in flight when it asks to be interrupted"
+        );
+        assert!(
+            FETCH_FINISHED_BEFORE_INTERRUPT.get(),
+            "the victim's fetch finishes before its isolate is interrupted"
+        );
+        assert!(
+            !DELIVERED_TO_THE_VICTIM.get(),
+            "the pump delivered an answer it took into an interrupted isolate"
+        );
+        assert!(victim.is_quarantined(), "the interrupt stops the victim's isolate");
+        compio::time::timeout(Duration::from_secs(10), victim.shutdown())
+            .await
+            .expect("the victim's shutdown never finished");
         drop(victim);
 
         attacker.enter_isolate();

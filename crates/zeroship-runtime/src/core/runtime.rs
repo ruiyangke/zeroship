@@ -193,12 +193,17 @@ impl From<&str> for DispatchError {
     }
 }
 
-/// Thread-safe, permanent interruption of an exclusive runtime. The owning
-/// thread must still quarantine and join native work through `Runtime::shutdown`.
+/// Thread-safe, permanent interruption of an exclusive runtime.
+///
+/// Interrupting terminates any JavaScript running in the isolate and wakes its
+/// pump, wherever that pump is waiting, to stop the isolate: every request
+/// still pending on it is answered with the interruption's error and the
+/// isolate is quarantined (`RuntimeInner::stop_for_host_interrupt`). The owning
+/// thread still joins native work through `Runtime::shutdown`.
 #[derive(Clone)]
 pub struct RuntimeInterrupt {
     handle: v8::IsolateHandle,
-    cancelled: Arc<AtomicBool>,
+    interrupt: Arc<HostInterrupt>,
 }
 impl std::fmt::Debug for RuntimeInterrupt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -207,8 +212,26 @@ impl std::fmt::Debug for RuntimeInterrupt {
 }
 impl RuntimeInterrupt {
     pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
+        self.interrupt.raised.store(true, Ordering::Release);
         self.handle.terminate_execution();
+        self.interrupt.pump.wake();
+    }
+}
+
+/// A host's interruption of one isolate, shared by the isolate and every
+/// [`RuntimeInterrupt`] for it, and raised from any thread.
+///
+/// The pump registers its waker here whenever it waits. A pump waiting on host
+/// work that never settles has nothing else to wake it, and terminating
+/// execution reaches only JavaScript that is running.
+#[derive(Default)]
+struct HostInterrupt {
+    raised: AtomicBool,
+    pump: futures::task::AtomicWaker,
+}
+impl HostInterrupt {
+    fn is_raised(&self) -> bool {
+        self.raised.load(Ordering::Acquire)
     }
 }
 
@@ -445,7 +468,7 @@ impl Runtime {
         let inner = self.inner.borrow();
         RuntimeInterrupt {
             handle: inner.isolate.thread_safe_handle(),
-            cancelled: inner.host_interrupt.clone(),
+            interrupt: inner.host_interrupt.clone(),
         }
     }
 
@@ -571,7 +594,8 @@ impl Runtime {
     }
 
     /// Register a hook the runtime calls once when this isolate quarantines
-    /// itself (heap cap, pump-CPU share, or a native-callback panic). A caching
+    /// itself (heap cap, pump-CPU share, a native-callback panic, or a host
+    /// interrupt through a [`RuntimeInterrupt`]). A caching
     /// host uses it to drop the cache entry at the stop, so a stopped isolate's
     /// raised heap is released then rather than held until the app's next
     /// request or an LRU eviction. The hook runs on this thread with no runtime
@@ -701,10 +725,11 @@ impl Runtime {
     }
 
     /// Stop this isolate if a native callback panicked in the window that just
-    /// ended (see [`RuntimeInner::stop_for_caught_panic`]) or its heap reached
-    /// the cap (see [`RuntimeInner::stop_for_heap_cap`]). Every entry point
-    /// that runs script calls it once the isolate is released; the pump checks
-    /// after each of its own windows.
+    /// ended (see [`RuntimeInner::stop_for_caught_panic`]), its heap reached
+    /// the cap (see [`RuntimeInner::stop_for_heap_cap`]) or its host
+    /// interrupted it (see [`RuntimeInner::stop_for_host_interrupt`]). Every
+    /// entry point that runs script calls it once the isolate is released; the
+    /// pump checks after each of its own windows.
     fn stop_if_the_isolate_must_stop(&self) {
         let stop = self.inner.borrow().take_isolate_stop();
         if let Some(stop) = stop {
@@ -758,8 +783,9 @@ impl Runtime {
 
     /// True once this runtime is quarantined, by its host through
     /// [`Self::quarantine`] or by the runtime itself when its event pump
-    /// exceeded its CPU share, a native callback panicked in it, or its heap
-    /// reached the cap. A quarantined runtime never runs app code again, so a
+    /// exceeded its CPU share, a native callback panicked in it, its heap
+    /// reached the cap, or its host interrupted it through a
+    /// [`RuntimeInterrupt`]. A quarantined runtime never runs app code again, so a
     /// host that caches runtimes replaces it rather than dispatching to it.
     #[must_use]
     pub fn is_quarantined(&self) -> bool {
@@ -1153,6 +1179,8 @@ enum IsolateStop {
     CaughtPanic,
     /// Its heap reached the cap: `RuntimeInner::stop_for_heap_cap`.
     HeapCap,
+    /// Its host interrupted it: `RuntimeInner::stop_for_host_interrupt`.
+    HostInterrupt,
 }
 
 /// What a host-interrupted isolate refuses work with.
@@ -1293,7 +1321,7 @@ pub(crate) struct RuntimeInner {
     cpu_note: Arc<std::sync::atomic::AtomicBool>,
 
     /// Host interruption is permanent; limit recovery cannot resume app code.
-    host_interrupt: Arc<AtomicBool>,
+    host_interrupt: Arc<HostInterrupt>,
 
     /// Cause of the most recent detected termination, set by
     /// `check_v8_terminated` so call sites report the right limit.
@@ -1533,7 +1561,7 @@ impl RuntimeInner {
             wall_timeout,
             terminated_note: heap_terminated,
             cpu_note: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            host_interrupt: Arc::new(AtomicBool::new(false)),
+            host_interrupt: Arc::default(),
             last_termination_was_heap: false,
             #[cfg(target_os = "linux")]
             cpu_timer: None,
@@ -1785,14 +1813,16 @@ impl RuntimeInner {
                     // iteration begins is taken before either, so neither runs
                     // on a stopped isolate.
                     //
-                    // No test drives this position over the after-cleanup check
-                    // below: `reached` is set only by an allocation, which
-                    // happens inside a dispatch or timer window whose end
-                    // already takes the stop, so a fresh pump iteration never
-                    // begins with `reached` newly set. It guards the one path
-                    // that would set it between windows, a GC firing the
-                    // callback, which cannot arise today because a GC does not
-                    // allocate past the cap.
+                    // A host interrupt is raised between windows, from any
+                    // thread, and wakes the wait below, so it is taken here.
+                    // For the heap cap, no test drives this position over the
+                    // after-cleanup check below: `reached` is set only by an
+                    // allocation, which happens inside a dispatch or timer
+                    // window whose end already takes the stop, so a fresh pump
+                    // iteration never begins with `reached` newly set. It
+                    // guards the one path that would set it between windows, a
+                    // GC firing the callback, which cannot arise today because
+                    // a GC does not allocate past the cap.
                     if let Some(stop) = rt.take_isolate_stop() {
                         drop(rt);
                         Self::stop_isolate(&runtime, stop);
@@ -1840,10 +1870,6 @@ impl RuntimeInner {
                         }))
                         .chain(crate::streams::stream_forwarder::next_deadline(&rt.state))
                         .min();
-                }
-
-                if runtime.borrow().host_interrupt.load(Ordering::Acquire) {
-                    return;
                 }
 
                 // PHASE 1 — drain new spawned ops/timers/fetches + flush
@@ -1922,6 +1948,13 @@ impl RuntimeInner {
                     return std::task::Poll::Ready(());
                 };
                 let rt = runtime.borrow();
+                // Registered before the flag is read, so an interrupt raised
+                // on another thread in between still wakes this wait. The next
+                // iteration's top takes the stop.
+                rt.host_interrupt.pump.register(cx.waker());
+                if rt.host_interrupt.is_raised() {
+                    return std::task::Poll::Ready(());
+                }
                 for request in &rt.waiting_startup_requests {
                     request.ctx.cancel.register_waker(cx.waker());
                     if request.ctx.cancel.is_cancelled() {
@@ -2229,7 +2262,7 @@ impl RuntimeInner {
     /// and so is the heap cap, which stops the isolate; a CPU termination is
     /// recovered for an ordinary cached runtime.
     fn termination_message(&self) -> &'static str {
-        if self.host_interrupt.load(Ordering::Acquire) {
+        if self.host_interrupt.is_raised() {
             HOST_INTERRUPT_CAUSE
         } else if self.last_termination_was_heap {
             HEAP_CAP_CAUSE
@@ -2242,7 +2275,7 @@ impl RuntimeInner {
     /// interrupted it, or its heap reached the cap. Every place the runtime is
     /// about to enter creator JavaScript asks first.
     fn halted(&self) -> Option<&'static str> {
-        if self.host_interrupt.load(Ordering::Acquire) {
+        if self.host_interrupt.is_raised() {
             Some(HOST_INTERRUPT_CAUSE)
         } else if self.heap_cap.reached() {
             Some(HEAP_CAP_CAUSE)
@@ -2263,7 +2296,7 @@ impl RuntimeInner {
             .swap(false, std::sync::atomic::Ordering::Relaxed);
 
         let v8_terminating = self.isolate.is_execution_terminating();
-        let host_interrupted = self.host_interrupt.load(Ordering::Acquire);
+        let host_interrupted = self.host_interrupt.is_raised();
         if !host_interrupted && !heap_terminated && !cpu_terminated && !v8_terminating {
             return false;
         }
@@ -2306,10 +2339,10 @@ impl RuntimeInner {
         crate::node::net::state::reset_dispatch_egress(&self.state);
 
         let init_result = self.initialize_modules(modules, env);
-        if self.creator_namespace.is_none() || self.host_interrupt.load(Ordering::Acquire) {
+        if self.creator_namespace.is_none() || self.host_interrupt.is_raised() {
             let msg = match init_result {
                 Err(err) => err,
-                Ok(_) if self.host_interrupt.load(Ordering::Acquire) => {
+                Ok(_) if self.host_interrupt.is_raised() => {
                     self.termination_message().to_string()
                 }
                 Ok(true) => "Startup published no creator module for workflow dispatch".to_string(),
@@ -3683,6 +3716,12 @@ impl RuntimeInner {
         self.heap_cap.reached() && !self.state.borrow().tasks.is_closed()
     }
 
+    /// Whether this isolate's host interrupted it and the isolate has not been
+    /// stopped yet.
+    fn host_interrupt_stop_due(&self) -> bool {
+        self.host_interrupt.is_raised() && !self.state.borrow().tasks.is_closed()
+    }
+
     /// The stop this isolate is due, if any. A caught panic is taken, so it is
     /// reported once.
     fn take_isolate_stop(&self) -> Option<IsolateStop> {
@@ -3690,6 +3729,8 @@ impl RuntimeInner {
             Some(IsolateStop::CaughtPanic)
         } else if self.heap_cap_stop_due() {
             Some(IsolateStop::HeapCap)
+        } else if self.host_interrupt_stop_due() {
+            Some(IsolateStop::HostInterrupt)
         } else {
             None
         }
@@ -3699,6 +3740,7 @@ impl RuntimeInner {
         match stop {
             IsolateStop::CaughtPanic => Self::stop_for_caught_panic(this),
             IsolateStop::HeapCap => Self::stop_for_heap_cap(this),
+            IsolateStop::HostInterrupt => Self::stop_for_host_interrupt(this),
         }
     }
 
@@ -3767,6 +3809,36 @@ impl RuntimeInner {
             app_id = app_id.as_ref().map(AppId::as_str),
             failed_requests = failed,
             "a native callback panicked; isolate quarantined and its pending requests failed"
+        );
+    }
+
+    /// Stop this isolate because its host interrupted it.
+    ///
+    /// The interrupt is permanent, so the isolate runs no more JavaScript and a
+    /// request still pending on it would never settle. Each is ended, so its
+    /// later host ops are refused and what waits on its end runs, and answered
+    /// with the interruption's error, as an indeterminate commit when a commit
+    /// it asked for is still in flight. The isolate is then quarantined, which
+    /// cancels its native work and releases any initialization still waiting
+    /// on its startup. No creator JavaScript runs here.
+    fn stop_for_host_interrupt(this: &Rc<RefCell<Self>>) {
+        let (failed, app_id) = {
+            let mut rt = this.borrow_mut();
+            let pending: Vec<(u64, PendingRequest)> = rt.pending_requests.drain().collect();
+            let failed = pending.len();
+            for (id, request) in pending {
+                let mid_commit = request.token.control().stop();
+                rt.drain_request_logs(id);
+                rt.drop_timers_owned_by(id);
+                send_pending_error(request, early_end_error(HOST_INTERRUPT_CAUSE, mid_commit));
+            }
+            (failed, rt.app_id.clone())
+        };
+        Self::quarantine(this, HOST_INTERRUPT_CAUSE);
+        tracing::warn!(
+            app_id = app_id.as_ref().map(AppId::as_str),
+            failed_requests = failed,
+            "host interrupted the isolate; quarantined and its pending requests failed"
         );
     }
 

@@ -1,7 +1,7 @@
 //! V8 lifecycle adapter for the shared workflow runner.
 
 use async_trait::async_trait;
-use std::{cell::RefCell, future::Future, rc::Rc, task::Poll, time::Duration};
+use std::{cell::RefCell, rc::Rc, time::Duration};
 use zeroship_bundle::LoadedWorker;
 use zeroship_runtime::{
     CancelFlag, EnvSnapshot, RequestCtx, Runtime, WorkflowOutcome,
@@ -190,15 +190,19 @@ impl TaskExecution for V8Execution {
             WorkflowOutcome::Response { json, .. } => json,
             WorkflowOutcome::Pending { rx, .. } => {
                 loaded.runtime.notify_pump();
-                let mut received = std::pin::pin!(rx.recv());
-                let mut failed = std::pin::pin!(self.payloads.failed());
-                let result = std::future::poll_fn(|cx| {
-                    if let Poll::Ready(error) = failed.as_mut().poll(cx) {
-                        return Poll::Ready(Err(error));
+                // The runtime answers this dispatch however its execution ends:
+                // an expired budget and a failed replay dependency each
+                // interrupt it, and its pump answers every pending request.
+                // A commit in flight at that moment may have applied, and
+                // re-running the task could apply it again, so that answer
+                // outranks the cause. Any other answer is named by the checks
+                // below, so an expired budget stays a timeout.
+                let result = match rx.recv().await {
+                    Err(error) if error.code == Some(COMMIT_FAILED_INDETERMINATE) => {
+                        return Err(dispatch_wait_error(error));
                     }
-                    received.as_mut().poll(cx).map(|result| result.map_err(dispatch_wait_error))
-                })
-                .await;
+                    answer => answer.map_err(dispatch_wait_error),
+                };
                 self.budget.check()?;
                 self.payloads.check()?;
                 result?.json

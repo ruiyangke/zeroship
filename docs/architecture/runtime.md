@@ -40,7 +40,7 @@ src/storage.rs                app-storage abstraction
 - `build()` leaves a new isolate entered, and the worker exits it after caching so later requests can re-enter it just in time for dispatch.
 - Async native work resolves through the per-isolate pump started by `Runtime::start_pump()`.
 - Trusted hosts can permanently quarantine an isolate and await `Runtime::shutdown()` before reusing execution capacity. The native task scope cancels the pump and socket roots, joins their child tasks, and keeps V8 alive until native futures have been destroyed.
-- `Runtime::interrupt_handle()` lets a trusted watchdog permanently interrupt synchronous app execution from another thread. Interruption preserves V8 thread ownership; the owning thread still quarantines and joins native work before releasing capacity.
+- `Runtime::interrupt_handle()` lets a trusted watchdog permanently interrupt app execution from another thread. Interruption preserves V8 thread ownership: it terminates running JavaScript and wakes the pump, which on its own thread answers every pending request with the interruption's error and quarantines the isolate, whether that pump is idle on host work that never settles or is woken by work that settles afterwards. The owning thread still joins native work through `Runtime::shutdown()` before releasing capacity.
 - The pump batches ready timer and op completions into a single V8 re-entry so one burst of settled work does not pay one enter/exit cycle per completion.
 - Initialization failures are stored on `RuntimeInner::init_error`; `call_fetch_handler` surfaces them as a 500 instead of pretending no handler exists.
 

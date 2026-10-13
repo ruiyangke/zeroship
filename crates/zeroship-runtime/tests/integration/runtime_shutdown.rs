@@ -3,9 +3,13 @@ use std::{cell::{Cell, RefCell}, rc::Rc, time::Duration};
 use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
 use zeroship_runtime::state::{SharedState, admit_op};
 use zeroship_runtime::{
-    CancelFlag, EnvSnapshot, FetchOutcome, ModuleEntry, OpResult, RequestCtx, Runtime,
-    SettledFetch, runtime::InnerProbe,
+    CancelFlag, EnvSnapshot, FetchOutcome, ModuleEntry, OpResult, RequestCtx, ResultReceiver,
+    Runtime, SettledFetch,
+    runtime::{DispatchError, InnerProbe},
 };
+
+/// What a request still pending after its dispatch is answered through.
+type Reply = ResultReceiver<Result<SettledFetch, DispatchError>>;
 
 struct NativeOperation {
     dropped: Rc<Cell<bool>>,
@@ -38,7 +42,39 @@ impl NativePlugin for ProbePlugin {
 
     fn register(&self, r: &mut NativeRegistrar) {
         r.add("hang", hang_callback);
+        r.add("commit", commit_callback);
     }
+}
+
+thread_local! {
+    /// Set when the pump first polls the op `env.probe.commit()` queues.
+    static COMMIT_POLLED: Cell<bool> = const { Cell::new(false) };
+    /// Set when the request whose `env.probe.commit()` is in flight ends early.
+    static COMMITTING_REQUEST_ENDED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// `env.probe.commit()` queues a host op that asks for a commit and never
+/// learns its outcome, the way a transaction's commit stays in flight while its
+/// database has not answered. It records when the pump first polls it and when
+/// its request ends early.
+fn commit_callback(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+    let owner = admit_op(scope).expect("the committing request is live");
+    let link = owner.retain();
+    let commit = link.commit_guard().expect("a live request admits its commit");
+    let ended = link.on_end(|| COMMITTING_REQUEST_ENDED.set(true));
+    state.borrow_mut().spawn_op(owner, async move {
+        let _in_flight = (commit, ended);
+        COMMIT_POLLED.set(true);
+        std::future::pending::<OpResult>().await
+    });
 }
 
 fn hang_callback(
@@ -67,7 +103,9 @@ fn runtime() -> Runtime {
         .modules(vec![ModuleEntry {
             specifier: "index.js".into(),
             source: "export default { async fetch(request, env) { \
-                     if (new URL(request.url).pathname === '/hang') env.probe.hang(); \
+                     const path = new URL(request.url).pathname; \
+                     if (path === '/hang') env.probe.hang(); \
+                     if (path === '/commit') env.probe.commit(); \
                      return await new Promise(() => {}); } };"
                 .into(),
         }])
@@ -107,6 +145,144 @@ async fn host_interrupt_is_permanent_and_safe_after_isolate_disposal() {
     runtime.shutdown().await;
     drop(runtime);
     interrupt.cancel();
+}
+
+/// A host interrupt raised on another thread while the pump waits on a host op
+/// that never settles answers the requests still pending with the
+/// interruption's error and stops the isolate. Nothing else could end that
+/// wait: no JavaScript is running for the interrupt to terminate, and no
+/// operation will settle to wake the pump.
+#[compio::test]
+async fn a_host_interrupt_from_another_thread_answers_requests_pending_on_an_idle_pump() {
+    let runtime = runtime();
+    let outcome = runtime.call_fetch_handler(
+        "GET",
+        "http://local/",
+        &[],
+        [],
+        &EnvSnapshot::empty(),
+        RequestCtx::new(CancelFlag::new()),
+    );
+    let FetchOutcome::Pending { rx, .. } = outcome else {
+        panic!("request must be pending");
+    };
+    runtime.exit_isolate();
+    runtime.start_pump();
+    let (dropped, _, hanging) = native_operation(&runtime).await;
+    let interrupt = runtime.interrupt_handle();
+    std::thread::spawn(move || interrupt.cancel()).join().unwrap();
+    let answers = compio::time::timeout(Duration::from_secs(5), async {
+        (rx.recv().await, hanging.recv().await)
+    })
+    .await;
+    let stopped = runtime.is_quarantined();
+    // Joined before any assertion, so a failing case does not drop the isolate
+    // under the host op it still holds.
+    compio::time::timeout(Duration::from_secs(5), runtime.shutdown())
+        .await
+        .expect("an interrupted isolate's native work must join");
+    let (waiting, holding) = answers.expect("the interrupt must answer both pending requests");
+    for (request, answer) in [("awaiting a promise", waiting), ("holding the host op", holding)] {
+        let Err(error) = answer else {
+            panic!("the request {request} must not settle as a response");
+        };
+        assert_eq!(error.message, "runtime execution interrupted", "{request}");
+        assert_eq!(error.code, None, "the request {request} has no commit in flight");
+    }
+    assert!(stopped, "the interrupt stops the isolate before its host does");
+    assert!(dropped.get(), "the host op the isolate waited on is destroyed");
+}
+
+/// A host interrupt raised on another thread, while the pump waits with a
+/// request's commit in flight, answers that request that whether the commit
+/// applied is unknown, and ends the request, so what waits on its end runs.
+/// The control is the case above, whose requests had no commit in flight and
+/// are answered with the plain interruption.
+#[compio::test]
+async fn a_host_interrupt_answers_a_request_with_a_commit_in_flight_as_indeterminate() {
+    let runtime = runtime();
+    runtime.exit_isolate();
+    runtime.start_pump();
+    runtime.enter_isolate();
+    let outcome = runtime.call_fetch_handler(
+        "GET",
+        "http://local/commit",
+        &[],
+        [],
+        &EnvSnapshot::empty(),
+        RequestCtx::new(CancelFlag::new()),
+    );
+    runtime.exit_isolate();
+    let FetchOutcome::Pending { rx, .. } = outcome else {
+        panic!("the committing request must be pending");
+    };
+    runtime.notify_pump();
+    // Once the pump has polled the commit, it has nothing left to do and
+    // waits, so only the interrupt's own wake can reach it.
+    compio::time::timeout(Duration::from_secs(5), async {
+        while !COMMIT_POLLED.get() {
+            compio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the commit must enter the real pump");
+    let interrupt = runtime.interrupt_handle();
+    std::thread::spawn(move || interrupt.cancel()).join().unwrap();
+    let answer = compio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+    let ended = COMMITTING_REQUEST_ENDED.get();
+    compio::time::timeout(Duration::from_secs(5), runtime.shutdown())
+        .await
+        .expect("an interrupted isolate's native work must join");
+    let Err(error) = answer.expect("the interrupt must answer the committing request") else {
+        panic!("an interrupted request must not settle as a response");
+    };
+    assert_eq!(
+        error.code,
+        Some(zeroship_runtime::runtime::COMMIT_FAILED_INDETERMINATE),
+        "{error:?}"
+    );
+    assert!(error.message.starts_with("runtime execution interrupted"), "{error:?}");
+    assert!(ended, "the interrupt ends the request, so what waits on its end runs");
+}
+
+/// A host interrupt raised on another thread while startup waits on a
+/// top-level await that never settles releases the initialization waiting on
+/// it with the interruption's error.
+#[compio::test]
+async fn a_host_interrupt_from_another_thread_releases_a_waiting_initialization() {
+    zeroship_runtime::init_v8();
+    let runtime = Runtime::builder()
+        .modules(vec![ModuleEntry {
+            specifier: "index.js".into(),
+            source: "await new Promise(() => {}); export default { fetch() { throw new Error('interrupted handler ran'); } };".into(),
+        }])
+        .build();
+    runtime.exit_isolate();
+    let initializing_runtime = runtime.clone();
+    let (started, started_rx) = futures::channel::oneshot::channel();
+    let initialization = compio::runtime::spawn(async move {
+        let env = EnvSnapshot::empty();
+        let initialize = initializing_runtime.initialize(&env);
+        futures::pin_mut!(initialize);
+        assert!(futures::poll!(&mut initialize).is_pending());
+        started.send(()).unwrap();
+        initialize.await
+    });
+    compio::time::timeout(Duration::from_secs(5), started_rx)
+        .await
+        .expect("initialization must register its readiness waiter")
+        .unwrap();
+    let interrupt = runtime.interrupt_handle();
+    std::thread::spawn(move || interrupt.cancel()).join().unwrap();
+    let error = compio::time::timeout(Duration::from_secs(5), initialization)
+        .await
+        .expect("the interrupt must release the waiting initialization")
+        .unwrap()
+        .unwrap_err();
+    assert!(error.contains("runtime execution interrupted"), "{error}");
+    compio::time::timeout(Duration::from_secs(5), runtime.shutdown())
+        .await
+        .expect("an interrupted isolate's native work must join");
 }
 
 #[compio::test]
@@ -159,8 +335,9 @@ async fn quarantine_releases_pending_initialization_and_startup_requests() {
 }
 
 /// Queue a host op that never settles, through a request whose handler calls
-/// `env.probe.hang()`, and wait for the pump to start it.
-async fn native_operation(runtime: &Runtime) -> (Rc<Cell<bool>>, Rc<InnerProbe>) {
+/// `env.probe.hang()`, and wait for the pump to start it. Answers whether the
+/// op is destroyed, the isolate's strong-count probe, and the request's reply.
+async fn native_operation(runtime: &Runtime) -> (Rc<Cell<bool>>, Rc<InnerProbe>, Reply) {
     let started = Rc::new(Cell::new(false));
     let dropped = Rc::new(Cell::new(false));
     let isolate = Rc::new(runtime.clone().into_inner_probe_for_test());
@@ -181,10 +358,9 @@ async fn native_operation(runtime: &Runtime) -> (Rc<Cell<bool>>, Rc<InnerProbe>)
         RequestCtx::new(CancelFlag::new()),
     );
     runtime.exit_isolate();
-    assert!(
-        matches!(outcome, FetchOutcome::Pending { .. }),
-        "the hanging request must be pending"
-    );
+    let FetchOutcome::Pending { rx, .. } = outcome else {
+        panic!("the hanging request must be pending");
+    };
     assert!(
         NEXT_OPERATION.with_borrow(Option::is_none),
         "the handler must have queued the operation"
@@ -197,7 +373,7 @@ async fn native_operation(runtime: &Runtime) -> (Rc<Cell<bool>>, Rc<InnerProbe>)
     })
     .await
     .expect("native operation must enter the real pump");
-    (dropped, isolate)
+    (dropped, isolate, rx)
 }
 
 #[compio::test]
@@ -216,7 +392,7 @@ async fn shutdown_joins_native_operations_and_prevents_further_dispatch() {
     };
     runtime.exit_isolate();
     runtime.start_pump();
-    let (dropped, _) = native_operation(&runtime).await;
+    let (dropped, _, _) = native_operation(&runtime).await;
     // Abandon the first wait, then resume it: cancellation must not lose the
     // native teardown barrier or reopen the isolate.
     let _ = runtime.shutdown().now_or_never();
@@ -247,7 +423,7 @@ async fn quarantine_retains_v8_until_native_destructors_have_finished() {
     let runtime = runtime();
     runtime.exit_isolate();
     runtime.start_pump();
-    let (dropped, isolate) = native_operation(&runtime).await;
+    let (dropped, isolate, _) = native_operation(&runtime).await;
     runtime.quarantine();
     drop(runtime);
     compio::time::timeout(Duration::from_secs(5), async {

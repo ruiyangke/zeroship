@@ -1,5 +1,9 @@
 use crate::support::{deployment_fixture, orm as orm_fixture};
 use async_trait::async_trait;
+use futures::{
+    channel::oneshot,
+    future::{Either, FutureExt, Shared},
+};
 use serde_json::json;
 use std::{
     cell::{Cell, RefCell},
@@ -10,7 +14,8 @@ use std::{
 use zeroship_bundle::LoadedWorker;
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
-use zeroship_runtime::{runtime::InnerProbe, EnvSnapshot, ModuleEntry, Runtime};
+use zeroship_runtime::state::{admit_op, SharedState};
+use zeroship_runtime::{runtime::InnerProbe, EnvSnapshot, ModuleEntry, OpResult, Runtime};
 use zeroship_workflow::{
     operations::{RunOperation, RunState, RunStatus, SignalOptions, StartOptions},
     service::{
@@ -52,6 +57,33 @@ impl NativePlugin for Markers {
                     .lock()
                     .unwrap()
                     .push(marker);
+            },
+        );
+        // `env.probe.commit()` queues a host op that asks for a commit and
+        // never learns its outcome, the way a transaction's commit stays in
+        // flight while its database has not answered, and marks `committing`.
+        registrar.add(
+            "commit",
+            |scope: &mut v8::PinScope,
+             _args: v8::FunctionCallbackArguments,
+             _rv: v8::ReturnValue| {
+                let state = scope.get_slot::<SharedState>().unwrap().clone();
+                let owner = admit_op(scope).expect("the committing dispatch is live");
+                let commit = owner
+                    .retain()
+                    .commit_guard()
+                    .expect("a live dispatch admits its commit");
+                scope
+                    .get_slot::<Self>()
+                    .unwrap()
+                    .0
+                    .lock()
+                    .unwrap()
+                    .push("committing".into());
+                state.borrow_mut().spawn_op(owner, async move {
+                    let _in_flight = commit;
+                    std::future::pending::<OpResult>().await
+                });
             },
         );
     }
@@ -2333,6 +2365,14 @@ async fn an_execution_is_cut_at_the_delivered_attempt_bound_under_a_longer_host_
 struct DelayedReads {
     tasks: WorkerTasks,
     objects: Vec<(Vec<u8>, Duration)>,
+    /// When set, every object read waits past its delay until the case
+    /// releases this, so a read answers at the moment the case picks, or
+    /// never.
+    hold: Option<Shared<oneshot::Receiver<()>>>,
+    /// Run by the first held read the release reaches, before that read
+    /// answers, so whatever it does lands in the pump pass that takes the
+    /// answers.
+    on_release: RefCell<Option<Box<dyn FnOnce()>>>,
     reads: RefCell<Vec<String>>,
     in_flight: Cell<usize>,
     max_in_flight: Cell<usize>,
@@ -2378,6 +2418,15 @@ impl TaskPayloads for DelayedReads {
         self.in_flight.set(in_flight);
         self.max_in_flight.set(self.max_in_flight.get().max(in_flight));
         compio::time::sleep(*delay).await;
+        if let Some(hold) = &self.hold {
+            hold.clone()
+                .await
+                .expect("the case keeps the release of a held read alive");
+            let on_release = self.on_release.borrow_mut().take();
+            if let Some(on_release) = on_release {
+                on_release();
+            }
+        }
         self.in_flight.set(self.in_flight.get() - 1);
         PayloadRead::checked(
             reference.clone(),
@@ -2432,12 +2481,22 @@ struct Replayed {
     max_in_flight: usize,
 }
 
-async fn replay_under(
+/// One delivery of `Example` over `journal`, ready to execute: the assignment,
+/// the [`DelayedReads`] answering the objects it names, and an executor over
+/// both under the host budgets `limits`.
+struct Delivery {
+    task: TaskAssignment,
+    transport: Rc<DelayedReads>,
+    executor: V8TaskExecutor,
+}
+
+async fn deliver(
     fixture: &Fixture,
     journal: serde_json::Value,
     objects: Vec<(Vec<u8>, Duration)>,
+    hold: Option<Shared<oneshot::Receiver<()>>>,
     limits: TaskPayloadLimits,
-) -> Replayed {
+) -> Delivery {
     fixture
         .app
         .start(&RequestId::mint(), "Example", StartOptions::default())
@@ -2454,11 +2513,31 @@ async fn replay_under(
     let transport = Rc::new(DelayedReads {
         tasks: fixture.app.tasks(worker, fixture.objects.clone()),
         objects,
+        hold,
+        on_release: RefCell::default(),
         reads: RefCell::default(),
         in_flight: Cell::default(),
         max_in_flight: Cell::default(),
     });
     let executor = V8TaskExecutor::new(fixture.loader.clone(), transport.clone(), limits).unwrap();
+    Delivery {
+        task,
+        transport,
+        executor,
+    }
+}
+
+async fn replay_under(
+    fixture: &Fixture,
+    journal: serde_json::Value,
+    objects: Vec<(Vec<u8>, Duration)>,
+    limits: TaskPayloadLimits,
+) -> Replayed {
+    let Delivery {
+        task,
+        transport,
+        executor,
+    } = deliver(fixture, journal, objects, None, limits).await;
     let guard = zeroship_workflow_runner::ExecutionGuard::new(Duration::from_secs(20)).unwrap();
     let mut execution =
         zeroship_workflow_runner::TaskExecutor::start(&executor, &task, guard.budget()).unwrap();
@@ -2797,6 +2876,202 @@ async fn referenced_children_are_read_at_the_hosts_concurrency_bound() {
         replayed.max_in_flight,
         zeroship_workflow_runner::CHILD_OUTPUT_READS,
         "the bridge batches its referenced reads"
+    );
+}
+
+/// How long a case waits on an execution it expects to end. Reaching it means
+/// the execution never ended; a passing case never waits this long.
+const ENDS_WITHIN: Duration = Duration::from_secs(30);
+
+/// Execute `delivery` under a budget its deadline never ends, so only the case
+/// ends it: once `ready` holds, `end` takes the budget's guard and ends the
+/// budget. Answers how the execution ends, or `None` when it is still running
+/// [`ENDS_WITHIN`] after.
+async fn execute_until_the_case_ends_its_budget(
+    delivery: &Delivery,
+    ready: impl Fn() -> bool,
+    end: impl FnOnce(zeroship_workflow_runner::ExecutionGuard),
+) -> Option<Result<zeroship_workflow::WorkflowExecution, WorkflowServiceError>> {
+    let guard = zeroship_workflow_runner::ExecutionGuard::new(Duration::from_mins(5)).unwrap();
+    let mut execution = zeroship_workflow_runner::TaskExecutor::start(
+        &delivery.executor,
+        &delivery.task,
+        guard.budget(),
+    )
+    .unwrap();
+    let budget_ends = std::pin::pin!(async move {
+        while !ready() {
+            compio::time::sleep(Duration::from_millis(1)).await;
+        }
+        end(guard);
+    });
+    let ended = match compio::time::timeout(
+        ENDS_WITHIN,
+        futures::future::select(execution.wait(), budget_ends),
+    )
+    .await
+    .expect("the dispatch never reached the point its budget ends at")
+    {
+        Either::Left((ended, _)) => panic!("the execution ended before its budget did: {ended:?}"),
+        Either::Right(((), wait)) => compio::time::timeout(ENDS_WITHIN, wait).await.ok(),
+    };
+    execution.stop().await;
+    ended
+}
+
+/// End a budget from another thread, the way the deadline watchdog ends an
+/// expired one.
+fn end_elsewhere(guard: zeroship_workflow_runner::ExecutionGuard) {
+    std::thread::spawn(move || drop(guard))
+        .join()
+        .expect("the budget ends without a panic");
+}
+
+/// An execution whose budget ends while its dispatch waits on a read that never
+/// answers ends with a timeout. Nothing but the end of the budget can end that
+/// wait: the isolate runs no JavaScript and no host operation will settle.
+#[compio::test]
+async fn a_budget_that_ends_while_a_read_never_answers_ends_the_execution_as_a_timeout() {
+    let fixture = Box::pin(Fixture::new(ONE_CHILD)).await;
+    let output = child_output_of("A", REFERENCED);
+    let (release, hold) = oneshot::channel();
+    let delivery = deliver(
+        &fixture,
+        json!([child(0, "A", &output)]),
+        vec![(output, Duration::ZERO)],
+        Some(hold.shared()),
+        SPLIT,
+    )
+    .await;
+    let ended = execute_until_the_case_ends_its_budget(
+        &delivery,
+        || !delivery.transport.reads.borrow().is_empty(),
+        end_elsewhere,
+    )
+    .await;
+    assert_eq!(
+        delivery.transport.reads.borrow().len(),
+        1,
+        "the budget ended while the dispatch waited on its read"
+    );
+    assert_eq!(
+        ended.expect("the execution outlived its budget").map(drop),
+        Err(WorkflowServiceError::Timeout)
+    );
+    drop(release);
+}
+
+/// An execution whose budget ends while a commit its dispatch asked for is in
+/// flight ends as an indeterminate commit, not as a timeout: the commit may
+/// have applied, and the delivery loop re-runs a timed-out task, which could
+/// apply it again. The commit is a step's effect, the work a dispatch runs
+/// past its replayed prefix. The control is
+/// `a_budget_that_ends_while_a_read_never_answers_ends_the_execution_as_a_timeout`,
+/// whose dispatch has no commit in flight and ends as a timeout.
+#[compio::test]
+async fn a_budget_that_ends_with_a_commit_in_flight_ends_the_execution_as_an_indeterminate_commit(
+) {
+    let fixture = Box::pin(Fixture::new(
+        r"
+        import { env } from 'zeroship';
+        export class Example {
+            async run(_trigger, step) {
+                await step.run('commit', () => {
+                    env.probe.commit();
+                    return new Promise(() => {});
+                });
+                return 'done';
+            }
+        }
+    ",
+    ))
+    .await;
+    let delivery = deliver(
+        &fixture,
+        json!([]),
+        Vec::new(),
+        None,
+        TaskPayloadLimits::default(),
+    )
+    .await;
+    let markers = fixture.loader.markers.clone();
+    let ended = execute_until_the_case_ends_its_budget(
+        &delivery,
+        || markers.0.lock().unwrap().iter().any(|marker| marker == "committing"),
+        end_elsewhere,
+    )
+    .await
+    .expect("the execution outlived its budget")
+    .map(drop);
+    assert!(
+        matches!(
+            &ended,
+            Err(WorkflowServiceError::Internal(message))
+                if message.starts_with(zeroship_runtime::runtime::COMMIT_FAILED_INDETERMINATE)
+        ),
+        "{ended:?}"
+    );
+}
+
+/// An execution whose budget ends in the pump pass that takes its first batch
+/// of reads' answers ends with a timeout, and its dispatch asks for nothing
+/// more. The budget ends as the first held read is released, so the pump holds
+/// every answer of the batch when it finds the isolate interrupted: it drops
+/// them and stops the isolate after the batch rather than before it. Three
+/// mechanisms keep the next batch from being asked for: the pump delivers no
+/// answer to an interrupted isolate, the interrupt terminates the JavaScript an
+/// answer would wake, and the stop runs before any read queued since is
+/// polled. The control is
+/// `referenced_children_are_read_at_the_hosts_concurrency_bound`, where the
+/// same fan-out under a budget that does not end reads every output.
+#[compio::test]
+async fn reads_answered_as_the_budget_ends_end_the_execution_as_a_timeout_and_issue_no_further_read(
+) {
+    const COUNT: usize = zeroship_workflow_runner::CHILD_OUTPUT_READS + 4;
+    let source = fan_out(COUNT);
+    let fixture = Box::pin(Fixture::new(&source)).await;
+    let outputs: Vec<Vec<u8>> = (0..COUNT)
+        .map(|index| child_output_of(&format!("C{index}"), REFERENCED))
+        .collect();
+    let journal = serde_json::Value::Array(
+        outputs
+            .iter()
+            .enumerate()
+            .map(|(index, output)| {
+                child(i32::try_from(index).unwrap(), &format!("C{index}"), output)
+            })
+            .collect(),
+    );
+    let objects = outputs
+        .iter()
+        .map(|output| (output.clone(), Duration::ZERO))
+        .collect();
+    let (release, hold) = oneshot::channel();
+    let delivery = deliver(&fixture, journal, objects, Some(hold.shared()), SPLIT).await;
+    let transport = delivery.transport.clone();
+    let ended = execute_until_the_case_ends_its_budget(
+        &delivery,
+        || {
+            delivery.transport.reads.borrow().len() == zeroship_workflow_runner::CHILD_OUTPUT_READS
+        },
+        move |guard| {
+            *transport.on_release.borrow_mut() = Some(Box::new(move || drop(guard)));
+            release.send(()).expect("the held reads are waiting");
+        },
+    )
+    .await;
+    assert_eq!(
+        ended.expect("the execution outlived its budget").map(drop),
+        Err(WorkflowServiceError::Timeout)
+    );
+    assert!(
+        delivery.transport.on_release.borrow().is_none(),
+        "a released read ended the budget"
+    );
+    assert_eq!(
+        delivery.transport.reads.borrow().len(),
+        zeroship_workflow_runner::CHILD_OUTPUT_READS,
+        "the dispatch asked for no object after its budget ended"
     );
 }
 
