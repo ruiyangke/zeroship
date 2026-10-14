@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::mpsc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -156,18 +156,27 @@ pub struct RedpandaConfig {
     pub client_id: Option<String>,
     /// librdkafka's PRODUCER setting (`message.timeout.ms`): the longest a
     /// produced record may go unacknowledged before the producer gives up on
-    /// it. This transport also reuses the same number as the stall bound it
-    /// reports from [`StreamTransport::stall_timeout`] for its blocking
-    /// consumer-side waits - there is no separate consumer-side timeout to
-    /// configure instead, so tuning this one tunes both. See
-    /// [`RedpandaTransport`]'s `stall_timeout` field for what that implies for
-    /// a caller running on a single executor thread.
+    /// it. Producer-only. The transport's stall bound is its own setting,
+    /// [`Self::stall_timeout_ms`]; tuning either does not move the other.
     #[serde(default = "default_message_timeout_ms")]
     pub message_timeout_ms: u64,
     #[serde(default = "default_publish_timeout_ms")]
     pub publish_timeout_ms: u64,
     #[serde(default = "default_poll_timeout_ms")]
     pub poll_timeout_ms: u64,
+    /// The transport's stall bound, reported as
+    /// [`StreamTransport::stall_timeout`]. It is the longest either consumer
+    /// of the stream may go without progress before it treats the broker as
+    /// stalled: the recompute scan, whose `rewind` group join and seek,
+    /// `end_offsets` metadata and watermark queries, and gaps between the polls
+    /// that advance a partition are all held to it; and the usage outbox in
+    /// `zeroship-metering`, whose batch publish treats a broker that
+    /// acknowledges nothing for this long as stalled. This is not
+    /// a librdkafka setting, so it takes this struct's plain `snake_case`
+    /// spelling, and it is independent of [`Self::message_timeout_ms`], which
+    /// stays the producer's `message.timeout.ms`. Defaults to 30 seconds.
+    #[serde(default = "default_stall_timeout_ms")]
+    pub stall_timeout_ms: u64,
     #[serde(default = "default_auto_offset_reset")]
     pub auto_offset_reset: String,
     /// librdkafka's `session.timeout.ms`: how long the broker waits for a
@@ -207,6 +216,10 @@ fn default_poll_timeout_ms() -> u64 {
     100
 }
 
+const fn default_stall_timeout_ms() -> u64 {
+    30_000
+}
+
 fn default_auto_offset_reset() -> String {
     "earliest".to_string()
 }
@@ -227,6 +240,7 @@ impl RedpandaConfig {
         require_non_zero("redpanda: message_timeout_ms", self.message_timeout_ms)?;
         require_non_zero("redpanda: publish_timeout_ms", self.publish_timeout_ms)?;
         require_non_zero("redpanda: poll_timeout_ms", self.poll_timeout_ms)?;
+        require_non_zero("redpanda: stall_timeout_ms", self.stall_timeout_ms)?;
         require_non_zero("redpanda: session.timeout.ms", self.session_timeout_ms)?;
         require_non_zero("redpanda: max.poll.interval.ms", self.max_poll_interval_ms)?;
         // librdkafka refuses to build a classic-protocol consumer where
@@ -268,27 +282,79 @@ pub const ID: &str = "redpanda";
 
 pub struct RedpandaTransport {
     producer: BaseProducer<DeliveryContext>,
-    consumer: Mutex<BaseConsumer>,
+    consumer: Arc<Mutex<BaseConsumer>>,
     topic: String,
     publish_timeout: Duration,
     poll_timeout: Duration,
-    /// `message_timeout_ms`: a PRODUCER setting - librdkafka's own
-    /// `message.timeout.ms`, the longest a produced record may go
-    /// unacknowledged before the producer gives up on it - that this
-    /// transport also reuses as the STALL bound for its blocking
-    /// consumer-side waits: `rewind`'s group join and seek, `end_offsets`'s
-    /// metadata and watermark queries, and the gap between polls that advance
-    /// a scan. There is no separate consumer-side timeout to configure
-    /// instead, so raising or lowering this one value changes both. Reported
-    /// as [`StreamTransport::stall_timeout`], the gap without progress after
-    /// which a caller treats the broker as stalled.
+    /// `stall_timeout_ms`: the transport's STALL bound, reported as
+    /// [`StreamTransport::stall_timeout`] and shared by both consumers of the
+    /// stream. The recompute scan holds `rewind`'s group join and seek,
+    /// `end_offsets`' metadata and watermark queries, and the gap between the
+    /// polls that advance a partition to it; the usage outbox in
+    /// `zeroship-metering` holds its batch publish to it, treating a broker
+    /// that acknowledges nothing for this long as stalled. Independent of
+    /// `message_timeout_ms`, which stays the producer's librdkafka
+    /// `message.timeout.ms`.
     ///
-    /// Every one of those calls is SYNCHRONOUS and blocks the calling thread
-    /// until librdkafka answers - the thread the caller's scan runs on, as
-    /// `spend_recompute`'s period scan does - leaving it unresponsive to
-    /// everything else it would otherwise run for up to this long, once per
-    /// period the scan reads, whenever one of those calls stalls.
+    /// Every one of the calls this bounds is SYNCHRONOUS and blocks the thread
+    /// that runs it until librdkafka answers or the bound expires. This
+    /// transport runs each of them on a compio blocking-pool thread (see
+    /// [`run_blocking`]), so the caller's executor thread keeps serving other
+    /// work - a scan on Control's compio runtime does - while librdkafka waits.
     stall_timeout: Duration,
+}
+
+/// Run `blocking` on a compio blocking-pool thread and await its result.
+///
+/// The consumer calls this transport makes are synchronous librdkafka calls:
+/// `poll`, `commit`, `rewind`'s group join and seek, and `end_offsets`'s
+/// metadata and watermark queries all block the calling thread until the
+/// broker answers or the call's own bound expires. Running one on the thread
+/// that polled this future would block the executor thread the caller's scan
+/// runs on - Control's compio runtime - for up to the stall bound. The
+/// blocking pool keeps that thread serving other work while the call waits.
+/// A panic in `blocking` is resumed on the caller, so the transport keeps the
+/// panic it always propagated.
+async fn run_blocking<T: Send + 'static>(blocking: impl FnOnce() -> T + Send + 'static) -> T {
+    compio::runtime::spawn_blocking(blocking)
+        .await
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+impl RedpandaTransport {
+    /// Lock this transport's consumer and run `call` on a compio
+    /// blocking-pool thread, so a synchronous librdkafka wait inside `call`
+    /// does not hold the caller's executor thread. Every consumer-side method
+    /// takes this path.
+    ///
+    /// The mutex is acquired and released on the blocking thread, so its
+    /// `!Send` guard never crosses the thread hop; a poisoned lock maps to
+    /// [`StreamError::Unavailable`] the same way it did when the lock was
+    /// taken on the caller. `call` therefore needs a compio runtime under the
+    /// caller: without one `spawn_blocking` has nothing to offload onto.
+    ///
+    /// An ABANDONED call - the caller dropped the returned future, as the
+    /// recompute's `unless_stalled` does at the stall bound - still runs to
+    /// completion under the consumer lock, and any records it consumes are
+    /// discarded. So only a caller that rewinds the consumer afterwards may
+    /// abandon one: the discarded records are re-read from the retained
+    /// beginning, not lost. The recompute rewinds every cycle for exactly this
+    /// reason; a caller that intends to continue from its current position
+    /// must wait for the call instead.
+    async fn with_consumer<T, F>(&self, call: F) -> Result<T, StreamError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&BaseConsumer) -> Result<T, StreamError> + Send + 'static,
+    {
+        let consumer = Arc::clone(&self.consumer);
+        run_blocking(move || {
+            let consumer = consumer
+                .lock()
+                .map_err(|_| StreamError::Unavailable("redpanda consumer mutex poisoned"))?;
+            call(&consumer)
+        })
+        .await
+    }
 }
 
 pub fn factory(config: &StreamConfig) -> Result<std::sync::Arc<dyn StreamTransport>, StreamError> {
@@ -336,11 +402,11 @@ impl RedpandaTransport {
 
         Ok(Self {
             producer,
-            consumer: Mutex::new(consumer),
+            consumer: Arc::new(Mutex::new(consumer)),
             topic: config.topic,
             publish_timeout: Duration::from_millis(config.publish_timeout_ms),
             poll_timeout: Duration::from_millis(config.poll_timeout_ms),
-            stall_timeout: Duration::from_millis(config.message_timeout_ms),
+            stall_timeout: Duration::from_millis(config.stall_timeout_ms),
         })
     }
 }
@@ -410,27 +476,26 @@ impl StreamTransport for RedpandaTransport {
             return Ok(Vec::new());
         }
 
-        let consumer = self
-            .consumer
-            .lock()
-            .map_err(|_| StreamError::Unavailable("redpanda consumer mutex poisoned"))?;
-
-        // The whole body is `drain_batch` so the batching AND the
-        // error-vs-records policy are reachable from a test. Everything left
-        // inline here is the rdkafka message->StreamRecord field copy, which
-        // has no branches.
-        drain_batch(max, self.poll_timeout, |timeout| {
-            consumer.poll(timeout).map(|result| {
-                result
-                    .map(|message| StreamRecord {
-                        partition: message.partition(),
-                        offset: message.offset(),
-                        key: message.key().unwrap_or_default().to_vec(),
-                        payload: message.payload().unwrap_or_default().to_vec(),
-                    })
-                    .map_err(StreamError::from)
+        let poll_timeout = self.poll_timeout;
+        self.with_consumer(move |consumer| {
+            // The whole body is `drain_batch` so the batching AND the
+            // error-vs-records policy are reachable from a test. Everything left
+            // inline here is the rdkafka message->StreamRecord field copy, which
+            // has no branches.
+            drain_batch(max, poll_timeout, |timeout| {
+                consumer.poll(timeout).map(|result| {
+                    result
+                        .map(|message| StreamRecord {
+                            partition: message.partition(),
+                            offset: message.offset(),
+                            key: message.key().unwrap_or_default().to_vec(),
+                            payload: message.payload().unwrap_or_default().to_vec(),
+                        })
+                        .map_err(StreamError::from)
+                })
             })
         })
+        .await
     }
 
     async fn commit(&self, offsets: &[StreamOffset]) -> Result<(), StreamError> {
@@ -458,66 +523,65 @@ impl StreamTransport for RedpandaTransport {
                 .map_err(StreamError::from)?;
         }
 
-        let consumer = self
-            .consumer
-            .lock()
-            .map_err(|_| StreamError::Unavailable("redpanda consumer mutex poisoned"))?;
-        consumer
-            .commit(&topic_partitions, CommitMode::Sync)
-            .map_err(StreamError::from)
+        self.with_consumer(move |consumer| {
+            consumer
+                .commit(&topic_partitions, CommitMode::Sync)
+                .map_err(StreamError::from)
+        })
+        .await
     }
 
     async fn rewind(&self) -> Result<(), StreamError> {
-        let consumer = self
-            .consumer
-            .lock()
-            .map_err(|_| StreamError::Unavailable("redpanda consumer mutex poisoned"))?;
+        let poll_timeout = self.poll_timeout;
+        let stall_timeout = self.stall_timeout;
+        self.with_consumer(move |consumer| {
+            // A freshly-subscribed group consumer has no assignment until it has
+            // polled AND the group rebalance has settled - that can take longer
+            // than a single poll cycle against a real broker. Poll until
+            // partitions are assigned, bounded by the transport's stall timeout
+            // (`stall_timeout_ms`), so a group join that never lands ends the
+            // wait rather than blocking it.
+            let deadline = Instant::now() + stall_timeout;
+            let mut assignment = consumer.assignment().map_err(StreamError::from)?;
+            while assignment.count() == 0 && Instant::now() < deadline {
+                let _ = consumer.poll(poll_timeout);
+                assignment = consumer.assignment().map_err(StreamError::from)?;
+            }
+            if assignment.count() == 0 {
+                // Nothing assigned to this member yet (another member holds the
+                // partitions, or the rebalance has not landed). The next recompute
+                // cycle rewinds once this consumer is assigned - not an error.
+                return Ok(());
+            }
 
-        // A freshly-subscribed group consumer has no assignment until it has
-        // polled AND the group rebalance has settled — that can take longer than
-        // a single poll cycle against a real broker. Poll until partitions are
-        // assigned, bounded by the transport's stall timeout
-        // (`message_timeout_ms`), so a group join that never lands ends the
-        // wait rather than blocking it.
-        let deadline = Instant::now() + self.stall_timeout;
-        let mut assignment = consumer.assignment().map_err(StreamError::from)?;
-        while assignment.count() == 0 && Instant::now() < deadline {
-            let _ = consumer.poll(self.poll_timeout);
-            assignment = consumer.assignment().map_err(StreamError::from)?;
-        }
-        if assignment.count() == 0 {
-            // Nothing assigned to this member yet (another member holds the
-            // partitions, or the rebalance has not landed). The next recompute
-            // cycle rewinds once this consumer is assigned — not an error.
-            return Ok(());
-        }
-
-        // `seek()` transiently returns `Local: Erroneous state` (__STATE) when a
-        // just-assigned partition has no established fetch position yet — the
-        // exact cold-start the enforcement recompute hits on its first cycle.
-        // Poll to advance the partition into a seekable state and retry, bounded.
-        // seek(Beginning) resets the fetch position, so records consumed by these
-        // priming polls are re-read by the caller's subsequent poll — no loss.
-        loop {
-            let mut last_err = None;
-            for elem in assignment.elements() {
-                if let Err(err) = consumer.seek(
-                    elem.topic(),
-                    elem.partition(),
-                    Offset::Beginning,
-                    self.poll_timeout,
-                ) {
-                    last_err = Some(err);
+            // `seek()` transiently returns `Local: Erroneous state` (__STATE) when a
+            // just-assigned partition has no established fetch position yet - the
+            // exact cold-start the enforcement recompute hits on its first cycle.
+            // Poll to advance the partition into a seekable state and retry, bounded.
+            // seek(Beginning) resets the fetch position, so records consumed by these
+            // priming polls are re-read by the caller's subsequent poll - no loss.
+            loop {
+                let mut last_err = None;
+                for elem in assignment.elements() {
+                    if let Err(err) = consumer.seek(
+                        elem.topic(),
+                        elem.partition(),
+                        Offset::Beginning,
+                        poll_timeout,
+                    ) {
+                        last_err = Some(err);
+                    }
+                }
+                match last_err {
+                    None => return Ok(()),
+                    Some(err) if Instant::now() >= deadline => return Err(StreamError::from(err)),
+                    Some(_) => {
+                        let _ = consumer.poll(poll_timeout);
+                    }
                 }
             }
-            match last_err {
-                None => return Ok(()),
-                Some(err) if Instant::now() >= deadline => return Err(StreamError::from(err)),
-                Some(_) => {
-                    let _ = consumer.poll(self.poll_timeout);
-                }
-            }
-        }
+        })
+        .await
     }
 
     /// The topic's partitions come from the broker's metadata, not from this
@@ -532,41 +596,47 @@ impl StreamTransport for RedpandaTransport {
     /// timeout, so the capture as a whole is bounded however many partitions
     /// the topic has.
     async fn end_offsets(&self) -> Result<Vec<PartitionEnd>, StreamError> {
-        let consumer = self
-            .consumer
-            .lock()
-            .map_err(|_| StreamError::Unavailable("redpanda consumer mutex poisoned"))?;
-        let deadline = Instant::now() + self.stall_timeout;
-        let remaining = || deadline.saturating_duration_since(Instant::now());
+        let topic = self.topic.clone();
+        let stall_timeout = self.stall_timeout;
+        let mut ends = self
+            .with_consumer(move |consumer| {
+                let deadline = Instant::now() + stall_timeout;
+                let remaining = || deadline.saturating_duration_since(Instant::now());
 
-        let metadata = consumer
-            .fetch_metadata(Some(&self.topic), remaining())
-            .map_err(StreamError::from)?;
-        let Some(topic) = metadata.topics().iter().find(|t| t.name() == self.topic) else {
-            return Ok(Vec::new());
-        };
-        match topic.error() {
-            None => {}
-            Some(RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN_TOPIC_OR_PART) => return Ok(Vec::new()),
-            Some(error) => {
-                return Err(StreamError::Kafka(format!(
-                    "metadata for topic '{}': {error:?}",
-                    self.topic
-                )));
-            }
-        }
+                let metadata = consumer
+                    .fetch_metadata(Some(&topic), remaining())
+                    .map_err(StreamError::from)?;
+                let Some(metadata_topic) = metadata.topics().iter().find(|t| t.name() == topic)
+                else {
+                    return Ok(Vec::new());
+                };
+                match metadata_topic.error() {
+                    None => {}
+                    Some(RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN_TOPIC_OR_PART) => {
+                        return Ok(Vec::new())
+                    }
+                    Some(error) => {
+                        return Err(StreamError::Kafka(format!(
+                            "metadata for topic '{topic}': {error:?}"
+                        )));
+                    }
+                }
 
-        let mut ends = Vec::with_capacity(topic.partitions().len());
-        for partition in topic.partitions() {
-            let (low, high) = consumer
-                .fetch_watermarks(&self.topic, partition.id(), remaining())
-                .map_err(StreamError::from)?;
-            ends.push(PartitionEnd {
-                partition: partition.id(),
-                last_offset: (high > low).then_some(high - 1),
-            });
-        }
-        drop(consumer);
+                let mut ends = Vec::with_capacity(metadata_topic.partitions().len());
+                for partition in metadata_topic.partitions() {
+                    let (low, high) = consumer
+                        .fetch_watermarks(&topic, partition.id(), remaining())
+                        .map_err(StreamError::from)?;
+                    ends.push(PartitionEnd {
+                        partition: partition.id(),
+                        last_offset: (high > low).then_some(high - 1),
+                    });
+                }
+                Ok(ends)
+            })
+            .await?;
+        // Sorting needs no broker, so it runs after the consumer lock is
+        // released.
         ends.sort_unstable_by_key(|end| end.partition);
         Ok(ends)
     }
@@ -669,33 +739,190 @@ mod tests {
     }
 
     /// The stall bound a caller holds the broker to is the operator's
-    /// configured `message_timeout_ms`, not a constant and not one of the
-    /// other two timeouts, which are set to different values here so a swap
-    /// shows.
+    /// configured `stall_timeout_ms`, not `message_timeout_ms` - which is the
+    /// producer's librdkafka `message.timeout.ms` - and not one of the other
+    /// timeouts. The two are set to different values in both orders so a swap
+    /// shows, and `publish_timeout_ms`/`poll_timeout_ms` differ again.
     ///
     /// Building the transport opens no socket: librdkafka connects lazily and
     /// `subscribe` only records the subscription, so no broker is needed.
     #[test]
-    fn the_stall_timeout_is_the_configured_message_timeout() {
-        let config = |message_timeout_ms: u64| {
+    fn the_stall_timeout_follows_its_own_setting_not_the_message_timeout() {
+        let config = |message_timeout_ms: u64, stall_timeout_ms: u64| {
             crate::StreamConfig::from(serde_json::json!({
                 "brokers": "127.0.0.1:1",
                 "topic": "t",
                 "group.id": "g",
                 "message_timeout_ms": message_timeout_ms,
+                "stall_timeout_ms": stall_timeout_ms,
                 "publish_timeout_ms": 4321,
                 "poll_timeout_ms": 25,
             }))
         };
-        for message_timeout_ms in [1234, 98_765] {
-            let transport = factory(&config(message_timeout_ms))
+        for (message_timeout_ms, stall_timeout_ms) in [(1234, 98_765), (98_765, 1234)] {
+            let transport = factory(&config(message_timeout_ms, stall_timeout_ms))
                 .expect("redpanda transport builds without a live broker");
             assert_eq!(
                 transport.stall_timeout(),
-                Some(Duration::from_millis(message_timeout_ms)),
-                "the stall timeout must follow the configured message timeout"
+                Some(Duration::from_millis(stall_timeout_ms)),
+                "the stall timeout must follow stall_timeout_ms ({stall_timeout_ms}), \
+                 not message_timeout_ms ({message_timeout_ms})"
             );
         }
+    }
+
+    /// A config that sets neither timeout reports the transport's default
+    /// stall bound, and that default is today's effective bound - the value
+    /// `message_timeout_ms` defaults to - so leaving `stall_timeout_ms` unset
+    /// reports the same bound.
+    #[test]
+    fn an_unset_stall_timeout_reports_todays_effective_bound() {
+        let transport = factory(&config_with(serde_json::json!({
+            "brokers": "127.0.0.1:1",
+            "topic": "t",
+            "group.id": "g",
+        })))
+        .expect("redpanda transport builds without a live broker");
+        assert_eq!(
+            transport.stall_timeout(),
+            Some(Duration::from_millis(default_message_timeout_ms())),
+            "an unset stall_timeout_ms must report today's effective bound"
+        );
+    }
+
+    /// A zero `stall_timeout_ms` is refused by name, the way the other
+    /// timeouts are: a bound of zero is a stalled call before it starts.
+    #[test]
+    fn a_zero_stall_timeout_is_refused_by_name() {
+        let refused = factory(&config_with(serde_json::json!({
+            "brokers": "127.0.0.1:1",
+            "topic": "t",
+            "group.id": "g",
+            "stall_timeout_ms": 0,
+        })));
+        match refused {
+            Err(StreamError::Config(message)) => assert!(
+                message.contains("stall_timeout_ms"),
+                "the refusal names the setting: {message}"
+            ),
+            Err(other) => panic!("a zero stall_timeout_ms must be refused by config: {other:?}"),
+            Ok(_) => panic!("a zero stall_timeout_ms must be refused"),
+        }
+    }
+
+    /// Hand control back to the runtime once, so a spawned spinner advances a
+    /// fixed number of ticks with no dependence on a real timer.
+    async fn yield_to_runtime() {
+        let mut yielded = false;
+        std::future::poll_fn(|cx| {
+            if yielded {
+                std::task::Poll::Ready(())
+            } else {
+                yielded = true;
+                cx.waker().wake_by_ref();
+                std::task::Poll::Pending
+            }
+        })
+        .await;
+    }
+
+    /// A transport pointed at a TCP listener that lets the OS accept the
+    /// connection and never replies: the broker address that never answers.
+    /// The listener is returned with the transport so the caller keeps it alive
+    /// for the whole call.
+    fn silent_transport(
+        stall_timeout_ms: u64,
+        poll_timeout_ms: u64,
+    ) -> (std::net::TcpListener, std::sync::Arc<dyn StreamTransport>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a silent broker");
+        let brokers = listener.local_addr().expect("silent broker address");
+        let transport = factory(&config_with(serde_json::json!({
+            "brokers": brokers.to_string(),
+            "topic": "never-answers",
+            "group.id": "stalled-runtime",
+            "stall_timeout_ms": stall_timeout_ms,
+            "poll_timeout_ms": poll_timeout_ms,
+        })))
+        .expect("redpanda transport builds without a live broker");
+        (listener, transport)
+    }
+
+    /// Await `call` while a spawned spinner yields a fixed number of times on
+    /// the same compio runtime, and assert the spinner finished BEFORE the call
+    /// did. A call that runs on the caller's thread blocks the runtime for its
+    /// whole bound, so the spinner cannot run at all until the call returns and
+    /// then observes it already done; one that runs on a blocking thread leaves
+    /// the runtime serving. Deterministic: the spinner is ticked by yields, not
+    /// a sleep, and the call is bounded by its own configured timeout.
+    async fn assert_runtime_serves_during<T>(call: impl std::future::Future<Output = T>) -> T {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        const TICKS: usize = 64;
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let call_returned = Arc::new(AtomicBool::new(false));
+        let served_while_stalled = Arc::new(AtomicBool::new(false));
+
+        let spinner = {
+            let ticks = Arc::clone(&ticks);
+            let call_returned = Arc::clone(&call_returned);
+            let served_while_stalled = Arc::clone(&served_while_stalled);
+            compio::runtime::spawn(async move {
+                for _ in 0..TICKS {
+                    yield_to_runtime().await;
+                    ticks.fetch_add(1, Ordering::SeqCst);
+                }
+                served_while_stalled.store(
+                    !call_returned.load(Ordering::SeqCst),
+                    Ordering::SeqCst,
+                );
+            })
+        };
+
+        let outcome = call.await;
+        call_returned.store(true, Ordering::SeqCst);
+        spinner.await.expect("the spinner task");
+
+        assert_eq!(
+            ticks.load(Ordering::SeqCst),
+            TICKS,
+            "the spinner ran to completion"
+        );
+        assert!(
+            served_while_stalled.load(Ordering::SeqCst),
+            "another task on the runtime must make progress while the consumer call is \
+             stalled; it did not run until the blocking call returned"
+        );
+        outcome
+    }
+
+    /// A stalled `end_offsets` against a broker that never answers leaves the
+    /// runtime serving other tasks and ends at the stall bound. The bound is
+    /// the transport's own, so a stalled capture still surfaces as a Kafka
+    /// failure rather than hanging.
+    #[compio::test]
+    async fn a_stalled_end_offsets_leaves_the_runtime_serving_other_tasks() {
+        let (_listener, transport) = silent_transport(300, 25);
+        let outcome = assert_runtime_serves_during(transport.end_offsets()).await;
+        assert!(
+            matches!(outcome, Err(StreamError::Kafka(_))),
+            "a broker that never answers must end the capture at the stall bound with a \
+             Kafka failure: {outcome:?}"
+        );
+    }
+
+    /// A stalled `poll` likewise runs off the caller's thread: while it waits
+    /// out its poll timeout on a broker that never answers, the runtime serves
+    /// another task. The poll timeout is raised so the wait is long enough to
+    /// observe, and the call still ends at that bound.
+    #[compio::test]
+    async fn a_stalled_poll_leaves_the_runtime_serving_other_tasks() {
+        let (_listener, transport) = silent_transport(300, 300);
+        let outcome = assert_runtime_serves_during(transport.poll(64)).await;
+        assert!(
+            matches!(outcome, Ok(ref records) if records.is_empty()),
+            "a poll against a broker that never answers returns nothing at the bound, \
+             not an error: {outcome:?}"
+        );
     }
 
     fn config_with(json: serde_json::Value) -> crate::StreamConfig {

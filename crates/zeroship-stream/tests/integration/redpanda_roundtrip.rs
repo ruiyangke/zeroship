@@ -9,7 +9,6 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use futures::executor::block_on;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::config::ClientConfig;
@@ -23,6 +22,18 @@ fn brokers() -> String {
     zeroship_testkit::redpanda::broker().brokers()
 }
 
+/// Drive `future` to completion on a compio runtime.
+///
+/// The redpanda transport runs its blocking librdkafka consumer calls on
+/// compio's blocking pool, so it needs a compio runtime under the caller.
+/// These roundtrip cases drive it on one rather than a bare `futures`
+/// executor, which has no such runtime to offload onto.
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    compio::runtime::Runtime::new()
+        .expect("compio runtime")
+        .block_on(future)
+}
+
 /// The transport settings for `group` against `topic`.
 fn config(brokers: &str, topic: &str, group: &str, client: &str) -> StreamConfig {
     StreamConfig::from(json!({
@@ -31,6 +42,7 @@ fn config(brokers: &str, topic: &str, group: &str, client: &str) -> StreamConfig
         "group.id": group,
         "client_id": client,
         "message_timeout_ms": 10000,
+        "stall_timeout_ms": 10000,
         "publish_timeout_ms": 10000,
         "poll_timeout_ms": 250,
         "auto_offset_reset": "earliest"
@@ -408,6 +420,7 @@ fn rejoin_config(brokers: &str, topic: &str, group: &str, client: &str) -> Strea
         "group.id": group,
         "client_id": client,
         "message_timeout_ms": 10000,
+        "stall_timeout_ms": 10000,
         "publish_timeout_ms": 10000,
         "poll_timeout_ms": 250,
         "auto_offset_reset": "earliest",

@@ -169,8 +169,11 @@ async fn spend_state(client: &compio_postgres::Client, app: &AppId) -> String {
 }
 
 /// The stream timeouts this case configures, named once so the case's budget
-/// is derived from the same values the transports are built with.
+/// is derived from the same values the transports are built with. The stall
+/// bound is the consumer-side setting; `message_timeout_ms` is the producer's
+/// librdkafka `message.timeout.ms` and has its own setting.
 const MESSAGE_TIMEOUT_MS: u64 = 10_000;
+const STALL_TIMEOUT_MS: u64 = 10_000;
 const PUBLISH_TIMEOUT_MS: u64 = 10_000;
 const POLL_TIMEOUT_MS: u64 = 250;
 
@@ -181,6 +184,7 @@ fn redpanda_config(brokers: &str, topic: &str, group: &str) -> StreamConfig {
         "group.id": group,
         "client_id": format!("zeroship-e2e-{}", Uuid::new_v4().simple()),
         "message_timeout_ms": MESSAGE_TIMEOUT_MS,
+        "stall_timeout_ms": STALL_TIMEOUT_MS,
         "publish_timeout_ms": PUBLISH_TIMEOUT_MS,
         "poll_timeout_ms": POLL_TIMEOUT_MS,
         "auto_offset_reset": "earliest"
@@ -210,6 +214,7 @@ fn rejoin_config(brokers: &str, topic: &str, group: &str) -> StreamConfig {
         "group.id": group,
         "client_id": format!("zeroship-rejoin-{}", Uuid::new_v4().simple()),
         "message_timeout_ms": MESSAGE_TIMEOUT_MS,
+        "stall_timeout_ms": STALL_TIMEOUT_MS,
         "publish_timeout_ms": PUBLISH_TIMEOUT_MS,
         "poll_timeout_ms": POLL_TIMEOUT_MS,
         "auto_offset_reset": "earliest",
@@ -221,11 +226,13 @@ fn rejoin_config(brokers: &str, topic: &str, group: &str) -> StreamConfig {
 /// The longest the pipeline below may take, summed from the bounds its broker
 /// steps carry: one publish, held to the publish timeout, and one recompute
 /// cycle, whose rewind, end capture and scan are each held to the stall
-/// timeout (`message_timeout_ms`), the scan's last blocking poll overrunning
-/// it by at most one poll timeout. The database steps carry no configured
-/// bound of their own and share what the broker steps leave unused.
+/// timeout (`stall_timeout_ms`). The scan's poll is abandoned once what is
+/// left of the gap runs out, so it does not add a poll timeout of its own; one
+/// poll timeout is left in the sum as slack for the poll in flight as the
+/// bound is reached. The database steps carry no configured bound of their own
+/// and share what the broker steps leave unused.
 const fn pipeline_budget() -> Duration {
-    Duration::from_millis(PUBLISH_TIMEOUT_MS + 3 * MESSAGE_TIMEOUT_MS + POLL_TIMEOUT_MS)
+    Duration::from_millis(PUBLISH_TIMEOUT_MS + 3 * STALL_TIMEOUT_MS + POLL_TIMEOUT_MS)
 }
 
 fn set_phase(phase: &Mutex<&'static str>, name: &'static str) {
@@ -317,7 +324,7 @@ async fn producer_to_redpanda_to_recompute_to_spend_block_end_to_end() {
     // polled, so nothing can reach it before that thread resumes - survives
     // long enough to reach this slacked deadline, and that is what the
     // watchdog's `abort()`, with the phase name, exists to catch.
-    let watchdog_budget = budget + Duration::from_millis(MESSAGE_TIMEOUT_MS);
+    let watchdog_budget = budget + Duration::from_millis(STALL_TIMEOUT_MS);
     let _watchdog = Watchdog::start(watchdog_budget, Arc::clone(&phase));
 
     let pipeline = async {
@@ -375,8 +382,8 @@ async fn producer_to_redpanda_to_recompute_to_spend_block_end_to_end() {
             .expect("redpanda recompute transport");
         assert_eq!(
             recompute_stream.stall_timeout(),
-            Some(Duration::from_millis(MESSAGE_TIMEOUT_MS)),
-            "the recompute's stall bound is the configured message timeout"
+            Some(Duration::from_millis(STALL_TIMEOUT_MS)),
+            "the recompute's stall bound is the configured stall timeout"
         );
         let cfg = SpendRecomputeConfig {
             interval: Duration::from_secs(1),
@@ -441,7 +448,7 @@ const fn rejoin_budget() -> Duration {
     Duration::from_millis(
         IDLE_BETWEEN_CYCLES_MS
             + PUBLISH_TIMEOUT_MS
-            + 6 * MESSAGE_TIMEOUT_MS
+            + 6 * STALL_TIMEOUT_MS
             + 2 * POLL_TIMEOUT_MS,
     )
 }
@@ -474,7 +481,7 @@ async fn a_recompute_cycle_rejoins_after_the_consumer_idles_past_max_poll() {
 
     let brokers = brokers();
     let url = db_url();
-    let watchdog_budget = budget + Duration::from_millis(MESSAGE_TIMEOUT_MS);
+    let watchdog_budget = budget + Duration::from_millis(STALL_TIMEOUT_MS);
     let _watchdog = Watchdog::start(watchdog_budget, Arc::clone(&phase));
 
     let pipeline = async {

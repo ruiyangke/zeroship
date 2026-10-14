@@ -412,14 +412,14 @@ pub fn periods_to_recompute(now_unix: i64, settle_window: Duration) -> Vec<i64> 
 /// advance a partition toward its captured end, never the scan as a whole: a
 /// period of any size completes as long as the stream keeps delivering. A
 /// `poll` that suspends is abandoned once what is left of the current gap runs
-/// out (see [`unless_stalled`]), so a poll that parks ends the scan. A `poll`
-/// that blocks its thread instead (the redpanda adapter's librdkafka calls)
-/// cannot be abandoned, so the stall clock is also checked before every poll;
-/// there the gap can overrun by one poll, which that adapter bounds by its own
-/// configured poll timeout. A transport with no stall timeout answers every
-/// poll at once, so one poll that advances nothing ends the scan there. In each
-/// case the scan returns [`SpendRecomputeError::Stalled`] and nothing is
-/// written. A `PollExceeded` - the consumer evicted for idling past
+/// out (see [`unless_stalled`]), so a poll that parks ends the scan - the
+/// redpanda adapter's poll suspends while its librdkafka call runs on a
+/// blocking thread, so that adapter is cut the same way. The stall clock is
+/// also checked before every poll, for a transport whose `poll` answers at once
+/// without suspending or advancing. A transport with no stall timeout answers
+/// every poll at once, so one poll that advances nothing ends the scan there.
+/// In each case the scan returns [`SpendRecomputeError::Stalled`] and nothing
+/// is written. A `PollExceeded` - the consumer evicted for idling past
 /// `max.poll.interval.ms` - carries no records and so is not progress either:
 /// the scan polls through the rejoin under the same stall budget, and a rejoin
 /// that does not land inside it ends the scan as a stall. Exactness across a
@@ -1339,11 +1339,11 @@ mod live_db_tests {
         /// Hand over the first this-many records, then hand the last of them
         /// over again on every call: a broker replaying an old offset.
         ReplaysAfter(usize),
-        /// Like `StopsAfter`, but answering at once without ever suspending,
-        /// the way an adapter whose `poll` blocks its thread answers (the
-        /// redpanda adapter's librdkafka calls). A test's own timeout cannot
-        /// fire around a loop over such a poll, so the stream is its own
-        /// watchdog: polled long past its stall timeout, it panics by name.
+        /// Like `StopsAfter`, but answering at once without ever suspending:
+        /// an adapter whose `poll` does its work synchronously on the caller's
+        /// thread. A test's own timeout cannot fire around a loop over such a
+        /// poll, so the stream is its own watchdog: polled long past its stall
+        /// timeout, it panics by name.
         Blocking(usize),
         /// Answer the first poll with [`StreamError::PollExceeded`], then hand
         /// over the log like `Delivers`: a consumer this scan kept across an
@@ -1842,9 +1842,9 @@ mod live_db_tests {
         assert_total(&client, &base.app, base.period, base.total).await;
     }
 
-    /// A poll that blocks its thread and answers at once without advancing -
-    /// how the redpanda adapter answers once it has nothing new - never
-    /// suspends, so no timeout around it can fire. The scan's own check of the
+    /// A poll that answers at once without advancing and never suspends - an
+    /// adapter doing its work synchronously on the caller's thread - leaves no
+    /// point for a timeout around it to fire. The scan's own check of the
     /// stall clock between polls is what ends it, with the named error and no
     /// write.
     ///

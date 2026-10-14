@@ -16,13 +16,15 @@ thiserror = { workspace = true }
 # transport error when it already holds records, and a swallow with no signal
 # at all is the shape that produced the defect it fixes.
 tracing = { workspace = true }
+# librdkafka's consumer calls are synchronous, so the redpanda adapter runs
+# them on compio's blocking pool to keep the caller's runtime thread free. The
+# idle-eviction test also waits out librdkafka's own `max.poll.interval.ms`
+# timer on a `compio::time::sleep`, the broker's timer being the only clock the
+# case rides.
+compio = { workspace = true }
 
 [dev-dependencies]
 futures = { workspace = true }
-# The idle-eviction case waits out librdkafka's own `max.poll.interval.ms`
-# timer; the wait is a `compio::time::sleep` on a compio runtime rather than a
-# thread sleep, so the broker's timer is the only clock the case rides.
-compio = { workspace = true }
 # The worktree's shared broker this binary runs against, and the lifetime
 # measurements of its recipe.
 zeroship-testkit = { workspace = true }
