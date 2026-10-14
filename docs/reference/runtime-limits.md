@@ -93,9 +93,10 @@ after that `await` still runs. What that code can still reach:
   on that transaction sees it fail with `request_cancelled`, and a commit it
   asks for after the stop is refused and rolled back instead.
 - **A commit already sent when it was stopped can still complete.** The
-  request's caller is then answered with the error above and
-  `"code":"commit_failed_indeterminate"`: whether the commit applied is
-  unknown. A generated RPC client surfaces the same code as
+  request's caller is then answered `500` with the cause followed by
+  `; a transaction commit was in flight, so whether it applied is unknown` as
+  the `message`, and with `"code":"commit_failed_indeterminate"`: whether the
+  commit applied is unknown. A generated RPC client surfaces the same code as
   `error.code === "COMMIT_FAILED_INDETERMINATE"` (see
   [RPC](rpc.md#errors-and-retries)); a caller reading the raw response body
   sees the lowercase spelling above.
@@ -159,6 +160,15 @@ isolate was doing:
 
   The answer comes when the stop happens, on every plan. On `unlimited`, which
   has no wall timeout, nothing else would ever answer those requests.
+- Each request still waiting on the isolate ends as a request stopped for
+  CPU does (see [What a stopped request can still
+  do](#what-a-stopped-request-can-still-do)): a transaction it opened is
+  rolled back at the stop, and when a commit it asked for is already sent, its
+  answer's `message` adds
+  `; a transaction commit was in flight, so whether it applied is unknown` and
+  the body carries `"code":"commit_failed_indeterminate"`. A transaction
+  whose request already has its answer is not rolled back at the stop: it
+  ends at its own time limit.
 - A response that is already streaming its body is cut off. The connection
   closes before the body's end, so a client reading the body sees the read
   fail rather than a body that ended normally.
@@ -325,13 +335,23 @@ stop ends everything that isolate was doing:
 - Every other request still waiting on that isolate fails at once with the
   same `500` and `memory limit exceeded`, including a request that allocated
   nothing.
+- Each request still waiting on the isolate ends as a request stopped for
+  CPU does (see [What a stopped request can still
+  do](#what-a-stopped-request-can-still-do)): a transaction it opened is
+  rolled back at the stop, and when a commit it asked for is already sent, its
+  answer's `message` adds
+  `; a transaction commit was in flight, so whether it applied is unknown` and
+  the body carries `"code":"commit_failed_indeterminate"`. A transaction
+  whose request already has its answer is not rolled back at the stop: it
+  ends at its own time limit.
 - None of your code runs in that isolate again. Its timers and pending
   operations are cancelled, and work your code had already queued, such as a
   promise callback, never runs.
 
 The stop cannot be caught: it skips every `catch` and `finally` block of
-yours. As with the CPU limit, there is no `code`, the `name` is always
-`"Error"`, and "non-2xx" is the contract.
+yours. As with the CPU limit, there is no `code` unless a commit of the
+request is in flight at the stop, the `name` is always `"Error"`, and
+"non-2xx" is the contract.
 
 The next request to your deployed app is served by a fresh isolate, which runs
 your module's top-level code again, so state held in module scope does not

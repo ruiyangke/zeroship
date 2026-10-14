@@ -1,3 +1,4 @@
+use crate::support::commits;
 use futures::FutureExt;
 use std::{cell::{Cell, RefCell}, rc::Rc, time::Duration};
 use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
@@ -32,7 +33,8 @@ thread_local! {
 }
 
 /// `env.probe.hang()` queues the thread's next [`NativeOperation`] as a host
-/// op that never settles, the way any binding queues one.
+/// op that never settles, the way any binding queues one, and
+/// `env.probe.panicOnEnd()` registers an end action that panics.
 struct ProbePlugin;
 
 impl NativePlugin for ProbePlugin {
@@ -42,22 +44,14 @@ impl NativePlugin for ProbePlugin {
 
     fn register(&self, r: &mut NativeRegistrar) {
         r.add("hang", hang_callback);
-        r.add("commit", commit_callback);
+        r.add("panicOnEnd", panic_on_end_callback);
     }
 }
 
-thread_local! {
-    /// Set when the pump first polls the op `env.probe.commit()` queues.
-    static COMMIT_POLLED: Cell<bool> = const { Cell::new(false) };
-    /// Set when the request whose `env.probe.commit()` is in flight ends early.
-    static COMMITTING_REQUEST_ENDED: Cell<bool> = const { Cell::new(false) };
-}
-
-/// `env.probe.commit()` queues a host op that asks for a commit and never
-/// learns its outcome, the way a transaction's commit stays in flight while its
-/// database has not answered. It records when the pump first polls it and when
-/// its request ends early.
-fn commit_callback(
+/// `env.probe.panicOnEnd()` registers an action on its request's early end
+/// that panics, standing in for native cleanup with a defect, and queues a
+/// host op that never settles, which holds the registration.
+fn panic_on_end_callback(
     scope: &mut v8::PinScope,
     _args: v8::FunctionCallbackArguments,
     _rv: v8::ReturnValue,
@@ -66,13 +60,12 @@ fn commit_callback(
         .get_slot::<SharedState>()
         .expect("RuntimeState not in isolate slot")
         .clone();
-    let owner = admit_op(scope).expect("the committing request is live");
-    let link = owner.retain();
-    let commit = link.commit_guard().expect("a live request admits its commit");
-    let ended = link.on_end(|| COMMITTING_REQUEST_ENDED.set(true));
+    let owner = admit_op(scope).expect("the request is live");
+    let ended = owner
+        .retain()
+        .on_end(|| panic!("an action waiting on a request's end panicked"));
     state.borrow_mut().spawn_op(owner, async move {
-        let _in_flight = (commit, ended);
-        COMMIT_POLLED.set(true);
+        let _registered = ended;
         std::future::pending::<OpResult>().await
     });
 }
@@ -105,11 +98,13 @@ fn runtime() -> Runtime {
             source: "export default { async fetch(request, env) { \
                      const path = new URL(request.url).pathname; \
                      if (path === '/hang') env.probe.hang(); \
-                     if (path === '/commit') env.probe.commit(); \
+                     if (path === '/commit') env.commits.hold(); \
+                     if (path === '/panic-on-end') env.probe.panicOnEnd(); \
                      return await new Promise(() => {}); } };"
                 .into(),
         }])
         .plugin(ProbePlugin)
+        .plugin(commits::Probe)
         .build()
 }
 
@@ -193,6 +188,53 @@ async fn a_host_interrupt_from_another_thread_answers_requests_pending_on_an_idl
     assert!(dropped.get(), "the host op the isolate waited on is destroyed");
 }
 
+/// An action waiting on a request's early end that panics does not keep the
+/// stop that ends the request from answering every pending request and
+/// quarantining the isolate. The control is
+/// `a_host_interrupt_from_another_thread_answers_requests_pending_on_an_idle_pump`,
+/// whose requests register no such action.
+#[compio::test]
+async fn a_panicking_end_action_does_not_keep_a_stop_from_answering_and_quarantining() {
+    let runtime = runtime();
+    let dispatch = |path: &str| {
+        let outcome = runtime.call_fetch_handler(
+            "GET",
+            &format!("http://local{path}"),
+            &[],
+            [],
+            &EnvSnapshot::empty(),
+            RequestCtx::new(CancelFlag::new()),
+        );
+        let FetchOutcome::Pending { rx, .. } = outcome else {
+            panic!("{path} must be pending");
+        };
+        rx
+    };
+    let waiting = dispatch("/");
+    let panicking = dispatch("/panic-on-end");
+    runtime.exit_isolate();
+    runtime.start_pump();
+    let interrupt = runtime.interrupt_handle();
+    std::thread::spawn(move || interrupt.cancel()).join().unwrap();
+    let answers = compio::time::timeout(Duration::from_secs(5), async {
+        (waiting.recv().await, panicking.recv().await)
+    })
+    .await;
+    let stopped = runtime.is_quarantined();
+    compio::time::timeout(Duration::from_secs(5), runtime.shutdown())
+        .await
+        .expect("an interrupted isolate's native work must join");
+    let (waiting, panicking) =
+        answers.expect("the stop must answer both pending requests despite the panicking action");
+    for (request, answer) in [("awaiting a promise", waiting), ("with the action", panicking)] {
+        let Err(error) = answer else {
+            panic!("the request {request} must not settle as a response");
+        };
+        assert_eq!(error.message, "runtime execution interrupted", "{request}");
+    }
+    assert!(stopped, "the stop quarantines the isolate despite the panicking action");
+}
+
 /// A host interrupt raised on another thread, while the pump waits with a
 /// request's commit in flight, answers that request that whether the commit
 /// applied is unknown, and ends the request, so what waits on its end runs.
@@ -203,6 +245,7 @@ async fn a_host_interrupt_answers_a_request_with_a_commit_in_flight_as_indetermi
     let runtime = runtime();
     runtime.exit_isolate();
     runtime.start_pump();
+    let commit = commits::watch();
     runtime.enter_isolate();
     let outcome = runtime.call_fetch_handler(
         "GET",
@@ -220,7 +263,7 @@ async fn a_host_interrupt_answers_a_request_with_a_commit_in_flight_as_indetermi
     // Once the pump has polled the commit, it has nothing left to do and
     // waits, so only the interrupt's own wake can reach it.
     compio::time::timeout(Duration::from_secs(5), async {
-        while !COMMIT_POLLED.get() {
+        while !commit.polled() {
             compio::time::sleep(Duration::from_millis(1)).await;
         }
     })
@@ -229,20 +272,13 @@ async fn a_host_interrupt_answers_a_request_with_a_commit_in_flight_as_indetermi
     let interrupt = runtime.interrupt_handle();
     std::thread::spawn(move || interrupt.cancel()).join().unwrap();
     let answer = compio::time::timeout(Duration::from_secs(5), rx.recv()).await;
-    let ended = COMMITTING_REQUEST_ENDED.get();
     compio::time::timeout(Duration::from_secs(5), runtime.shutdown())
         .await
         .expect("an interrupted isolate's native work must join");
     let Err(error) = answer.expect("the interrupt must answer the committing request") else {
         panic!("an interrupted request must not settle as a response");
     };
-    assert_eq!(
-        error.code,
-        Some(zeroship_runtime::runtime::COMMIT_FAILED_INDETERMINATE),
-        "{error:?}"
-    );
-    assert!(error.message.starts_with("runtime execution interrupted"), "{error:?}");
-    assert!(ended, "the interrupt ends the request, so what waits on its end runs");
+    commit.assert_ended_as_indeterminate(&error, "runtime execution interrupted");
 }
 
 /// A host interrupt raised on another thread while startup waits on a

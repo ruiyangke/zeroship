@@ -5,8 +5,9 @@
 //! termination and grants bounded headroom for the allocation in flight to
 //! finish (`heap_cap` in the runtime). The runtime then runs no more JavaScript
 //! in that isolate: the request that reached the cap and every request still
-//! pending on the isolate fail with `memory limit exceeded`, and the isolate is
-//! quarantined for its host to replace. The app sees a non-2xx, never a
+//! pending on the isolate fail with `memory limit exceeded`, marked as an
+//! indeterminate commit when a commit of theirs is in flight, and the isolate
+//! is quarantined for its host to replace. The app sees a non-2xx, never a
 //! success and never a hang, and no other isolate notices.
 //!
 //! A case whose failure would abort the process runs through
@@ -23,6 +24,7 @@
 //! the cap, and not some other failure, refused the request.
 
 use crate::support;
+use support::commits;
 use support::*;
 use crate::in_own_process;
 
@@ -345,6 +347,8 @@ const SETTLE_WITHIN: Duration = Duration::from_secs(30);
 ///   showing a queued timer does report.
 /// - `/under` holds a sizeable share of the cap and answers.
 /// - `/park` waits on a promise nothing settles.
+/// - `/commit` holds a commit whose outcome it never learns (`commits`) and
+///   waits on a promise nothing settles.
 /// - anything else answers at once.
 const STOP_SOURCE: &str = r#"
     const later = (work) => new Promise(() => setTimeout(work, 0));
@@ -393,6 +397,10 @@ const STOP_SOURCE: &str = r#"
             if (path === "/park") {
                 return new Promise(() => {});
             }
+            if (path === "/commit") {
+                env.commits.hold();
+                return new Promise(() => {});
+            }
             return new Response("served");
         }
     };
@@ -424,7 +432,11 @@ impl zeroship_runtime::NativePlugin for Probe {
 /// worker's per-thread cache keeps every isolate between dispatches.
 fn tenant(heap_limit_mb: Option<u32>) -> Runtime {
     init_v8();
-    let mut builder = Runtime::builder().modules(m(STOP_SOURCE)).plugin(Probe).idle_gc_after_ms(0);
+    let mut builder = Runtime::builder()
+        .modules(m(STOP_SOURCE))
+        .plugin(Probe)
+        .plugin(commits::Probe)
+        .idle_gc_after_ms(0);
     if let Some(mb) = heap_limit_mb {
         builder = builder.heap_limit_mb(mb);
     }
@@ -537,6 +549,39 @@ fn one_allocation_past_the_cap_stops_its_isolate_and_not_the_process() {
 fn gradual_growth_past_the_cap_stops_its_isolate_and_not_the_process() {
     in_own_process!(gradual_growth_past_the_cap_stops_its_isolate_and_not_the_process, {
         assert_route_stops_only_its_isolate("/grow");
+    });
+}
+
+/// A request with a commit in flight when its isolate reaches the cap is
+/// answered that the commit's outcome is unknown rather than with the cap's
+/// plain error, and is ended, so what waits on its end runs. The control is
+/// `/park` in `one_allocation_past_the_cap_stops_its_isolate_and_not_the_process`,
+/// which holds no commit and receives the plain error.
+#[test]
+fn a_commit_in_flight_when_the_cap_stops_its_isolate_is_answered_as_indeterminate() {
+    in_own_process!(a_commit_in_flight_when_the_cap_stops_its_isolate_is_answered_as_indeterminate, {
+        let capped = tenant(Some(STOP_CAP_MB));
+        compio::runtime::Runtime::new().expect("compio runtime").block_on(async {
+            capped.start_pump();
+            let commit = commits::watch();
+            let committing = pending(&capped, "/commit");
+            assert!(commit.held(), "the request holds its commit before the cap is reached");
+            let hits_before = zeroship_runtime::heap_limit_callback_hits();
+            let reaching = pending(&capped, "/huge");
+            assert_cap_error("/huge", &reaching).await;
+            assert!(
+                zeroship_runtime::heap_limit_callback_hits() > hits_before,
+                "the near-heap-limit callback never fired, so the cap did not stop the isolate",
+            );
+            let answer = compio::time::timeout(SETTLE_WITHIN, committing.recv())
+                .await
+                .expect("the request holding a commit is never answered: the stop strands it");
+            let Err(error) = answer else {
+                panic!("the request holding a commit must be ended by the cap, but it answered");
+            };
+            commit.assert_ended_as_indeterminate(&error, "memory limit exceeded");
+            assert!(capped.is_quarantined(), "the isolate that reached its cap is quarantined");
+        });
     });
 }
 

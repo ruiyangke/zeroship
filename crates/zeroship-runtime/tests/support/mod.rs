@@ -437,3 +437,96 @@ macro_rules! in_own_process {
         }
     }};
 }
+
+/// `env.commits.hold()` queues a host op that asks for a commit and never
+/// learns its outcome, the way a transaction's commit stays in flight while its
+/// database has not answered. The request that makes it is pending with a
+/// commit in flight from that call on, so how the runtime ends that request
+/// shows whether it reports the commit's outcome as unknown and runs what
+/// waits on the request's end. A case reads what a hold reported through the
+/// [`Watch`] it makes before dispatching.
+pub mod commits {
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+    use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
+    use zeroship_runtime::runtime::{DispatchError, COMMIT_FAILED_INDETERMINATE};
+    use zeroship_runtime::state::{admit_op, OpResult, SharedState};
+
+    /// What one watch's holds reported.
+    #[derive(Default)]
+    struct Reports {
+        held: Cell<bool>,
+        polled: Cell<bool>,
+        ended: Cell<bool>,
+    }
+
+    thread_local! {
+        /// Where this thread's next holds report: the latest [`watch`].
+        static WATCHED: RefCell<Rc<Reports>> = RefCell::default();
+    }
+
+    /// The `commits` namespace with its one `hold` method.
+    pub struct Probe;
+
+    impl NativePlugin for Probe {
+        fn namespace(&self) -> &'static str {
+            "commits"
+        }
+
+        fn register(&self, registrar: &mut NativeRegistrar) {
+            registrar.add("hold", hold);
+        }
+    }
+
+    fn hold(scope: &mut v8::PinScope, _args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
+        let state: SharedState = scope
+            .get_slot::<SharedState>()
+            .expect("RuntimeState not in isolate slot")
+            .clone();
+        let reports = WATCHED.with_borrow(Rc::clone);
+        let owner = admit_op(scope).expect("the committing request is live");
+        let link = owner.retain();
+        let commit = link.commit_guard().expect("a live request admits its commit");
+        let on_end = Rc::clone(&reports);
+        let ended = link.on_end(move || on_end.ended.set(true));
+        reports.held.set(true);
+        state.borrow_mut().spawn_op(owner, async move {
+            let _in_flight = (commit, ended);
+            reports.polled.set(true);
+            std::future::pending::<OpResult>().await
+        });
+    }
+
+    /// What the holds this thread makes after it report. A hold reports only
+    /// to the latest watch, so no check reads what an earlier hold reported.
+    pub struct Watch(Rc<Reports>);
+
+    /// Watch the holds this thread makes from now on.
+    pub fn watch() -> Watch {
+        let reports = Rc::new(Reports::default());
+        WATCHED.set(Rc::clone(&reports));
+        Watch(reports)
+    }
+
+    impl Watch {
+        /// Whether a request asked for a held commit.
+        pub fn held(&self) -> bool {
+            self.0.held.get()
+        }
+
+        /// Whether the pump has polled the held commit's op.
+        pub fn polled(&self) -> bool {
+            self.0.polled.get()
+        }
+
+        /// Require `error`, the answer a stop gave the request holding the
+        /// commit, to name `cause` and to say the commit's outcome is unknown,
+        /// and the request's end to have run what waited on it.
+        pub fn assert_ended_as_indeterminate(&self, error: &DispatchError, cause: &str) {
+            assert!(self.held(), "a request held a commit");
+            assert_eq!(error.code, Some(COMMIT_FAILED_INDETERMINATE), "{error:?}");
+            assert!(error.message.starts_with(cause), "the answer names the stop: {error:?}");
+            assert!(self.0.ended.get(), "the stop ends the request, so what waits on its end runs");
+        }
+    }
+}

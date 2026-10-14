@@ -180,12 +180,36 @@ fn source_with_fetch(procedures: &str) -> SqliteRuntimeSource {
     }
 }
 
-/// One app, served from a fresh database, with the latch plugin and a CPU
-/// limit.
+/// `env.boom.explode()` panics, standing in for a native callback with a
+/// defect a creator can reach. The panic boundary throws in its place and the
+/// runtime stops the isolate the callback ran in.
+struct BoomPlugin;
+
+impl NativePlugin for BoomPlugin {
+    fn namespace(&self) -> &'static str {
+        "boom"
+    }
+
+    fn register(&self, registrar: &mut NativeRegistrar) {
+        registrar.add("explode", explode);
+    }
+}
+
+fn explode(_scope: &mut v8::PinScope, _args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
+    panic!("a native callback panicked");
+}
+
+/// One app, served from a fresh database, with the latch and boom plugins and
+/// a CPU limit.
 struct App {
     runtime: Runtime,
     directory: tempfile::TempDir,
     alias: String,
+    /// What the isolate is built from, so a case can build the one a host
+    /// would replace it with.
+    db: Arc<crate::service::DbService>,
+    source: SqliteRuntimeSource,
+    cpu_limit: Duration,
 }
 
 impl App {
@@ -219,27 +243,21 @@ impl App {
             meter: None,
         })
         .unwrap();
-        zeroship_runtime::init_v8();
-        let plugins: Vec<Arc<dyn NativePlugin>> = vec![db.plugin(), Arc::new(LatchPlugin)];
-        let runtime = Runtime::builder()
-            .modules(vec![ModuleEntry {
-                specifier: "index.js".into(),
-                source: source.source,
-            }])
-            .plugins(plugins)
-            .runtime_descriptor(Some(crate::tests::fixtures::harness_descriptor_document(
-                LOCAL_DEV_APP_ID,
-                &source.descriptor,
-            )))
-            .cpu_limit(cpu_limit)
-            .build();
-        runtime.initialize(&EnvSnapshot::empty()).await.unwrap();
-        runtime.start_pump();
+        let runtime = isolate(&db, &source, cpu_limit).await;
         Self {
             runtime,
             directory,
             alias,
+            db,
+            source,
+            cpu_limit,
         }
+    }
+
+    /// A fresh isolate of this app on the same database and thread, as a host
+    /// builds to replace one it found quarantined.
+    async fn replacement(&self) -> Runtime {
+        isolate(&self.db, &self.source, self.cpu_limit).await
     }
 
     /// Call procedure `name`, which must still be running when the call
@@ -253,18 +271,7 @@ impl App {
         name: &str,
         cancel: CancelFlag,
     ) -> zeroship_runtime::channel::ResultReceiver<Result<SettledFetch, DispatchError>> {
-        let outcome = self.runtime.call_fetch_handler(
-            "POST",
-            &format!("http://localhost/__zeroship/v1/{name}"),
-            &[("content-type".into(), "application/json".into())],
-            r#"{"json":null}"#,
-            &EnvSnapshot::empty(),
-            RequestCtx::new(cancel),
-        );
-        let FetchOutcome::Pending { rx, .. } = outcome else {
-            panic!("{name} is still running when its call returns");
-        };
-        rx
+        call_on(&self.runtime, name, cancel)
     }
 
     /// Call procedure `name` through the plain-fetch tier (a module built by
@@ -299,6 +306,54 @@ impl App {
             .map(|row| row[0].clone().expect("a title is never null"))
             .collect()
     }
+}
+
+/// Build, initialize and start an isolate of the app `source` describes,
+/// served by `db`.
+async fn isolate(
+    db: &crate::service::DbService,
+    source: &SqliteRuntimeSource,
+    cpu_limit: Duration,
+) -> Runtime {
+    zeroship_runtime::init_v8();
+    let plugins: Vec<Arc<dyn NativePlugin>> =
+        vec![db.plugin(), Arc::new(LatchPlugin), Arc::new(BoomPlugin)];
+    let runtime = Runtime::builder()
+        .modules(vec![ModuleEntry {
+            specifier: "index.js".into(),
+            source: source.source.clone(),
+        }])
+        .plugins(plugins)
+        .runtime_descriptor(Some(crate::tests::fixtures::harness_descriptor_document(
+            LOCAL_DEV_APP_ID,
+            &source.descriptor,
+        )))
+        .cpu_limit(cpu_limit)
+        .build();
+    runtime.initialize(&EnvSnapshot::empty()).await.unwrap();
+    runtime.start_pump();
+    runtime
+}
+
+/// Call procedure `name` on `runtime`, which must still be running when the
+/// call returns.
+fn call_on(
+    runtime: &Runtime,
+    name: &str,
+    cancel: CancelFlag,
+) -> zeroship_runtime::channel::ResultReceiver<Result<SettledFetch, DispatchError>> {
+    let outcome = runtime.call_fetch_handler(
+        "POST",
+        &format!("http://localhost/__zeroship/v1/{name}"),
+        &[("content-type".into(), "application/json".into())],
+        r#"{"json":null}"#,
+        &EnvSnapshot::empty(),
+        RequestCtx::new(cancel),
+    );
+    let FetchOutcome::Pending { rx, .. } = outcome else {
+        panic!("{name} is still running when its call returns");
+    };
+    rx
 }
 
 async fn answer(
@@ -584,6 +639,87 @@ fn a_transaction_its_stopped_request_left_open_is_rolled_back_at_the_stop() {
             app.titles().await,
             ["after-stop-sibling"],
             "the stopped transaction's write is rolled back, the sibling's committed"
+        );
+    });
+}
+
+/// Parked inside its transaction's callback when a native callback panics in
+/// another request of the same isolate. The panic stops the whole isolate:
+/// the stop ends the parked request, which rolls its transaction back and
+/// releases its lane at once, and quarantines the isolate. The isolate a host
+/// builds to replace it, on the same database, begins a transaction and
+/// commits it before the stopped transaction's execution deadline could have
+/// expired, which is when the lane is released without the rollback.
+const PARKED_INSIDE_ITS_CALLBACK: &str = r#"async function () {
+    await env.db.transaction(async (tx) => {
+      await tx.collection(COLLECTION).insert({ title: "open-at-stop" });
+      await env.latch.wait();
+    });
+    return { survived: true };
+  }"#;
+
+const PANICS: &str = r"async explode() {
+    env.boom.explode();
+  },";
+
+#[test]
+fn a_transaction_open_when_a_panic_stops_its_isolate_is_rolled_back_at_the_stop() {
+    run(async {
+        let app = App::new(
+            &format!("stopped: {PARKED_INSIDE_ITS_CALLBACK}, {PANICS} {COMMITS_ITS_OWN}"),
+            Duration::from_millis(200),
+        )
+        .await;
+        // The stopped transaction begins after this, so its execution deadline
+        // is no earlier than this plus the execution budget.
+        let dispatched = Instant::now();
+        let parked = latch_parked();
+        let stopped = app.call("stopped");
+        compio::time::timeout(Duration::from_secs(30), parked)
+            .await
+            .expect("the stopped request parks inside its transaction")
+            .expect("the latch reports its park");
+        // The dispatch that panics takes the stop as it returns, whatever it
+        // answers itself.
+        drop(app.runtime.call_fetch_handler(
+            "POST",
+            "http://localhost/__zeroship/v1/explode",
+            &[("content-type".into(), "application/json".into())],
+            r#"{"json":null}"#,
+            &EnvSnapshot::empty(),
+            RequestCtx::new(CancelFlag::new()),
+        ));
+        match answer(stopped, "the stopped request").await {
+            Err(error) => assert_eq!(
+                (error.message.as_str(), error.code),
+                ("internal error", None),
+                "the panic's stop ends the parked request, which has no commit in flight"
+            ),
+            Ok(_) => panic!("the parked request must be ended by the panic's stop"),
+        }
+        assert!(app.runtime.is_quarantined(), "the isolate the panic happened in is quarantined");
+
+        let replacement = app.replacement().await;
+        let deadline = dispatched
+            + Duration::from_millis(u64::from(zeroship_data_orm::budgets::DB_IDLE_IN_TX_TIMEOUT_MS));
+        let after_stop = call_on(&replacement, "afterStop", CancelFlag::new());
+        let before_the_deadline = futures::future::select(
+            Box::pin(answer_of(after_stop)),
+            Box::pin(compio::time::sleep(deadline.saturating_duration_since(Instant::now()))),
+        )
+        .await;
+        let futures::future::Either::Left((answer, _)) = before_the_deadline else {
+            panic!(
+                "the replacement's transaction waited for the stopped transaction's execution \
+                 deadline instead of beginning at the stop"
+            );
+        };
+        let committed = completed(answer);
+        assert_eq!(committed.1["json"], "committed", "the replacement commits: {committed:?}");
+        assert_eq!(
+            app.titles().await,
+            ["after-stop-sibling"],
+            "the stopped transaction's write is rolled back, the replacement's committed"
         );
     });
 }

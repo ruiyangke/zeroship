@@ -3744,39 +3744,74 @@ impl RuntimeInner {
         }
     }
 
+    /// End every request still pending on this isolate, which stops for
+    /// `cause`, and quarantine it: the one way an isolate stop ends its
+    /// requests.
+    ///
+    /// Each request is ended on its control ([`RequestControl::stop`]): from
+    /// now on [`crate::state::admit_op`] refuses every host op its
+    /// continuations make, what waits on its end (the rollback of a
+    /// transaction it has open, the release of its downloads) runs now, and
+    /// whether a commit of its is in flight is recorded as of this moment. It
+    /// is answered with `cause`, or with its own cause when the runtime had
+    /// already stopped it ([`Self::stop_request`]), and as an indeterminate
+    /// commit when a commit it asked for is in flight ([`early_end_error`]),
+    /// since that commit may yet apply. The isolate is then quarantined with
+    /// `cause`, which cancels its
+    /// native work, refuses later dispatch and releases any initialization
+    /// still waiting on its startup.
+    ///
+    /// No creator JavaScript runs here. The requests are answered directly,
+    /// before quarantine's cancellation sweep would enter V8 to abort their
+    /// signals. Answers how many requests were ended, and the app, for the
+    /// stop's log.
+    fn end_requests_and_quarantine(
+        this: &Rc<RefCell<Self>>,
+        cause: &'static str,
+    ) -> (usize, Option<AppId>) {
+        let (ended, app_id) = {
+            let mut rt = this.borrow_mut();
+            let pending: Vec<(u64, PendingRequest)> = rt.pending_requests.drain().collect();
+            let ended = pending.len();
+            for (id, request) in pending {
+                let mid_commit = request.token.control().stop();
+                rt.drain_request_logs(id);
+                rt.drop_timers_owned_by(id);
+                // A request the runtime already stopped on its own, still
+                // waiting for the cleanup that answers it, keeps its cause.
+                let cause = request.stop_cause.unwrap_or(cause);
+                send_pending_error(request, early_end_error(cause, mid_commit));
+            }
+            (ended, rt.app_id.clone())
+        };
+        Self::quarantine(this, cause);
+        (ended, app_id)
+    }
+
     /// Stop this isolate because its heap reached the cap.
     ///
     /// The heap cap's callback has requested termination and granted headroom
     /// only for the allocation in flight to finish, so the isolate serves
-    /// nothing more: every request still pending on it is answered with the
-    /// cap's error, and it is quarantined, so [`Runtime::is_quarantined`] tells
-    /// a caching host to replace it before the next request.
+    /// nothing more: every request still pending on it is ended with the cap's
+    /// error, and it is quarantined, so [`Runtime::is_quarantined`] tells a
+    /// caching host to replace it before the next request.
     ///
-    /// No creator JavaScript runs here. The pending requests are answered
-    /// directly, before quarantine's cancellation sweep would enter V8, and a
-    /// full GC releases the heap the cap's grants raised so the isolate does
-    /// not hold it until it is dropped. `low_memory_notification` runs no
-    /// creator JavaScript; the termination the cap requested stays pending for
-    /// whatever script teardown might still enter.
+    /// No creator JavaScript runs here. A full GC releases the heap the cap's
+    /// grants raised so the isolate does not hold it until it is dropped.
+    /// `low_memory_notification` runs no creator JavaScript; the termination
+    /// the cap requested stays pending for whatever script teardown might
+    /// still enter.
     fn stop_for_heap_cap(this: &Rc<RefCell<Self>>) {
-        let (failed, app_id) = {
-            let mut rt = this.borrow_mut();
-            let pending: Vec<(u64, PendingRequest)> = rt.pending_requests.drain().collect();
-            let failed = pending.len();
-            for (id, request) in pending {
-                rt.drain_request_logs(id);
-                rt.drop_timers_owned_by(id);
-                send_pending_error(request, HEAP_CAP_CAUSE);
-            }
+        {
             // The cap's grants raised the old-generation limit by up to the
             // headroom ceiling. Enter the isolate just to GC that back down,
             // the way the idle ticker does; nothing else here touches V8.
+            let mut rt = this.borrow_mut();
             rt.enter_isolate();
             rt.isolate.low_memory_notification();
             rt.exit_isolate();
-            (failed, rt.app_id.clone())
-        };
-        Self::quarantine(this, HEAP_CAP_CAUSE);
+        }
+        let (failed, app_id) = Self::end_requests_and_quarantine(this, HEAP_CAP_CAUSE);
         tracing::warn!(
             app_id = app_id.as_ref().map(AppId::as_str),
             failed_requests = failed,
@@ -3788,23 +3823,11 @@ impl RuntimeInner {
     ///
     /// The panic was answered inside the isolate, but the callback may have
     /// left its native state half updated, so the isolate serves nothing more:
-    /// every request still pending on it is failed with `internal error` and
-    /// it is quarantined, so [`Runtime::is_quarantined`] tells a caching host
-    /// to replace it before the next request.
+    /// every request still pending on it is ended with `internal error` and it
+    /// is quarantined, so [`Runtime::is_quarantined`] tells a caching host to
+    /// replace it before the next request.
     fn stop_for_caught_panic(this: &Rc<RefCell<Self>>) {
-        const CAUSE: &str = "internal error";
-        let (failed, app_id) = {
-            let mut rt = this.borrow_mut();
-            let pending: Vec<(u64, PendingRequest)> = rt.pending_requests.drain().collect();
-            let failed = pending.len();
-            for (id, request) in pending {
-                rt.drain_request_logs(id);
-                rt.drop_timers_owned_by(id);
-                send_pending_error(request, CAUSE);
-            }
-            (failed, rt.app_id.clone())
-        };
-        Self::quarantine(this, CAUSE);
+        let (failed, app_id) = Self::end_requests_and_quarantine(this, "internal error");
         tracing::error!(
             app_id = app_id.as_ref().map(AppId::as_str),
             failed_requests = failed,
@@ -3815,26 +3838,11 @@ impl RuntimeInner {
     /// Stop this isolate because its host interrupted it.
     ///
     /// The interrupt is permanent, so the isolate runs no more JavaScript and a
-    /// request still pending on it would never settle. Each is ended, so its
-    /// later host ops are refused and what waits on its end runs, and answered
-    /// with the interruption's error, as an indeterminate commit when a commit
-    /// it asked for is still in flight. The isolate is then quarantined, which
-    /// cancels its native work and releases any initialization still waiting
-    /// on its startup. No creator JavaScript runs here.
+    /// request still pending on it would never settle: each is ended with the
+    /// interruption's error, and the isolate is quarantined, which also
+    /// releases any initialization still waiting on its startup.
     fn stop_for_host_interrupt(this: &Rc<RefCell<Self>>) {
-        let (failed, app_id) = {
-            let mut rt = this.borrow_mut();
-            let pending: Vec<(u64, PendingRequest)> = rt.pending_requests.drain().collect();
-            let failed = pending.len();
-            for (id, request) in pending {
-                let mid_commit = request.token.control().stop();
-                rt.drain_request_logs(id);
-                rt.drop_timers_owned_by(id);
-                send_pending_error(request, early_end_error(HOST_INTERRUPT_CAUSE, mid_commit));
-            }
-            (failed, rt.app_id.clone())
-        };
-        Self::quarantine(this, HOST_INTERRUPT_CAUSE);
+        let (failed, app_id) = Self::end_requests_and_quarantine(this, HOST_INTERRUPT_CAUSE);
         tracing::warn!(
             app_id = app_id.as_ref().map(AppId::as_str),
             failed_requests = failed,
@@ -3846,17 +3854,13 @@ impl RuntimeInner {
     /// overrun stops a request.
     ///
     /// The share is policed per isolate rather than per request, so the stop
-    /// is too. Every request still pending on the isolate is answered with the
+    /// is too. Every request still pending on the isolate is ended with the
     /// termination error the CPU limit produces, and the isolate is
     /// quarantined: its pump and native work are cancelled, later dispatch is
     /// refused with the same cause, and [`Runtime::is_quarantined`] tells a
     /// caching host to replace it.
-    ///
-    /// No creator JavaScript runs here. The pending requests are answered
-    /// directly, before quarantine's cancellation sweep would enter V8 to
-    /// abort their signals.
     fn stop_for_pump_share(this: &Rc<RefCell<Self>>, exceeded: PumpShareExceeded) {
-        let (cause, failed, app_id) = {
+        let cause = {
             let mut rt = this.borrow_mut();
             // Leave the note the CPU timer leaves, so the detection every
             // limit goes through records this cause rather than whichever
@@ -3865,17 +3869,9 @@ impl RuntimeInner {
             rt.enter_isolate();
             rt.check_v8_terminated();
             rt.exit_isolate();
-            let cause = rt.termination_message();
-            let pending: Vec<(u64, PendingRequest)> = rt.pending_requests.drain().collect();
-            let failed = pending.len();
-            for (id, request) in pending {
-                rt.drain_request_logs(id);
-                rt.drop_timers_owned_by(id);
-                send_pending_error(request, cause);
-            }
-            (cause, failed, rt.app_id.clone())
+            rt.termination_message()
         };
-        Self::quarantine(this, cause);
+        let (failed, app_id) = Self::end_requests_and_quarantine(this, cause);
         tracing::warn!(
             app_id = app_id.as_ref().map(AppId::as_str),
             cpu_fraction = exceeded.fraction,

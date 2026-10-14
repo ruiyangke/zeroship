@@ -110,7 +110,17 @@ impl RequestControl {
         // nothing to withdraw.
         let waiting = self.on_end.take();
         for (_, action) in waiting {
-            action();
+            // An action is native cleanup a binding registered. One that
+            // panics must not keep the actions after it, or whoever is ending
+            // the request, from finishing: a stop still answers the isolate's
+            // other requests and quarantines it.
+            if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)) {
+                tracing::error!(
+                    request = self.id,
+                    panic = %crate::panic_util::panic_message(&*panic),
+                    "panic in an action waiting on a request's early end; the request still ends"
+                );
+            }
         }
         mid_commit
     }

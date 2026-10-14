@@ -27,6 +27,7 @@
 //! `cargo test` the case re-executes this binary for just itself.
 
 use crate::support;
+use support::commits;
 use support::*;
 use crate::in_own_process;
 
@@ -948,6 +949,102 @@ fn a_panic_during_dispatch_quarantines_the_isolate() {
         let answered = settle(&runtime);
         assert_eq!(answered, (200, "Error: internal error".to_owned()), "the panic is thrown into the handler");
         assert_eq!(zeroship_runtime::callback::caught_panics() - panics_before, 1);
+        assert!(runtime.is_quarantined(), "the isolate the panic happened in is quarantined");
+    });
+}
+
+/// A request with a commit in flight when a callback panics in its isolate is
+/// answered that the commit's outcome is unknown rather than with the plain
+/// `internal error`, and is ended, so what waits on its end runs. The panic
+/// happens in another request's dispatch, whose end takes the stop, so the
+/// answer is in place when that dispatch returns. The control is
+/// `a_panic_on_the_pump_fails_the_pending_requests_and_quarantines_the_isolate`,
+/// whose pending request holds no commit and receives the plain error.
+#[test]
+fn a_commit_in_flight_when_a_panic_stops_its_isolate_is_answered_as_indeterminate() {
+    in_own_process!(a_commit_in_flight_when_a_panic_stops_its_isolate_is_answered_as_indeterminate, {
+        init_v8();
+        let runtime = Runtime::builder()
+            .plugin(PanickingPlugin)
+            .plugin(commits::Probe)
+            .modules(m(r#"
+            export default {
+                fetch(request, env) {
+                    if (new URL(request.url).pathname === "/commit") {
+                        env.commits.hold();
+                        return new Promise(() => {});
+                    }
+                    try { env.boom.explode(); } catch {}
+                    return new Response("answered after the panic");
+                }
+            };
+            "#))
+            .build();
+        let env = EnvSnapshot::empty();
+        let commit = commits::watch();
+        let FetchOutcome::Pending { rx: committing, .. } = runtime.call_fetch_handler(
+            "GET",
+            "http://localhost/commit",
+            &[],
+            "",
+            &env,
+            RequestCtx::new(CancelFlag::new()),
+        ) else {
+            panic!("the request holding a commit must be pending");
+        };
+        assert!(commit.held(), "the request holds its commit before the panic");
+        assert!(committing.try_recv().is_none(), "nothing answers it before the panic");
+        let panics_before = zeroship_runtime::callback::caught_panics();
+        assert_eq!(settle(&runtime), (200, "answered after the panic".to_owned()));
+        assert_eq!(zeroship_runtime::callback::caught_panics() - panics_before, 1);
+        let Some(Err(error)) = committing.try_recv() else {
+            panic!("the panic's stop must end the request holding a commit with an error");
+        };
+        commit.assert_ended_as_indeterminate(&error, "internal error");
+        assert!(runtime.is_quarantined(), "the isolate the panic happened in is quarantined");
+    });
+}
+
+/// A request the runtime has already stopped for CPU, still waiting for the
+/// cleanup that answers it when a panic in the same pump window stops the
+/// isolate, keeps its own cause. Its timer callback reaches the panicking
+/// callback and then spins until its CPU limit terminates it, so the request
+/// is stopped and the isolate is due its stop in one window. The control is
+/// `a_panic_on_the_pump_fails_the_pending_requests_and_quarantines_the_isolate`,
+/// whose request the runtime had not stopped and which receives
+/// `internal error`.
+#[test]
+fn a_request_stopped_for_cpu_keeps_its_cause_when_a_panic_stops_its_isolate() {
+    in_own_process!(a_request_stopped_for_cpu_keeps_its_cause_when_a_panic_stops_its_isolate, {
+        init_v8();
+        let runtime = Runtime::builder()
+            .plugin(PanickingPlugin)
+            .cpu_limit(Duration::from_millis(50))
+            .modules(m(r"
+            export default {
+                fetch(request, env) {
+                    return new Promise(() => {
+                        setTimeout(() => {
+                            try { env.boom.explode(); } catch {}
+                            for (;;) {}
+                        }, 1);
+                    });
+                }
+            };
+            "))
+            .build();
+        let panics_before = zeroship_runtime::callback::caught_panics();
+        let answered = settle(&runtime);
+        assert_eq!(
+            zeroship_runtime::callback::caught_panics() - panics_before,
+            1,
+            "the timer reached the panicking callback"
+        );
+        assert_eq!(
+            answered,
+            (500, "CPU time limit exceeded".to_owned()),
+            "the request keeps the cause it was stopped for"
+        );
         assert!(runtime.is_quarantined(), "the isolate the panic happened in is quarantined");
     });
 }

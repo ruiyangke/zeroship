@@ -16,7 +16,7 @@ use zeroship_runtime::channel::{CancelFlag, StreamReader};
 use zeroship_runtime::runtime::DispatchError;
 use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, RequestCtx, Runtime, SettledFetch};
 
-use crate::support::m;
+use crate::support::{commits, m};
 
 /// Short enough that a case reaches the stop promptly, long enough that the
 /// light route below spans several windows.
@@ -32,6 +32,8 @@ const SETTLE_WITHIN: Duration = Duration::from_secs(10);
 ///   time it occupies and re-arms itself, and the request never settles on its
 ///   own.
 /// - `/park` waits on a promise nothing resolves.
+/// - `/commit` holds a commit whose outcome it never learns (`commits`) and
+///   waits on a promise nothing resolves.
 /// - `/stream` answers at once with a body whose every chunk is produced by a
 ///   continuation that holds the pump the way `/spin` does.
 /// - `/drip` answers at once with a body that streams a light chunk every few
@@ -45,7 +47,7 @@ const SETTLE_WITHIN: Duration = Duration::from_secs(10);
 const SOURCE: &str = r#"
     const burn = (ms) => { const end = Date.now() + ms; while (Date.now() < end) {} };
     export default {
-        fetch(request) {
+        fetch(request, env) {
             const path = new URL(request.url).pathname;
             if (path === "/spin") {
                 return new Promise(() => {
@@ -54,6 +56,10 @@ const SOURCE: &str = r#"
                 });
             }
             if (path === "/park") {
+                return new Promise(() => {});
+            }
+            if (path === "/commit") {
+                env.commits.hold();
                 return new Promise(() => {});
             }
             if (path === "/stream") {
@@ -112,6 +118,7 @@ fn budgeted() -> zeroship_runtime::RuntimeBuilder {
     init_v8();
     Runtime::builder()
         .modules(m(SOURCE))
+        .plugin(commits::Probe)
         .idle_gc_after_ms(0)
         .pump_cpu_budget(WINDOW, MAX_FRACTION)
 }
@@ -204,6 +211,33 @@ fn exceeding_the_pump_share_fails_every_pending_request_and_stops_the_isolate() 
                 r#"{"message":"module init failed: CPU time limit exceeded","name":"Error"}"#.into()
             ),
             "a stopped isolate refuses dispatch with its cause, and runs no handler"
+        );
+    });
+}
+
+/// A request with a commit in flight when the pump share stops its isolate is
+/// answered that the commit's outcome is unknown rather than with the plain
+/// CPU termination error, and is ended, so what waits on its end runs. The
+/// control is `/park` in
+/// `exceeding_the_pump_share_fails_every_pending_request_and_stops_the_isolate`,
+/// which holds no commit and receives the plain error.
+#[test]
+fn a_commit_in_flight_when_the_pump_share_stops_its_isolate_is_answered_as_indeterminate() {
+    let runtime = budgeted().build();
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        runtime.start_pump();
+        let commit = commits::watch();
+        let committing = pending(&runtime, "/commit");
+        assert!(commit.held(), "the request holds its commit before the stop");
+        let spinning = pending(&runtime, "/spin");
+        assert_cpu_stop("/spin", settled("/spin", &spinning).await);
+        let Err(error) = settled("/commit", &committing).await else {
+            panic!("the request holding a commit must be ended by the stop, but it answered");
+        };
+        commit.assert_ended_as_indeterminate(&error, "CPU time limit exceeded");
+        assert!(
+            !runtime.has_pending_requests_for_test(),
+            "the stop leaves no request waiting on the isolate"
         );
     });
 }
