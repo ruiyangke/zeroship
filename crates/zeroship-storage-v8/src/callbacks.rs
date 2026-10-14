@@ -8,13 +8,15 @@
 use base64::Engine;
 use serde_json::json;
 use zeroship_runtime::state::{
-    NativeValue, OpError, OpOwner, OpResult, ResolveValue, SharedState, admit_op, rejected_promise,
+    NativeValue, OpError, OpOwner, OpResult, ResolveValue, SharedState, admit_op,
+    rejected_promise, request_cancelled_error,
 };
 use zeroship_runtime::streams::stream_forwarder::{self, ChunkPolicy, UploadOptions, UploadReader};
 
 use zeroship_storage::backend::{ChunkResult, ChunkSource, ObjectMeta};
 use zeroship_storage::StorageError;
 use crate::download::{Download, Gathered};
+use crate::live_streams::StreamOpen;
 use crate::StorageContext;
 
 /// Raw usage metrics a storage op emits in its success arm. `storage_ops`
@@ -526,11 +528,10 @@ pub fn get_stream(
     let Some(bucket) = require_string_arg(scope, &args, 0, "bucket") else { return };
     let Some(key) = require_string_arg(scope, &args, 1, "key") else { return };
 
-    let (op_id, owner, promise) = match setup_promise(scope, &state) {
+    let (resolver, owner, promise) = match setup_js_promise(scope) {
         Ok(admitted) => admitted,
         Err(refused) => return rv.set(refused.into()),
     };
-
 
     let meter = context.meter.clone();
     let link = owner.retain();
@@ -541,7 +542,7 @@ pub fn get_stream(
                 if let Some(m) = &meter {
                     m.record(STORAGE_OPS, 1);
                 }
-                OpResult::Completed { op_id, value: "null".into() }
+                OpResult::JsValue { resolver, value: ResolveValue::String("null".into()) }
             }
             Ok(Some((meta, source))) => {
                 // Park the source in this isolate, for the request that asked
@@ -549,25 +550,41 @@ pub fn get_stream(
                 // early. A refusal here means the app is over its live-stream
                 // cap; the source is dropped (releasing its fd / HTTP body)
                 // and the op fails.
-                let stream_id = match context.streams.open_for(Download::new(source, meta.size), &link) {
-                    Ok(id) => id,
-                    Err(e) => return OpResult::Failed { op_id, error: e },
-                };
-                // Success arm only, and only once the handle is actually
-                // live: one op + the object's full byte count as egress.
-                // `meta.size` is the authoritative object size known at open;
-                // the per-chunk reads (readChunk) are the transport of those
-                // same bytes, so billing once here avoids double-counting.
-                if let Some(m) = &meter {
-                    m.record(STORAGE_OPS, 1);
-                    m.record(STORAGE_EGRESS_BYTES, meta.size);
-                }
-                OpResult::Completed {
-                    op_id,
-                    value: get_stream_handle_json(stream_id, &meta),
+                match context.streams.open_for(Download::new(source, meta.size), &link) {
+                    Ok(StreamOpen::Live(stream_id)) => {
+                        // Success arm only, and only once the handle is
+                        // actually live: one op + the object's full byte
+                        // count as egress. `meta.size` is the authoritative
+                        // object size known at open; the per-chunk reads
+                        // (readChunk) are the transport of those same bytes,
+                        // so billing once here avoids double-counting.
+                        if let Some(m) = &meter {
+                            m.record(STORAGE_OPS, 1);
+                            m.record(STORAGE_EGRESS_BYTES, meta.size);
+                        }
+                        OpResult::JsValue {
+                            resolver,
+                            value: ResolveValue::String(get_stream_handle_json(stream_id, &meta)),
+                        }
+                    }
+                    // The request ended before the download opened, so the
+                    // slot was closed as it opened: no byte can ever be read,
+                    // so nothing is billed and no handle is handed back. The
+                    // op fails the way every other call of that request does.
+                    Ok(StreamOpen::ClosedAsItOpened) => OpResult::JsValue {
+                        resolver,
+                        value: ResolveValue::RejectError(request_cancelled_error()),
+                    },
+                    Err(e) => OpResult::JsValue {
+                        resolver,
+                        value: ResolveValue::RejectError(OpError::error(e)),
+                    },
                 }
             }
-            Err(e) => OpResult::Failed { op_id, error: e.to_string() },
+            Err(e) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(OpError::error(e.to_string())),
+            },
         }
     });
 

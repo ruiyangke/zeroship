@@ -232,17 +232,21 @@ fn downloads_answered_requests_left_open_are_released_when_their_isolate_stops()
     });
 }
 
-/// `/opens-late?of=N` asks for a download without waiting for it and spins
-/// until it is stopped, so its download opens after the stop; the N-th such
-/// open settles `/opened`. `/read` reads the whole object.
+/// `/opens-late?of=N&at=M` asks for a download without waiting for it and
+/// spins until it is stopped, so its download opens after the stop; each
+/// request records its own outcome at index `M`, and the N-th to settle
+/// releases `/opened` with every outcome. `/read` reads the whole object.
 const OPENS_LATE: &str = r#"
-let opened = 0;
-let everyOpen;
-const allOpened = new Promise((resolve) => { everyOpen = resolve; });
+let settled = 0;
+const outcomes = [];
+let everySettle;
+const allSettled = new Promise((resolve) => { everySettle = resolve; });
 export default {
     async fetch(request, env) {
         const url = new URL(request.url);
-        if (url.pathname === "/opened") return Response.json({ opened: await allOpened });
+        if (url.pathname === "/opened") {
+            return Response.json({ settled: await allSettled, outcomes });
+        }
         if (url.pathname === "/read") {
             const handle = JSON.parse(await env.storage.getStream("uploads", "big.bin"));
             let total = 0;
@@ -253,11 +257,20 @@ export default {
             }
             return Response.json({ size: handle.size, total });
         }
+        const at = Number(url.searchParams.get("at"));
         const want = Number(url.searchParams.get("of"));
-        env.storage.getStream("uploads", "big.bin").then(() => {
-            opened += 1;
-            if (opened === want) everyOpen(opened);
-        });
+        env.storage.getStream("uploads", "big.bin").then(
+            () => {
+                outcomes[at] = "admitted";
+                settled += 1;
+                if (settled === want) everySettle(settled);
+            },
+            (error) => {
+                outcomes[at] = error.code ?? String(error);
+                settled += 1;
+                if (settled === want) everySettle(settled);
+            },
+        );
         let x = 0;
         for (;;) { x = (x + 1) % 2147483647; }
     },
@@ -267,46 +280,71 @@ export default {
 /// More requests than the app may hold downloads open each ask for one and
 /// are stopped for CPU before it opens, and a live request still opens the
 /// object and reads it to its end: a download that opens for a request that
-/// has already ended is closed as it opens, holding none of the app's shared
-/// budget.
+/// has already ended is refused with the request-cancelled code, holds none
+/// of the app's shared budget, and is billed nothing. The control read of the
+/// live request is billed one op and the object's full size once.
 #[test]
-fn a_download_that_opens_after_its_request_ended_is_closed_as_it_opens() {
-    const APP_ID: &str = "app_late_readers";
+fn a_download_that_opens_after_its_request_ended_is_refused_and_unbilled() {
+    let app = zeroship_core::AppId::mint();
     let root = tempfile::tempdir().unwrap();
     let store = StorageStore::from_backend(Arc::new(LocalFs::new(root.path())));
     let size = 2 * DOWNLOAD_CHUNK_BYTES + 1;
-    let storage = store.namespace(Namespace::app(APP_ID).unwrap());
+    let storage = store.namespace(Namespace::app(app.as_str()).unwrap());
     compio::runtime::Runtime::new().unwrap().block_on(async {
         storage.put_stream("uploads", "big.bin", Box::new(Whole(Bytes::from(vec![7; size]))), None).await.unwrap();
     });
 
     let late_readers = max_live_get_streams_per_app() + 1;
+    let meter = Arc::new(zeroship_metering::Meter::new());
     compio::runtime::Runtime::new().unwrap().block_on(async move {
         init_v8();
-        let plugin: Arc<dyn NativePlugin> = Arc::new(StorageBinding::new(store, None));
+        let plugin: Arc<dyn NativePlugin> =
+            Arc::new(StorageBinding::new(store, Some(Arc::clone(&meter))));
         let runtime = Runtime::builder()
             .modules(vec![ModuleEntry { specifier: "index.js".into(), source: OPENS_LATE.into() }])
-            .env_vars(HashMap::from([("APP_ID".to_owned(), APP_ID.to_owned())]))
+            .env_vars(HashMap::from([("APP_ID".to_owned(), app.as_str().to_owned())]))
             .plugins(vec![plugin])
             .cpu_limit(Duration::from_millis(20))
             .build();
         runtime.start_pump();
         for reader in 0..late_readers {
-            let answer = call(&runtime, &format!("/opens-late?of={late_readers}")).await;
+            let answer =
+                call(&runtime, &format!("/opens-late?of={late_readers}&at={reader}")).await;
             assert!(
                 answer.as_ref().map_or(true, |(status, _)| *status != 200),
                 "late reader {reader} must be stopped for CPU, not answered: {answer:?}"
             );
         }
+        let opened = json(call(&runtime, "/opened").await);
         assert_eq!(
-            json(call(&runtime, "/opened").await),
-            serde_json::json!({ "opened": late_readers }),
-            "every stopped request's download opened after its stop",
+            opened["settled"],
+            serde_json::json!(late_readers),
+            "every stopped request's download opened after its stop: {opened}",
+        );
+        assert_eq!(
+            opened["outcomes"],
+            serde_json::json!(vec!["request_cancelled"; late_readers]),
+            "every download that opened after its request ended was refused: {opened}",
+        );
+        let refused = meter.drain();
+        assert!(
+            !refused.iter().any(|event| event.subject.app.as_ref() == Some(&app)),
+            "a download refused as it opened records no storage_ops and no storage_egress_bytes: {refused:?}",
         );
         assert_eq!(
             json(call(&runtime, "/read").await),
             serde_json::json!({ "size": size, "total": size }),
             "a live request still opens a download and reads it to its end",
         );
+        let events = meter.drain();
+        let value = |name: &str| {
+            events
+                .iter()
+                .filter(|e| e.subject.app.as_ref() == Some(&app) && e.meter == name)
+                .map(|e| e.value)
+                .sum::<u64>()
+        };
+        assert_eq!(value("storage_ops"), 1, "the live read is one op: {events:?}");
+        assert_eq!(value("storage_egress_bytes"), size as u64, "egress is the full object: {events:?}");
     });
 }

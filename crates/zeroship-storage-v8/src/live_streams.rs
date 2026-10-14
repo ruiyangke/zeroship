@@ -56,6 +56,15 @@ pub(crate) struct LiveStreams {
     cap: usize,
 }
 
+/// What [`LiveStreams::open_for`] hands back: the live handle's id, or that the
+/// request it was opened for had already ended, so the slot was closed as it
+/// opened and there is no handle to read.
+#[derive(Debug)]
+pub enum StreamOpen {
+    Live(u32),
+    ClosedAsItOpened,
+}
+
 impl LiveStreams {
     pub fn new(app_id: &str) -> Self {
         let budget = BUDGETS.with(|budgets| {
@@ -80,8 +89,12 @@ impl LiveStreams {
 
     /// Open a download for the request `link` names, closing it when that
     /// request ends early or its isolate stops, or at once if either already
-    /// has.
-    pub fn open_for(self: &Rc<Self>, download: Download, link: &RequestLink) -> Result<u32, String> {
+    /// has ([`StreamOpen::ClosedAsItOpened`], with no handle).
+    pub fn open_for(
+        self: &Rc<Self>,
+        download: Download,
+        link: &RequestLink,
+    ) -> Result<StreamOpen, String> {
         let streams = Rc::downgrade(self);
         let (id, ended) = self.open_with(download, |id, entry| {
             let entry = entry.clone();
@@ -92,11 +105,13 @@ impl LiveStreams {
             }))
         })?;
         // An end that came first runs the release before the download is
-        // live, when it finds nothing to close, so it is closed here.
+        // live, when it finds nothing to close, so it is closed here and the
+        // caller is told there is no handle to read.
         if ended {
             self.close(id);
+            return Ok(StreamOpen::ClosedAsItOpened);
         }
-        Ok(id)
+        Ok(StreamOpen::Live(id))
     }
 
     /// Open a download, registering `release_on_end` for it: its id, and

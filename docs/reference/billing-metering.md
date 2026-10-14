@@ -28,7 +28,9 @@ encounter them):
 - `db_writes` — one database mutation: an insert, update, or delete.
 - `db_rows_written` — rows a mutation affected or returned.
 - `kv_reads` / `kv_writes` — key-value operations.
-- `storage_ops` / `storage_bytes` — object-storage operations and bytes.
+- `storage_ops` / `storage_bytes` - object-storage operations, and the bytes
+  those operations write to storage.
+- `storage_egress_bytes` - bytes read back out of object storage.
 - `net_egress_bytes` / `net_ingress_bytes` — bytes on raw outbound sockets
   (`node:net`, `node:tls`, outbound WebSocket), recorded in addition to
   `egress_bytes` / `ingress_bytes`.
