@@ -594,8 +594,9 @@ impl Runtime {
     }
 
     /// Register a hook the runtime calls once when this isolate quarantines
-    /// itself (heap cap, pump-CPU share, a native-callback panic, or a host
-    /// interrupt through a [`RuntimeInterrupt`]). A caching
+    /// itself (heap cap, pump-CPU share, a native-callback panic, its event
+    /// pump task panicked, or a host interrupt through a
+    /// [`RuntimeInterrupt`]). A caching
     /// host uses it to drop the cache entry at the stop, so a stopped isolate's
     /// raised heap is released then rather than held until the app's next
     /// request or an LRU eviction. The hook runs on this thread with no runtime
@@ -784,9 +785,10 @@ impl Runtime {
     /// True once this runtime is quarantined, by its host through
     /// [`Self::quarantine`] or by the runtime itself when its event pump
     /// exceeded its CPU share, a native callback panicked in it, its heap
-    /// reached the cap, or its host interrupted it through a
-    /// [`RuntimeInterrupt`]. A quarantined runtime never runs app code again, so a
-    /// host that caches runtimes replaces it rather than dispatching to it.
+    /// reached the cap, its event pump task panicked, or its host interrupted
+    /// it through a [`RuntimeInterrupt`]. A quarantined runtime never runs app
+    /// code again, so a host that caches runtimes replaces it rather than
+    /// dispatching to it.
     #[must_use]
     pub fn is_quarantined(&self) -> bool {
         self.state().borrow().tasks.is_closed()
@@ -891,6 +893,9 @@ pub struct RuntimeBuilder {
     /// Test-only controlled clock for RPC/stream deadline checks. See
     /// [`RuntimeBuilder::rpc_deadline_clock_for_test`].
     rpc_deadline_clock: Option<(Rc<Cell<Instant>>, Duration)>,
+    /// Test-only: panic the event pump on its first iteration. See
+    /// [`RuntimeBuilder::panic_pump_for_test`].
+    panic_pump_for_test: bool,
 }
 
 impl RuntimeBuilder {
@@ -1079,6 +1084,20 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Test-only: make this runtime's event pump panic at the top of its first
+    /// loop iteration.
+    ///
+    /// A panic in the pump loop happens outside the native-callback panic
+    /// containment, so it reaches the isolate's stop by a different route;
+    /// this hook is the only deterministic way a test can drive that route.
+    /// Production hosts never call it.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn panic_pump_for_test(mut self) -> Self {
+        self.panic_pump_for_test = true;
+        self
+    }
+
     /// Build the runtime. Panics on V8 init failure (same as the underlying
     /// `v8::Isolate::new` call — not newly fallible here).
     pub fn build(self) -> Runtime {
@@ -1105,6 +1124,7 @@ impl RuntimeBuilder {
         );
         inner.state.borrow_mut().validate_rpc_output = self.validate_rpc_output;
         inner.dev_entry_factory = self.dev_entry_loader;
+        inner.panic_pump_for_test = self.panic_pump_for_test;
         if let Some((window, max_fraction)) = self.pump_cpu_budget {
             inner.pump_budget_window = window;
             inner.pump_max_cpu_fraction = max_fraction;
@@ -1181,6 +1201,8 @@ enum IsolateStop {
     HeapCap,
     /// Its host interrupted it: `RuntimeInner::stop_for_host_interrupt`.
     HostInterrupt,
+    /// Its event pump panicked: `RuntimeInner::stop_for_pump_panic`.
+    PumpPanic,
 }
 
 /// What a host-interrupted isolate refuses work with.
@@ -1188,6 +1210,13 @@ const HOST_INTERRUPT_CAUSE: &str = "runtime execution interrupted";
 
 /// What an isolate whose heap reached its cap answers its requests with.
 const HEAP_CAP_CAUSE: &str = "memory limit exceeded";
+
+/// What an isolate whose event pump panicked answers its requests with.
+///
+/// The pump is platform code, so a panic in it is the platform's fault and not
+/// the app's: the answer says the runtime failed rather than naming creator
+/// code or the internal mechanism that failed.
+const PUMP_PANIC_CAUSE: &str = "runtime failed";
 
 /// What a request is answered with when its dispatch could not start its
 /// JavaScript at all.
@@ -1274,6 +1303,9 @@ pub(crate) struct RuntimeInner {
     startup: StartupState,
     dev_entry_factory: Option<String>,
     dev_entry_loader: Option<super::dev_entry::DevEntryLoader>,
+    /// Test-only: panic the pump loop on its first iteration. Set only through
+    /// [`RuntimeBuilder::panic_pump_for_test`].
+    panic_pump_for_test: bool,
     dev_entry_cpu: Duration,
     dev_entry_cpu_started: Option<Duration>,
     dev_entry_cpu_generation: Option<u64>,
@@ -1547,6 +1579,7 @@ impl RuntimeInner {
             startup: StartupState::Uninitialized,
             dev_entry_factory: None,
             dev_entry_loader: None,
+            panic_pump_for_test: false,
             dev_entry_cpu: Duration::ZERO,
             dev_entry_cpu_started: None,
             dev_entry_cpu_generation: None,
@@ -1713,10 +1746,22 @@ impl RuntimeInner {
         // the pump upgrades transiently per iteration and exits the moment
         // `upgrade()` returns `None`.
         let weak = Rc::downgrade(&self_ref);
+        let pump_weak = weak.clone();
         tasks.spawn(async move {
-            crate::panic_util::guard("pump_loop", async move {
+            let finished = crate::panic_util::guard("pump_loop", async move {
                 Self::pump_loop(weak, notify_rx).await;
             }).await;
+            // The guard logged the panic. The pump was the only thing driving
+            // the isolate, so a panic that ended it must stop the isolate the
+            // way every other stop does, or its pending requests and native
+            // work are stranded on an isolate the cache keeps dispatching to.
+            // Nothing to stop if the runtime is already dropped: the cache
+            // handle that would have been replaced is gone with it.
+            if finished.is_none()
+                && let Some(this) = pump_weak.upgrade()
+            {
+                Self::stop_isolate(&this, IsolateStop::PumpPanic);
+            }
         });
 
         // Idle-GC ticker — sibling task with a Weak handle so isolate
@@ -1785,6 +1830,15 @@ impl RuntimeInner {
         }
     }
 
+    /// Panic the event pump, for [`RuntimeBuilder::panic_pump_for_test`].
+    ///
+    /// The caller holds the runtime's borrow across this call, so the unwind
+    /// that catches the panic releases the borrow before the stop takes the
+    /// cell again.
+    fn pump_panic(site: &str) -> ! {
+        panic!("{site}");
+    }
+
     /// The pump loop — drives `AsyncWork` (fetch, timers, streams) on the
     /// current compio thread.  Enters/exits the V8 isolate around every V8
     /// interaction so multi-isolate-per-thread setups (the worker) work
@@ -1821,6 +1875,14 @@ impl RuntimeInner {
                 let Some(runtime) = runtime.upgrade() else { return; };
                 {
                     let mut rt = runtime.borrow_mut();
+                    // Test-only: panic before any JavaScript this iteration
+                    // runs, outside the native-callback panic containment, so a
+                    // test can drive the stop a pump panic must take. `rt` is
+                    // held across the panic on purpose: the unwind must release
+                    // the borrow before the stop takes the cell again.
+                    if rt.panic_pump_for_test {
+                        Self::pump_panic("the runtime event pump panicked");
+                    }
                     // Before any JavaScript this iteration runs. The startup
                     // advance and `cleanup_cancelled_requests` below both enter
                     // V8, and the cleanup aborts cancelled requests' signals,
@@ -3756,6 +3818,7 @@ impl RuntimeInner {
             IsolateStop::CaughtPanic => Self::stop_for_caught_panic(this),
             IsolateStop::HeapCap => Self::stop_for_heap_cap(this),
             IsolateStop::HostInterrupt => Self::stop_for_host_interrupt(this),
+            IsolateStop::PumpPanic => Self::stop_for_pump_panic(this),
         }
     }
 
@@ -3847,6 +3910,32 @@ impl RuntimeInner {
             app_id = app_id.as_ref().map(AppId::as_str),
             failed_requests = failed,
             "a native callback panicked; isolate quarantined and its pending requests failed"
+        );
+    }
+
+    /// Stop this isolate when its event pump task ended in a panic.
+    ///
+    /// `panic_util::guard` caught and logged the panic, but the pump is the
+    /// only thing that settles this isolate's pending requests and ends its
+    /// native work: without the stop the isolate is a zombie a caching host
+    /// keeps dispatching to, with requests nothing answers and transactions
+    /// and downloads nothing ends. The stop is the one every other isolate
+    /// stop takes ([`Self::end_requests_and_quarantine`]): every pending
+    /// request is answered with [`PUMP_PANIC_CAUSE`], its in-flight commits
+    /// report indeterminate, the isolate end actions run, and the isolate is
+    /// quarantined so [`Runtime::is_quarantined`] makes the cache replace it.
+    /// A panic in the pump is a platform fault, not the app's, so the answer
+    /// says so rather than naming creator code.
+    ///
+    /// No creator JavaScript runs here. The panic may have left the isolate
+    /// entered, so the stop enters no V8: it answers the requests and runs the
+    /// Rust end actions directly.
+    fn stop_for_pump_panic(this: &Rc<RefCell<Self>>) {
+        let (failed, app_id) = Self::end_requests_and_quarantine(this, PUMP_PANIC_CAUSE);
+        tracing::error!(
+            app_id = app_id.as_ref().map(AppId::as_str),
+            failed_requests = failed,
+            "the runtime event pump panicked; isolate quarantined and its pending requests failed"
         );
     }
 

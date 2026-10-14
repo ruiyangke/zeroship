@@ -154,6 +154,7 @@ mod node_zlib;
 mod pump_cleanup;
 mod pump_cpu_share;
 mod pump_eviction_leak;
+mod pump_panic;
 mod request_init_enums;
 mod runtime_shutdown;
 mod rpc_ctx;

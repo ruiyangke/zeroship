@@ -367,6 +367,36 @@ the `ZEROSHIP_HEAP_LIMIT_MB` environment variable), so a bundle that loads large
 dependencies can run locally and still exceed the free tier's 64 MB in
 production. Size the plan for what you import.
 
+## Internal runtime failure
+
+The platform's runtime can fail inside itself, on its own, with no defect in
+your code. When that happens the isolate running your app is stopped, the same
+way an isolate that exceeds its pump CPU share or its heap cap is stopped, and
+the stop ends everything that isolate was doing:
+
+- Every request still waiting on it fails at once with a `500`:
+
+  ```
+  500  {"message":"runtime failed","name":"Error"}
+  ```
+
+- Each request still waiting on the isolate ends as a request stopped for
+  CPU does (see [What a stopped request can still
+  do](#what-a-stopped-request-can-still-do)): when a commit it asked for is
+  already sent, its answer's `message` adds
+  `; a transaction commit was in flight, so whether it applied is unknown` and
+  the body carries `"code":"commit_failed_indeterminate"`.
+- Every transaction your code has open in the isolate is rolled back at the
+  stop, and every download it holds open is closed.
+- None of your code runs in that isolate again.
+
+The next request to your deployed app is served by a fresh isolate, which runs
+your module's top-level code again, so state held in module scope does not
+survive the stop.
+
+This stop is a platform fault, not a defect in your code: your handler did
+nothing to cause it.
+
 ## Outbound fetch
 
 `fetch` sends any request body, including a `ReadableStream`. These are the
