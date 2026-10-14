@@ -281,7 +281,15 @@ fn require_non_zero(name: &str, value: u64) -> Result<(), StreamError> {
 pub const ID: &str = "redpanda";
 
 pub struct RedpandaTransport {
-    producer: BaseProducer<DeliveryContext>,
+    /// The producer is shared behind an `Arc` so [`publish`] can move a clone
+    /// onto a compio blocking-pool thread while the caller's executor thread
+    /// stays free. `BaseProducer` is `Send + Sync` - the same property
+    /// `rdkafka`'s own `ThreadedProducer` relies on to poll it from a dedicated
+    /// thread while callers `send` from others - so one producer can be polled
+    /// from the blocking pool safely.
+    ///
+    /// [`publish`]: StreamTransport::publish
+    producer: Arc<BaseProducer<DeliveryContext>>,
     consumer: Arc<Mutex<BaseConsumer>>,
     topic: String,
     publish_timeout: Duration,
@@ -306,15 +314,21 @@ pub struct RedpandaTransport {
 
 /// Run `blocking` on a compio blocking-pool thread and await its result.
 ///
-/// The consumer calls this transport makes are synchronous librdkafka calls:
-/// `poll`, `commit`, `rewind`'s group join and seek, and `end_offsets`'s
-/// metadata and watermark queries all block the calling thread until the
+/// The consumer calls and the producer publish this transport makes are
+/// synchronous librdkafka calls: `poll`, `commit`, `rewind`'s group join and
+/// seek, `end_offsets`'s metadata and watermark queries, and `publish`'s `send`
+/// plus its delivery-wait poll loop all block the calling thread until the
 /// broker answers or the call's own bound expires. Running one on the thread
 /// that polled this future would block the executor thread the caller's scan
-/// runs on - Control's compio runtime - for up to the stall bound. The
+/// runs on - Control's compio runtime - for up to the call's bound. The
 /// blocking pool keeps that thread serving other work while the call waits.
 /// A panic in `blocking` is resumed on the caller, so the transport keeps the
 /// panic it always propagated.
+///
+/// An abandoned call - the caller dropped the returned future at its own stall
+/// bound - does not cancel `blocking`: `spawn_blocking` runs it to completion
+/// on the blocking thread regardless. See [`StreamTransport::publish`] for what
+/// that means for a publish the caller gave up on.
 async fn run_blocking<T: Send + 'static>(blocking: impl FnOnce() -> T + Send + 'static) -> T {
     compio::runtime::spawn_blocking(blocking)
         .await
@@ -401,7 +415,7 @@ impl RedpandaTransport {
             .map_err(StreamError::from)?;
 
         Ok(Self {
-            producer,
+            producer: Arc::new(producer),
             consumer: Arc::new(Mutex::new(consumer)),
             topic: config.topic,
             publish_timeout: Duration::from_millis(config.publish_timeout_ms),
@@ -428,6 +442,74 @@ impl StreamTransport for RedpandaTransport {
         ID
     }
 
+    /// Publish one record and wait for its delivery report off the caller's
+    /// thread.
+    ///
+    /// `send` and the delivery-wait poll loop are synchronous librdkafka
+    /// calls, so the pair runs on a compio blocking thread through
+    /// [`run_blocking`]. The caller's executor thread keeps serving other work
+    /// while the broker acknowledges, up to `publish_timeout_ms`. Without this
+    /// the loop held the executor thread for the whole bound - and a caller's
+    /// [`unless_stalled`] deadline could not fire, because the future never
+    /// suspended for the timer to be polled.
+    ///
+    /// Outcomes are unchanged by the thread hop: a record that cannot be
+    /// enqueued is the same [`StreamError`] a refused `send` always produced, a
+    /// delivery error or a disconnected callback the same [`StreamError::Kafka`],
+    /// and no acknowledgement within `publish_timeout_ms` the same
+    /// [`StreamError::PublishTimeout`]. Per-partition-key ordering is
+    /// librdkafka's and unchanged: the producer stays idempotent
+    /// (`enable.idempotence`), and the usage outbox awaits each publish before
+    /// the next, so one app's events keep their order on one partition.
+    ///
+    /// # An abandoned publish may still be delivered
+    ///
+    /// A caller that drops this future at its own stall bound - as the usage
+    /// outbox in `zeroship-metering` does through [`unless_stalled`] - does
+    /// NOT cancel the send or the delivery wait. [`run_blocking`]'s
+    /// `spawn_blocking` future is detached from its result, so the blocking
+    /// thread runs the send and poll loop to `publish_timeout_ms`, and
+    /// librdkafka keeps retrying the record to `message.timeout.ms`
+    /// independently of this crate. The record can therefore reach the broker
+    /// AFTER the caller was told (or timed out with)
+    /// [`StreamError::PublishTimeout`].
+    ///
+    /// For the outbox that is at-least-once, and safe. The event's id is stable
+    /// across retries, and the outbox leaves the event in its WAL on the
+    /// timeout and replays the SAME `event_id` on the next drain, so the broker
+    /// may receive the event twice. Each consumer dedups it:
+    ///
+    ///   * the spend recompute's own `seen_event_ids` within one scan;
+    ///   * the provider forwarder's per-adapter `DedupContract`: `openmeter` and
+    ///     `lite` dedup on `SourceAndId` with an `Unbounded` ttl, `lago` on
+    ///     `TransactionId` with an `Unbounded` ttl, and Stripe meters on an
+    ///     `Identifier` with a `Bounded` 24-hour ttl - the shortest of them.
+    ///
+    /// A late delivery is still billed once because both copies that could
+    /// collide - the abandoned publish and its outbox replay - fall inside even
+    /// that shortest window: an abandoned publish finishes within
+    /// `publish_timeout_ms`, and the outbox replays the same id on its next
+    /// drain. A replay therefore moves neither a count nor a period. What an
+    /// abandoned publish must not be read as is a promise that the record was
+    /// NOT delivered: it may have been.
+    ///
+    /// # Do not let abandoned publishes accumulate
+    ///
+    /// An abandoned publish is not free while it finishes. compio's blocking
+    /// pool serves `spawn_blocking` from a bounded set of threads, and the
+    /// `io_uring` driver BUSY-SPINS the runtime thread - `poll_blocking` plus
+    /// `thread::yield_now` - while every one of them is busy, instead of
+    /// parking. So a blocking task whose broker never acknowledges holds a pool
+    /// thread until its own bound, and enough of them spin the runtime. The
+    /// outbox keeps the count bounded: it awaits one publish at a time, and a
+    /// stall cut is followed by the top-of-loop stall check that defers every
+    /// remaining event, so at most one publish is abandoned per drain cycle,
+    /// and each abandoned task ends within `publish_timeout`. At most
+    /// `publish_timeout_ms / outbox interval` are therefore alive at once, a
+    /// small relation because the two are independent operator settings of the
+    /// same order.
+    ///
+    /// [`unless_stalled`]: crate::unless_stalled
     async fn publish(
         &self,
         topic: &str,
@@ -441,34 +523,43 @@ impl StreamTransport for RedpandaTransport {
             ));
         }
 
-        let (tx, rx) = mpsc::sync_channel(1);
-        let record = BaseRecord::with_opaque_to(topic, Box::new(tx))
-            .key(partition_key)
-            .payload(payload);
-        self.producer
-            .send(record)
-            .map_err(|(error, _record)| StreamError::from(error))?;
+        let producer = Arc::clone(&self.producer);
+        let topic = topic.to_owned();
+        let key = partition_key.to_vec();
+        let payload = payload.to_vec();
+        let publish_timeout = self.publish_timeout;
+        run_blocking(move || {
+            let (tx, rx) = mpsc::sync_channel(1);
+            let record = BaseRecord::with_opaque_to(topic.as_str(), Box::new(tx))
+                .key(key.as_slice())
+                .payload(payload.as_slice());
+            producer
+                .send(record)
+                .map_err(|(error, _record)| StreamError::from(error))?;
 
-        let deadline = Instant::now() + self.publish_timeout;
-        loop {
-            self.producer.poll(Duration::from_millis(10));
-            match rx.try_recv() {
-                Ok(Ok(_partition_offset)) => return Ok(()),
-                Ok(Err(error)) => return Err(StreamError::Kafka(error)),
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    return Err(StreamError::Kafka(
-                        "producer delivery callback disconnected".into(),
-                    ));
-                }
-                Err(mpsc::TryRecvError::Empty) => {
-                    if Instant::now() >= deadline {
-                        return Err(StreamError::PublishTimeout {
-                            timeout_ms: self.publish_timeout.as_millis() as u64,
-                        });
+            let deadline = Instant::now() + publish_timeout;
+            loop {
+                producer.poll(Duration::from_millis(10));
+                match rx.try_recv() {
+                    Ok(Ok(_partition_offset)) => return Ok(()),
+                    Ok(Err(error)) => return Err(StreamError::Kafka(error)),
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        return Err(StreamError::Kafka(
+                            "producer delivery callback disconnected".into(),
+                        ));
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {
+                        if Instant::now() >= deadline {
+                            return Err(StreamError::PublishTimeout {
+                                timeout_ms: u64::try_from(publish_timeout.as_millis())
+                                    .unwrap_or(u64::MAX),
+                            });
+                        }
                     }
                 }
             }
-        }
+        })
+        .await
     }
 
     async fn poll(&self, max: usize) -> Result<Vec<StreamRecord>, StreamError> {
@@ -829,10 +920,12 @@ mod tests {
     /// A transport pointed at a TCP listener that lets the OS accept the
     /// connection and never replies: the broker address that never answers.
     /// The listener is returned with the transport so the caller keeps it alive
-    /// for the whole call.
+    /// for the whole call. Each bound is set separately so a case can pick the
+    /// one it stalls on and let the others sit at their defaults.
     fn silent_transport(
         stall_timeout_ms: u64,
         poll_timeout_ms: u64,
+        publish_timeout_ms: u64,
     ) -> (std::net::TcpListener, std::sync::Arc<dyn StreamTransport>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a silent broker");
         let brokers = listener.local_addr().expect("silent broker address");
@@ -842,6 +935,7 @@ mod tests {
             "group.id": "stalled-runtime",
             "stall_timeout_ms": stall_timeout_ms,
             "poll_timeout_ms": poll_timeout_ms,
+            "publish_timeout_ms": publish_timeout_ms,
         })))
         .expect("redpanda transport builds without a live broker");
         (listener, transport)
@@ -889,7 +983,7 @@ mod tests {
         );
         assert!(
             served_while_stalled.load(Ordering::SeqCst),
-            "another task on the runtime must make progress while the consumer call is \
+            "another task on the runtime must make progress while the transport call is \
              stalled; it did not run until the blocking call returned"
         );
         outcome
@@ -901,7 +995,7 @@ mod tests {
     /// failure rather than hanging.
     #[compio::test]
     async fn a_stalled_end_offsets_leaves_the_runtime_serving_other_tasks() {
-        let (_listener, transport) = silent_transport(300, 25);
+        let (_listener, transport) = silent_transport(300, 25, 30_000);
         let outcome = assert_runtime_serves_during(transport.end_offsets()).await;
         assert!(
             matches!(outcome, Err(StreamError::Kafka(_))),
@@ -916,13 +1010,47 @@ mod tests {
     /// observe, and the call still ends at that bound.
     #[compio::test]
     async fn a_stalled_poll_leaves_the_runtime_serving_other_tasks() {
-        let (_listener, transport) = silent_transport(300, 300);
+        let (_listener, transport) = silent_transport(300, 300, 30_000);
         let outcome = assert_runtime_serves_during(transport.poll(64)).await;
         assert!(
             matches!(outcome, Ok(ref records) if records.is_empty()),
             "a poll against a broker that never answers returns nothing at the bound, \
              not an error: {outcome:?}"
         );
+    }
+
+    /// A stalled `publish` runs off the caller's thread too. The record is
+    /// enqueued locally, then the delivery-wait poll loop runs on a compio
+    /// blocking thread while the broker accepts the connection and never
+    /// acknowledges; another task on the same runtime keeps running, and the
+    /// publish ends at its own `publish_timeout_ms` bound with
+    /// [`StreamError::PublishTimeout`].
+    ///
+    /// WHAT IT CATCHES: a publish that `send`s and polls on the caller's
+    /// executor thread instead of a blocking thread. Then the spinner cannot
+    /// run until the publish returns, `served_while_stalled` is false, and this
+    /// is red. The bound is asserted by value, so a publish that returned some
+    /// other error, or timed out at a different bound, is red too.
+    #[compio::test]
+    async fn a_stalled_publish_leaves_the_runtime_serving_other_tasks() {
+        const PUBLISH_TIMEOUT_MS: u64 = 300;
+        let (_listener, transport) = silent_transport(300, 25, PUBLISH_TIMEOUT_MS);
+        let outcome = assert_runtime_serves_during(transport.publish(
+            "never-answers",
+            b"partition-key",
+            b"{\"event\":1}",
+        ))
+        .await;
+        match outcome {
+            Err(StreamError::PublishTimeout { timeout_ms }) => assert_eq!(
+                timeout_ms, PUBLISH_TIMEOUT_MS,
+                "a stalled publish must end at its configured publish timeout"
+            ),
+            other => panic!(
+                "a broker that accepts a connection and never acknowledges must end the \
+                 publish at publish_timeout_ms with PublishTimeout: {other:?}"
+            ),
+        }
     }
 
     fn config_with(json: serde_json::Value) -> crate::StreamConfig {
