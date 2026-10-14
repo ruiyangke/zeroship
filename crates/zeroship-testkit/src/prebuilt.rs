@@ -39,6 +39,22 @@ pub struct Executable {
     pub location: Location,
 }
 
+impl Executable {
+    /// The path cargo leaves this executable at, relative to the cargo target
+    /// directory.
+    ///
+    /// The build-input gate pairs a rule's artifacts with the sources of the
+    /// package that builds them; deriving the path here keeps the artifact list
+    /// and the executable table from naming different files.
+    #[must_use]
+    pub fn artifact_path(&self) -> String {
+        match self.location {
+            Location::Bin => format!("debug/{}", self.name),
+            Location::Example => format!("debug/examples/{}", self.name),
+        }
+    }
+}
+
 /// The example that owns the platform and creator servers the fleets share.
 pub const WORKFLOW_ENVIRONMENT: Executable = Executable {
     name: "workflow-test-environment",
@@ -101,17 +117,20 @@ pub const BUILD_ARGS: &[&str] = &[
     "workflow-test-environment",
 ];
 
-/// The repository-relative paths [`BUILD_ARGS`] writes, for the build-input
-/// gate that compares a generated artifact against the sources it is built
-/// from.
+/// The paths [`BUILD_ARGS`] writes, relative to the cargo target directory.
+///
+/// [`Executable::artifact_path`] derives the same paths from [`EXECUTABLES`],
+/// and `the_build_selection_covers_every_executable` holds this list to that
+/// derivation, so the table naming which package builds which executable is the
+/// single source of those paths.
 pub const ARTIFACTS: &[&str] = &[
-    "target/debug/zeroship-control",
-    "target/debug/zeroship-worker",
-    "target/debug/zeroship-gate",
-    "target/debug/zeroship-data-cdc-server",
-    "target/debug/zeroship-workflow-server",
-    "target/debug/dev-provision",
-    "target/debug/examples/workflow-test-environment",
+    "debug/zeroship-control",
+    "debug/zeroship-worker",
+    "debug/zeroship-gate",
+    "debug/zeroship-data-cdc-server",
+    "debug/zeroship-workflow-server",
+    "debug/dev-provision",
+    "debug/examples/workflow-test-environment",
 ];
 
 /// The command that rebuilds every executable above and warms the ORM
@@ -375,11 +394,14 @@ mod tests {
 
     #[test]
     fn the_build_selection_covers_every_executable() {
+        let derived: Vec<String> = EXECUTABLES.iter().map(Executable::artifact_path).collect();
+        let declared: Vec<String> = ARTIFACTS.iter().map(|path| (*path).to_owned()).collect();
+        assert_eq!(
+            derived, declared,
+            "ARTIFACTS must be exactly the paths the executable table derives"
+        );
         for executable in EXECUTABLES {
-            let artifact = match executable.location {
-                Location::Bin => format!("target/debug/{}", executable.name),
-                Location::Example => format!("target/debug/examples/{}", executable.name),
-            };
+            let artifact = executable.artifact_path();
             assert!(
                 ARTIFACTS.contains(&artifact.as_str()),
                 "{} names no artifact",

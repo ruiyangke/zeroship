@@ -65,6 +65,21 @@ pub fn metadata() -> &'static Value {
         serde_json::from_slice(&output.stdout).unwrap()
     })
 }
+
+/// The directory cargo writes build artifacts into, as cargo itself resolves
+/// it for this checkout.
+///
+/// A test process may run with `CARGO_TARGET_DIR` pointed outside the
+/// repository, so the artifact's location is cargo's answer rather than a path
+/// assumed under the root.
+pub fn target_directory() -> PathBuf {
+    PathBuf::from(
+        metadata()["target_directory"]
+            .as_str()
+            .expect("cargo metadata names the target directory"),
+    )
+}
+
 pub fn package(name: &str) -> &'static Value {
     metadata()["packages"]
         .as_array()

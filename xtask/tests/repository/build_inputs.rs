@@ -14,7 +14,7 @@
 
 use crate::architecture::repo;
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use xtask::build_chain::BUILD_CHAIN;
@@ -25,7 +25,12 @@ const WHOLE_CHAIN: &str = "pnpm build";
 
 /// One generated build input: the paths it is written to, the paths it is
 /// written FROM, and the command that rewrites it.
+///
+/// `base` is the directory the artifact paths are relative to: the repository
+/// root for a bundle generated under the repository, and the cargo target
+/// directory for an executable cargo writes elsewhere.
 struct BuildInput {
+    base: PathBuf,
     artifacts: Vec<String>,
     sources: Vec<String>,
     rebuild: &'static str,
@@ -148,39 +153,35 @@ fn migration_compiler_sources() -> Vec<String> {
     sources
 }
 
-/// The Rust the workflow process executables are compiled from: every
-/// workspace crate in the normal closure of the packages the service build
-/// selects, plus the lockfile and the root manifest.
-fn workflow_executable_sources() -> Vec<String> {
+/// The Rust one service package's executable is compiled from: every workspace
+/// crate in that package's normal closure, plus the lockfile and the root
+/// manifest.
+///
+/// The sources are keyed per package rather than unioned across every package
+/// the service build selects. Cargo relinks only a binary whose own inputs
+/// moved, so a union flags a binary stale for a crate it never compiles, and the
+/// rebuild command does not clear the flag. Pairing an executable with its own
+/// package's closure makes it stale only when a source it compiles is newer.
+fn executable_package_sources(package: &str) -> Vec<String> {
     let workspace: BTreeSet<String> = repo::workspace()
         .iter()
-        .map(|package| {
-            package["name"]
+        .map(|candidate| {
+            candidate["name"]
                 .as_str()
                 .expect("workspace package name")
                 .to_owned()
         })
         .collect();
-    let mut names = BTreeSet::new();
-    for package in [
-        "zeroship-control",
-        "zeroship-worker",
-        "zeroship-gateway",
-        "zeroship-data-cdc-server",
-        "zeroship-workflow-server",
-    ] {
-        names.extend(
-            repo::normal_closure(package)
-                .into_iter()
-                .filter(|name| workspace.contains(name)),
-        );
-    }
+    let members: Vec<String> = repo::normal_closure(package)
+        .into_iter()
+        .filter(|name| workspace.contains(name))
+        .collect();
     assert!(
-        names.contains("zeroship-control"),
-        "the executable closure lost the control package"
+        members.contains(&package.to_owned()),
+        "the {package} closure lost the package itself"
     );
     let mut sources = vec!["Cargo.lock".to_owned(), "Cargo.toml".to_owned()];
-    for name in names {
+    for name in members {
         let directory = crate_directory(&name);
         sources.push(format!("{directory}/Cargo.toml"));
         let src = format!("{directory}/src");
@@ -195,11 +196,41 @@ fn workflow_executable_sources() -> Vec<String> {
     sources
 }
 
+/// One build-input rule per package the service build selects: the executables
+/// that package produces, paired with that package's own closure.
+///
+/// [`prebuilt::EXECUTABLES`] is the one table naming which package builds which
+/// executable, so the artifact list and the source list cannot name different
+/// files. The source provider is a parameter so a test can pair synthetic
+/// executables against synthetic closures.
+fn executable_inputs(
+    executables: &[prebuilt::Executable],
+    sources: impl Fn(&str) -> Vec<String>,
+) -> Vec<BuildInput> {
+    let mut grouped: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for executable in executables {
+        grouped
+            .entry(executable.package)
+            .or_default()
+            .push(executable.artifact_path());
+    }
+    grouped
+        .into_iter()
+        .map(|(package, artifacts)| BuildInput {
+            base: repo::target_directory(),
+            artifacts,
+            sources: sources(package),
+            rebuild: prebuilt::REBUILD,
+        })
+        .collect()
+}
+
 fn build_inputs() -> Vec<BuildInput> {
-    vec![
+    let mut inputs = vec![
         // The shared lexicon. Both the migration DSL and the DB adapter inline
         // it, so its staleness is inherited by everything below.
         BuildInput {
+            base: repo::root(),
             artifacts: vec!["packages/schema/dist/index.js".to_owned()],
             sources: also(
                 tree("packages/schema/src", &["ts"]),
@@ -210,6 +241,7 @@ fn build_inputs() -> Vec<BuildInput> {
         // The authoring DSL and the recorder every schema generator drives.
         // `noExternal` inlines the lexicon, which is why its dist is a source.
         BuildInput {
+            base: repo::root(),
             artifacts: vec![
                 "packages/zero-migrate/dist/index.js".to_owned(),
                 "packages/zero-migrate/dist/internal/recorder.js".to_owned(),
@@ -228,6 +260,7 @@ fn build_inputs() -> Vec<BuildInput> {
         // `currentIrVersion` from. It keeps `@zeroship/migrate` external, so the
         // DSL is a runtime resolution rather than a bundled source.
         BuildInput {
+            base: repo::root(),
             artifacts: vec!["packages/zero-migrate-cli/dist/index.js".to_owned()],
             sources: also(
                 tree("packages/zero-migrate-cli/src", &["ts"]),
@@ -239,6 +272,7 @@ fn build_inputs() -> Vec<BuildInput> {
         // the compiler crates, `generate.mjs --check` reports the ARTIFACT
         // stale and regenerating overwrites correct output with old.
         BuildInput {
+            base: repo::root(),
             artifacts: node_addons(),
             sources: migration_compiler_sources(),
             rebuild: "pnpm --filter zeroship-migrate-node build",
@@ -247,6 +281,7 @@ fn build_inputs() -> Vec<BuildInput> {
         // bundles the crate's own TypeScript, the SDK source it imports by
         // relative path, and the lexicon behind that.
         BuildInput {
+            base: repo::root(),
             artifacts: vec!["crates/zeroship-data-v8/dist/adapter.js".to_owned()],
             sources: also(
                 [
@@ -267,6 +302,7 @@ fn build_inputs() -> Vec<BuildInput> {
         // test binary could compile against an SDK bundle older than its sources
         // and answer from the stale facade it carries.
         BuildInput {
+            base: repo::root(),
             artifacts: vec!["packages/db/dist/index.js".to_owned()],
             sources: also(
                 tree("packages/db/src", &["ts"]),
@@ -278,18 +314,16 @@ fn build_inputs() -> Vec<BuildInput> {
         // They are generated under the target directory the same way the
         // bundles above are generated under the repository, and a stale one
         // answers from sources that have moved. The suites locate them and
-        // refuse on a missing or stale artifact; this rule is the
+        // refuse on a missing or stale artifact; these rules are the
         // repository-side twin for a checkout whose target directory is in the
-        // repository.
-        BuildInput {
-            artifacts: prebuilt::ARTIFACTS
-                .iter()
-                .map(|path| (*path).to_owned())
-                .collect(),
-            sources: workflow_executable_sources(),
-            rebuild: prebuilt::REBUILD,
-        },
-    ]
+        // repository. One rule per package, so an executable is stale only
+        // against a source its own package compiles.
+    ];
+    inputs.extend(executable_inputs(
+        prebuilt::EXECUTABLES,
+        executable_package_sources,
+    ));
+    inputs
 }
 
 fn modified(path: &Path) -> SystemTime {
@@ -314,14 +348,15 @@ fn source_stamps(sources: &[String]) -> Vec<(String, SystemTime)> {
         .collect()
 }
 
-/// Declared artifacts that have actually been built. An absent one is a
-/// different condition from a stale one and is left to the build: every
-/// consumer already fails on it by name, and a fresh checkout has none.
-fn artifact_stamps(artifacts: &[String]) -> Vec<(String, SystemTime)> {
+/// Declared artifacts that have actually been built, resolved under `base`. An
+/// absent one is a different condition from a stale one and is left to the
+/// build: every consumer already fails on it by name, and a fresh checkout has
+/// none.
+fn artifact_stamps(base: &Path, artifacts: &[String]) -> Vec<(String, SystemTime)> {
     artifacts
         .iter()
         .filter_map(|artifact| {
-            let path = repo::root().join(artifact);
+            let path = base.join(artifact);
             path.is_file().then(|| (artifact.clone(), modified(&path)))
         })
         .collect()
@@ -353,7 +388,7 @@ fn generated_build_inputs_outlive_the_sources_they_are_generated_from() {
             "no sources declared for `{}`",
             input.rebuild
         );
-        let artifacts = artifact_stamps(&input.artifacts);
+        let artifacts = artifact_stamps(&input.base, &input.artifacts);
         if artifacts.is_empty() {
             continue;
         }
@@ -399,6 +434,127 @@ fn staleness_pairs_the_oldest_artifact_with_the_newest_source() {
     // Unbuilt is not stale, and neither is a rule with nothing to compare.
     assert_eq!(stale(&[], &partial), None);
     assert_eq!(stale(&artifacts, &[]), None);
+}
+
+/// An executable is stale only against a source its own package compiles.
+///
+/// [`executable_inputs`] pairs each executable with its package's normal
+/// closure, so a crate only some executables link cannot flag the rest. Pairing
+/// every executable against the union of all their closures - the shape that
+/// flags a binary cargo does not relink, which the rebuild command then cannot
+/// clear - is the mutation this test binds.
+#[test]
+fn an_executable_is_stale_only_against_a_source_its_own_closure_holds() {
+    use zeroship_testkit::prebuilt::{Executable, Location};
+
+    fn rule<'a>(inputs: &'a [BuildInput], name: &str) -> &'a BuildInput {
+        inputs
+            .iter()
+            .find(|input| input.artifacts.iter().any(|artifact| artifact.ends_with(name)))
+            .unwrap_or_else(|| panic!("no rule holds an executable named {name}"))
+    }
+
+    let executables = [
+        Executable {
+            name: "zeroship-relay",
+            package: "zeroship-relay",
+            location: Location::Bin,
+        },
+        Executable {
+            name: "zeroship-manager",
+            package: "zeroship-manager",
+            location: Location::Bin,
+        },
+        Executable {
+            name: "zeroship-manager-tool",
+            package: "zeroship-manager",
+            location: Location::Bin,
+        },
+    ];
+    // `newer.rs` belongs only to the manager's closure.
+    let newer = "manager/src/newer.rs";
+    let sources = |package: &str| -> Vec<String> {
+        match package {
+            "zeroship-relay" => vec!["relay/Cargo.toml".to_owned()],
+            "zeroship-manager" => vec!["manager/Cargo.toml".to_owned(), newer.to_owned()],
+            other => panic!("synthetic package table lost {other}"),
+        }
+    };
+    let inputs = executable_inputs(&executables, sources);
+    assert_eq!(inputs.len(), 2, "one rule per package");
+
+    let at = |seconds| SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+    let artifacts = |name: &str| -> Vec<(String, SystemTime)> {
+        rule(&inputs, name)
+            .artifacts
+            .iter()
+            .map(|artifact| (artifact.clone(), at(10)))
+            .collect()
+    };
+    let own_closure = |name: &str| -> Vec<(String, SystemTime)> {
+        rule(&inputs, name)
+            .sources
+            .iter()
+            .map(|source| {
+                let stamp = if source.as_str() == newer { at(20) } else { at(0) };
+                (source.clone(), stamp)
+            })
+            .collect()
+    };
+
+    assert!(
+        stale(&artifacts("zeroship-manager"), &own_closure("zeroship-manager")).is_some(),
+        "a package that compiles a newer source than its own artifact is stale"
+    );
+    assert!(
+        stale(&artifacts("zeroship-relay"), &own_closure("zeroship-relay")).is_none(),
+        "an executable whose own closure holds no newer source is fresh"
+    );
+
+    let union: Vec<(String, SystemTime)> = inputs
+        .iter()
+        .flat_map(|input| input.sources.iter())
+        .map(|source| {
+            let stamp = if source.as_str() == newer { at(20) } else { at(0) };
+            (source.clone(), stamp)
+        })
+        .collect();
+    assert!(
+        stale(&artifacts("zeroship-relay"), &union).is_some(),
+        "the union of every closure flags a binary the rebuild does not touch"
+    );
+}
+
+/// The production provider pairs each executable with its own package's
+/// closure.
+///
+/// `zeroship-stream` is compiled by the worker and the gateway but not by the
+/// CDC relay, so the relay's rule must exclude it while the other two include
+/// it. Unioning the provider again puts it in every rule and this fails.
+#[test]
+fn the_real_executable_rules_pair_each_package_with_its_own_closure() {
+    fn rule<'a>(inputs: &'a [BuildInput], artifact: &str) -> &'a BuildInput {
+        inputs
+            .iter()
+            .find(|input| input.artifacts.iter().any(|held| held == artifact))
+            .unwrap_or_else(|| panic!("no build-input rule holds {artifact}"))
+    }
+
+    let inputs = build_inputs();
+    let stream = "crates/zeroship-stream/src/lib.rs";
+
+    let relay = rule(&inputs, "debug/zeroship-data-cdc-server");
+    assert!(
+        !relay.sources.iter().any(|source| source.as_str() == stream),
+        "the CDC relay rule must not compile zeroship-stream"
+    );
+    for artifact in ["debug/zeroship-worker", "debug/zeroship-gate"] {
+        let package = rule(&inputs, artifact);
+        assert!(
+            package.sources.iter().any(|source| source.as_str() == stream),
+            "{artifact} compiles zeroship-stream"
+        );
+    }
 }
 
 #[test]
