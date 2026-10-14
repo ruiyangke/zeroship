@@ -454,20 +454,36 @@ async fn a_backend_killed_mid_row_stream_fails_the_stream_and_releases_the_conne
     );
 }
 
-/// Every backend killed while IDLE in one pool must be replaced on checkout.
+/// Every backend killed while IDLE in one pool must be replaced on checkout,
+/// and the first post-kill query must never run on a backend `PostgreSQL` has
+/// already terminated.
 ///
 /// This is the idle-then-explicitly-checked-out case. The two tests above kill
 /// live non-pooled connections while they are checked out and mid-operation;
 /// the tests below cover pooled connections killed while checked out.
 ///
-/// IT DOES NOT REST ON THE ALIVE-CHECK, which is worth knowing because this
-/// test leaves `PoolConfig::validation_bypass` at its 500 ms default and a
-/// reader would reasonably suspect it only passes because the kill took longer
-/// than that. MEASURED 2026-08-24: re-run with the bypass set to 600 SECONDS -
-/// so every checkout skips validation - it still passes. A connection handed
-/// out dead under the bypass fails on first use and the pool evicts and
-/// retries, so recovery here is a property of the pool rather than of the
-/// timing this test happens to produce.
+/// The pool guarantees this for every termination DELIVERED to the client
+/// socket by the time of checkout. An idle session receives nothing
+/// unsolicited, so the alive-validation bypass (`validation_bypass`, 500 ms by
+/// default) refuses any idle entry whose socket has readable bytes, or a peer
+/// close or reset pending, and runs the alive round trip instead. That round
+/// trip reads the queued `FATAL`, so the entry is evicted and the query never
+/// reaches it - even though the connection's reader task may not have run since
+/// the kill and `is_closed()` and read-retirement still report the entry as
+/// live.
+///
+/// What remains uncovered is a termination the client has NOT observed at
+/// checkout. One case is the `FATAL` and close still in flight, which includes
+/// forwarding by any proxy between the server and the client: this suite
+/// reaches its container through Docker's port mapping, a userland proxy
+/// process, so a backend leaving `pg_stat_activity` does not prove its bytes
+/// reached the client socket. The test's wait - no tagged backends in
+/// `pg_stat_activity`, then the observer's reply - orders the checkout after
+/// the server-side exit, not after delivery. The other case is the `FATAL`
+/// already read off the socket by the reader task before the close arrives and
+/// before the reader publishes the failure. A delivered close stays readable,
+/// so once the close has arrived the probe reports it even if the `FATAL` bytes
+/// were consumed.
 #[compio::test]
 async fn all_idle_pool_backends_are_replaced_after_mass_termination() {
     compio::time::timeout(WATCHDOG, async {

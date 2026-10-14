@@ -1458,6 +1458,24 @@ impl InnerClient {
         }
     }
 
+    /// Whether the server has queued bytes on this session's socket, or ended
+    /// it, that the reader has not consumed yet.
+    ///
+    /// `false` when there is no inspectable socket: a caller-owned
+    /// `connect_raw` stream, a test double built with [`Client::new`], or a pool
+    /// connection whose descriptor could not be duplicated. `Socket::release_handle`
+    /// (`src/socket.rs`) returns `ConnectionRelease::dup_of(..)`, which is `None`
+    /// when `dup(2)` fails - for example at the descriptor limit - and the
+    /// connect path (`connect_raw_with_target_session_attrs` in
+    /// `src/connect_raw.rs`) accepts that `None`. With no socket the check
+    /// abstains, so only the age bypass applies to such a session; the expiry,
+    /// closure and read-retirement checks still apply.
+    pub(crate) fn input_pending_or_closed(&self) -> bool {
+        self.release
+            .as_ref()
+            .is_some_and(ConnectionRelease::input_pending_or_closed)
+    }
+
     /// Send a batch of frontend messages to the connection task. Returns
     /// a `Responses` stream the caller drains with `next().await`.
     ///
@@ -2353,6 +2371,13 @@ impl Client {
 
     pub(crate) fn inner(&self) -> &Arc<InnerClient> {
         &self.inner
+    }
+
+    /// Whether the server has queued bytes on this session's socket, or ended
+    /// it, that the connection's reader has not consumed yet. See
+    /// [`InnerClient::input_pending_or_closed`].
+    pub(crate) fn input_pending_or_closed(&self) -> bool {
+        self.inner.input_pending_or_closed()
     }
 
     /// Whether a stale-cache replay may be ATTEMPTED for an operation starting

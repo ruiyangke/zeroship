@@ -115,11 +115,13 @@ whoami = "2.0"
 compio = { workspace = true }
 socket2 = { workspace = true }
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 # `requirepeer` needs both the kernel's peer credentials and the canonical
 # passwd-database name for that UID. nix provides safe wrappers for
-# SO_PEERCRED/getpwuid_r and carries no async runtime.
-nix = { version = "0.31.2", features = ["socket", "user"] }
+# SO_PEERCRED/getpwuid_r and carries no async runtime. `poll` gives the pool a
+# safe zero-timeout readiness check on a connected socket, which raw `libc`
+# would need `unsafe` for (the crate denies it).
+nix = { version = "0.31.2", features = ["socket", "user", "poll"] }
 
 [dependencies.compio-tls]
 workspace = true

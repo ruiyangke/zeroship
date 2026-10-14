@@ -429,6 +429,55 @@ impl ConnectionRelease {
     pub(crate) fn shared_socket_is_open(&self) -> bool {
         self.socket.lock().is_some()
     }
+
+    /// Whether the kernel has bytes queued for this socket, or the peer has
+    /// closed or reset it, without consuming any of them.
+    ///
+    /// An idle `PostgreSQL` session receives nothing unsolicited except
+    /// `ParameterStatus`, `NoticeResponse` and `NotificationResponse`, so any
+    /// readable byte on an idle socket - or an end of stream or reset - means
+    /// the server sent something this connection has not finished with. The
+    /// pool uses this to refuse the alive-validation bypass for such a
+    /// session; see `Pool::get_inner`.
+    ///
+    /// A zero-timeout `poll(2)` on the owned dup, not a read: it reports only
+    /// whether the socket is readable and leaves the bytes in the receive
+    /// queue for the connection's reader. `poll` is used rather than a
+    /// nonblocking `recv(MSG_PEEK)` because compio's `io_uring` backend creates
+    /// its sockets BLOCKING (`compio-driver`'s `CreateSocket` adds only
+    /// `SOCK_CLOEXEC`), and a peek on a socket with nothing queued would park
+    /// this single-threaded executor. With TLS the readable byte is
+    /// ciphertext, which is exactly what is wanted: pending ciphertext is
+    /// pending server input even though its plaintext is not yet decoded.
+    #[cfg(unix)]
+    pub(crate) fn input_pending_or_closed(&self) -> bool {
+        use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+        use std::os::fd::AsFd;
+
+        let guard = self.socket.lock();
+        // A missing descriptor means the connection-side `abort` took it, so
+        // the socket is down and this session must not be handed out on the
+        // bypass. Otherwise: data (`POLLIN`), a peer FIN (also `POLLIN`, with
+        // a zero-length read), a hangup, an error and an invalid descriptor
+        // are all reported; a healthy idle socket reports nothing, and a poll
+        // that itself failed proves nothing and so must not skip validation
+        // either.
+        guard.as_ref().is_none_or(|socket| {
+            let mut fds = [PollFd::new(socket.as_fd(), PollFlags::POLLIN)];
+            !matches!(poll(&mut fds, PollTimeout::ZERO), Ok(0))
+        })
+    }
+
+    /// Whether the kernel has bytes queued for this socket, or the peer has
+    /// closed or reset it.
+    ///
+    /// Non-Unix fallback: no zero-timeout readiness primitive is wired here, so
+    /// the bypass is refused and the checkout validates for any session that
+    /// has a release. That is strictly safer than assuming an idle descriptor.
+    #[cfg(not(unix))]
+    pub(crate) fn input_pending_or_closed(&self) -> bool {
+        true
+    }
 }
 
 impl Drop for ConnectionDropRelease {

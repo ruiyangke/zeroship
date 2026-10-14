@@ -7,7 +7,8 @@
 //! Key features learned from HikariCP:
 //!   - Max lifetime with 25% variance (prevents mass expiry / thundering herd)
 //!   - Idle timeout (shrinks pool when load drops)
-//!   - Alive-bypass validation (skip validation if used within 500ms)
+//!   - Alive-bypass validation (skip validation if used within 500ms, unless
+//!     the socket already has server bytes or a close pending)
 //!   - Async wait queue (callers wait instead of getting instant error)
 //!   - Housekeeper task (periodic scan every 30s)
 //!   - Metrics (acquire time, usage time, creation time, timeouts)
@@ -343,7 +344,19 @@ impl PoolConfig {
 
     /// Set the alive-validation bypass window (default: 500 ms).
     ///
-    /// Hot connections used within this window are assumed alive.
+    /// Hot connections used within this window are assumed alive, EXCEPT that
+    /// an idle entry whose socket already has readable bytes, or a peer close
+    /// or reset, is always validated: an idle session receives nothing
+    /// unsolicited, so pending input means the server sent something - a
+    /// `FATAL`, an administrative close, or an async message - that a plain
+    /// age check cannot see.
+    ///
+    /// The check judges only what has reached the socket. A `FATAL` or close
+    /// still in flight, including one a proxy between the server and the client
+    /// has not yet forwarded, is not seen; neither is a `FATAL` already read
+    /// off the socket before its failure is published or the close arrives. In
+    /// those cases the entry is handed out and the caller sees the error on
+    /// first use.
     pub fn validation_bypass(&mut self, validation_bypass: Duration) -> &mut Self {
         self.validation_bypass = validation_bypass;
         self
@@ -1428,7 +1441,9 @@ impl Pool {
                     }
                     // The barrier itself provides the alive-check; skip the
                     // second `simple_query("")` below.
-                } else if entry.last_used.elapsed() > self.inner.config.validation_bypass {
+                } else if entry.last_used.elapsed() > self.inner.config.validation_bypass
+                    || entry.client.input_pending_or_closed()
+                {
                     let validation = entry.client.simple_query("").await;
                     self.ensure_open()?;
                     if validation.is_err() {
@@ -1436,6 +1451,17 @@ impl Pool {
                         // outside the bypass window gets a cheap server round
                         // trip. Dirty connections used the stronger barrier
                         // above instead.
+                        //
+                        // `input_pending_or_closed` widens the same branch to an
+                        // idle connection still INSIDE the window that the
+                        // kernel already has bytes for, or that the peer has
+                        // closed: an idle session receives nothing
+                        // unsolicited, so pending input is a FATAL, an
+                        // administrative close or an unread async message, and
+                        // the round trip below is what consumes it. Without
+                        // this, a backend terminated moments ago is handed
+                        // out as alive because its reader has not published
+                        // terminal poison yet.
                         self.inner.metrics.inc_evictions();
                         continue;
                     }
@@ -3079,6 +3105,31 @@ mod tests {
         )
     }
 
+    /// A test double whose client half owns a `ConnectionRelease` dup of
+    /// `socket`, so the checkout's readiness probe has a real descriptor to
+    /// inspect. The matching receiver is returned unserviced, so a test can see
+    /// whether a checkout put a request on the wire.
+    #[cfg(unix)]
+    fn fake_client_with_socket<S: std::os::fd::AsFd>(
+        process_id: i32,
+        socket: &S,
+    ) -> (Client, mpsc::UnboundedReceiver<Request>) {
+        let (sender, receiver) = mpsc::unbounded();
+        let release = crate::release::ConnectionRelease::dup_of(socket)
+            .expect("duplicate the socket into a connection release");
+        (
+            Client::new(
+                sender,
+                SslMode::Disable,
+                SslNegotiation::Postgres,
+                process_id,
+                Some(0.into()),
+                Some(release),
+            ),
+            receiver,
+        )
+    }
+
     fn backend_frame(tag: u8, body: &[u8]) -> Vec<u8> {
         let mut frame = Vec::with_capacity(body.len() + 5);
         frame.push(tag);
@@ -3194,6 +3245,103 @@ mod tests {
             let _ = finish_rx.recv();
         });
         (address, finish_tx, server)
+    }
+
+    /// Read one startup packet and answer it with a distinct backend PID.
+    fn answer_startup<S: Read + Write>(stream: &mut S, process_id: u32) {
+        let mut length = [0u8; 4];
+        stream.read_exact(&mut length).unwrap();
+        let remaining = u32::from_be_bytes(length) as usize - length.len();
+        let mut startup = vec![0u8; remaining];
+        stream.read_exact(&mut startup).unwrap();
+
+        let pid = process_id.to_be_bytes();
+        stream
+            .write_all(&[
+                b'R', 0, 0, 0, 8, 0, 0, 0, 0, b'K', 0, 0, 0, 12, pid[0], pid[1], pid[2], pid[3], 0,
+                0, 0, 46, b'Z', 0, 0, 0, 5, b'I',
+            ])
+            .unwrap();
+    }
+
+    /// The `FATAL` frame `pg_terminate_backend` produces (SQLSTATE 57P01).
+    fn terminating_fatal_frame() -> Vec<u8> {
+        let mut body = Vec::new();
+        body.push(b'S');
+        body.extend_from_slice(b"FATAL\0");
+        body.push(b'V');
+        body.extend_from_slice(b"FATAL\0");
+        body.push(b'C');
+        body.extend_from_slice(b"57P01\0");
+        body.push(b'M');
+        body.extend_from_slice(b"terminating connection due to administrator command\0");
+        body.push(0);
+        backend_frame(b'E', &body)
+    }
+
+    /// The channels and thread a terminating server hands back.
+    struct TerminatingPostgresServer {
+        terminate: std::sync::mpsc::Sender<()>,
+        killed: std::sync::mpsc::Receiver<()>,
+        finish: std::sync::mpsc::Sender<()>,
+        server: std::thread::JoinHandle<()>,
+    }
+
+    /// A server that hands the first accepted session over to a kill and then
+    /// accepts the replacement.
+    ///
+    /// The first session is answered on request with a real `FATAL` frame and
+    /// then closed. The second is answered only to prove the pool opened a
+    /// replacement. The channels let the test script the kill while the compio
+    /// executor is blocked, and stop the server at the end. Generic over the
+    /// listener so the same script runs for a TCP and a Unix socket.
+    fn spawn_terminating_server<L, S>(
+        listener: L,
+        accept: impl Fn(&L) -> S + Send + 'static,
+    ) -> TerminatingPostgresServer
+    where
+        L: Send + 'static,
+        S: Read + Write + Send + 'static,
+    {
+        let (terminate_tx, terminate_rx) = std::sync::mpsc::channel::<()>();
+        let (killed_tx, killed_rx) = std::sync::mpsc::channel::<()>();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            let mut first = accept(&listener);
+            answer_startup(&mut first, 45);
+            terminate_rx.recv().unwrap();
+            first.write_all(&terminating_fatal_frame()).unwrap();
+            first.flush().unwrap();
+            drop(first);
+            killed_tx.send(()).unwrap();
+
+            let mut second = accept(&listener);
+            answer_startup(&mut second, 46);
+            let _ = finish_rx.recv();
+        });
+        TerminatingPostgresServer {
+            terminate: terminate_tx,
+            killed: killed_rx,
+            finish: finish_tx,
+            server,
+        }
+    }
+
+    fn terminating_postgres_server() -> (std::net::SocketAddr, TerminatingPostgresServer) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = spawn_terminating_server(listener, |listener: &TcpListener| {
+            listener.accept().unwrap().0
+        });
+        (address, server)
+    }
+
+    #[cfg(unix)]
+    fn terminating_unix_postgres_server(dir: &std::path::Path) -> TerminatingPostgresServer {
+        let listener = std::os::unix::net::UnixListener::bind(dir.join(".s.PGSQL.5432")).unwrap();
+        spawn_terminating_server(listener, |listener: &std::os::unix::net::UnixListener| {
+            listener.accept().unwrap().0
+        })
     }
 
     /// A fake server that answers every startup handshake it receives until the
@@ -4118,6 +4266,128 @@ mod tests {
             Poll::Ready(Err(error)) => panic!("clean handoff failed: {error}"),
             Poll::Pending => panic!("clean recent handoff performed an unnecessary probe"),
         }
+    }
+
+    /// The control for the readiness probe: an idle entry whose socket is quiet
+    /// and open is still handed out inside the bypass window with NO validation
+    /// round trip.
+    ///
+    /// Without this, a probe that reported every socket as busy would silently
+    /// disable the bypass for every connection and this test would catch it. The
+    /// peer end stays open and writes nothing, so `poll(2)` reports no
+    /// readability and the checkout must reach a `PoolConnection` without
+    /// enqueueing a request.
+    #[cfg(unix)]
+    #[test]
+    fn a_quiet_open_entry_is_reused_inside_the_bypass_window() {
+        let (client_socket, peer) =
+            std::os::unix::net::UnixStream::pair().expect("create a Unix socket pair");
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            validation_bypass: Duration::from_secs(60),
+            ..PoolConfig::default()
+        };
+        let (client, mut receiver) = fake_client_with_socket(33, &client_socket);
+        let entry = PoolEntry::new(client, Duration::from_secs(600));
+        let pool = test_pool(config, vec![entry], 0, 1);
+
+        let progress = ConnectProgress::new();
+        let mut acquire = Box::pin(pool.get_inner_leased(&progress));
+        match poll_once(acquire.as_mut()) {
+            Poll::Ready(Ok(borrowed)) => assert_eq!(
+                borrowed.process_id(),
+                33,
+                "the quiet open entry was not the pooled backend"
+            ),
+            Poll::Ready(Err(error)) => panic!("the quiet open entry was rejected: {error}"),
+            Poll::Pending => panic!("the bypass validated a quiet open entry"),
+        }
+        assert!(
+            receiver.try_recv().is_err(),
+            "the bypass sent a validation query on a quiet open entry"
+        );
+
+        // The peer is dropped only after the checkout, so the socket is open
+        // and quiet for exactly the poll above.
+        drop(peer);
+    }
+
+    /// The paired negative for the control: the same fixture, but the peer has
+    /// already written a `FATAL` and gone. The probe must force the alive round
+    /// trip, so the first poll is Pending and a request reached the wire.
+    #[cfg(unix)]
+    #[test]
+    fn an_entry_whose_peer_sent_a_fatal_is_not_bypassed() {
+        let (client_socket, mut peer) =
+            std::os::unix::net::UnixStream::pair().expect("create a Unix socket pair");
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            validation_bypass: Duration::from_secs(60),
+            ..PoolConfig::default()
+        };
+        let (client, mut receiver) = fake_client_with_socket(34, &client_socket);
+        let entry = PoolEntry::new(client, Duration::from_secs(600));
+        let pool = test_pool(config, vec![entry], 0, 1);
+
+        peer.write_all(&terminating_fatal_frame())
+            .expect("write the FATAL to the peer");
+        peer.flush().expect("flush the FATAL");
+        drop(peer);
+
+        let progress = ConnectProgress::new();
+        let mut acquire = Box::pin(pool.get_inner_leased(&progress));
+        assert!(
+            poll_once(acquire.as_mut()).is_pending(),
+            "a peer FATAL did not force the alive round trip"
+        );
+        assert!(
+            receiver.try_recv().is_ok(),
+            "the probe refused the entry without sending a validation query"
+        );
+    }
+
+    /// Server bytes already queued on a socket whose peer is still OPEN must
+    /// also refuse the bypass. This is the case a dropped peer cannot reach: a
+    /// dropped Unix peer raises `POLLHUP` whatever events are requested, so
+    /// only a live peer with unread bytes exercises readability itself - a
+    /// `FATAL` whose close has not arrived, or an async
+    /// `NoticeResponse`/`ParameterStatus`.
+    #[cfg(unix)]
+    #[test]
+    fn an_entry_with_unread_server_bytes_on_an_open_socket_is_not_bypassed() {
+        let (client_socket, mut peer) =
+            std::os::unix::net::UnixStream::pair().expect("create a Unix socket pair");
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            validation_bypass: Duration::from_secs(60),
+            ..PoolConfig::default()
+        };
+        let (client, mut receiver) = fake_client_with_socket(35, &client_socket);
+        let entry = PoolEntry::new(client, Duration::from_secs(600));
+        let pool = test_pool(config, vec![entry], 0, 1);
+
+        peer.write_all(&terminating_fatal_frame())
+            .expect("write the FATAL to the peer");
+        peer.flush().expect("flush the FATAL");
+
+        let progress = ConnectProgress::new();
+        let mut acquire = Box::pin(pool.get_inner_leased(&progress));
+        assert!(
+            poll_once(acquire.as_mut()).is_pending(),
+            "unread server bytes on an open socket did not force the alive round trip"
+        );
+        assert!(
+            receiver.try_recv().is_ok(),
+            "the probe refused the entry without sending a validation query"
+        );
+
+        // The peer stays open until after the checkout: a close would report
+        // through `POLLHUP` regardless of the requested events, which is the
+        // case this test exists to separate from queued bytes.
+        drop(peer);
     }
 
     #[test]
@@ -6316,6 +6586,149 @@ mod tests {
             (99, 0),
             "checkout discarded an entry that was still inside its max_lifetime"
         );
+    }
+
+    /// A backend terminated while its pool entry is idle must not be handed out
+    /// on the alive-validation bypass, even when the connection's reader task
+    /// has not published the failure.
+    ///
+    /// The scripted peer answers the warm-up session, then on cue writes a real
+    /// `FATAL` and closes WITHOUT the executor being polled in between: the test
+    /// waits on a plain `std::sync::mpsc` channel, so no task runs and neither
+    /// `is_closed()` nor the reader's terminal poison is published. That wait
+    /// does not prove the reader left the `FATAL` in the socket: its io_uring
+    /// recv may already have been outstanding, and the kernel can complete it
+    /// and copy the frame into the reader's buffer while no task runs. What the
+    /// wait guarantees is that the reader is not polled, so it cannot publish
+    /// the failure; and the peer's close stays readable after the `FATAL` bytes
+    /// are gone (a received FIN keeps the socket readable), which is the
+    /// evidence the probe sees. `validation_bypass` is an hour, so `last_used`
+    /// is far inside it and only the socket check can reject the entry. On the
+    /// bypass the pool would hand out backend 45; with the check it validates,
+    /// the round trip fails on the dead session, and the pool evicts the entry
+    /// and opens backend 46.
+    #[compio::test]
+    async fn an_idle_entry_with_a_terminated_backend_is_not_bypassed() {
+        let (address, server) = terminating_postgres_server();
+        let connection_config: Config =
+            format!("postgres://postgres@{address}/fake?sslmode=disable")
+                .parse()
+                .unwrap();
+        let pool_config = PoolConfig {
+            max_size: 1,
+            min_idle: 1,
+            validation_bypass: Duration::from_secs(3600),
+            ..PoolConfig::default()
+        };
+        let pool = compio::time::timeout(
+            Duration::from_secs(5),
+            Pool::connect_with_config(connection_config, pool_config),
+        )
+        .await
+        .expect("pool warm-up did not finish")
+        .expect("pool warm-up failed");
+
+        let first = pool.acquire().await.expect("check out the warm entry");
+        assert_eq!(first.process_id(), 45, "the warm entry is the first backend");
+        drop(first);
+        assert_eq!(pool.idle_count(), 1, "the warm entry was not idle");
+        assert_eq!(pool.metrics().evictions.get(), 0);
+
+        // Terminate the backend and block the executor until the peer has
+        // written the FATAL and closed. No task is polled during the wait, so
+        // the reader cannot publish terminal poison; the peer's close stays
+        // readable after the FATAL bytes are gone, which is what the probe
+        // sees.
+        server.terminate.send(()).unwrap();
+        server.killed.recv().unwrap();
+
+        let replacement = compio::time::timeout(Duration::from_secs(5), pool.acquire())
+            .await
+            .expect("checkout after termination did not finish")
+            .expect("checkout after termination failed");
+        assert_ne!(
+            replacement.process_id(),
+            45,
+            "the bypass handed out the terminated backend because its reader had not run"
+        );
+        assert_eq!(
+            replacement.process_id(),
+            46,
+            "no replacement backend was opened"
+        );
+        assert_eq!(
+            pool.metrics().evictions.get(),
+            1,
+            "the terminated idle entry was not evicted"
+        );
+        drop(replacement);
+
+        let _ = server.finish.send(());
+        server.server.join().expect("scripted PostgreSQL peer panicked");
+    }
+
+    /// The same guarantee over a Unix domain socket.
+    ///
+    /// The readiness check runs on the connection's raw descriptor, and this
+    /// proves it does so for the other address family rather than only TCP. The
+    /// socket path is short because it lives under a temp directory.
+    #[cfg(unix)]
+    #[compio::test]
+    async fn an_idle_unix_socket_entry_with_a_terminated_backend_is_not_bypassed() {
+        let dir = tempfile::tempdir().expect("create a Unix socket directory");
+        let server = terminating_unix_postgres_server(dir.path());
+        let connection_config: Config = format!(
+            "host={} port=5432 user=postgres dbname=fake sslmode=disable",
+            dir.path().display()
+        )
+        .parse()
+        .expect("the Unix-socket DSN parses");
+        let pool_config = PoolConfig {
+            max_size: 1,
+            min_idle: 1,
+            validation_bypass: Duration::from_secs(3600),
+            ..PoolConfig::default()
+        };
+        let pool = compio::time::timeout(
+            Duration::from_secs(5),
+            Pool::connect_with_config(connection_config, pool_config),
+        )
+        .await
+        .expect("pool warm-up did not finish")
+        .expect("pool warm-up failed");
+
+        let first = pool.acquire().await.expect("check out the warm entry");
+        assert_eq!(first.process_id(), 45, "the warm entry is the first backend");
+        drop(first);
+        assert_eq!(pool.idle_count(), 1, "the warm entry was not idle");
+        assert_eq!(pool.metrics().evictions.get(), 0);
+
+        server.terminate.send(()).unwrap();
+        server.killed.recv().unwrap();
+
+        let replacement = compio::time::timeout(Duration::from_secs(5), pool.acquire())
+            .await
+            .expect("checkout after termination did not finish")
+            .expect("checkout after termination failed");
+        assert_ne!(
+            replacement.process_id(),
+            45,
+            "the bypass handed out the terminated Unix-socket backend"
+        );
+        assert_eq!(
+            replacement.process_id(),
+            46,
+            "no replacement backend was opened"
+        );
+        assert_eq!(
+            pool.metrics().evictions.get(),
+            1,
+            "the terminated idle Unix-socket entry was not evicted"
+        );
+        drop(replacement);
+
+        let _ = server.finish.send(());
+        server.server.join().expect("scripted PostgreSQL peer panicked");
     }
 
     #[compio::test]
