@@ -1888,12 +1888,14 @@ async fn stalled_native_stop_exhausts_renewal_budget_without_reusing_slot() {
     }
 }
 
-/// A corrupted child output is a permanent data fault, not a transient one, so
-/// the retry predicate refuses it: a retry would read the same bytes and fail
-/// the same way, spending the run's delivery budget without a chance to
-/// recover. The control is an unavailable read, which stays retryable.
+/// The retry predicate the delivery applies to its own transport calls -
+/// completion, settlement and renewal - refuses an `Internal` error, the class a
+/// corrupted child output carries, and retries an unavailable one. It does not
+/// decide whether a failed execution runs again: every failed execution
+/// releases its attempt and the run is re-executed, so a corrupted child output
+/// spends delivery attempts.
 #[test]
-fn a_corrupt_child_output_is_not_retryable() {
+fn the_transport_retry_predicate_refuses_internal_and_retries_unavailable() {
     assert!(!retryable(&WorkflowServiceError::Internal(
         "workflow child output payload is not valid JSON".into()
     )));

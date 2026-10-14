@@ -126,8 +126,9 @@ pub enum ReplayOutput {
 /// The refusal a child output that is not the JSON its run returned earns.
 ///
 /// It is a permanent data fault, not a transient one: the bytes in the object
-/// store will not become JSON on a later attempt. `Internal` is not retried, so
-/// the run rests on the fault instead of spending its delivery budget on it.
+/// store will not become JSON on a later attempt. `Internal` names it as one.
+/// The delivery still releases the attempt like any failed execution, so the
+/// run is re-executed and spends delivery attempts on the fault.
 fn child_output_error() -> WorkflowServiceError {
     WorkflowServiceError::Internal("workflow child output payload is not valid JSON".into())
 }

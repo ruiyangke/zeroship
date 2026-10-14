@@ -2963,9 +2963,10 @@ async fn a_budget_that_ends_while_a_read_never_answers_ends_the_execution_as_a_t
 
 /// An execution whose budget ends while a commit its dispatch asked for is in
 /// flight ends as an indeterminate commit, not as a timeout: the commit may
-/// have applied, and the delivery loop re-runs a timed-out task, which could
-/// apply it again. The commit is a step's effect, the work a dispatch runs
-/// past its replayed prefix. The control is
+/// have applied, and the execution says so. The attempt is released and the
+/// run re-executed either way, at least once like every step. The commit is a
+/// step's effect, the work a dispatch runs past its replayed prefix. The
+/// control is
 /// `a_budget_that_ends_while_a_read_never_answers_ends_the_execution_as_a_timeout`,
 /// whose dispatch has no commit in flight and ends as a timeout.
 #[compio::test]

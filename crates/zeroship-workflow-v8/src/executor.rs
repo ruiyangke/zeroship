@@ -117,10 +117,10 @@ impl TaskExecutor for V8TaskExecutor {
 ///
 /// A commit the request asked for may have been in flight at the stop, so its
 /// wire code (`error.code`) is kept, not folded into a generic unavailability:
-/// unlike every other dispatch failure here, re-running the task could
-/// re-apply a commit that already landed. `Internal` is never retried by the
-/// delivery loop (`zeroship_workflow_runner::delivery::retryable`), where
-/// `Unavailable` is.
+/// the execution reports, opaquely, that whether that commit applied is
+/// unknown. The delivery treats it as it treats any failed execution: the
+/// attempt is released and the run re-executed, at least once like every step,
+/// so the commit can apply again unless the step is idempotent.
 fn dispatch_wait_error(error: DispatchError) -> WorkflowServiceError {
     match error.code {
         Some(code) if code == COMMIT_FAILED_INDETERMINATE => {
@@ -193,9 +193,9 @@ impl TaskExecution for V8Execution {
                 // The runtime answers this dispatch however its execution ends:
                 // an expired budget and a failed replay dependency each
                 // interrupt it, and its pump answers every pending request.
-                // A commit in flight at that moment may have applied, and
-                // re-running the task could apply it again, so that answer
-                // outranks the cause. Any other answer is named by the checks
+                // A commit in flight at that moment may have applied, so that
+                // answer outranks the cause and the execution reports it as
+                // indeterminate. Any other answer is named by the checks
                 // below, so an expired budget stays a timeout.
                 let result = match rx.recv().await {
                     Err(error) if error.code == Some(COMMIT_FAILED_INDETERMINATE) => {
@@ -275,11 +275,10 @@ mod dispatch_wait_error_tests {
     use super::{COMMIT_FAILED_INDETERMINATE, DispatchError, WorkflowServiceError, dispatch_wait_error};
 
     /// The guard this test fails without: a commit left in flight at the stop
-    /// must not come back as the retried-by-default `Unavailable` - the
-    /// delivery loop would re-run the task over a commit that may have
-    /// already landed.
+    /// must not come back as a plain `Unavailable`, which would lose that its
+    /// outcome is unknown. The attempt is released and re-run either way.
     #[test]
-    fn an_indeterminate_commit_is_reported_opaquely_and_is_not_retried() {
+    fn an_indeterminate_commit_is_reported_opaquely_as_indeterminate() {
         let error = DispatchError::coded(
             "CPU time limit exceeded; a transaction commit was in flight, so whether \
              it applied is unknown",
@@ -294,9 +293,9 @@ mod dispatch_wait_error_tests {
     }
 
     /// The control beside it: a dispatch error with no code - a plain stop or
-    /// host cancellation - keeps its retryable classification.
+    /// host cancellation - stays a plain unavailability.
     #[test]
-    fn an_uncoded_dispatch_error_stays_a_retryable_unavailability() {
+    fn an_uncoded_dispatch_error_stays_an_unavailability() {
         let error = DispatchError::new("request timed out", 504);
         assert_eq!(
             dispatch_wait_error(error),
