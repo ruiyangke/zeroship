@@ -241,6 +241,8 @@ impl OrmStore {
             policy_binding: None,
             observed_policy: None,
             mutation_authority: None,
+            #[cfg(test)]
+            deadline_clock: None,
         };
         if tx.dialect() == "sqlite" {
             // A no-match write obtains SQLite's writer reservation before any
@@ -299,6 +301,11 @@ pub struct Transaction {
     pub(crate) policy_binding: Option<super::PolicyBinding>,
     pub(super) observed_policy: Option<super::policy::CapturedPolicy>,
     mutation_authority: Option<super::policy::PolicyAuthority>,
+    /// The clock this transaction's policy reads measure against. A test
+    /// installs a caller-owned clock so a lease can be advanced past expiry on
+    /// command; absent in every host, where the reads use the system clock.
+    #[cfg(test)]
+    pub(super) deadline_clock: super::delivery::DeadlineClock,
 }
 impl std::fmt::Debug for Transaction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -357,18 +364,22 @@ impl Transaction {
     }
     pub(crate) fn policy(&self, app: &AppId) -> Result<super::AppPolicy, WorkflowServiceError> {
         self.check_app(app)?;
+        #[cfg(test)]
+        let now = super::delivery::deadline_now(&self.deadline_clock);
+        #[cfg(not(test))]
+        let now = std::time::Instant::now();
         if let Some(binding) = &self.policy_binding {
             if let Some(authority) = &self.mutation_authority {
                 return authority.effective();
             }
-            return binding.resolve();
+            return binding.resolve_at(now);
         }
         self.policies
             .as_ref()
             .ok_or_else(|| {
                 WorkflowServiceError::Unavailable("workflow host policy not bound".into())
             })?
-            .resolve(app)
+            .resolve_at(app, now)
     }
     pub(crate) fn capture_mutation(&mut self, app: &AppId) -> Result<(), WorkflowServiceError> {
         self.check_app(app)?;

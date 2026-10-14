@@ -607,9 +607,10 @@ fn expires_in(expires: Instant) -> Result<Duration, WorkflowServiceError> {
 
 /// The clock a captured deadline is measured against. A test installs a
 /// caller-owned clock so it can advance a deadline on command; every host reads
-/// the system clock, so the value carries nothing.
+/// the system clock, so the value carries nothing. Shared with the execution
+/// thread because a captured policy authority crosses to it.
 #[cfg(test)]
-pub(super) type DeadlineClock = Option<std::rc::Rc<std::cell::Cell<Instant>>>;
+pub(super) type DeadlineClock = Option<std::sync::Arc<std::sync::Mutex<Instant>>>;
 
 /// The instant a captured deadline is measured against, on the system clock.
 #[cfg(not(test))]
@@ -620,10 +621,10 @@ fn deadline_now() -> Instant {
 /// The instant a captured deadline is measured against: the caller-owned clock
 /// a test installs, and the system clock when none is installed.
 #[cfg(test)]
-fn deadline_now(clock: &DeadlineClock) -> Instant {
+pub(super) fn deadline_now(clock: &DeadlineClock) -> Instant {
     clock
         .as_ref()
-        .map_or_else(Instant::now, |clock| clock.get())
+        .map_or_else(Instant::now, |clock| *clock.lock().unwrap())
 }
 
 pub(super) struct CapturedLease {

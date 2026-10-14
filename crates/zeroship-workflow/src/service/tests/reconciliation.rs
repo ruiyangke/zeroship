@@ -6,6 +6,7 @@ use crate::service::{
 };
 use std::{
     cell::{Cell, RefCell},
+    sync::Mutex,
     time::{Duration, Instant},
 };
 use zeroship_core::{
@@ -327,7 +328,7 @@ async fn assert_explicit_empty_phase_transitions(
 /// its next step.
 async fn timeout_progress(store: Rc<OrmStore>) {
     let (service, app, _, _deployments) = registered_service(store).await;
-    let clock: Rc<Cell<Instant>> = Rc::new(Cell::new(Instant::now()));
+    let clock: Arc<Mutex<Instant>> = Arc::new(Mutex::new(Instant::now()));
     let service = service.with_deadline_clock_for_test(clock.clone());
     let scope = service.fixture_app(app.clone());
     let jobs = start(&scope, 2).await;
@@ -339,7 +340,10 @@ async fn timeout_progress(store: Rc<OrmStore>) {
     let attempt = scope.reconcile_job(&grant, &publisher, options(2));
     let lapse = async {
         held.recv_async().await.unwrap();
-        clock.set(clock.get() + Duration::from_secs(3601));
+        // Past this attempt's 30 s grant, the deadline under test, and inside
+        // the hour-long host policy lease that the same clock also measures.
+        let lapsed = *clock.lock().unwrap() + Duration::from_secs(31);
+        *clock.lock().unwrap() = lapsed;
         resume.send_async(()).await.unwrap();
     };
     let (result, ()) = futures::join!(attempt, lapse);
@@ -351,7 +355,7 @@ async fn timeout_progress(store: Rc<OrmStore>) {
         .await
         .unwrap()
         .is_none());
-    clock.set(Instant::now());
+    *clock.lock().unwrap() = Instant::now();
     assert_eq!(
         scope
             .reconcile_job(&grant.retry(), &publisher, options(2))

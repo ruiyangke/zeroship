@@ -46,7 +46,7 @@ fn assert_conflict<T>(result: Result<T, WorkflowServiceError>) {
 fn replacement_retires_capabilities_and_outstanding_refreshes() {
     let (policies, original) = registry();
     assert!(policies.app_ids().unwrap().is_empty());
-    assert_unavailable(original.resolve());
+    assert_unavailable(original.resolve_at(Instant::now()));
     install(&original, configured(3));
     let capture = original.authority().unwrap();
     let delayed = original.begin_refresh().unwrap();
@@ -57,7 +57,7 @@ fn replacement_retires_capabilities_and_outstanding_refreshes() {
     assert!(capture.belongs_to(&original));
     assert!(!capture.belongs_to(&replacement));
     assert_unavailable(capture.check());
-    assert_unavailable(original.resolve());
+    assert_unavailable(original.resolve_at(Instant::now()));
     assert_unavailable(original.authority());
     assert_unavailable(original.begin_refresh());
     assert_unavailable(original.revoke());
@@ -203,9 +203,12 @@ fn expired_snapshots_narrow_authority_and_fresh_refreshes_serve_new_operations()
     let expired = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
     install(&binding, leased(1, expired));
     assert_unavailable(binding.authority());
-    let effective = binding.resolve().unwrap();
+    let effective = binding.resolve_at(Instant::now()).unwrap();
     assert!(!effective.admission && !effective.dispatch && !effective.ingress);
-    assert_eq!(policies.resolve(binding.app_id()).unwrap(), effective);
+    assert_eq!(
+        policies.resolve_at(binding.app_id(), Instant::now()).unwrap(),
+        effective
+    );
     assert_eq!(policies.app_ids().unwrap(), [binding.app_id().clone()]);
     let deadline = Instant::now() + Duration::from_secs(60);
     install(&binding, leased(1, deadline));

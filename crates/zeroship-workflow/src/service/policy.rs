@@ -126,12 +126,13 @@ impl PolicySnapshot {
         self.ingress_epoch
     }
 
-    fn effective(&self) -> AppPolicy {
+    /// The limits this snapshot grants at `now`. A test measures it against its
+    /// caller-owned clock, so the bound it places on a granted task does not
+    /// race the wall clock.
+    fn effective_at(&self, now: Instant) -> AppPolicy {
         let mut policy = self.policy.clone();
         if let Validity::Until(deadline) = self.validity {
-            let remaining = deadline
-                .saturating_duration_since(Instant::now())
-                .as_millis();
+            let remaining = deadline.saturating_duration_since(now).as_millis();
             if remaining == 0 {
                 policy.admission = false;
                 policy.dispatch = false;
@@ -296,14 +297,18 @@ impl HostPolicies {
             .collect())
     }
 
-    pub(crate) fn resolve(&self, app: &AppId) -> Result<AppPolicy, WorkflowServiceError> {
+    pub(crate) fn resolve_at(
+        &self,
+        app: &AppId,
+        now: Instant,
+    ) -> Result<AppPolicy, WorkflowServiceError> {
         let state = self.state.read().map_err(|_| unavailable("registry lock poisoned"))?;
         state
             .entries
             .get(app)
             .and_then(|entry| entry.current.as_ref())
             .and_then(|current| current.snapshot.as_ref())
-            .map(PolicySnapshot::effective)
+            .map(|snapshot| snapshot.effective_at(now))
             .ok_or(WorkflowServiceError::PermissionDenied)
     }
 }
@@ -393,12 +398,12 @@ impl PolicyBinding {
         Ok(())
     }
 
-    pub(crate) fn resolve(&self) -> Result<AppPolicy, WorkflowServiceError> {
+    pub(crate) fn resolve_at(&self, now: Instant) -> Result<AppPolicy, WorkflowServiceError> {
         let state = self.registry.state.read().map_err(|_| unavailable("registry lock poisoned"))?;
         self.current(&state)?
             .snapshot
             .as_ref()
-            .map(PolicySnapshot::effective)
+            .map(|snapshot| snapshot.effective_at(now))
             .ok_or_else(|| unavailable("no installed policy for this binding"))
     }
 
@@ -415,10 +420,20 @@ impl PolicyBinding {
     /// # Errors
     /// Refuses a retired or revoked binding and a poisoned registry.
     pub fn authority(&self) -> Result<PolicyAuthority, WorkflowServiceError> {
+        self.authority_at(Instant::now())
+    }
+
+    /// Capture this binding's live authority, measuring its deadline against
+    /// `now`. Production reads the system clock; a test supplies its
+    /// caller-owned clock so the capture does not race the wall clock.
+    ///
+    /// # Errors
+    /// Refuses a retired or revoked binding and a poisoned registry.
+    fn authority_at(&self, now: Instant) -> Result<PolicyAuthority, WorkflowServiceError> {
         let state = self.registry.state.read().map_err(|_| unavailable("registry lock poisoned"))?;
         let current = self.current(&state)?;
         let snapshot = current.snapshot.as_ref().ok_or_else(|| unavailable("no installed policy for this binding"))?;
-        let deadline = live_deadline(&snapshot.validity)?;
+        let deadline = live_deadline(&snapshot.validity, now)?;
         let authority = PolicyAuthority {
             binding: self.clone(),
             epoch: current.epoch.number,
@@ -427,6 +442,8 @@ impl PolicyBinding {
             deadline,
             policy: snapshot.policy.clone(),
             ingress_epoch: snapshot.ingress_epoch,
+            #[cfg(test)]
+            deadline_clock: None,
         };
         drop(state);
         Ok(authority)
@@ -555,6 +572,11 @@ pub struct PolicyAuthority {
     pub(super) deadline: Option<Instant>,
     pub(super) policy: AppPolicy,
     pub(super) ingress_epoch: Option<Revision>,
+    /// The clock `deadline` is measured against. A test installs a caller-owned
+    /// clock so it can advance the lease past expiry on command; absent in every
+    /// host, where the checks read the system clock.
+    #[cfg(test)]
+    pub(super) deadline_clock: super::delivery::DeadlineClock,
 }
 impl std::fmt::Debug for PolicyAuthority {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -575,9 +597,13 @@ impl PolicyAuthority {
     /// # Errors
     /// Refuses an expired lease and a superseded or revoked generation.
     pub fn check(&self) -> Result<(), WorkflowServiceError> {
+        #[cfg(test)]
+        let now = super::delivery::deadline_now(&self.deadline_clock);
+        #[cfg(not(test))]
+        let now = Instant::now();
         if self
             .deadline
-            .is_some_and(|deadline| deadline <= Instant::now())
+            .is_some_and(|deadline| deadline <= now)
         {
             return Err(lease_expired());
         }
@@ -592,10 +618,10 @@ impl PolicyAuthority {
         if current.epoch.number != self.epoch || snapshot.revision != self.revision {
             return Err(unavailable("installed policy moved to another epoch or revision"));
         }
-        live_deadline(&snapshot.validity)?;
+        live_deadline(&snapshot.validity, now)?;
         if self
             .deadline
-            .is_some_and(|deadline| deadline <= Instant::now())
+            .is_some_and(|deadline| deadline <= now)
         {
             return Err(lease_expired());
         }
@@ -605,6 +631,10 @@ impl PolicyAuthority {
 
     pub(crate) fn effective(&self) -> Result<AppPolicy, WorkflowServiceError> {
         self.check()?;
+        #[cfg(test)]
+        let now = super::delivery::deadline_now(&self.deadline_clock);
+        #[cfg(not(test))]
+        let now = Instant::now();
         Ok(PolicySnapshot {
             revision: self.revision,
             policy: self.policy.clone(),
@@ -617,7 +647,7 @@ impl PolicyAuthority {
             // has nothing to correct here.
             anchor_slack: std::time::Duration::ZERO,
         }
-        .effective())
+        .effective_at(now))
     }
 
     pub fn cancelled(&self) -> Shared<BoxFuture<'static, ()>> {
@@ -645,7 +675,19 @@ impl PolicyAuthority {
             let cancelled = self.cancelled().fuse();
             let expiry = async {
                 if let Some(deadline) = self.deadline {
-                    compio::time::sleep(deadline.saturating_duration_since(Instant::now())).await;
+                    // A caller-owned test clock has no waker, so no sleep can
+                    // observe it advance. The test advances the clock on command
+                    // and the operation observes the lapse at the checks its own
+                    // steps make, and at the check after it returns.
+                    #[cfg(test)]
+                    if self.deadline_clock.is_some() {
+                        return futures::future::pending::<()>().await;
+                    }
+                    #[cfg(test)]
+                    let now = super::delivery::deadline_now(&self.deadline_clock);
+                    #[cfg(not(test))]
+                    let now = Instant::now();
+                    compio::time::sleep(deadline.saturating_duration_since(now)).await;
                 } else {
                     futures::future::pending::<()>().await;
                 }
@@ -672,7 +714,24 @@ impl CapturedPolicy {
         Self(Ok(authority))
     }
     pub(super) fn capture(binding: &PolicyBinding) -> Self {
-        Self(binding.authority())
+        Self::capture_at(binding, Instant::now())
+    }
+
+    pub(super) fn capture_at(binding: &PolicyBinding, now: Instant) -> Self {
+        Self(binding.authority_at(now))
+    }
+
+    /// Measure this capture's deadline against a caller-owned clock. Installed
+    /// by a test so it can advance the lease past expiry on command.
+    #[cfg(test)]
+    pub(super) fn with_deadline_clock(
+        mut self,
+        clock: super::delivery::DeadlineClock,
+    ) -> Self {
+        if let Ok(authority) = &mut self.0 {
+            authority.deadline_clock = clock;
+        }
+        self
     }
 
     pub(super) fn recheck(&self) -> Result<(), WorkflowServiceError> {
@@ -698,10 +757,13 @@ impl CapturedPolicy {
     }
 }
 
-fn live_deadline(validity: &Validity) -> Result<Option<Instant>, WorkflowServiceError> {
+fn live_deadline(
+    validity: &Validity,
+    now: Instant,
+) -> Result<Option<Instant>, WorkflowServiceError> {
     match validity {
         Validity::Configuration => Ok(None),
-        Validity::Until(deadline) if *deadline > Instant::now() => Ok(Some(*deadline)),
+        Validity::Until(deadline) if *deadline > now => Ok(Some(*deadline)),
         Validity::Until(_) => Err(unavailable("lease deadline had already elapsed")),
     }
 }

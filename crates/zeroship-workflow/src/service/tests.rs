@@ -41,7 +41,8 @@ impl HostPolicies {
         self: &Arc<Self>,
         app: &AppId,
     ) -> Result<AppPolicy, WorkflowServiceError> {
-        self.current_binding(app)?.resolve()
+        self.current_binding(app)?
+            .resolve_at(std::time::Instant::now())
     }
 }
 

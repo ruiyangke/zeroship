@@ -93,7 +93,7 @@ impl WorkflowService {
     #[must_use]
     pub(crate) fn with_deadline_clock_for_test(
         mut self,
-        clock: std::rc::Rc<std::cell::Cell<std::time::Instant>>,
+        clock: std::sync::Arc<std::sync::Mutex<std::time::Instant>>,
     ) -> Self {
         self.deadline_clock = Some(clock);
         self
@@ -140,6 +140,8 @@ impl WorkflowService {
         tx.observed_policy = captured;
         tx.policies = Some(self.policies.clone());
         tx.policy_binding.clone_from(&self.bound_policy);
+        #[cfg(test)]
+        tx.deadline_clock.clone_from(&self.deadline_clock);
         Ok(tx)
     }
 
@@ -173,9 +175,18 @@ impl WorkflowService {
     }
 
     pub(super) fn capture_policy(&self) -> Option<CapturedPolicy> {
-        self.operation_policy
-            .clone()
-            .or_else(|| self.bound_policy.as_ref().map(CapturedPolicy::capture))
+        self.operation_policy.clone().or_else(|| {
+            self.bound_policy.as_ref().map(|binding| {
+                #[cfg(test)]
+                let now = super::delivery::deadline_now(&self.deadline_clock);
+                #[cfg(not(test))]
+                let now = std::time::Instant::now();
+                let captured = CapturedPolicy::capture_at(binding, now);
+                #[cfg(test)]
+                let captured = captured.with_deadline_clock(self.deadline_clock.clone());
+                captured
+            })
+        })
     }
 
     pub(super) fn run_bound<'a, T: 'a>(
@@ -196,13 +207,17 @@ impl WorkflowService {
     }
 
     pub(crate) fn policy_for(&self, app: &AppId) -> Result<AppPolicy, WorkflowServiceError> {
+        #[cfg(test)]
+        let now = super::delivery::deadline_now(&self.deadline_clock);
+        #[cfg(not(test))]
+        let now = std::time::Instant::now();
         if let Some(binding) = &self.bound_policy {
             if binding.app_id() != app {
                 return Err(WorkflowServiceError::PermissionDenied);
             }
-            return binding.resolve();
+            return binding.resolve_at(now);
         }
-        self.policies.resolve(app)
+        self.policies.resolve_at(app, now)
     }
 
     /// Register the app selected by an already configured host binding.

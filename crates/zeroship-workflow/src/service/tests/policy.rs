@@ -5,6 +5,7 @@ use crate::{
     operations::RunState,
     service::{ControlIntent, WorkerIdentity},
 };
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 mod lifetimes;
@@ -563,10 +564,15 @@ async fn metadata_lease_bounds_grants_and_duplicate_delivery_keeps_its_deadline(
     let directory = tempfile::tempdir().unwrap();
     let path = journal_file(directory.path());
     schema::initialize_sqlite(&path).unwrap();
-    let (service, app, _, _deployments) =
-        registered_service(Rc::new(sqlite_store(&path).await)).await;
+    let store = Rc::new(sqlite_store(&path).await);
+    let (service, app, _, _deployments) = registered_service(store.clone()).await;
+    // The lease deadline is measured against a caller-owned clock, so the work
+    // it bounds never races the wall clock: the clock stands still until the
+    // test advances it past the lease on command.
+    let clock: Arc<Mutex<Instant>> = Arc::new(Mutex::new(Instant::now()));
+    let service = service.with_deadline_clock_for_test(clock.clone());
     let lifetime = Duration::from_millis(250);
-    let until = Instant::now() + lifetime;
+    let until = *clock.lock().unwrap() + lifetime;
     let snapshot = PolicySnapshot::lease(2.try_into().unwrap(), AppPolicy::default(), until)
         .unwrap()
         .with_ingress_epoch(Some(open_epoch()));
@@ -582,7 +588,29 @@ async fn metadata_lease_bounds_grants_and_duplicate_delivery_keeps_its_deadline(
     let worker = WorkerIdentity::new("customer-worker".into()).unwrap();
     let task = service.poll(&worker).await.unwrap().unwrap();
     assert!(u128::try_from(task.lease_ms).unwrap() <= lifetime.as_millis());
-    compio::time::sleep(until.saturating_duration_since(Instant::now())).await;
+    // Reach expiry on command. The host lease is measured on the caller-owned
+    // clock, but the granted task's journal deadline is the database's clock,
+    // so expire that task in place rather than wait for the database to catch
+    // up. Re-delivering the identical policy is not a renewal: the deadline it
+    // already holds stands.
+    *clock.lock().unwrap() = until + Duration::from_millis(1);
+    let mut tx = store.begin().await.unwrap();
+    let expired = tx.now().await.unwrap() - 1;
+    journal_update(
+        &tx,
+        "tasks",
+        json!({"id": task.id.as_str()}),
+        json!({"deadline": expired}),
+    )
+    .await;
+    journal_update(
+        &tx,
+        "runs",
+        json!({"app_id": app.as_str(), "id": task.invocation.run_id.as_str()}),
+        json!({"due_at": expired}),
+    )
+    .await;
+    tx.commit().await.unwrap();
     service.policies.fixture_install(&app, snapshot).unwrap();
     assert!(matches!(
         scope
