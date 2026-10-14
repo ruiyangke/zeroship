@@ -161,7 +161,7 @@ fn a_claim_asks_for_no_more_than_the_protocol_allows() {
     let skipped = RefCell::new(SkipList::default());
     let bound = usize::try_from(ClaimJobs::MAX_DELIVERIES).unwrap();
     for (free, asked) in [(bound * 4, ClaimJobs::MAX_DELIVERIES), (3, 3)] {
-        let request = claim_request(free, None, &skipped, options).unwrap();
+        let request = claim_request(free, None, &skipped, options, Instant::now()).unwrap();
         assert_eq!(request.max.get(), asked, "{free} free slots");
     }
 }

@@ -82,6 +82,30 @@ const fn skip_ceiling(backoff: Duration) -> Duration {
     backoff.saturating_mul(1 << SKIP_DOUBLINGS)
 }
 
+/// The clock a skip-list entry's expiry is measured against. A test installs a
+/// caller-owned clock so it can advance an entry's expiry on command; every
+/// host reads the system clock, so no clock is ever installed there.
+#[cfg(test)]
+type SkipClock = Rc<Cell<Instant>>;
+
+/// The host's absent clock: [`skip_now`] reads the system clock.
+#[cfg(not(test))]
+type SkipClock = ();
+
+/// The instant a skip-list entry's expiry is measured against: the caller-owned
+/// clock a test installs, and the system clock when none is installed.
+#[cfg(test)]
+fn skip_now(clock: Option<&SkipClock>) -> Instant {
+    clock.map_or_else(Instant::now, |clock| clock.get())
+}
+
+/// The instant a skip-list entry's expiry is measured against: the system
+/// clock, because a host installs no clock.
+#[cfg(not(test))]
+fn skip_now(_clock: Option<&SkipClock>) -> Instant {
+    Instant::now()
+}
+
 /// Apps this host failed to prepare, withheld from its own claims until each
 /// entry expires.
 ///
@@ -174,6 +198,11 @@ pub struct JobConsumer<T: JobTransport, F: CreatorFactory<Journal = T::Journal>>
     slots: Vec<Slot<T>>,
     cursor: Option<AppId>,
     skipped: RefCell<SkipList>,
+    /// The clock the skip list's expiries are measured against. A test installs
+    /// a caller-owned clock so it can advance an entry's expiry on command;
+    /// absent in every host, where [`skip_now`] reads the system clock.
+    #[cfg(test)]
+    clock: Option<SkipClock>,
 }
 
 impl<T: JobTransport, F: CreatorFactory<Journal = T::Journal>> std::fmt::Debug
@@ -211,7 +240,19 @@ impl<T: JobTransport, F: CreatorFactory<Journal = T::Journal>> JobConsumer<T, F>
             options,
             cursor: None,
             skipped: RefCell::new(SkipList::default()),
+            #[cfg(test)]
+            clock: None,
         })
+    }
+
+    /// Install a caller-owned clock, so a case advances a skip-list entry's
+    /// expiry on command rather than with the wall clock. Every host reads the
+    /// system clock.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_skip_clock_for_test(mut self, clock: SkipClock) -> Self {
+        self.clock = Some(clock);
+        self
     }
 
     /// Claim and run deliveries until `shutdown`; then claim nothing more, let
@@ -248,9 +289,15 @@ impl<T: JobTransport, F: CreatorFactory<Journal = T::Journal>> JobConsumer<T, F>
             slots,
             cursor,
             skipped,
+            #[cfg(test)]
+            clock,
         } = self;
         let options = *options;
         let (transport, worker, prepared, skipped) = (&*transport, &*worker, &**prepared, &*skipped);
+        #[cfg(test)]
+        let skip_clock = clock.as_ref();
+        #[cfg(not(test))]
+        let skip_clock = None;
         let mut free: Vec<&mut Slot<T>> = slots.iter_mut().collect();
         let mut running: Running<'_, T> = FuturesUnordered::new();
         // What the stop leaves to finish beside the grace: a claim pending at
@@ -271,7 +318,8 @@ impl<T: JobTransport, F: CreatorFactory<Journal = T::Journal>> JobConsumer<T, F>
                 }
                 continue;
             }
-            let Some(request) = claim_request(free.len(), cursor.as_ref(), skipped, options)
+            let Some(request) =
+                claim_request(free.len(), cursor.as_ref(), skipped, options, skip_now(skip_clock))
             else {
                 failed(&WorkflowServiceError::InvalidRequest(
                     "unrepresentable workflow claim".into(),
@@ -336,7 +384,8 @@ impl<T: JobTransport, F: CreatorFactory<Journal = T::Journal>> JobConsumer<T, F>
                     continue;
                 };
                 running.push(
-                    execute(slot, transport, prepared, skipped, options, claimed).boxed_local(),
+                    execute(slot, transport, prepared, skipped, options, claimed, skip_clock)
+                        .boxed_local(),
                 );
             }
             if exhausted && stopped(shutdown.clone(), idle(options.idle_poll, &mut running, &mut free))
@@ -392,12 +441,13 @@ impl<T: JobTransport, F: CreatorFactory<Journal = T::Journal>> JobConsumer<T, F>
 }
 
 /// The free slots up to the protocol's bound, the previous reply's cursor and
-/// the live skip list.
+/// the live skip list, measured against the instant `now`.
 fn claim_request(
     free: usize,
     cursor: Option<&AppId>,
     skipped: &RefCell<SkipList>,
     options: ConsumerOptions,
+    now: Instant,
 ) -> Option<ClaimJobs> {
     Some(ClaimJobs {
         max: NonZeroU32::new(
@@ -412,9 +462,7 @@ fn claim_request(
             u64::try_from(options.delivery.operation_timeout.as_millis()).ok()?,
         )?,
         after: cursor.cloned(),
-        exclude: skipped
-            .borrow_mut()
-            .excluded(Instant::now(), options.error_backoff),
+        exclude: skipped.borrow_mut().excluded(now, options.error_backoff),
     })
 }
 
@@ -475,6 +523,7 @@ async fn execute<'s, T, F>(
     skipped: &RefCell<SkipList>,
     options: ConsumerOptions,
     claimed: Claimed<T::Lease>,
+    skip_clock: Option<&SkipClock>,
 ) -> &'s mut Slot<T>
 where
     T: JobTransport,
@@ -499,7 +548,7 @@ where
             failed(&error);
             skipped
                 .borrow_mut()
-                .failed(&app, Instant::now(), options.error_backoff);
+                .failed(&app, skip_now(skip_clock), options.error_backoff);
             if let Err(error) = bounded(
                 options.delivery.operation_timeout,
                 transport.give_back(&claimed, Unstarted::Unprepared),

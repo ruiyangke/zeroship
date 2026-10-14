@@ -585,8 +585,16 @@ async fn each_delivery_runs_against_its_own_apps_journal() {
 }
 
 /// A failed preparation gives the claim back, journal task included, and puts
-/// the app on this worker's skip list: the next claim excludes it, and once the
-/// entry expires, claims stop excluding it.
+/// the app on this worker's skip list: the next claim excludes it, a claim just
+/// before the entry expires still excludes it, and a claim at the expiry does
+/// not.
+///
+/// The entry's life is measured on a clock the case advances, so the exclusion
+/// depends on where the case places a claim rather than on how long the host
+/// happened to take between the failure and that claim. Each claim's gate holds
+/// its reply until the case has read the request the claim was built from, so
+/// the clock the case sets before releasing a gate is the clock the next claim
+/// reads.
 #[compio::test]
 async fn a_failed_preparation_gives_back_and_excludes_the_app_until_it_expires() {
     let fixture = Fixture::new(AppPolicy::default()).await;
@@ -597,6 +605,18 @@ async fn a_failed_preparation_gives_back_and_excludes_the_app_until_it_expires()
         .borrow_mut()
         .insert(fixture.app.app_id().clone());
     let backoff = Duration::from_millis(300);
+    let clock = Rc::new(Cell::new(Instant::now()));
+    // One gate per claim the case inspects: the first delivers the app's job
+    // and fails, the next two carry the exclusion, and the last is built at the
+    // entry's expiry.
+    let mut release = VecDeque::new();
+    let mut gates = VecDeque::new();
+    for _ in 0..4 {
+        let (open, gate) = oneshot::channel();
+        release.push_back(open);
+        gates.push_back(gate);
+    }
+    queue.claim_gates.borrow_mut().extend(gates);
     let mut host = consumer(
         queue.clone(),
         &fixture.lease.delivery.worker_id,
@@ -606,49 +626,70 @@ async fn a_failed_preparation_gives_back_and_excludes_the_app_until_it_expires()
             idle_poll: Duration::from_millis(20),
             ..options(1)
         },
-    );
+    )
+    .with_skip_clock_for_test(clock.clone());
     let app = fixture.app.app_id().clone();
+    let failed_at = clock.get();
     finished(host.run_until(async {
+        // The first claim runs the app's job; the failed preparation gives it
+        // back and the event ends the case's wait for it.
+        release.pop_front().unwrap().send(()).unwrap();
         while !matches!(queue.responses.recv_async().await.unwrap(), Event::GivenBack) {}
-        // Claims continue at the idle interval until one leaves out
-        // the app; the entry's expiry is what ends the exclusion.
-        loop {
-            queue.claims(1).await;
-            if queue
+        // The next claim is built before its gate replies, so the case reads
+        // the exclusion the failure put on the skip list.
+        queue.claims(1).await;
+        assert_eq!(
+            queue
                 .requests
                 .borrow()
                 .last()
-                .is_some_and(|(_, request)| !request.exclude.contains(&app))
-            {
-                break;
-            }
-        }
+                .map(|(_, request)| request.exclude.clone()),
+            Some(vec![app.clone()]),
+            "the claim after the failure did not exclude the app"
+        );
+        // A claim built just before the entry expires still excludes it.
+        clock.set(
+            (failed_at + backoff)
+                .checked_sub(Duration::from_millis(1))
+                .unwrap(),
+        );
+        release.pop_front().unwrap().send(()).unwrap();
+        queue.claims(1).await;
+        assert_eq!(
+            queue
+                .requests
+                .borrow()
+                .last()
+                .map(|(_, request)| request.exclude.clone()),
+            Some(vec![app.clone()]),
+            "the claim before the entry's expiry did not exclude the app"
+        );
+        // A claim built at the expiry does not.
+        clock.set(failed_at + backoff);
+        release.pop_front().unwrap().send(()).unwrap();
+        queue.claims(1).await;
+        assert!(
+            !queue
+                .requests
+                .borrow()
+                .last()
+                .is_some_and(|(_, request)| request.exclude.contains(&app)),
+            "the claim at the entry's expiry kept excluding the app"
+        );
+        release.pop_front().unwrap().send(()).unwrap();
     }))
     .await;
     let given_back = queue.given_back.borrow().clone();
     assert_eq!(given_back.len(), 1);
-    let (returned_at, returned, with_task, why) = &given_back[0];
+    let (_, returned, with_task, why) = &given_back[0];
     assert_eq!(*why, Unstarted::Unprepared);
     assert_eq!(returned, &app);
-    assert!(with_task, "the journal accepted execution, so its task went back too");
+    assert!(
+        with_task,
+        "the journal accepted execution, so its task went back too"
+    );
     assert_eq!(fixture.task_state().await, "released");
     assert_eq!(fixture.probe.starts.get(), 0);
-    let after: Vec<_> = queue
-        .requests
-        .borrow()
-        .iter()
-        .filter(|(at, _)| at > returned_at)
-        .cloned()
-        .collect();
-    assert!(
-        after.first().is_some_and(|(_, request)| request.exclude == [app.clone()]),
-        "the claim after the failure did not exclude the app"
-    );
-    let (released_at, _) = after.last().unwrap();
-    assert!(
-        *released_at - *returned_at >= backoff / 2,
-        "the exclusion ended before the entry's expiry"
-    );
 }
 
 /// An app the version feed stops listing leaves the prepared cache on the next
