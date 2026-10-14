@@ -147,7 +147,24 @@ impl RecordingSession {
     /// which yields an empty-but-valid decode - enough to drive every path
     /// end-to-end without feeding a wrong-shaped row into a decoder.
     fn rows_for(&self, sql: &str) -> Vec<Row> {
-        if sql.contains("current_setting('server_version_num')") {
+        if sql.contains("AS statement_ms") {
+            // The project-lock acquisition reads the caller's timeouts first. This
+            // session carries no statement budget, so the acquisition lifts nothing.
+            vec![Row::new(
+                vec![
+                    "statement_timeout".into(),
+                    "lock_timeout".into(),
+                    "statement_ms".into(),
+                    "lock_ms".into(),
+                ],
+                vec![
+                    Value::Text("0".into()),
+                    Value::Text("0".into()),
+                    Value::Int(0),
+                    Value::Int(0),
+                ],
+            )]
+        } else if sql.contains("current_setting('server_version_num')") {
             vec![Row::new(
                 vec!["server_version_num".into()],
                 vec![Value::Text(self.server_version_num.to_string())],

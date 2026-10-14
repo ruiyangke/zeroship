@@ -429,6 +429,13 @@ struct ReplyFault {
     kind: ReplyFaultKind,
 }
 
+/// One armed server-side delay: the SQL substring it waits for, and how long the
+/// matching statement spends on the server before its own work.
+struct SlowStatement {
+    needle: String,
+    delay: std::time::Duration,
+}
+
 /// A TEST-ONLY [`SqlSession`] over a blocking `postgres::Client`, pinned to ONE
 /// connection (the seam's single-connection contract).
 pub struct PgDevSession {
@@ -438,6 +445,7 @@ pub struct PgDevSession {
     dsn: String,
     fail_next_resolved_pending_contract_insert: Cell<bool>,
     reply_fault: RefCell<Option<ReplyFault>>,
+    slow_statement: RefCell<Option<SlowStatement>>,
 }
 
 impl PgDevSession {
@@ -455,6 +463,7 @@ impl PgDevSession {
             dsn: dsn.to_string(),
             fail_next_resolved_pending_contract_insert: Cell::new(false),
             reply_fault: RefCell::new(None),
+            slow_statement: RefCell::new(None),
         }
     }
 
@@ -490,6 +499,59 @@ impl PgDevSession {
             needle: needle.to_string(),
             kind: ReplyFaultKind::UndecodableBool(column.to_string()),
         });
+    }
+
+    /// Make the next statement containing `needle` spend `delay` on the server
+    /// before its own work, inside the statement itself.
+    ///
+    /// This is a starved server as the statement sees it: the statement's own
+    /// timer runs for the whole delay, so any `statement_timeout` shorter than
+    /// `delay` cancels it before its work starts. One-shot, like the reply faults.
+    ///
+    /// # Panics
+    /// When the matching statement is not a `SELECT`, the only shape the delay can
+    /// be put in front of.
+    pub fn slow_next_statement(&self, needle: &str, delay: std::time::Duration) {
+        *self.slow_statement.borrow_mut() = Some(SlowStatement {
+            needle: needle.to_string(),
+            delay,
+        });
+    }
+
+    /// The needles of every armed fault that no statement has matched yet.
+    ///
+    /// A test that arms a fault asserts this is empty afterwards, so a fault whose
+    /// needle stopped matching the engine's SQL fails the test instead of letting
+    /// it pass without the fault.
+    #[must_use]
+    pub fn unfired_faults(&self) -> Vec<String> {
+        let reply = self.reply_fault.borrow();
+        let slow = self.slow_statement.borrow();
+        reply
+            .iter()
+            .map(|fault| fault.needle.clone())
+            .chain(slow.iter().map(|slow| slow.needle.clone()))
+            .collect()
+    }
+
+    /// `sql` as it goes to the server: with the armed delay put in front of its
+    /// select list when it matches the delay's needle, as is otherwise.
+    fn statement_to_send<'s>(&self, sql: &'s str) -> std::borrow::Cow<'s, str> {
+        let mut armed = self.slow_statement.borrow_mut();
+        if !armed.as_ref().is_some_and(|slow| sql.contains(&slow.needle)) {
+            return std::borrow::Cow::Borrowed(sql);
+        }
+        let slow = armed.take().expect("the armed delay was just matched");
+        let rest = sql.trim_start().strip_prefix("SELECT ").unwrap_or_else(|| {
+            panic!(
+                "the delay armed for {:?} matched a statement that is not a SELECT: {sql}",
+                slow.needle
+            )
+        });
+        std::borrow::Cow::Owned(format!(
+            "SELECT pg_sleep({}), {rest}",
+            slow.delay.as_secs_f64()
+        ))
     }
 
     /// Take the armed reply fault if `sql` matches its needle. One-shot: a matched
@@ -937,7 +999,7 @@ impl SqlSession for PgDevSession {
         let outcome = self
             .client
             .borrow_mut()
-            .execute(sql, &refs)
+            .execute(&*self.statement_to_send(sql), &refs)
             .map_err(|e| to_db_error(&e));
         match self.take_reply_fault(sql) {
             None => outcome,
@@ -953,7 +1015,7 @@ impl SqlSession for PgDevSession {
         let rows = self
             .client
             .borrow_mut()
-            .query(sql, &refs)
+            .query(&*self.statement_to_send(sql), &refs)
             .map_err(|e| to_db_error(&e))?;
         rows.iter().map(row_to_neutral).collect()
     }
@@ -964,7 +1026,7 @@ impl SqlSession for PgDevSession {
         let outcome = self
             .client
             .borrow_mut()
-            .query_one(sql, &refs)
+            .query_one(&*self.statement_to_send(sql), &refs)
             .map_err(|e| to_db_error(&e));
         match self.take_reply_fault(sql) {
             None => row_to_neutral(&outcome?),

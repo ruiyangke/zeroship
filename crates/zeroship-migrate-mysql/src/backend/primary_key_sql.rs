@@ -128,9 +128,7 @@ pub(super) async fn alter_primary_key<D: SqlSession>(
         Ok(ddl) => ddl,
         Err(error) => {
             if let Err(unlock) = conn.batch("UNLOCK TABLES").await {
-                return Err(ApplyError::Backend(format!(
-                    "{error}; additionally failed to release MySQL primary-key validation lock: {unlock}"
-                )));
+                return Err(session::table_unlock_failed(unlock, error));
             }
             return Err(error);
         }
@@ -146,9 +144,7 @@ pub(super) async fn alter_primary_key<D: SqlSession>(
     .await
     {
         if let Err(unlock) = conn.batch("UNLOCK TABLES").await {
-            return Err(ApplyError::Backend(format!(
-                "{error}; additionally failed to release MySQL primary-key validation lock: {unlock}"
-            )));
+            return Err(session::table_unlock_failed(unlock, error.into()));
         }
         return Err(error.into());
     }
@@ -161,20 +157,22 @@ pub(super) async fn alter_primary_key<D: SqlSession>(
     // path where ALTER did not take over the lock.
     let unlock_result = conn.batch("UNLOCK TABLES").await;
     if let Err(source) = ddl_result {
-        if let Err(unlock) = unlock_result {
-            return Err(ApplyError::Backend(format!(
-                "MySQL primary-key ALTER failed ({source}) and its explicit table lock could not be released ({unlock}); the inflight marker was retained"
-            )));
-        }
-        return Err(ApplyError::MigrationFailed {
+        let failed = ApplyError::MigrationFailed {
             version: step.migration.version.as_str().to_string(),
             source: source.into(),
-        });
+        };
+        if let Err(unlock) = unlock_result {
+            return Err(session::table_unlock_failed(unlock, failed));
+        }
+        return Err(failed);
     }
     if let Err(unlock) = unlock_result {
-        return Err(ApplyError::Backend(format!(
-            "MySQL primary-key ALTER completed but explicit table-lock cleanup failed: {unlock}; the inflight marker was retained for recovery"
-        )));
+        return Err(session::table_unlock_failed(
+            unlock,
+            ApplyError::Backend(
+                "MySQL primary-key ALTER completed; its inflight marker was retained for recovery".to_string(),
+            ),
+        ));
     }
         session::finalize_started_structured_ddl(conn, cfg, &step.migration, applied_by, exec_ms)
             .await?;
@@ -924,6 +922,7 @@ mod tests {
 
     use zeroship_migrate_backend::backend::MigrationBackend;
     use zeroship_migrate_backend::driver::{Bind, DbError, Row, Value};
+    use zeroship_migrate_backend::executor::{DiscardStep, SessionResidue};
     use zeroship_migrate_ir::migration::{
         Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
     };
@@ -940,6 +939,7 @@ mod tests {
         show_create: String,
         journal: Option<(String, String, Phase)>,
         fail_alter: bool,
+        fail_unlock: bool,
         in_transaction: bool,
     }
 
@@ -954,6 +954,7 @@ mod tests {
                 show_create: show_create.to_string(),
                 journal: None,
                 fail_alter: false,
+                fail_unlock: false,
                 in_transaction: false,
             }
         }
@@ -974,6 +975,11 @@ mod tests {
 
         fn with_alter_failure(mut self) -> Self {
             self.fail_alter = true;
+            self
+        }
+
+        fn with_unlock_failure(mut self) -> Self {
+            self.fail_unlock = true;
             self
         }
 
@@ -1073,6 +1079,9 @@ mod tests {
             self.log.borrow_mut().push(format!("batch: {sql}"));
             if self.fail_alter && sql.starts_with("ALTER TABLE ") {
                 return Err(DbError::message("injected primary-key ALTER failure"));
+            }
+            if self.fail_unlock && sql == "UNLOCK TABLES" {
+                return Err(DbError::message("injected UNLOCK TABLES failure"));
             }
             Ok(())
         }
@@ -1368,6 +1377,57 @@ mod tests {
             .iter()
             .any(|entry| entry == "batch: UNLOCK TABLES"));
         assert_session_restored_after(&rec, "batch: UNLOCK TABLES");
+    }
+
+    /// A failed ALTER whose `UNLOCK TABLES` also fails reports the session to
+    /// discard: explicit table locks last until the session ends, and every other
+    /// session is shut out of those tables while they do. The ALTER's own failure
+    /// travels inside the report.
+    #[compio::test]
+    async fn a_failed_table_unlock_reports_the_session_to_discard() {
+        let step = step(AlterPrimaryKeyAction::Replace {
+            expected_columns: vec!["id".into()],
+            columns: vec!["tenant_id".into(), "order_id".into()],
+            drop_identity_from: Some(vec!["id".into()]),
+        });
+        let rec = RecordingSession::new(
+            vec![
+                column("id", false, true),
+                column("tenant_id", false, false),
+                column("order_id", false, false),
+            ],
+            vec![
+                index("PRIMARY", 1, Some("id"), None),
+                index("orders_old_id_uq", 1, Some("id"), None),
+                index("orders_tenant_order_uq", 1, Some("tenant_id"), None),
+                index("orders_tenant_order_uq", 2, Some("order_id"), None),
+            ],
+            SHOW_CREATE,
+        )
+        .with_alter_failure()
+        .with_unlock_failure();
+
+        let error = MysqlBackend::new_generic(&rec)
+            .alter_primary_key(
+                &cfg(),
+                &step,
+                Approval::Approved,
+                &ApprovalScope::All,
+                "tester",
+            )
+            .await
+            .expect_err("the injected failures are surfaced");
+        let discard = error
+            .session_discard()
+            .unwrap_or_else(|| panic!("the session must be reported for discard: {error}"));
+        assert_eq!(discard.residue(), SessionResidue::TABLE_LOCKS, "{error}");
+        assert_eq!(discard.step(), DiscardStep::TableUnlock, "{error}");
+        assert!(
+            discard
+                .operation()
+                .is_some_and(|operation| operation.to_string().contains("injected primary-key ALTER failure")),
+            "the ALTER's own failure travels inside the report: {error}"
+        );
     }
 
     #[compio::test]

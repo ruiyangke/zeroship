@@ -34,7 +34,9 @@ use zeroship_migrate_backend::registry::VendorSet;
 
 use crate::apply::backend::MigrationBackend;
 use crate::apply::drift::DriftError;
-use crate::apply::executor::{self, ApplyError, ApplyOutcome, LockMode, RollbackError};
+use crate::apply::executor::{
+    self, close_project_lock_bracket, ApplyError, ApplyOutcome, LockMode, RollbackError,
+};
 use crate::apply::journal::{AppliedEntry, JournaledKind, Phase};
 pub use crate::approval::Approval;
 use crate::conn::ExecutorConfig;
@@ -575,11 +577,7 @@ impl MigrationEngine {
         }
         .await;
         let release = backend.release_project_lock(exec_cfg).await;
-        match (result, release) {
-            (Ok(outcome), Ok(())) => Ok(outcome),
-            (Ok(_), Err(error)) => Err(EngineError::Apply(error)),
-            (Err(error), _) => Err(error),
-        }
+        close_project_lock_bracket(result, release)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1028,8 +1026,7 @@ impl MigrationEngine {
         // We acquire the lock BEFORE the gate's denial/approval check is performed
         // inside `apply_inner`; that check still runs (with `AlreadyHeld`) and can
         // return early - every such early return lands on the single release below,
-        // which warns rather than masking the deploy's own error, so the lock is
-        // never held forever on a gate rejection.
+        // so the lock is never held forever on a gate rejection.
         //
         // The lock is acquired/released through the dialect seam
         // (`backend.acquire/release_project_lock`) rather than the PG `*_outer`
@@ -1047,17 +1044,11 @@ impl MigrationEngine {
             .apply_declarative_locked(plan, effective, approval, backend, exec_cfg, applied_by)
             .await;
 
-        // Release on EVERY path. Surface the deploy error first; a release failure
-        // is logged (the lock auto-releases on session end regardless).
-        if let Err(e) = backend.release_project_lock(exec_cfg).await {
-            tracing::warn!(
-                error = %e,
-                project = %exec_cfg.project_id,
-                "zero-migrate: failed to release project lock after apply_declarative"
-            );
-        }
-
-        result
+        // Release on EVERY path. A failed release leaves the session possibly still
+        // holding the lock, so it is reported as a session to discard, carrying the
+        // deploy's own error when there was one.
+        let release = backend.release_project_lock(exec_cfg).await;
+        close_project_lock_bracket(result, release)
     }
 
     /// Apply a declarative deploy plan, **verifying its set-level integrity
@@ -1431,12 +1422,8 @@ impl MigrationEngine {
         if !owns_lock {
             return result;
         }
-        let unlock = backend.release_project_lock(exec_cfg).await;
-        match (result, unlock) {
-            (Ok(outcome), Ok(())) => Ok(outcome),
-            (Ok(_), Err(error)) => Err(DeclarativeApplyError::Plain(EngineError::Apply(error))),
-            (Err(error), _) => Err(error),
-        }
+        let release = backend.release_project_lock(exec_cfg).await;
+        close_project_lock_bracket(result, release)
     }
 
     /// As [`apply_plan_with_touched`](Self::apply_plan_with_touched), but ALSO
@@ -1620,16 +1607,10 @@ impl MigrationEngine {
             )
             .await;
         if we_hold_lock {
-            // Release the lock we own, surfacing the body's error first. The lock
-            // auto-releases on session end regardless, so a release failure after a
-            // body error is not masked-but-lost data; we still log it.
-            let unlock = backend.release_project_lock(exec_cfg).await;
-            return match result {
-                Ok(o) => unlock
-                    .map(|()| o)
-                    .map_err(|e| DeclarativeApplyError::Plain(EngineError::Apply(e))),
-                Err(e) => Err(e),
-            };
+            // Release the lock we own. A failed release is reported as a session to
+            // discard, carrying the body's own error when there was one.
+            let release = backend.release_project_lock(exec_cfg).await;
+            return close_project_lock_bracket(result, release);
         }
         result
     }
@@ -1980,12 +1961,7 @@ impl MigrationEngine {
             return result;
         }
         let release = backend.release_project_lock(exec_cfg).await;
-        match (result, release) {
-            (Ok(outcome), Ok(())) => Ok(outcome),
-            (Ok(_), Err(error)) => Err(DeclarativeApplyError::Plain(EngineError::Apply(error))),
-            (Err(error), Ok(())) => Err(error),
-            (Err(error), Err(_)) => Err(error),
-        }
+        close_project_lock_bracket(result, release)
     }
 
     /// The plan body, run with the project lock already held (either because the
@@ -4299,6 +4275,18 @@ pub enum DeclarativeApplyError {
     /// prior rename's expand) is already applied; the backfill is resumable.
     #[error(transparent)]
     Expand(#[from] OnlineError),
+}
+
+impl From<executor::SessionDiscard> for EngineError {
+    fn from(discard: executor::SessionDiscard) -> Self {
+        Self::Apply(ApplyError::from(discard))
+    }
+}
+
+impl From<executor::SessionDiscard> for DeclarativeApplyError {
+    fn from(discard: executor::SessionDiscard) -> Self {
+        Self::Plain(EngineError::from(discard))
+    }
 }
 
 /// The failure an online expand refuses with. It moved down to the backend

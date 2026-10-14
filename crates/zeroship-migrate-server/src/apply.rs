@@ -13,7 +13,8 @@ use zeroship_migrate::apply::journal::DeployRecoveryScope;
 use zeroship_migrate::{
     resolve_create_table_policy, Approval, ApprovalScope, DeclarativeApplyError, EngineError,
     ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, LoweredArtifact, MigrationBackend,
-    MigrationEngine, MigrationIr, PlanStatusManifest, SealError, SealedPolicy, StatusError,
+    MigrationEngine, MigrationIr, PlanStatusManifest, SealError, SealedPolicy, SessionDiscard,
+    StatusError,
 };
 // PG-shaped surfaces live in the vendor crate: this PostgreSQL host names
 // PostgreSQL directly rather than through a facade re-export.
@@ -252,6 +253,15 @@ pub enum ApplyRequestError {
     Apply(#[from] SealedApplyError),
 }
 
+impl From<SessionDiscard> for ApplyRequestError {
+    fn from(discard: SessionDiscard) -> Self {
+        Self::ProjectLock {
+            action: "release",
+            source: zeroship_migrate::ApplyError::from(discard),
+        }
+    }
+}
+
 /// Apply a frozen `.ir.json` bundle into the schema of the database it names.
 ///
 /// THERE IS ONE PATH. The ceiling the creator runs under is what bounds them, and
@@ -423,22 +433,41 @@ pub async fn apply_ir_documents(
     .await;
 
     let release = backend.release_project_lock(&exec_cfg).await;
-    match (result, release) {
-        (Ok(response), Ok(())) => Ok(response),
-        (Ok(_), Err(source)) => Err(ApplyRequestError::ProjectLock {
-            action: "release",
-            source,
-        }),
-        (Err(error), Ok(())) => Err(error),
-        (Err(error), Err(release_error)) => {
-            tracing::warn!(
-                error = %release_error,
-                project = %exec_cfg.project_id,
-                "migrate-server: failed to release project lock after request failure"
-            );
-            Err(error)
-        }
+    if let Some(discard) = unanswered_release(result.is_ok(), release, &exec_cfg.project_id) {
+        return Err(ApplyRequestError::from(discard));
     }
+    result
+}
+
+/// What a failed release adds to this request's answer.
+///
+/// A failed release leaves the session possibly still holding the lock, and the
+/// session is this request's own and ends with it, which is the discard that
+/// failure calls for. A request that failed therefore keeps its own error, and
+/// with it its own status, and the failed release is only logged: `None`. A
+/// request that succeeded answers with the discard instead, because the release
+/// is the one thing that went wrong.
+fn unanswered_release(
+    request_succeeded: bool,
+    release: Result<(), zeroship_migrate::ApplyError>,
+    project: &str,
+) -> Option<SessionDiscard> {
+    let error = release.err()?;
+    if request_succeeded {
+        return Some(SessionDiscard::new(
+            zeroship_migrate::SessionResidue::PROJECT_LOCK,
+            zeroship_migrate::DiscardStep::ProjectLockRelease,
+            error,
+            None,
+        ));
+    }
+    tracing::warn!(
+        error = %error,
+        project,
+        "migrate-server: releasing the project lock failed after the request failed; \
+         the request's session is discarded with it"
+    );
+    None
 }
 
 /// Run every fallible schema/apply operation after the ledger row opens and before
@@ -1023,6 +1052,14 @@ pub fn apply_error_kind(err: &ApplyRequestError) -> (ntex::http::StatusCode, &'s
         ),
         ApplyRequestError::Preflight(source) => ir_apply_error_kind(source),
         ApplyRequestError::Apply(source) => sealed_apply_error_kind(source),
+        // The project-lock bracket could not return the session to a reusable
+        // state, and nothing else failed: a request that failed answers with its
+        // own kind (see `unanswered_release`). The session is this request's own
+        // and ended with it, so a retry runs on a fresh one.
+        ApplyRequestError::ProjectLock { source, .. } if source.session_discard().is_some() => (
+            ntex::http::StatusCode::SERVICE_UNAVAILABLE,
+            "migration_session_discarded",
+        ),
         ApplyRequestError::TempDir(_)
         | ApplyRequestError::Write { .. }
         | ApplyRequestError::Policy(_)
@@ -1144,6 +1181,71 @@ mod tests {
         ));
         assert_eq!(
             apply_error_kind(&err),
+            (
+                ntex::http::StatusCode::SERVICE_UNAVAILABLE,
+                "migration_infrastructure",
+            )
+        );
+    }
+
+    fn release_failure() -> zeroship_migrate::ApplyError {
+        zeroship_migrate::ApplyError::Backend("release cancelled fixture".to_string())
+    }
+
+    fn creator_conflict() -> ApplyRequestError {
+        ApplyRequestError::IncompleteHistory {
+            missing_versions: vec!["mig_missing_a".to_string()],
+        }
+    }
+
+    /// A request that failed keeps its own error, and so its own status, when the
+    /// release that closes its bracket fails too: its session ends with it, and a
+    /// creator fault must not turn into a retryable infrastructure answer.
+    #[test]
+    fn a_failed_request_keeps_its_own_kind_when_its_release_fails() {
+        assert!(
+            unanswered_release(false, Err(release_failure()), "prj").is_none(),
+            "a failed request answers with its own error"
+        );
+        assert_eq!(
+            apply_error_kind(&creator_conflict()),
+            (
+                ntex::http::StatusCode::CONFLICT,
+                "migration_history_incomplete",
+            )
+        );
+    }
+
+    /// A request that succeeded but whose release failed answers with the discard
+    /// code, and an ordinary lock failure stays infrastructure.
+    #[test]
+    fn a_successful_request_whose_release_fails_answers_with_the_discard_code() {
+        let err = ApplyRequestError::from(
+            unanswered_release(true, Err(release_failure()), "prj")
+                .expect("a failed release is not a clean request"),
+        );
+        assert_eq!(
+            apply_error_kind(&err),
+            (
+                ntex::http::StatusCode::SERVICE_UNAVAILABLE,
+                "migration_session_discarded",
+            )
+        );
+        assert!(
+            err.to_string().contains("release cancelled fixture"),
+            "the release failure survives into the message: {err}"
+        );
+        assert!(
+            unanswered_release(true, Ok(()), "prj").is_none(),
+            "a clean release adds nothing"
+        );
+
+        let ordinary = ApplyRequestError::ProjectLock {
+            action: "acquire",
+            source: zeroship_migrate::ApplyError::Backend("acquire fixture".to_string()),
+        };
+        assert_eq!(
+            apply_error_kind(&ordinary),
             (
                 ntex::http::StatusCode::SERVICE_UNAVAILABLE,
                 "migration_infrastructure",

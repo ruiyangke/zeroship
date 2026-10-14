@@ -16,6 +16,7 @@
 use zeroship_migrate_backend::baseline::{BaselineError, BaselineOutcome};
 use zeroship_migrate_backend::conn::ExecutorConfig;
 use zeroship_migrate_backend::driver::SqlSession;
+use zeroship_migrate_backend::executor::close_project_lock_bracket;
 use zeroship_migrate_backend::journal::{self, JournalError};
 use zeroship_migrate_ir::migration::Migration;
 
@@ -71,11 +72,8 @@ pub(crate) async fn baseline<B: zeroship_migrate_backend::backend::MigrationBack
     // acquisition failed has nothing to release with.
     backend.acquire_project_lock(cfg).await?;
     let result = baseline_locked(conn, cfg, baseline_migration, applied_by).await;
-    let unlock = backend.release_project_lock(cfg).await;
-    match result {
-        Ok(o) => unlock.map(|()| o).map_err(BaselineError::Lock),
-        Err(e) => Err(e),
-    }
+    let release = backend.release_project_lock(cfg).await;
+    close_project_lock_bracket(result, release)
 }
 
 /// The baseline body, run while holding the project advisory lock.

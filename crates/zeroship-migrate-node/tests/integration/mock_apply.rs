@@ -62,6 +62,20 @@ impl MockDispatch {
     /// migration is pending and gets applied. Every other read (introspection,
     /// squash, drift) gets an empty rowset - a valid empty decode.
     fn rows_for(&self, sql: &str) -> Vec<JsRow> {
+        // The project-lock acquisition's read of the caller's timeouts, which also
+        // names `statement_timeout` and so must be routed before the session
+        // snapshot below. No statement budget: the acquisition lifts nothing.
+        if sql.contains("AS statement_ms") {
+            return vec![JsRow {
+                columns: vec![
+                    "statement_timeout".into(),
+                    "lock_timeout".into(),
+                    "statement_ms".into(),
+                    "lock_ms".into(),
+                ],
+                cells: vec![text_cell("0"), text_cell("0"), int_cell(0), int_cell(0)],
+            }];
+        }
         if sql.contains("current_setting('statement_timeout')") {
             return vec![JsRow {
                 columns: vec!["st".into(), "lt".into(), "sp".into()],

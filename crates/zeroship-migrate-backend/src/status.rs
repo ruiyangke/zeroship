@@ -106,6 +106,12 @@ pub enum StatusError {
     PlanManifest(String),
 }
 
+impl From<crate::executor::SessionDiscard> for StatusError {
+    fn from(discard: crate::executor::SessionDiscard) -> Self {
+        Self::ProjectLock(ApplyError::from(discard))
+    }
+}
+
 /// Derive the [`MigrationStatus::pending_contracts`] + [`MigrationStatus::blocked`]
 /// fields from the OUTSTANDING obligation set and the supplied migration set.
 /// Pure - shared by the PG snapshot path and any

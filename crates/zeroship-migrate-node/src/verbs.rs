@@ -11,7 +11,10 @@
 use std::collections::HashSet;
 
 use zeroship_migrate::apply::backend::{MigrationBackend, ProjectLockAcquisition, ProjectLockHolder};
-use zeroship_migrate::apply::executor::{ApplyOutcome, LockMode, RollbackOptions, RollbackTarget};
+use zeroship_migrate::apply::executor::{
+    close_project_lock_bracket, ApplyError, ApplyOutcome, LockMode, RollbackOptions,
+    RollbackTarget, SessionDiscard,
+};
 use zeroship_migrate::approval::Approval;
 use zeroship_migrate::conn::ExecutorConfig;
 use zeroship_migrate::model::migration::Migration;
@@ -760,17 +763,38 @@ pub async fn apply_ir_with_locked_backend<B: MigrationBackend>(
     .await;
 
     let release = backend.release_project_lock(cfg).await;
-    match (result, release) {
-        (Ok(reply), Ok(())) => Ok(reply),
-        (Ok(reply), Err(error)) => Err(after_failure(
-            reply.failure.as_deref(),
-            format!("failed to release project lock: {error}"),
-        )),
-        (Err(error), Ok(())) => Err(error),
-        (Err(error), Err(release_error)) => Err(format!(
-            "{error}; additionally failed to release project lock: {release_error}"
-        )),
+    let walk_failure = result.as_ref().ok().and_then(|reply| reply.failure.clone());
+    close_verb_bracket(result, release)
+        .map_err(|error| after_failure(walk_failure.as_deref(), error))
+}
+
+/// A verb's own failure, as the engine's lock bracket carries it.
+#[derive(Debug)]
+struct VerbFailure(String);
+
+impl std::fmt::Display for VerbFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
     }
+}
+
+impl std::error::Error for VerbFailure {}
+
+impl From<SessionDiscard> for VerbFailure {
+    fn from(discard: SessionDiscard) -> Self {
+        Self(discard.to_string())
+    }
+}
+
+/// Fold the release that closes a verb's project-lock bracket into the verb's
+/// result, exactly as the engine folds its own: a failed release leaves the host's
+/// session possibly still holding the lock, so it is reported as a session to
+/// discard, with the verb's own failure carried inside the message.
+fn close_verb_bracket<T>(
+    result: std::result::Result<T, String>,
+    release: std::result::Result<(), ApplyError>,
+) -> std::result::Result<T, String> {
+    close_project_lock_bracket(result.map_err(VerbFailure), release).map_err(|failure| failure.0)
 }
 
 /// `error`, appended to the failure a walk already stopped on when there is one,
@@ -1438,14 +1462,7 @@ pub async fn rollback_with_locked_backend<B: MigrationBackend>(
     .await;
 
     let release = backend.release_project_lock(cfg).await;
-    match (result, release) {
-        (Ok(reply), Ok(())) => Ok(reply),
-        (Ok(_), Err(error)) => Err(format!("failed to release project lock: {error}")),
-        (Err(error), Ok(())) => Err(error),
-        (Err(error), Err(release_error)) => Err(format!(
-            "{error}; additionally failed to release project lock: {release_error}"
-        )),
-    }
+    close_verb_bracket(result, release)
 }
 
 /// Name the authored migration behind a refusal the engine can only report as a
@@ -1637,14 +1654,7 @@ pub async fn status_ir_with_locked_backend<B: MigrationBackend>(
     .await;
 
     let release = backend.release_project_lock(cfg).await;
-    match (result, release) {
-        (Ok(reply), Ok(())) => Ok(reply),
-        (Ok(_), Err(error)) => Err(format!("failed to release project lock: {error}")),
-        (Err(error), Ok(())) => Err(error),
-        (Err(error), Err(release_error)) => Err(format!(
-            "{error}; additionally failed to release project lock: {release_error}"
-        )),
-    }
+    close_verb_bracket(result, release)
 }
 
 /// Read migration-only status through the selected dialect backend while holding
@@ -1691,14 +1701,7 @@ pub async fn legacy_status_with_locked_backend<B: MigrationBackend>(
     .await;
 
     let release = backend.release_project_lock(cfg).await;
-    match (result, release) {
-        (Ok(reply), Ok(())) => Ok(reply),
-        (Ok(_), Err(error)) => Err(format!("failed to release project lock: {error}")),
-        (Err(error), Ok(())) => Err(error),
-        (Err(error), Err(release_error)) => Err(format!(
-            "{error}; additionally failed to release project lock: {release_error}"
-        )),
-    }
+    close_verb_bracket(result, release)
 }
 
 /// Resolve one durable PostgreSQL online-rename obligation and return the
@@ -1748,14 +1751,7 @@ pub async fn resolve_pending_with_locked_backend<B: MigrationBackend>(
     .await;
 
     let release = backend.release_project_lock(cfg).await;
-    match (result, release) {
-        (Ok(reply), Ok(())) => Ok(reply),
-        (Ok(_), Err(error)) => Err(format!("failed to release project lock: {error}")),
-        (Err(error), Ok(())) => Err(error),
-        (Err(error), Err(release_error)) => Err(format!(
-            "{error}; additionally failed to release project lock: {release_error}"
-        )),
-    }
+    close_verb_bracket(result, release)
 }
 
 /// The `project_id` an `ExecutorConfig` carries. The IR host path uses the project
@@ -2023,14 +2019,7 @@ pub async fn baseline_ir_with_locked_backend<B: MigrationBackend>(
     .await;
 
     let release = backend.release_project_lock(cfg).await;
-    match (result, release) {
-        (Ok(reply), Ok(())) => Ok(reply),
-        (Ok(_), Err(error)) => Err(format!("failed to release project lock: {error}")),
-        (Err(error), Ok(())) => Err(error),
-        (Err(error), Err(release_error)) => Err(format!(
-            "{error}; additionally failed to release project lock: {release_error}"
-        )),
-    }
+    close_verb_bracket(result, release)
 }
 
 /// Refuse an adoption whose corpus does not describe the database it is pointed at.

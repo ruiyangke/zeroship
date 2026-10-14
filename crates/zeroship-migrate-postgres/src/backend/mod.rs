@@ -107,6 +107,27 @@ const fn minimum_server_version_num(feature: DatabaseFeature) -> i32 {
     }
 }
 
+/// The attempts of [`MigrationBackend::try_acquire_project_lock`], inside the one
+/// lifted statement budget its caller brackets them with: whether any of them took
+/// the lock.
+async fn try_project_lock_attempts<D: SqlSession>(
+    conn: &D,
+    project_id: &str,
+) -> Result<bool, ApplyError> {
+    for attempt in 1..=PROJECT_LOCK_TRY_ATTEMPTS {
+        if session::try_acquire_project_lock(conn, project_id).await? {
+            return Ok(true);
+        }
+        if attempt < PROJECT_LOCK_TRY_ATTEMPTS {
+            // The seam is one verb at a time over one pinned session, driven on
+            // a thread that has nothing else to run, so parking it is the whole
+            // cost of the pause.
+            std::thread::sleep(PROJECT_LOCK_TRY_BACKOFF);
+        }
+    }
+    Ok(false)
+}
+
 /// The generic Postgres [`MigrationBackend`] implementation.
 ///
 /// Generic over the [`SqlSession`] driver seam. Online expand-contract work uses
@@ -196,20 +217,22 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
     /// contention that has already cleared. The attempt count is FIXED and small:
     /// retrying until the lock is free is the unbounded wait this method exists to
     /// avoid, only spelled with more round trips.
+    ///
+    /// The caller's statement budget is lifted once around every attempt, as for
+    /// the blocking acquisition, and restored once after. The holder probe that
+    /// follows a contended run is an ordinary read, so it runs after the restore,
+    /// under the caller's own budget.
     async fn try_acquire_project_lock(
         &self,
         cfg: &ExecutorConfig,
     ) -> Result<ProjectLockAcquisition, ApplyError> {
-        for attempt in 1..=PROJECT_LOCK_TRY_ATTEMPTS {
-            if session::try_acquire_project_lock(self.conn, &cfg.project_id).await? {
-                return Ok(ProjectLockAcquisition::Acquired);
-            }
-            if attempt < PROJECT_LOCK_TRY_ATTEMPTS {
-                // The seam is one verb at a time over one pinned session, driven on
-                // a thread that has nothing else to run, so parking it is the whole
-                // cost of the pause.
-                std::thread::sleep(PROJECT_LOCK_TRY_BACKOFF);
-            }
+        let lifted = session::lift_statement_budget(self.conn).await?;
+        let outcome = try_project_lock_attempts(self.conn, &cfg.project_id).await;
+        let acquired =
+            session::settle_lock_statement(self.conn, lifted.as_ref(), outcome, |got| *got)
+                .await?;
+        if acquired {
+            return Ok(ProjectLockAcquisition::Acquired);
         }
         let holders = session::project_lock_holders(self.conn, &cfg.project_id).await?;
         Ok(ProjectLockAcquisition::Busy(holders))

@@ -29,7 +29,10 @@ use super::PostgresSessionSnapshot;
 use zeroship_migrate_backend::backend::ProjectLockHolder;
 use zeroship_migrate_backend::conn::ExecutorConfig;
 use zeroship_migrate_backend::driver::SqlSession;
-use zeroship_migrate_backend::executor::{authorize_existence_guard_schema, ApplyError, RollbackError};
+use zeroship_migrate_backend::executor::{
+    authorize_existence_guard_schema, ApplyError, DiscardStep, RollbackError, SessionDiscard,
+    SessionResidue,
+};
 use zeroship_migrate_backend::journal::{self, JournalError};
 use zeroship_migrate_backend::timeout::{resolve_timeout_ms, IndefiniteTimeoutError as TimeoutError};
 use zeroship_migrate_ir::migration::Migration;
@@ -57,10 +60,49 @@ pub(super) const AUTHOR_SQL_LITERAL_MODE: &str = "SET LOCAL standard_conforming_
 /// The hash space is 2^64 rather than `hashtext`'s 2^32. A theoretical collision
 /// only serializes two unrelated projects using the same PostgreSQL database;
 /// each apply remains confined to its own meta and project schemas.
+///
+/// # The caller's timeouts bound the wait
+///
+/// The wait is bounded by whichever of the caller's `statement_timeout` and
+/// `lock_timeout` is tighter, applied as a `lock_timeout` while the caller's
+/// `statement_timeout` is lifted (see [`lift_statement_budget`]). A failed
+/// acquisition may still have been granted the lock, and the statement that
+/// drops that grant has to run after the failure; the server applies
+/// `statement_timeout` to every statement, so under the caller's budget that
+/// drop would be cancelled under exactly the conditions that just cancelled the
+/// acquisition. `lock_timeout` can only end a lock wait, and the drop never
+/// waits.
+///
+/// # A session left unsettled
+///
+/// Whenever a statement that returns the session to its caller's state cannot
+/// be confirmed (the drop of a possible grant, the lift's `set_config`, or the
+/// restore of the caller's timeouts), the acquisition reports
+/// [`ApplyError::SessionMustBeDiscarded`] naming what the session may still
+/// carry. Closing the session settles all of it.
+///
+/// A caller that drops the returned future while it is pending can leave the
+/// session the same way: with the lock granted and not yet reported, or with the
+/// caller's timeouts lifted and not yet restored. Such a session is the caller's
+/// to discard.
+///
+/// # A caller's transaction block is refused
+///
+/// An acquisition that failed inside a transaction block could not drop its
+/// possible grant until the caller ended the block, so a session inside one is
+/// refused before anything is requested (see [`refuse_transaction_block`]).
 pub(crate) async fn acquire_project_lock<D: SqlSession>(
     conn: &D,
     project_id: &str,
 ) -> Result<(), ApplyError> {
+    let lifted = lift_statement_budget(conn).await?;
+    let outcome = take_project_lock(conn, project_id).await;
+    settle_lock_statement(conn, lifted.as_ref(), outcome, |(): &()| true).await
+}
+
+/// The `pg_advisory_lock` statement of [`acquire_project_lock`], with the drop of
+/// a possible grant on its failure path.
+async fn take_project_lock<D: SqlSession>(conn: &D, project_id: &str) -> Result<(), ApplyError> {
     match conn
         .exec(
             "SELECT pg_advisory_lock( \
@@ -71,15 +113,196 @@ pub(crate) async fn acquire_project_lock<D: SqlSession>(
         .await
     {
         Ok(_) => Ok(()),
-        Err(error) => {
-            drop_grant_from_failed_acquire(conn, project_id).await;
-            Err(error.into())
-        }
+        Err(error) => Err(drop_grant_from_failed_acquire(conn, project_id, error.into()).await),
     }
 }
 
+/// The caller's own `statement_timeout` and `lock_timeout`, held aside while a
+/// project-lock statement runs with its statement budget lifted.
+///
+/// Both are the `current_setting` text, which `set_config` round-trips exactly.
+#[derive(Debug)]
+pub(super) struct CallerTimeouts {
+    statement_timeout: String,
+    lock_timeout: String,
+}
+
+/// Lift the caller's `statement_timeout` for a project-lock statement and the
+/// statements that settle it, carrying its bound over to `lock_timeout`.
+///
+/// Returns `None`, and changes nothing, when the caller set no statement budget:
+/// a `lock_timeout` alone already cannot cancel the statements that settle a
+/// failed acquisition, because none of them waits for a lock. Otherwise the
+/// session runs with `statement_timeout = 0` and a `lock_timeout` of the tighter
+/// non-zero of the two, so the caller's budget still bounds the wait for the
+/// lock, and [`settle_lock_statement`] puts the caller's settings back.
+///
+/// It first refuses a session inside a transaction block
+/// ([`refuse_transaction_block`]). Every statement here runs before the lock is
+/// requested, so a failure in any of them has no grant to leave behind. A failed
+/// read changes nothing. A `set_config` the server answered with an error was
+/// rolled back with its implicit transaction and changed nothing either; one that
+/// failed without a server answer may have taken effect with only its reply lost,
+/// so it is reported as a session to discard rather than as a plain failure.
+pub(super) async fn lift_statement_budget<D: SqlSession>(
+    conn: &D,
+) -> Result<Option<CallerTimeouts>, ApplyError> {
+    refuse_transaction_block(conn).await?;
+    let row = conn
+        .query_one(
+            "SELECT current_setting('statement_timeout') AS statement_timeout, \
+                    current_setting('lock_timeout') AS lock_timeout, \
+                    (SELECT setting::int8 FROM pg_settings \
+                      WHERE name = 'statement_timeout') AS statement_ms, \
+                    (SELECT setting::int8 FROM pg_settings \
+                      WHERE name = 'lock_timeout') AS lock_ms",
+            &[],
+        )
+        .await?;
+    let statement_ms: i64 = row.try_get("statement_ms")?;
+    if statement_ms == 0 {
+        return Ok(None);
+    }
+    let lock_ms: i64 = row.try_get("lock_ms")?;
+    let wait_ms = if lock_ms == 0 {
+        statement_ms
+    } else {
+        statement_ms.min(lock_ms)
+    };
+    let caller = CallerTimeouts {
+        statement_timeout: row.try_get("statement_timeout")?,
+        lock_timeout: row.try_get("lock_timeout")?,
+    };
+    match conn
+        .exec(
+            "SELECT set_config('statement_timeout', '0', false), \
+                    set_config('lock_timeout', $1, false)",
+            &[wait_ms.to_string().into()],
+        )
+        .await
+    {
+        Ok(_) => Ok(Some(caller)),
+        Err(error) if answered_by_server(&error) => Err(error.into()),
+        Err(error) => Err(SessionDiscard::new(
+            SessionResidue::TIMEOUTS,
+            DiscardStep::TimeoutLift,
+            error.into(),
+            None,
+        )
+        .into()),
+    }
+}
+
+/// Refuses a statement run inside a transaction block, and nothing else.
+///
+/// It compares the transaction's start with the statement's. A simple-protocol
+/// statement outside a block runs in an implicit transaction that starts with it,
+/// so the two are equal; inside a block the transaction started at `BEGIN`, an
+/// earlier round trip. It goes through `batch` because that is the simple
+/// protocol: the extended protocol stamps the statement again at Bind and at
+/// Execute, after its implicit transaction began at the first message, so the
+/// same comparison is false outside a block as well. A failed transaction block
+/// refuses it too, with the server's own error.
+const TRANSACTION_BLOCK_PROBE: &str = "DO $probe$ BEGIN \
+       IF transaction_timestamp() <> statement_timestamp() THEN \
+         RAISE EXCEPTION 'zero-migrate takes the project lock only on a session outside a \
+transaction block; end the open transaction first' \
+           USING ERRCODE = 'active_sql_transaction'; \
+       END IF; \
+     END $probe$";
+
+/// Refuse a session inside a transaction block before anything is requested.
+///
+/// An acquisition that failed inside a block could not drop the grant it may
+/// hold until the caller ended the block, and the lock would then outlive the
+/// failure on a session the caller still holds. Refusing first means no lock is
+/// ever requested on such a session.
+async fn refuse_transaction_block<D: SqlSession>(conn: &D) -> Result<(), ApplyError> {
+    conn.batch(TRANSACTION_BLOCK_PROBE).await?;
+    Ok(())
+}
+
+/// Whether the server answered `error` for its statement, so the statement's
+/// implicit transaction rolled back and changed nothing.
+///
+/// A server error carries a SQLSTATE of five digits or upper-case letters. Class
+/// `08` is a connection exception, which a client library also reports for a link
+/// it lost, and no server class begins with `E`, while the host driver reports
+/// node's system error codes (`EPIPE`, `ECONNRESET`) in the same field. Those are
+/// not server answers.
+fn answered_by_server(error: &zeroship_migrate_backend::driver::DbError) -> bool {
+    error.sqlstate.as_deref().is_some_and(|code| {
+        code.len() == 5
+            && code
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte.is_ascii_uppercase())
+            && !code.starts_with("08")
+            && !code.starts_with('E')
+    })
+}
+
+/// Put back the caller's timeouts captured by [`lift_statement_budget`].
+///
+/// This statement itself runs unbudgeted: the session's `statement_timeout` is
+/// still zero when it arrives, and the server arms a statement's timer from the
+/// setting in force when the statement starts.
+async fn restore_caller_timeouts<D: SqlSession>(
+    conn: &D,
+    caller: &CallerTimeouts,
+) -> Result<(), ApplyError> {
+    conn.exec(
+        "SELECT set_config('statement_timeout', $1, false), \
+                set_config('lock_timeout', $2, false)",
+        &[
+            caller.statement_timeout.as_str().into(),
+            caller.lock_timeout.as_str().into(),
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Finish a project-lock statement by putting the caller's timeouts back.
+///
+/// A restore that fails leaves the session out of its caller's contract: a
+/// failed statement leaves the lifted settings in place, and one whose reply
+/// alone was lost may or may not have put them back. Either way the acquisition
+/// reports a session to discard, and nothing more runs on it. `holds` reports
+/// whether a successful `outcome` left the lock held, so that report names the
+/// lock too; a failed `outcome` contributes whatever it already named.
+pub(super) async fn settle_lock_statement<D: SqlSession, T>(
+    conn: &D,
+    lifted: Option<&CallerTimeouts>,
+    outcome: Result<T, ApplyError>,
+    holds: impl FnOnce(&T) -> bool,
+) -> Result<T, ApplyError> {
+    let Some(caller) = lifted else {
+        return outcome;
+    };
+    let Err(error) = restore_caller_timeouts(conn, caller).await else {
+        return outcome;
+    };
+    let residue = match &outcome {
+        Ok(value) if holds(value) => SessionResidue::TIMEOUTS.and(SessionResidue::PROJECT_LOCK),
+        Ok(_) => SessionResidue::TIMEOUTS,
+        Err(failure) => failure
+            .session_discard()
+            .map_or(SessionResidue::TIMEOUTS, |discard| {
+                discard.residue().and(SessionResidue::TIMEOUTS)
+            }),
+    };
+    Err(SessionDiscard::new(
+        residue,
+        DiscardStep::TimeoutRestore,
+        error,
+        outcome.err().map(Into::into),
+    )
+    .into())
+}
+
 /// Drop a grant the server may have recorded for an acquisition that then failed,
-/// so a session outliving the failure does not carry a lock nobody tracks.
+/// so a session outliving the failure does not carry a lock nobody tracks, and
+/// return the error the acquisition reports.
 ///
 /// PostgreSQL can grant a session advisory lock and still fail the acquiring
 /// statement. `LockErrorCleanup` re-grants a waiter that was kicked off the lock
@@ -87,7 +310,7 @@ pub(crate) async fn acquire_project_lock<D: SqlSession>(
 /// table"), and `pg_advisory_lock` acquires with `sessionLock = true`, so the
 /// grant outlives the transaction abort that follows. A cancelled lock wait is the
 /// live case: a peer's release lands in the same instant as the acquirer's
-/// `statement_timeout`, and the acquirer holds a lock it was told it never got. An
+/// lock-wait timeout, and the acquirer holds a lock it was told it never got. An
 /// acquisition whose reply is lost on the way back has the same shape. In every
 /// one of them the acquisition reported failure, so no caller has anything to
 /// release with.
@@ -97,28 +320,46 @@ pub(crate) async fn acquire_project_lock<D: SqlSession>(
 /// exposed is a Rust embedder, or any pooled or long-lived session, where the
 /// connection survives the failed acquisition and nothing ever releases the grant.
 ///
-/// Best effort by construction, on the ERROR path only. Releasing after a
-/// SUCCESSFUL acquisition would free the lock the caller is about to rely on.
-/// `pg_advisory_unlock` on a key this session never held returns false rather than
-/// erroring, so compensating for a grant that never happened cannot turn a failed
-/// acquisition into a worse failure. Session advisory locks stack by depth, so
-/// this would drop an outer bracket's hold if one existed -- none does: every
-/// acquisition site is the outermost bracket for its session, and an inner
-/// sub-batch runs under `LockMode::AlreadyHeld` and takes no lock of its own.
+/// Every caller runs this with no statement budget in force: it is called only
+/// between [`lift_statement_budget`] and [`settle_lock_statement`], and either the
+/// caller set no budget or the lift took it away. So no timeout the caller set
+/// can cancel it, and the lift refused a session inside a transaction block, so
+/// no aborted block can refuse it either. When it fails anyway (a lost connection,
+/// or a cancel aimed at this session while it runs), the session may still hold
+/// the lock, and the acquisition reports
+/// [`ApplyError::SessionMustBeDiscarded`] carrying its own `failure`. Otherwise it
+/// reports `failure` itself.
+///
+/// It runs on the ERROR path only. Releasing after a SUCCESSFUL acquisition would
+/// free the lock the caller is about to rely on. `pg_advisory_unlock` on a key
+/// this session never held returns false rather than erroring, so compensating
+/// for a grant that never happened cannot turn a failed acquisition into a worse
+/// failure. Session advisory locks stack by depth, so this would drop an outer
+/// bracket's hold if one existed -- none does: every acquisition site is the
+/// outermost bracket for its session, and an inner sub-batch runs under
+/// `LockMode::AlreadyHeld` and takes no lock of its own.
 ///
 /// PostgreSQL only, deliberately. MySQL's `GET_LOCK` grants nothing when it
 /// returns 0 or errors, and SQLite's project lock is a local file try_lock, so
 /// neither has a grant to compensate for and neither gets this call.
-async fn drop_grant_from_failed_acquire<D: SqlSession>(conn: &D, project_id: &str) {
-    if let Err(error) = release_project_lock(conn, project_id).await {
-        tracing::warn!(
-            error = %error,
-            "zero-migrate: failed to drop a possible advisory-lock grant after a failed project-lock acquisition"
-        );
+async fn drop_grant_from_failed_acquire<D: SqlSession>(
+    conn: &D,
+    project_id: &str,
+    failure: ApplyError,
+) -> ApplyError {
+    match release_project_lock(conn, project_id).await {
+        Ok(()) => failure,
+        Err(error) => SessionDiscard::new(
+            SessionResidue::PROJECT_LOCK,
+            DiscardStep::GrantDrop,
+            error,
+            Some(Box::new(failure)),
+        )
+        .into(),
     }
 }
 
-/// Take the project lock if it is free right now, without waiting.
+/// Take the project lock if it is free right now, without waiting: one attempt.
 ///
 /// `pg_try_advisory_lock` is the non-waiting peer of the `pg_advisory_lock` above
 /// and takes the identical pair of `hashtextextended(project_id, 0)` halves, so a
@@ -128,11 +369,16 @@ async fn drop_grant_from_failed_acquire<D: SqlSession>(conn: &D, project_id: &st
 /// its own; what it shares with the blocking acquisition is a lock the server
 /// granted and the caller never learned about, whether the reply was lost in
 /// transport or arrived undecodable. Both failure paths therefore compensate
-/// through [`drop_grant_from_failed_acquire`], which documents why.
+/// through [`drop_grant_from_failed_acquire`].
+///
+/// The caller brackets its attempts with [`lift_statement_budget`] and
+/// [`settle_lock_statement`], exactly as the blocking acquisition does, so the
+/// compensation runs with no statement budget in force.
 ///
 /// # Errors
 /// [`ApplyError::Db`] on a driver failure, [`ApplyError::Backend`] if the boolean
-/// result cannot be decoded.
+/// result cannot be decoded, and [`ApplyError::SessionMustBeDiscarded`] when the
+/// compensation for either cannot be confirmed.
 pub(crate) async fn try_acquire_project_lock<D: SqlSession>(
     conn: &D,
     project_id: &str,
@@ -149,17 +395,16 @@ pub(crate) async fn try_acquire_project_lock<D: SqlSession>(
     {
         Ok(row) => row,
         Err(error) => {
-            drop_grant_from_failed_acquire(conn, project_id).await;
-            return Err(error.into());
+            return Err(drop_grant_from_failed_acquire(conn, project_id, error.into()).await);
         }
     };
     match row.try_get::<_, bool>("got") {
         Ok(got) => Ok(got),
         Err(error) => {
-            drop_grant_from_failed_acquire(conn, project_id).await;
-            Err(ApplyError::Backend(format!(
+            let failure = ApplyError::Backend(format!(
                 "pg_try_advisory_lock returned an undecodable result: {error}"
-            )))
+            ));
+            Err(drop_grant_from_failed_acquire(conn, project_id, failure).await)
         }
     }
 }

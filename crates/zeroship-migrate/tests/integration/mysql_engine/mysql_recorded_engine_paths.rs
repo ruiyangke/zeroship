@@ -1578,7 +1578,26 @@ async fn successful_apply_surfaces_restore_failure_after_releasing_lock() {
     )
     .await;
 
-    assert!(matches!(result, Err(ApplyError::Db(_))), "{result:?}");
+    // A failed restore leaves the session on the apply's settings, so the apply
+    // reports the session to discard even though its migration succeeded.
+    let discard = match &result {
+        Err(error) => error
+            .session_discard()
+            .unwrap_or_else(|| panic!("the session must be reported for discard: {error}")),
+        Ok(outcome) => panic!("a failed restore is not a clean apply: {outcome:?}"),
+    };
+    assert_eq!(
+        discard.step(),
+        zeroship_migrate::DiscardStep::SettingsRestore,
+        "{result:?}"
+    );
+    assert!(
+        discard
+            .residue()
+            .contains(zeroship_migrate::SessionResidue::SETTINGS),
+        "{result:?}"
+    );
+    assert!(discard.operation().is_none(), "the migration itself succeeded");
     let log = rec.log.borrow();
     let author = log
         .iter()

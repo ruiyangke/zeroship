@@ -226,8 +226,9 @@ pub use zeroship_migrate_backend::guard::ParseError;
 // name. The neutral surface is
 // `MigrationBackend::{check_checksum_drift, snapshot_schema}`.
 pub use apply::executor::{
-    ApplyError, ApplyOutcome, BackendError, LockMode, PreconditionVerdict, RollbackError,
-    RollbackOptions, RollbackOutcome, RollbackRequest, RollbackTarget,
+    ApplyError, ApplyOutcome, BackendError, DiscardStep, LockMode, PreconditionVerdict,
+    RollbackError, RollbackOptions, RollbackOutcome, RollbackRequest, RollbackTarget,
+    SessionDiscard, SessionResidue,
 };
 // The rollback verb, and the planner that decides every refusal before it runs.
 // Generic over `MigrationBackend`, so it runs on every dialect through one body.

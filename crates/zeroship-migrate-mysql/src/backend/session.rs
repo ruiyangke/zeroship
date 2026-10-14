@@ -47,7 +47,10 @@ use crate::backend::journal_sql;
 use zeroship_migrate_backend::backend::ProjectLockHolder;
 use zeroship_migrate_backend::conn::ExecutorConfig;
 use zeroship_migrate_backend::driver::{Bind, SqlSession};
-use zeroship_migrate_backend::executor::{authorize_existence_guard_schema, ApplyError, RollbackError};
+use zeroship_migrate_backend::executor::{
+    authorize_existence_guard_schema, ApplyError, DiscardStep, RollbackError, SessionDiscard,
+    SessionResidue,
+};
 use zeroship_migrate_backend::journal::{self, CompletedRecord};
 use zeroship_migrate_backend::step::BindValue;
 use zeroship_migrate_backend::timeout::{resolve_timeout_ms, IndefiniteTimeoutError as TimeoutError};
@@ -229,6 +232,26 @@ pub(crate) async fn acquire_journal_bootstrap_lock<D: SqlSession>(
             "mysql journal bootstrap GET_LOCK('{name}') returned NULL (lock error)"
         ))),
     }
+}
+
+/// The error a step bracketed by `LOCK TABLES` reports when its `UNLOCK TABLES`
+/// failed.
+///
+/// Explicit table locks last until `UNLOCK TABLES` or the end of the session, and
+/// while they last no other session can touch those tables, so the session must
+/// be discarded rather than reused. `operation` is the step's own failure, which
+/// travels inside the report.
+pub(super) fn table_unlock_failed(
+    unlock: zeroship_migrate_backend::driver::DbError,
+    operation: ApplyError,
+) -> ApplyError {
+    SessionDiscard::new(
+        SessionResidue::TABLE_LOCKS,
+        DiscardStep::TableUnlock,
+        unlock.into(),
+        Some(Box::new(operation)),
+    )
+    .into()
 }
 
 pub(crate) async fn release_journal_bootstrap_lock<D: SqlSession>(

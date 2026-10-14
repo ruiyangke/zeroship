@@ -29,7 +29,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 // `dialect` argument was exactly the shape that let the neutral verbs read
 // PostgreSQL's journal whatever dialect the caller named.
 use crate::apply::backend::{BackfillProgressEntry, ProjectLockAcquisition, ProjectLockHolder};
-use crate::apply::executor::order_pending;
+use crate::apply::executor::{close_project_lock_bracket, order_pending};
 use crate::apply::journal::{self, AppliedEntry, HistoryEvent, Phase};
 use crate::conn::ExecutorConfig;
 use crate::model::migration::{Checksum, Migration, MigrationId};
@@ -918,18 +918,7 @@ async fn status_plans_via_backend_inner<B: crate::apply::backend::MigrationBacke
     let snapshot = status_plans_via_backend_locked_inner(backend, cfg, manifests, !bootstrap).await;
 
     let release = backend.release_project_lock(cfg).await;
-    match (snapshot, release) {
-        (Ok(status), Ok(())) => Ok(StatusSnapshot::Ready(status)),
-        (Ok(_), Err(error)) => Err(StatusError::ProjectLock(error)),
-        (Err(error), Ok(())) => Err(error),
-        (Err(error), Err(release_error)) => {
-            tracing::warn!(
-                error = %release_error,
-                "zero-migrate: failed to release project lock after status snapshot error"
-            );
-            Err(error)
-        }
-    }
+    close_project_lock_bracket(snapshot, release).map(StatusSnapshot::Ready)
 }
 
 /// Read and reconcile plan status while the caller holds the project lock.
@@ -1220,18 +1209,7 @@ async fn status_via_backend_inner<B: crate::apply::backend::MigrationBackend>(
 
     let snapshot = status_via_backend_locked_inner(backend, cfg, migrations, !bootstrap).await;
     let release = backend.release_project_lock(cfg).await;
-    match (snapshot, release) {
-        (Ok(status), Ok(())) => Ok(StatusSnapshot::Ready(status)),
-        (Ok(_), Err(error)) => Err(StatusError::ProjectLock(error)),
-        (Err(error), Ok(())) => Err(error),
-        (Err(error), Err(release_error)) => {
-            tracing::warn!(
-                error = %release_error,
-                "zero-migrate: failed to release project lock after status error"
-            );
-            Err(error)
-        }
-    }
+    close_project_lock_bracket(snapshot, release).map(StatusSnapshot::Ready)
 }
 
 /// Reconcile migration-only status while the caller holds the backend's project

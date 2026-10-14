@@ -60,8 +60,9 @@ use crate::render::step::PlanStep;
 // here. Re-exported so every `crate::apply::executor::...` path (and the flattened
 // root re-exports in `lib.rs`) resolves unchanged.
 pub use zeroship_migrate_backend::executor::{
-    ApplyError, ApplyOutcome, BackendError, LockMode, PreconditionVerdict, RollbackError,
-    RollbackOptions, RollbackOutcome, RollbackRequest, RollbackTarget,
+    close_project_lock_bracket, close_session_bracket, ApplyError, ApplyOutcome, BackendError,
+    DiscardStep, LockMode, PreconditionVerdict, RollbackError, RollbackOptions, RollbackOutcome,
+    RollbackRequest, RollbackTarget, SessionDiscard, SessionResidue,
 };
 // `authorize_existence_guard_schema` followed the vocabulary down. It is the gate
 // each backend's own session path runs before reading a schema a guard NAMED, so it
@@ -212,12 +213,8 @@ pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
             // may run after this failure.
             backend.reset_role_best_effort().await;
             if lock_mode == LockMode::Acquire {
-                if let Err(unlock) = backend.release_project_lock(cfg).await {
-                    tracing::warn!(
-                        error = %unlock,
-                        "zero-migrate: failed to release project lock after session snapshot error"
-                    );
-                }
+                let release = backend.release_project_lock(cfg).await;
+                return close_project_lock_bracket(Err(error), release);
             }
             return Err(error);
         }
@@ -230,36 +227,29 @@ pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
     // role back to admin on EVERY exit path first, then restore the GUCs if we
     // have a snapshot. (Harmless no-op when no `SET ROLE` ran.)
     backend.reset_role_best_effort().await;
-    // Restore before releasing the lock. Preserve an apply failure when cleanup
-    // also fails, but never report a successful apply if its session restoration
-    // failed: returning that connection to a pool with altered settings is an
-    // observable failure of the operation's contract.
+    // Restore before releasing the lock. A restore that fails leaves the session
+    // with the role, search_path and timeouts the apply set, which a pooled or
+    // long-lived caller would otherwise reuse unawares, so it is reported as a
+    // session to discard whichever way the apply went, carrying the apply's own
+    // failure.
     let restored = backend.restore_session(&snapshot).await;
-    let result = match (result, restored) {
-        (Err(error), Err(restore)) => {
-            tracing::warn!(
-                error = %restore,
-                "zero-migrate: failed to restore session settings after apply error"
-            );
-            Err(error)
-        }
-        (Err(error), Ok(())) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
-        (Ok(outcome), Ok(())) => Ok(outcome),
-    };
+    let result = close_session_bracket(
+        result,
+        restored,
+        SessionResidue::SETTINGS,
+        DiscardStep::SettingsRestore,
+    );
     // Release the lock only when WE acquired it. Under `AlreadyHeld` the outer
     // `apply_declarative` releases it once, after every sub-batch. Always release
     // on the `Acquire` path, even on error. Surface the original error first.
     if lock_mode == LockMode::AlreadyHeld {
         return result;
     }
-    let unlock = backend.release_project_lock(cfg).await;
-    // Surface the apply error first if there was one; otherwise surface any
-    // unlock failure. (The lock auto-releases on session end regardless.)
-    match result {
-        Ok(o) => unlock.map(|()| o),
-        Err(e) => Err(e),
-    }
+    // A failed release leaves the session possibly still holding the lock, so it
+    // is reported as a session to discard whichever way the apply went, with the
+    // apply's own failure carried inside it.
+    let release = backend.release_project_lock(cfg).await;
+    close_project_lock_bracket(result, release)
 }
 
 /// Pre-flight over the FULL supplied set: reject malformed
@@ -1888,7 +1878,7 @@ pub async fn rollback_with_lock_and_inverse_plans<B: MigrationBackend>(
         backend
             .acquire_project_lock(cfg)
             .await
-            .map_err(|e| RollbackError::Backend(e.to_string()))?;
+            .map_err(rollback_lock_error)?;
     }
     let result = rollback_locked(
         backend,
@@ -1904,13 +1894,17 @@ pub async fn rollback_with_lock_and_inverse_plans<B: MigrationBackend>(
     if lock_mode == LockMode::AlreadyHeld {
         return result;
     }
-    let unlock = backend
-        .release_project_lock(cfg)
-        .await
-        .map_err(|e| RollbackError::Backend(e.to_string()));
-    match result {
-        Ok(o) => unlock.map(|()| o),
-        Err(e) => Err(e),
+    let release = backend.release_project_lock(cfg).await;
+    close_project_lock_bracket(result, release)
+}
+
+/// A project-lock acquisition failure on the rollback surface. A session to
+/// discard stays one, so a rollback caller learns it as surely as an apply caller
+/// does; any other failure keeps its message.
+fn rollback_lock_error(error: ApplyError) -> RollbackError {
+    match error {
+        ApplyError::SessionMustBeDiscarded(discard) => RollbackError::SessionMustBeDiscarded(discard),
+        other => RollbackError::Backend(other.to_string()),
     }
 }
 

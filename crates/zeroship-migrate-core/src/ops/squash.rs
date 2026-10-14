@@ -43,7 +43,7 @@ use std::collections::HashSet;
 use zeroship_migrate_backend::registry::VendorSet;
 
 use crate::apply::backend::MigrationBackend;
-use crate::apply::executor::ApplyError;
+use crate::apply::executor::{close_project_lock_bracket, ApplyError, SessionDiscard};
 use crate::apply::journal::{JournalError, Phase};
 use crate::conn::ExecutorConfig;
 use crate::guard::GuardError;
@@ -78,6 +78,11 @@ pub enum SquashError {
     /// behind the backend seam).
     #[error(transparent)]
     Journal(#[from] JournalError),
+    /// The session the squash ran on is left in a state its caller must not
+    /// reuse: the release that closes its project-lock bracket failed, or the
+    /// acquisition could not settle the session. See [`SessionDiscard`].
+    #[error(transparent)]
+    SessionMustBeDiscarded(#[from] SessionDiscard),
     /// The squash's `up` was denied by the guard (RCE / priv-esc / cross-tenant /
     /// file / network). `S.up` is held to the same parse-time deny-list as any `up`
     /// (defense in depth), even though it is recorded-not-run here. Nothing was
@@ -205,11 +210,8 @@ pub async fn squash<B: MigrationBackend>(
         .await
         .map_err(apply_to_squash)?;
     let result = squash_locked(backend, cfg, squash_migration, applied_by).await;
-    let unlock = backend.release_project_lock(cfg).await;
-    match result {
-        Ok(o) => unlock.map(|_| o).map_err(apply_to_squash),
-        Err(e) => Err(e),
-    }
+    let release = backend.release_project_lock(cfg).await;
+    close_project_lock_bracket(result, release)
 }
 
 /// Map a backend-neutral [`ApplyError`] (the lock / write leaf errors) onto the
@@ -223,6 +225,7 @@ pub async fn squash<B: MigrationBackend>(
 fn apply_to_squash(e: ApplyError) -> SquashError {
     match e {
         ApplyError::Journal(j) => SquashError::Journal(j),
+        ApplyError::SessionMustBeDiscarded(discard) => SquashError::SessionMustBeDiscarded(discard),
         other => SquashError::Backend(other.to_string()),
     }
 }

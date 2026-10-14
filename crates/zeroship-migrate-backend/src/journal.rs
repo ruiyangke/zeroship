@@ -429,6 +429,10 @@ pub enum JournalError {
     /// rather than interpolate it. Maps [`crate::dml::IdentQuoteError`].
     #[error("journal render: {0}")]
     IdentQuote(#[from] crate::dml::IdentQuoteError),
+    /// The session a journal bootstrap ran on is left in a state its caller must
+    /// not reuse. See [`SessionDiscard`](crate::executor::SessionDiscard).
+    #[error(transparent)]
+    SessionMustBeDiscarded(#[from] crate::executor::SessionDiscard),
 }
 
 // Every backend's journal reads through the same `DbError` seam, so this

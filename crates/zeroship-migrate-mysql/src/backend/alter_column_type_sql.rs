@@ -100,9 +100,7 @@ pub(super) async fn alter_column_type<D: SqlSession>(
             Ok(ddl) => ddl,
             Err(error) => {
                 if let Err(unlock) = conn.batch("UNLOCK TABLES").await {
-                    return Err(ApplyError::Backend(format!(
-                        "{error}; additionally failed to release the MySQL column-restate lock: {unlock}"
-                    )));
+                    return Err(session::table_unlock_failed(unlock, error));
                 }
                 return Err(error);
             }
@@ -118,9 +116,7 @@ pub(super) async fn alter_column_type<D: SqlSession>(
         .await
         {
             if let Err(unlock) = conn.batch("UNLOCK TABLES").await {
-                return Err(ApplyError::Backend(format!(
-                    "{error}; additionally failed to release the MySQL column-restate lock: {unlock}"
-                )));
+                return Err(session::table_unlock_failed(unlock, error.into()));
             }
             return Err(error.into());
         }
@@ -130,20 +126,22 @@ pub(super) async fn alter_column_type<D: SqlSession>(
         let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
         let unlock_result = conn.batch("UNLOCK TABLES").await;
         if let Err(source) = ddl_result {
-            if let Err(unlock) = unlock_result {
-                return Err(ApplyError::Backend(format!(
-                    "MySQL column restate failed ({source}) and its explicit table lock could not be released ({unlock}); the inflight marker was retained"
-                )));
-            }
-            return Err(ApplyError::MigrationFailed {
+            let failed = ApplyError::MigrationFailed {
                 version: step.migration.version.as_str().to_string(),
                 source: source.into(),
-            });
+            };
+            if let Err(unlock) = unlock_result {
+                return Err(session::table_unlock_failed(unlock, failed));
+            }
+            return Err(failed);
         }
         if let Err(unlock) = unlock_result {
-            return Err(ApplyError::Backend(format!(
-                "MySQL column restate completed but explicit table-lock cleanup failed: {unlock}; the inflight marker was retained for recovery"
-            )));
+            return Err(session::table_unlock_failed(
+                unlock,
+                ApplyError::Backend(
+                    "MySQL column restate completed; its inflight marker was retained for recovery".to_string(),
+                ),
+            ));
         }
         session::finalize_started_structured_ddl(conn, cfg, &step.migration, applied_by, exec_ms)
             .await?;

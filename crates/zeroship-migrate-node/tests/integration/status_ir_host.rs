@@ -32,6 +32,7 @@ use zeroship_migrate::conn::ExecutorConfig;
 use zeroship_migrate_postgres::PostgresBackend;
 
 use zeroship_migrate_node::marshal::{JsCell, JsReply, JsRequest, JsRow};
+use zeroship_migrate_node::wire::JsError;
 use zeroship_migrate_node::session::{NapiHostSession, VerbDispatch, VerbReply};
 use zeroship_migrate_node::verbs::status_ir_with_locked_backend;
 
@@ -54,6 +55,9 @@ struct MockPgDispatch {
     /// When false every `pg_try_advisory_lock` answers false, standing in for a
     /// peer's deploy holding the project lock for the length of its run.
     grants_project_lock: bool,
+    /// When true the closing `pg_advisory_unlock` fails, standing in for a release
+    /// the session's own statement budget cancelled.
+    fails_release: bool,
 }
 
 /// Process id the canned holder probe reports, so the busy reply can be checked
@@ -66,6 +70,7 @@ impl MockPgDispatch {
             log: RefCell::new(Vec::new()),
             journal_carries_event_seq,
             grants_project_lock: true,
+            fails_release: false,
         }
     }
 
@@ -74,10 +79,28 @@ impl MockPgDispatch {
             log: RefCell::new(Vec::new()),
             journal_carries_event_seq: true,
             grants_project_lock: false,
+            fails_release: false,
+        }
+    }
+
+    const fn failing_release() -> Self {
+        Self {
+            log: RefCell::new(Vec::new()),
+            journal_carries_event_seq: true,
+            grants_project_lock: true,
+            fails_release: true,
         }
     }
 
     fn rows_for(&self, sql: &str) -> Vec<JsRow> {
+        // The project-lock acquisition reads the caller's timeouts first. No
+        // statement budget: the acquisition lifts nothing.
+        if sql.contains("AS statement_ms") {
+            return vec![row(
+                &["statement_timeout", "lock_timeout", "statement_ms", "lock_ms"],
+                vec![text_cell("0"), text_cell("0"), int_cell(0), int_cell(0)],
+            )];
+        }
         if sql.contains("pg_try_advisory_lock") {
             return vec![row(&["got"], vec![bool_cell(self.grants_project_lock)])];
         }
@@ -200,6 +223,12 @@ impl MockPgDispatch {
 impl VerbDispatch for MockPgDispatch {
     async fn dispatch(&self, req: JsRequest) -> VerbReply {
         self.log.borrow_mut().push(req.sql.clone());
+        if self.fails_release && req.sql.contains("pg_advisory_unlock") {
+            return Err(JsError {
+                message: "canceling statement due to statement timeout".into(),
+                code: Some("57014".into()),
+            });
+        }
         let rows = self.rows_for(&req.sql);
         let row_count = rows.len() as i64;
         Ok(JsReply {
@@ -267,8 +296,18 @@ fn run_status(
     Result<zeroship_migrate_node::wire::StatusReply, String>,
     Vec<String>,
 ) {
+    run_status_over(MockPgDispatch::new(journal_carries_event_seq))
+}
+
+/// Reconcile an empty authored plan set over `dispatch`.
+fn run_status_over(
+    dispatch: MockPgDispatch,
+) -> (
+    Result<zeroship_migrate_node::wire::StatusReply, String>,
+    Vec<String>,
+) {
     futures::executor::block_on(async {
-        let session = NapiHostSession::new(MockPgDispatch::new(journal_carries_event_seq));
+        let session = NapiHostSession::new(dispatch);
         let cfg = ExecutorConfig::new(
             PROJECT_SCHEMA,
             PROJECT_SCHEMA,
@@ -471,5 +510,29 @@ fn a_journal_reply_without_event_seq_is_rejected() {
     assert!(
         error.contains("column not found in row"),
         "the missing journal column must surface as a decode failure: {error}"
+    );
+}
+
+/// A release that fails after a successful read reports the host's session as one
+/// to discard: the release is the statement that would have returned it to a
+/// reusable state, and advisory locks stack, so a session reused after it can hold
+/// the project lock for every later deploy.
+#[test]
+fn a_failed_release_reports_the_session_to_discard() {
+    let (reply, log) = run_status_over(MockPgDispatch::failing_release());
+    let error = reply.expect_err("a failed release is not a successful status");
+
+    assert!(
+        log.iter().any(|sql| sql.contains("pg_advisory_unlock")),
+        "the release must have been attempted: {log:?}"
+    );
+    assert!(
+        error.contains("may still hold the project lock")
+            && error.contains("discard the session"),
+        "the verb must report the session to discard: {error}"
+    );
+    assert!(
+        error.contains("canceling statement due to statement timeout"),
+        "the release's own failure must survive into the message: {error}"
     );
 }

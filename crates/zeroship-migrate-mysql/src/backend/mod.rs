@@ -57,7 +57,10 @@ use zeroship_migrate_backend::capability::OnlineSchemaChange;
 use zeroship_migrate_backend::conn::ExecutorConfig;
 use zeroship_migrate_backend::drift::DriftError;
 use zeroship_migrate_backend::driver::{Row, SqlSession};
-use zeroship_migrate_backend::executor::{ApplyError, RollbackError};
+use zeroship_migrate_backend::executor::{
+    close_project_lock_bracket, close_session_bracket, ApplyError, DiscardStep, RollbackError,
+    SessionDiscard, SessionResidue,
+};
 use zeroship_migrate_backend::journal::{AppliedEntry, JournalBootstrap, JournalError};
 use zeroship_migrate_backend::requirements::{DatabaseFeature, DatabaseRequirements};
 use zeroship_migrate_backend::snapshot::SchemaSnapshot;
@@ -180,6 +183,12 @@ pub enum MysqlInflightRecoveryError {
     /// The migration shape cannot map to a valid journal completion kind.
     #[error("mysql inflight DDL recovery received an invalid migration shape: {0}")]
     InvalidMigration(String),
+}
+
+impl From<SessionDiscard> for MysqlInflightRecoveryError {
+    fn from(discard: SessionDiscard) -> Self {
+        Self::Apply(ApplyError::from(discard))
+    }
 }
 
 /// Decide whether a stable plan-step version is already net-applied. A matching
@@ -405,19 +414,8 @@ impl<'a, D: SqlSession> MysqlBackend<'a, D> {
         let result =
             recover_inflight_locked(self.conn, cfg, migration, resolution, recovered_by, reason)
                 .await;
-        let unlock = session::release_project_lock(self.conn, &cfg.project_id).await;
-        match (result, unlock) {
-            (Err(error), Err(unlock)) => {
-                tracing::warn!(
-                    error = %unlock,
-                    "zero-migrate: failed to release MySQL project lock after inflight recovery error"
-                );
-                Err(error)
-            }
-            (Err(error), Ok(())) => Err(error),
-            (Ok(_), Err(error)) => Err(error.into()),
-            (Ok(outcome), Ok(())) => Ok(outcome),
-        }
+        let release = session::release_project_lock(self.conn, &cfg.project_id).await;
+        close_project_lock_bracket(result, release)
     }
 }
 
@@ -825,20 +823,14 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
                 session::acquire_journal_bootstrap_lock(self.conn, cfg, &cfg.project_id)
                     .await?;
                 let result = journal_sql::ensure_journal(self.conn, cfg).await;
-                let unlock =
+                let release =
                     session::release_journal_bootstrap_lock(self.conn, &cfg.project_id).await;
-                match (result, unlock) {
-                    (Err(error), Err(unlock)) => {
-                        tracing::warn!(
-                            error = %unlock,
-                            "zero-migrate: failed to release MySQL journal bootstrap lock after bootstrap error"
-                        );
-                        Err(error)
-                    }
-                    (Err(error), Ok(())) => Err(error),
-                    (Ok(()), Err(error)) => Err(error),
-                    (Ok(()), Ok(())) => Ok(()),
-                }
+                close_session_bracket(
+                    result,
+                    release,
+                    SessionResidue::BOOTSTRAP_LOCK,
+                    DiscardStep::BootstrapLockRelease,
+                )
             })
             .await
     }
@@ -1808,6 +1800,29 @@ mod render_tests {
             .position(|entry| entry.contains("RELEASE_LOCK(?)"))
             .expect("bootstrap lock released");
         assert!(acquire < failure && failure < release, "{log:?}");
+    }
+
+    /// A bootstrap whose release of the named bootstrap lock fails reports the
+    /// session to discard: `GET_LOCK` names stack per session, so a reused session
+    /// would keep the bootstrap lock held for every later deploy.
+    #[compio::test]
+    async fn a_failed_bootstrap_lock_release_reports_the_session_to_discard() {
+        let rec = RecordingSession::with_failure("RELEASE_LOCK(?)");
+        let backend = MysqlBackend::new_generic(&rec);
+        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
+
+        let result = backend.ensure_journal(&cfg).await;
+
+        let Err(JournalError::SessionMustBeDiscarded(discard)) = &result else {
+            panic!("a failed bootstrap-lock release must report the session to discard: {result:?}");
+        };
+        assert_eq!(discard.residue(), SessionResidue::BOOTSTRAP_LOCK);
+        assert_eq!(discard.step(), DiscardStep::BootstrapLockRelease);
+        assert!(discard.operation().is_none(), "the bootstrap itself succeeded");
+        assert!(
+            rec.fail_once_contains.borrow().is_none(),
+            "the release must have been attempted and failed"
+        );
     }
 
     #[compio::test]

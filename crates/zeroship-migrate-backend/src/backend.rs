@@ -343,6 +343,11 @@ pub trait MigrationBackend {
 
     /// Release the project apply-serialization lock (PG `pg_advisory_unlock`;
     /// MySQL `RELEASE_LOCK`).
+    ///
+    /// A failed release may leave the session holding the lock. Every bracket
+    /// folds this result through
+    /// [`close_project_lock_bracket`](crate::executor::close_project_lock_bracket),
+    /// which reports such a session for discard.
     async fn release_project_lock(&self, cfg: &ExecutorConfig) -> Result<(), ApplyError>;
 
     /// Take the project lock without waiting out a peer's deploy, reporting who
@@ -384,8 +389,9 @@ pub trait MigrationBackend {
 
     /// Restore the settings captured by [`snapshot_session`](Self::snapshot_session).
     /// Includes the leading unconditional role reset where the backend has roles.
-    /// A restoration error is surfaced when the apply itself otherwise succeeded,
-    /// so a connection with leaked settings is never reported as a clean success.
+    /// The apply reports a restoration error as a session to discard, whichever
+    /// way the apply itself went, so a connection with leaked settings is never
+    /// handed back as reusable.
     async fn restore_session(&self, snap: &Self::SessionSnapshot) -> Result<(), ApplyError>;
 
     /// Drop any per-apply privilege confinement back to the connecting role,

@@ -123,3 +123,9 @@ pub enum BaselineError {
     #[error("baseline backend error: {0}")]
     Backend(String),
 }
+
+impl From<crate::executor::SessionDiscard> for BaselineError {
+    fn from(discard: crate::executor::SessionDiscard) -> Self {
+        Self::Lock(crate::executor::ApplyError::from(discard))
+    }
+}

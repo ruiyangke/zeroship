@@ -578,7 +578,296 @@ pub enum ApplyError {
     /// [`crate::timeout`].
     #[error(transparent)]
     IndefiniteTimeout(#[from] crate::timeout::IndefiniteTimeoutError),
+    /// The session this operation ran on is left in a state its caller must not
+    /// reuse. See [`SessionDiscard`].
+    #[error(transparent)]
+    SessionMustBeDiscarded(#[from] SessionDiscard),
 }
+
+impl ApplyError {
+    /// The discard outcome this error carries, when the session it ran on must
+    /// not be reused.
+    #[must_use]
+    pub const fn session_discard(&self) -> Option<&SessionDiscard> {
+        match self {
+            Self::SessionMustBeDiscarded(discard)
+            | Self::Journal(JournalError::SessionMustBeDiscarded(discard)) => Some(discard),
+            _ => None,
+        }
+    }
+}
+
+/// What a session that must be discarded may still carry.
+///
+/// Closing the session drops all of it: the server releases a session's locks
+/// when the session ends, and its settings end with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionResidue(u8);
+
+impl SessionResidue {
+    /// The session may still hold the project lock.
+    pub const PROJECT_LOCK: Self = Self(1);
+
+    /// The session may still hold the lock that serializes a journal bootstrap.
+    pub const BOOTSTRAP_LOCK: Self = Self(1 << 1);
+
+    /// The session may still hold explicit table locks a migration step took.
+    pub const TABLE_LOCKS: Self = Self(1 << 2);
+
+    /// The session's `statement_timeout` and `lock_timeout` may still be the ones
+    /// a project-lock acquisition set, not the caller's own.
+    pub const TIMEOUTS: Self = Self(1 << 3);
+
+    /// The session may still carry the role, `search_path` and timeouts an apply
+    /// set for its migrations, not the caller's own.
+    pub const SETTINGS: Self = Self(1 << 4);
+
+    /// Each residue with the words that name it.
+    const NAMES: [(Self, &'static str); 5] = [
+        (Self::PROJECT_LOCK, "hold the project lock"),
+        (Self::BOOTSTRAP_LOCK, "hold the journal bootstrap lock"),
+        (Self::TABLE_LOCKS, "hold explicit table locks"),
+        (
+            Self::TIMEOUTS,
+            "run under timeouts zero-migrate set in place of its own",
+        ),
+        (
+            Self::SETTINGS,
+            "carry the role, search_path and timeouts an apply set in place of its own",
+        ),
+    ];
+
+    /// Everything either residue may carry.
+    #[must_use]
+    pub const fn and(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Whether this residue includes everything `other` names.
+    #[must_use]
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+
+impl fmt::Display for SessionResidue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("the session may still ")?;
+        let mut named = Self::NAMES
+            .iter()
+            .filter(|(residue, _)| self.contains(*residue))
+            .map(|(_, words)| words);
+        if let Some(first) = named.next() {
+            f.write_str(first)?;
+        }
+        for words in named {
+            write!(f, " and {words}")?;
+        }
+        Ok(())
+    }
+}
+
+/// The statement whose failure left a session to be discarded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscardStep {
+    /// Releasing the project lock at the end of an operation.
+    ProjectLockRelease,
+    /// Releasing the lock that serializes a journal bootstrap.
+    BootstrapLockRelease,
+    /// Releasing explicit table locks a migration step took.
+    TableUnlock,
+    /// Dropping a lock the server may have granted to an acquisition that then
+    /// failed.
+    GrantDrop,
+    /// Lifting the caller's statement budget before a project-lock statement,
+    /// when the session cannot say whether it took effect.
+    TimeoutLift,
+    /// Putting the caller's timeouts back after a project-lock statement.
+    TimeoutRestore,
+    /// Putting the caller's role and settings back after an apply.
+    SettingsRestore,
+}
+
+impl fmt::Display for DiscardStep {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::ProjectLockRelease => "releasing the project lock failed",
+            Self::BootstrapLockRelease => "releasing the journal bootstrap lock failed",
+            Self::TableUnlock => "releasing the step's explicit table locks failed",
+            Self::GrantDrop => {
+                "dropping a lock the server may have granted to the failed acquisition failed"
+            }
+            Self::TimeoutLift => {
+                "lifting the session's statement budget for the project lock failed without \
+                 a server answer, so it may have taken effect"
+            }
+            Self::TimeoutRestore => "restoring the session's own timeouts failed",
+            Self::SettingsRestore => "restoring the session's own role and settings failed",
+        })
+    }
+}
+
+/// A session its caller must discard rather than reuse, with the failure that
+/// left it so and the operation's own failure when it had one.
+///
+/// The engine reports this whenever a statement that returns the session to its
+/// caller's state could not be confirmed: the release that closes a lock bracket
+/// (the project lock, a journal bootstrap lock, explicit table locks), the drop of
+/// a grant a failed acquisition may hold, the lift and restore of the caller's
+/// timeouts around a project-lock statement, or the restore of the role and
+/// settings an apply changed. Advisory and named locks stack per session, so
+/// reusing such a session can keep a lock held for every later deploy; closing it
+/// is the one step that settles it.
+///
+/// It takes precedence over the operation's own outcome, success or failure, and
+/// carries that failure in [`operation`](Self::operation) so it is not lost.
+#[derive(Debug)]
+pub struct SessionDiscard {
+    residue: SessionResidue,
+    step: DiscardStep,
+    error: Box<ApplyError>,
+    operation: Option<Box<dyn Error + Send + Sync + 'static>>,
+}
+
+impl SessionDiscard {
+    /// A session left with `residue` because `step` failed with `error`, during
+    /// an operation that failed with `operation`, or succeeded when `None`.
+    ///
+    /// When `operation` is itself an [`ApplyError`] or [`RollbackError`] that
+    /// already reported a session to discard, what that report named is part of
+    /// this residue too.
+    #[must_use]
+    pub fn new(
+        residue: SessionResidue,
+        step: DiscardStep,
+        error: ApplyError,
+        operation: Option<Box<dyn Error + Send + Sync + 'static>>,
+    ) -> Self {
+        let inherited = operation.as_deref().and_then(|operation| {
+            operation
+                .downcast_ref::<ApplyError>()
+                .and_then(ApplyError::session_discard)
+                .or_else(|| {
+                    operation
+                        .downcast_ref::<RollbackError>()
+                        .and_then(RollbackError::session_discard)
+                })
+                .map(Self::residue)
+        });
+        Self {
+            residue: inherited.map_or(residue, |inherited| residue.and(inherited)),
+            step,
+            error: Box::new(error),
+            operation,
+        }
+    }
+
+    /// What the session may still carry.
+    #[must_use]
+    pub const fn residue(&self) -> SessionResidue {
+        self.residue
+    }
+
+    /// The statement whose failure left the session to be discarded.
+    #[must_use]
+    pub const fn step(&self) -> DiscardStep {
+        self.step
+    }
+
+    /// How that statement failed.
+    #[must_use]
+    pub fn error(&self) -> &ApplyError {
+        &self.error
+    }
+
+    /// The operation's own failure, when it failed too.
+    #[must_use]
+    pub fn operation(&self) -> Option<&(dyn Error + Send + Sync + 'static)> {
+        self.operation.as_deref()
+    }
+
+    /// Take the operation's own failure out of the report.
+    #[must_use]
+    pub fn into_operation(self) -> Option<Box<dyn Error + Send + Sync + 'static>> {
+        self.operation
+    }
+}
+
+impl fmt::Display for SessionDiscard {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{residue}, so discard the session instead of reusing it ({step}: {error})",
+            residue = self.residue,
+            step = self.step,
+            error = self.error
+        )?;
+        if let Some(operation) = &self.operation {
+            write!(f, "; the operation itself failed: {operation}")?;
+        }
+        Ok(())
+    }
+}
+
+impl Error for SessionDiscard {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&*self.error)
+    }
+}
+
+/// Fold a cleanup statement that returns a session to its caller's state into
+/// the result of the work it closes.
+///
+/// A failed cleanup leaves the session possibly still carrying `residue`, which
+/// is the caller's to settle by discarding the session, so it becomes a
+/// [`SessionDiscard`] whichever way the work went; a failure of the work travels
+/// inside it.
+///
+/// # Errors
+/// The work's own error when the cleanup succeeded, and the discard outcome when
+/// it did not.
+pub fn close_session_bracket<T, E, C>(
+    result: Result<T, E>,
+    cleanup: Result<(), C>,
+    residue: SessionResidue,
+    step: DiscardStep,
+) -> Result<T, E>
+where
+    E: From<SessionDiscard> + Into<Box<dyn Error + Send + Sync + 'static>>,
+    C: Into<ApplyError>,
+{
+    match cleanup {
+        Ok(()) => result,
+        Err(error) => Err(E::from(SessionDiscard::new(
+            residue,
+            step,
+            error.into(),
+            result.err().map(Into::into),
+        ))),
+    }
+}
+
+/// Fold the release that closes a project-lock bracket into the bracket's result:
+/// [`close_session_bracket`] for the project lock.
+///
+/// # Errors
+/// The body's own error when the release succeeded, and the discard outcome when
+/// it did not.
+pub fn close_project_lock_bracket<T, E>(
+    result: Result<T, E>,
+    release: Result<(), ApplyError>,
+) -> Result<T, E>
+where
+    E: From<SessionDiscard> + Into<Box<dyn Error + Send + Sync + 'static>>,
+{
+    close_session_bracket(
+        result,
+        release,
+        SessionResidue::PROJECT_LOCK,
+        DiscardStep::ProjectLockRelease,
+    )
+}
+
 impl From<crate::driver::DbError> for ApplyError {
     fn from(error: crate::driver::DbError) -> Self {
         Self::Db(error.into())
@@ -957,6 +1246,22 @@ pub enum RollbackError {
         /// That target's account of what specifically requires the rebuild.
         reason: String,
     },
+    /// The session this rollback ran on is left in a state its caller must not
+    /// reuse. See [`SessionDiscard`].
+    #[error(transparent)]
+    SessionMustBeDiscarded(#[from] SessionDiscard),
+}
+
+impl RollbackError {
+    /// The discard outcome this error carries, when the session it ran on must
+    /// not be reused.
+    #[must_use]
+    pub const fn session_discard(&self) -> Option<&SessionDiscard> {
+        match self {
+            Self::SessionMustBeDiscarded(discard) => Some(discard),
+            _ => None,
+        }
+    }
 }
 
 impl From<crate::driver::DbError> for RollbackError {
@@ -1261,4 +1566,61 @@ pub fn compute_superseded(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod project_lock_bracket_tests {
+    use super::{close_project_lock_bracket, ApplyError, DiscardStep, SessionResidue};
+
+    fn release_failure() -> ApplyError {
+        ApplyError::Backend("the release was cancelled".to_string())
+    }
+
+    fn body_failure() -> ApplyError {
+        ApplyError::Backend("the body failed".to_string())
+    }
+
+    #[test]
+    fn a_confirmed_release_leaves_the_result_as_it_was() {
+        let ok: Result<u8, ApplyError> = close_project_lock_bracket(Ok(7), Ok(()));
+        assert_eq!(ok.expect("a clean bracket succeeds"), 7);
+
+        let failed: Result<u8, ApplyError> = close_project_lock_bracket(Err(body_failure()), Ok(()));
+        let error = failed.expect_err("the body's failure survives");
+        assert!(error.session_discard().is_none(), "nothing to discard: {error}");
+        assert_eq!(error.to_string(), body_failure().to_string());
+    }
+
+    #[test]
+    fn a_failed_release_after_a_success_is_a_session_to_discard() {
+        let closed: Result<u8, ApplyError> = close_project_lock_bracket(Ok(7), Err(release_failure()));
+        let error = closed.expect_err("a failed release is not a success");
+        let discard = error.session_discard().expect("the session must be discarded");
+        assert_eq!(discard.residue(), SessionResidue::PROJECT_LOCK);
+        assert_eq!(discard.step(), DiscardStep::ProjectLockRelease);
+        assert_eq!(discard.error().to_string(), release_failure().to_string());
+        assert!(discard.operation().is_none(), "the body succeeded: {error}");
+    }
+
+    #[test]
+    fn a_failed_release_after_a_failure_carries_that_failure() {
+        let closed: Result<u8, ApplyError> =
+            close_project_lock_bracket(Err(body_failure()), Err(release_failure()));
+        let error = closed.expect_err("both failed");
+        let discard = error.session_discard().expect("the session must be discarded");
+        assert_eq!(discard.residue(), SessionResidue::PROJECT_LOCK);
+        assert_eq!(
+            discard.operation().map(ToString::to_string),
+            Some(body_failure().to_string()),
+            "the body's failure must travel inside the discard"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("may still hold the project lock")
+                && message.contains("discard the session")
+                && message.contains("the release was cancelled")
+                && message.contains("the body failed"),
+            "the message names the residue, the release and the body: {message}"
+        );
+    }
 }
