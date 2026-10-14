@@ -5,5 +5,6 @@
 //! `tests/e2e/<name>.rs` is compiled by nothing until it is declared here.
 
 mod check_config;
+mod join_port;
 mod peer_boot;
 mod plaintext_peers_env_tier;

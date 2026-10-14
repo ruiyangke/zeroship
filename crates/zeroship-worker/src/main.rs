@@ -40,6 +40,26 @@ const CONTROL_KEY_LABEL: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file";
 /// same declaration moved to the one place that now needs it.
 const WORKER_LISTEN_BACKLOG: i32 = 1024;
 
+/// The ONE port every bound listener agreed on, or the ports they reported when
+/// they did not.
+///
+/// `ntex::server::bind_addr` returns one listener per resolved address, so a
+/// bind host that resolves to more than one family yields several. With a fixed
+/// port they share its number; with `--port 0` the kernel assigns each its own,
+/// and they disagree. A join advertises a single port, and advertising one of
+/// several would point Control's dispatcher at an address only some listeners
+/// serve - so the caller refuses the boot rather than choosing.
+fn agreed_port(addrs: &[std::net::SocketAddr]) -> Result<u16, Vec<u16>> {
+    let Some(first) = addrs.first() else {
+        return Err(Vec::new());
+    };
+    if addrs.iter().all(|addr| addr.port() == first.port()) {
+        Ok(first.port())
+    } else {
+        Err(addrs.iter().map(std::net::SocketAddr::port).collect())
+    }
+}
+
 /// Every credential the worker needs, tagged by the subsystem that needs it.
 ///
 /// ONE, and unconditional: a worker that cannot poll control for versions is a
@@ -677,6 +697,53 @@ fn main() -> std::io::Result<()> {
         }
     };
 
+    // THE ADDRESSES THE KERNEL ACTUALLY BOUND, read off each listener rather
+    // than re-parsed from `bind_addr`. The join advertises ONE port and Control
+    // writes a row carrying it, so a `--port 0` boot must advertise the port it
+    // bound rather than the zero it asked for.
+    //
+    // A host name that resolves to more than one address family yields several
+    // listeners, and with a fixed port they share its number. With `--port 0`
+    // each bind is assigned its own ephemeral port, so the listeners can
+    // disagree - and the join has no way to name one of them without lying
+    // about the others. That case refuses the boot instead.
+    let mut bound = Vec::with_capacity(listeners.len());
+    for listener in &listeners {
+        match listener.local_addr() {
+            Ok(addr) => bound.push(addr),
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    "worker: refusing to start - a bound listener has no local address"
+                );
+                return Err(error);
+            }
+        }
+    }
+    let bound_port = match agreed_port(&bound) {
+        Ok(port) => port,
+        Err(ports) if ports.is_empty() => {
+            tracing::error!(
+                bind = %bind_addr,
+                "worker: refusing to start - the bind produced no listener"
+            );
+            return Err(std::io::Error::other(format!(
+                "bind {bind_addr} produced no listener"
+            )));
+        }
+        Err(ports) => {
+            tracing::error!(
+                bind = %bind_addr,
+                ?ports,
+                "worker: refusing to start - bound listeners disagree on the port, so the join \
+                 cannot advertise one"
+            );
+            return Err(std::io::Error::other(format!(
+                "bound listeners disagree on the port: {ports:?}"
+            )));
+        }
+    };
+
     // EVERY FAILURE HERE REFUSES THE BOOT, and that is the whole of it. A
     // worker that logged this and carried on would have no identity to verify
     // dispatch or read an app with, while control's registry either knows
@@ -689,12 +756,12 @@ fn main() -> std::io::Result<()> {
     // `svc/worker/<wkr_id>` and is addressed as `svc/worker`; everything below
     // - every reconcile, every dispatch, the CDC relay, the lease renewals and
     // the retirement at exit - is handed that and only that.
-    let service_auth = match join::join(join_material, &control_url, port).await {
+    let service_auth = match join::join(join_material, &control_url, bound_port).await {
         Ok(auth) => Arc::new(auth),
         Err(error) => {
             tracing::error!(
                 control_url = %control_url,
-                port,
+                port = bound_port,
                 %error,
                 "worker: refusing to start - this process could not join an instance identity"
             );
@@ -841,13 +908,19 @@ fn main() -> std::io::Result<()> {
         }
     };
 
-    tracing::info!(
-        bind = %bind_addr,
-        threads = workers_count,
-        max_isolates = config.max_isolates,
-        shutdown_timeout_secs = config.shutdown_timeout_secs,
-        "worker listening"
-    );
+    // One line per bound listener, each naming the address the kernel gave it:
+    // a `--port 0` boot announces the port it bound, and a host that resolves to
+    // both families announces both. The other fields are the process's and are
+    // repeated on every line.
+    for addr in &bound {
+        tracing::info!(
+            bind = %addr,
+            threads = workers_count,
+            max_isolates = config.max_isolates,
+            shutdown_timeout_secs = config.shutdown_timeout_secs,
+            "worker listening"
+        );
+    }
 
     // ntex installs SIGINT/SIGTERM handlers by default; `shutdown_timeout`
     // bounds how long worker threads have to drain in-flight requests

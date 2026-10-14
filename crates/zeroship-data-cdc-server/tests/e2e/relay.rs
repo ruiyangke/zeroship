@@ -2,6 +2,8 @@
 
 use zeroship_data_testkit::data::platform as platform_fixture;
 
+use std::io::BufRead as _;
+
 /// The plain identity a creator binding carries, for the shared ladder.
 fn plain_binding(
     binding: &zeroship_data_orm::binding::DbBinding,
@@ -637,4 +639,104 @@ async fn readiness_is_not_taken_from_a_port_another_process_holds() {
         waited.is_err(),
         "readiness was accepted from a port this child does not hold"
     );
+}
+
+/// A `--listen 127.0.0.1:0` relay announces the port it BOUND, and the process
+/// really listens there.
+///
+/// The relay has no address to reserve at `--listen 127.0.0.1:0`, so the one it
+/// names on its listening line is the process's own statement of what the
+/// kernel gave it.
+#[test]
+fn a_zero_port_relay_announces_the_port_it_bound() {
+    let database = zeroship_testkit::postgres::platform().fresh_database();
+    let platform = platform_fixture::Platform::at(database.admin_url().to_string());
+    let temp = tempfile::tempdir().unwrap();
+    let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let cert = temp.path().join("cert.pem");
+    let key = temp.path().join("key.pem");
+    std::fs::write(&cert, certificate.cert.pem()).unwrap();
+    std::fs::write(&key, certificate.signing_key.serialize_pem()).unwrap();
+    let log = temp.path().join("zero-port.log");
+    let sink = std::fs::File::create(&log).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_zeroship-data-cdc-server"))
+        .args(["--no-config", "--listen", "127.0.0.1:0"])
+        .args(["--observability-log-format", "json"])
+        .arg("--tls-cert-file")
+        .arg(&cert)
+        .arg("--tls-key-file")
+        .arg(&key)
+        .env("ZEROSHIP_DATA_CDC_SERVER_DATABASE_URL", platform.relay_url())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(sink))
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().expect("piped stdout");
+    let process = Process(child);
+    let announcement = await_relay_announcement(stdout);
+    let port = match announcement.recv_timeout(Duration::from_mins(1)) {
+        Ok(port) => port,
+        Err(error) => panic!(
+            "the relay never announced a bound port ({error}); log:\n{}",
+            std::fs::read_to_string(&log).unwrap_or_default()
+        ),
+    };
+    assert_ne!(
+        port, 0,
+        "a --listen 127.0.0.1:0 relay announced the requested port, not the bound one"
+    );
+    assert!(
+        zeroship_testkit::listen::child_listens(process.0.id(), port),
+        "the relay announced port {port} but does not own a listening socket on it; log:\n{}",
+        std::fs::read_to_string(&log).unwrap_or_default()
+    );
+}
+
+/// Read a child's piped stdout until it announces the relay's listening line,
+/// then keep draining so the child never blocks on a full pipe. The caller
+/// waits on the returned channel, so a child that stalls fails by timeout
+/// rather than hanging the run, and nothing polls on a sleep.
+fn await_relay_announcement(stdout: std::process::ChildStdout) -> std::sync::mpsc::Receiver<u16> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut announced = false;
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {
+                    if !announced {
+                        if let Some(port) = relay_announced_port(&line) {
+                            let _ = sender.send(port);
+                            announced = true;
+                        }
+                    }
+                }
+            }
+        }
+    });
+    receiver
+}
+
+/// The port a single log line announced in its `listen` field, if it carried
+/// the relay's listening marker.
+///
+/// The tracing line is JSON on a non-TTY stream; a plain `listen=host:port`
+/// spelling is accepted too, so this reader is not pinned to one format.
+fn relay_announced_port(line: &str) -> Option<u16> {
+    if !line.contains("CDC relay listening") {
+        return None;
+    }
+    let field = if let Some(rest) = line.split("\"listen\":\"").nth(1) {
+        rest.split('"').next().unwrap_or("")
+    } else if let Some(rest) = line.split("listen=").nth(1) {
+        rest.split_whitespace().next().unwrap_or("")
+    } else {
+        return None;
+    };
+    field
+        .parse::<std::net::SocketAddr>()
+        .ok()
+        .map(|addr| addr.port())
 }

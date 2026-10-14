@@ -51,6 +51,14 @@ use zeroship_workflow_manager::{
 
 type Error = Box<dyn std::error::Error>;
 
+/// Pending-connection backlog every listener is created with.
+///
+/// `ntex::server::bind_addr` takes the backlog explicitly; this is the value
+/// `HttpServer` passes to it by default, so binding a listener here and handing
+/// it to `HttpServer::listen` leaves the socket exactly as `HttpServer::bind`
+/// would have made it.
+const HTTP_LISTEN_BACKLOG: i32 = 1024;
+
 #[derive(Debug)]
 pub struct ServerOptions {
     pub listen: SocketAddr,
@@ -262,7 +270,7 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
     let recovery = options.driver.recovery;
     let max_request_bytes = options.max_request_bytes;
     let storage = options.storage.clone();
-    let server = web::HttpServer::new(move || {
+    let mut server = web::HttpServer::new(move || {
         let url = url.clone();
         let auth = auth.clone();
         let outbound = outbound.clone();
@@ -333,10 +341,21 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
         }
     })
     .workers(options.http_threads)
-    .maxconn(options.max_connections)
-    .bind(options.listen)?
-    .run();
-    tracing::info!(listen = %options.listen, "workflow coordinator listening");
+    .maxconn(options.max_connections);
+    // Bind HERE rather than letting `HttpServer::bind` do it below, so the
+    // announcement names the address actually BOUND: the server builder keeps
+    // its listeners private, so a `--listen 127.0.0.1:0` run would otherwise
+    // announce the port it asked for. `ntex::server::bind_addr` is the call
+    // `HttpServer::bind` makes, socket options included.
+    let listen_addr = options.listen.to_string();
+    let listeners = ntex::server::bind_addr(&listen_addr, HTTP_LISTEN_BACKLOG)?;
+    for listener in &listeners {
+        tracing::info!(listen = %listener.local_addr()?, "workflow coordinator listening");
+    }
+    for listener in listeners {
+        server = server.listen(listener)?;
+    }
+    let server = server.run();
     let serving = async {
         match select(Box::pin(server), disconnected).await {
             Either::Left((result, _)) => result.map_err(Into::into),

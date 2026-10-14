@@ -231,3 +231,35 @@ fn no_worker_secret_has_a_value_flag() {
     assert!(!longs.iter().any(|long| long == "db"), "{longs:?}");
     assert!(longs.iter().any(|long| long == "storage-url"), "{longs:?}");
 }
+
+/// One port every listener agreed on is the port the join can advertise; a set
+/// that disagrees is refused with every port it saw, and no listener at all is
+/// a distinct refusal. The join contributes exactly one port to the instance's
+/// recorded address, so an ambiguous set has no correct value to choose.
+#[test]
+fn bound_listeners_must_agree_on_the_one_port_a_join_advertises() {
+    use std::net::SocketAddr;
+
+    let same = |port: u16| {
+        vec![
+            SocketAddr::from(([127, 0, 0, 1], port)),
+            SocketAddr::from(([0, 0, 0, 0], port)),
+        ]
+    };
+    assert_eq!(agreed_port(&same(8080)), Ok(8080));
+    // A single listener is the common case and must be accepted.
+    assert_eq!(
+        agreed_port(&[SocketAddr::from(([127, 0, 0, 1], 8080))]),
+        Ok(8080)
+    );
+    // THE ONE-VARIABLE CONTROL: the same two listeners with different ports,
+    // which `--port 0` on a host resolving to both families produces.
+    let split = vec![
+        SocketAddr::from(([127, 0, 0, 1], 41001)),
+        SocketAddr::from(([0, 0, 0, 0], 41002)),
+    ];
+    assert_eq!(agreed_port(&split), Err(vec![41001, 41002]));
+    // No listener is a distinct failure from a disagreement, so the caller can
+    // report which it is.
+    assert_eq!(agreed_port(&[]), Err(Vec::new()));
+}

@@ -96,7 +96,7 @@ pub(crate) async fn run(settings: CdcServerSettings) -> Result<(), Error> {
     source::probe_binding_lookup(&pool).await?;
     pool.query("SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE left(slot_name, length($1)) = $1 AND database = current_database() AND NOT active", &[&source::SLOT_PREFIX]).await?;
     let listener = TcpListener::bind(settings.listen.get()).await?;
-    tracing::info!(listen = %settings.listen.get(), "CDC relay listening");
+    tracing::info!(listen = %listener.local_addr()?, "CDC relay listening");
     let state = Rc::new(State {
         hub: Rc::new(Hub::default()),
         pool: pool.clone(),

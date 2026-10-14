@@ -6,7 +6,7 @@
 use ntex::{client::Client, http::StatusCode};
 mod queue_control;
 use std::{
-    io::{Read as _, Seek as _, SeekFrom, Write as _},
+    io::{BufRead as _, Read as _, Seek as _, SeekFrom, Write as _},
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -243,6 +243,78 @@ impl ServerProcess {
             }
         }
     }
+
+    /// Spawn the server on an EPHEMERAL port (`127.0.0.1:0`) and return it once
+    /// it announces the address it bound.
+    ///
+    /// `ServerProcess::start` reserves a port in this process and hands it to
+    /// the child, so the address it waits on is the one it chose rather than the
+    /// one bound. A `--listen 127.0.0.1:0` run has no such address, so the
+    /// announcement is the only source - which is what makes this the case that
+    /// binds "the process announces what it bound".
+    ///
+    /// No readiness wait follows: the listening socket exists before the line is
+    /// logged, so the caller's ownership check races nothing, and a server that
+    /// announced the requested port instead of the bound one stays reachable at
+    /// no address - the caller asserts on the announcement rather than this
+    /// fixture timing out against `:0`.
+    pub async fn start_on_an_ephemeral_port(
+        platform: &super::platform::Platform,
+        peers: &Path,
+        directory: &Path,
+        name: &str,
+    ) -> Self {
+        let config = directory.join(format!("{name}.toml"));
+        let mut control =
+            Some(queue_control::Control::start(directory, name, platform.admin_url.as_str()).await);
+        let log = directory.join(format!("{name}.log"));
+        write_config(
+            &config,
+            platform,
+            peers,
+            control.as_ref().unwrap(),
+            // Port 0: the kernel assigns the real one, which the server names in
+            // its announcement.
+            "127.0.0.1:0".parse().expect("a zero address parses"),
+            true,
+            &serde_json::json!({}),
+        );
+        let (mut child, announcement) = spawn_streaming(&config, &log);
+        let address = match compio::time::timeout(Duration::from_secs(30), announcement).await {
+            Ok(Ok(address)) => address,
+            Ok(Err(_)) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!(
+                    "coordinator closed before announcing a bound address: {}",
+                    std::fs::read_to_string(&log).unwrap_or_default()
+                );
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!(
+                    "coordinator did not announce a bound address within 30s: {}",
+                    std::fs::read_to_string(&log).unwrap_or_default()
+                );
+            }
+        };
+        Self {
+            child,
+            _control: control.take().unwrap(),
+            config,
+            log,
+            name: name.to_owned(),
+            url: format!("http://{address}"),
+            address,
+        }
+    }
+
+    /// The pid of the spawned server, for a listener-ownership check.
+    pub fn child_id(&self) -> u32 {
+        self.child.id()
+    }
+
     pub async fn ready(&mut self, client: &Client) {
         match wait_started(&mut self.child, &self.log, client, self.address).await {
             Started::Ready => {}
@@ -315,6 +387,84 @@ fn spawn(config: &Path, log: &Path) -> Child {
         .stderr(output)
         .spawn()
         .unwrap()
+}
+
+/// Spawn the server with `stdout` piped and `stderr` in `log`.
+///
+/// The piped stream is read on a background thread that appends it to the same
+/// log `stderr` writes and resolves on the listening announcement, so a failing
+/// case still reports the server's startup chatter. Nothing polls on a sleep:
+/// the caller awaits the returned channel.
+fn spawn_streaming(
+    config: &Path,
+    log: &Path,
+) -> (Child, futures::channel::oneshot::Receiver<std::net::SocketAddr>) {
+    let sink = std::fs::File::create(log).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_zeroship-workflow-server"))
+        .env_clear()
+        .arg("--config")
+        .arg(config)
+        .args(["--observability-log-format", "json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(sink))
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (sender, receiver) = futures::channel::oneshot::channel();
+    let log = log.to_path_buf();
+    std::thread::spawn(move || {
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut sink = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+            .ok();
+        let mut sender = Some(sender);
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {
+                    if let Some(sink) = sink.as_mut() {
+                        let _ = sink.write_all(line.as_bytes());
+                    }
+                    if let Some(address) = announced_event(&line) {
+                        if let Some(sender) = sender.take() {
+                            let _ = sender.send(address);
+                        }
+                    }
+                }
+            }
+        }
+    });
+    (child, receiver)
+}
+
+/// The address a single log line announced in its `listen` field, if it carried
+/// the coordinator's listening marker.
+///
+/// The tracing line is JSON on a non-TTY stream; a plain `listen=host:port`
+/// spelling is accepted too, so this reader is not pinned to one format.
+fn announced_event(line: &str) -> Option<std::net::SocketAddr> {
+    if !line.contains("workflow coordinator listening") {
+        return None;
+    }
+    let field = serde_json::from_str::<serde_json::Value>(line)
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/fields/listen")
+                .or_else(|| value.get("listen"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .or_else(|| {
+            line.split("listen=")
+                .nth(1)
+                .map(|rest| rest.split_whitespace().next().unwrap_or("").to_owned())
+        })?;
+    field.parse::<std::net::SocketAddr>().ok()
 }
 
 /// How a spawned process's readiness wait ended.
