@@ -33,6 +33,14 @@ use zeroship_control::{
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// Pending-connection backlog every listener is created with.
+///
+/// `ntex::server::bind_addr` takes the backlog explicitly; this is the value
+/// `HttpServer` passes to it by default, so binding a listener here and handing
+/// it to `HttpServer::listen` leaves the socket exactly as `HttpServer::bind`
+/// would have made it.
+const HTTP_LISTEN_BACKLOG: i32 = 1024;
+
 /// The one outbound mail transport this process gets.
 ///
 /// It was `build_billing_mailer` until the invitation path needed one too. The
@@ -1413,14 +1421,22 @@ fn main() -> std::io::Result<()> {
     }
 
     let bind_addr = format!("{bind_host}:{port}");
-    tracing::info!(bind = %bind_addr, "zeroship-control listening");
+    // Bind HERE rather than letting `HttpServer::bind` do it below, so the
+    // announcement names the address actually BOUND: the server builder keeps
+    // its listeners private, so a `--port 0` run would otherwise announce the
+    // port it asked for. `ntex::server::bind_addr` is the call
+    // `HttpServer::bind` makes, socket options included.
+    let listeners = ntex::server::bind_addr(&bind_addr, HTTP_LISTEN_BACKLOG)?;
+    for listener in &listeners {
+        tracing::info!(bind = %listener.local_addr()?, "zeroship-control listening");
+    }
 
     // ONE gate for the whole process, shared by every ntex worker thread, so
     // the TTL bounds probe-driven Postgres traffic per PROCESS rather than
     // per thread.
     let readiness = Arc::new(zeroship_core::readiness::ReadinessGate::with_defaults());
 
-    web::server(async move || {
+    let mut server = web::server(async move || {
         web::App::new()
             .state(state.clone())
             .state(state.control_pg.clone())
@@ -1606,10 +1622,11 @@ fn main() -> std::io::Result<()> {
             )
             .configure(health::configure)
     })
-    .workers(http_threads)
-    .bind(&bind_addr)?
-    .run()
-    .await
+    .workers(http_threads);
+    for listener in listeners {
+        server = server.listen(listener)?;
+    }
+    server.run().await
         })
 }
 

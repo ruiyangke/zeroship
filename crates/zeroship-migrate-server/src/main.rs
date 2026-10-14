@@ -22,6 +22,14 @@ use zeroship_migrate_server::MigrationServiceState;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// Pending-connection backlog every listener is created with.
+///
+/// `ntex::server::bind_addr` takes the backlog explicitly; this is the value
+/// `HttpServer` passes to it by default, so binding a listener here and handing
+/// it to `HttpServer::listen` leaves the socket exactly as `HttpServer::bind`
+/// would have made it.
+const HTTP_LISTEN_BACKLOG: i32 = 1024;
+
 /// Operator-facing spelling of the migration-policy seal key.
 const POLICY_SEAL_KEY_LABEL: &str =
     "ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY / --policy-seal-key-file";
@@ -354,16 +362,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 policy_config,
             ));
             let bind_addr = format!("{}:{}", settings.bind.get(), settings.port.get());
-            tracing::info!(bind = %bind_addr, "zeroship-migrate-server listening");
-            web::server(async move || {
+            // Bind HERE rather than letting `HttpServer::bind` do it below, so
+            // the announcement names the address actually BOUND: the server
+            // builder keeps its listeners private, so a `--port 0` run would
+            // otherwise announce the port it asked for. `ntex::server::bind_addr`
+            // is the call `HttpServer::bind` makes, socket options included.
+            let listeners = ntex::server::bind_addr(&bind_addr, HTTP_LISTEN_BACKLOG)?;
+            for listener in &listeners {
+                tracing::info!(bind = %listener.local_addr()?, "zeroship-migrate-server listening");
+            }
+            let mut server = web::server(async move || {
                 web::App::new()
                     .state(state.clone())
                     .configure(zeroship_migrate_server::configure)
             })
-            .workers(http_threads)
-            .bind(&bind_addr)?
-            .run()
-            .await
+            .workers(http_threads);
+            for listener in listeners {
+                server = server.listen(listener)?;
+            }
+            server.run().await
         })?)
 }
 

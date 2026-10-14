@@ -1,5 +1,6 @@
 //! The gateway's startup refusal on missing, unreadable or forged service key
-//! material, driven against the real binary.
+//! material, driven against the real binary. It also covers the address the
+//! gateway announces once its bind succeeds.
 //!
 //! `zeroship-core`'s loader tests rule on `load_peer_bundle` and the signing-key
 //! reader; none of them can rule on whether `main` CALLS them, or on what an
@@ -17,8 +18,11 @@
 //! so a document that maps two issuers onto one key makes this process able to
 //! present as the worker, which is the wider consequence under test.
 
+use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, ChildStdout, Command, Output, Stdio};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use base64::Engine as _;
 use ed25519_dalek::pkcs8::EncodePrivateKey as _;
@@ -263,5 +267,207 @@ fn valid_key_material_walks_past_the_fence() {
     assert!(
         text.contains(LATER_REFUSAL),
         "the gateway did not reach the broker secret, so it never passed the fence:\n{text}"
+    );
+}
+
+/// A serving gateway child on a chosen port: a full boot configuration with
+/// valid service identity and a broker master secret. Its tracing stream is
+/// piped for the caller to read and its `stderr` is captured; killed when
+/// dropped.
+struct Serving {
+    child: Child,
+    stderr: PathBuf,
+    /// The fixture directory holding the service key, peer document and broker
+    /// secret the child reads; kept alive for the child's whole run.
+    _fixture: Fixture,
+}
+
+impl Serving {
+    /// Spawn the gateway on `port`. The boot reaches the bind without a dialled
+    /// database: the DSN is carried for the request path's pool and never opened
+    /// at startup.
+    fn start(port: u16) -> Self {
+        let fixture = Fixture::new();
+        let (key, gateway_x) = gateway_key(&fixture);
+        let control_x = public_x(&signing_key(0x11));
+        let peers = fixture.write(
+            "service-peers.json",
+            &document(&[
+                peer_entry(CONTROL_SERVICE_NAME, &control_x),
+                peer_entry(GATEWAY_SERVICE_NAME, &gateway_x),
+            ]),
+        );
+        let broker = fixture.write("broker-master", STRONG);
+        let stderr = fixture.0.join("gateway.err");
+        let sink = std::fs::File::create(&stderr).expect("gateway stderr log");
+        let child = Command::new(env!("CARGO_BIN_EXE_zeroship-gate"))
+            .env_clear()
+            .env("ZEROSHIP_CONTROL_KEY", "control-key-material")
+            .env("ZEROSHIP_GATEWAY_STASH_SIGNING_KEY", STRONG)
+            .env("ZEROSHIP_PAIRWISE_SALT", STRONG)
+            .env(
+                "ZEROSHIP_GATEWAY_DATABASE_URL",
+                "postgres://u:p@127.0.0.1:1/unreached",
+            )
+            .env("ZEROSHIP_GATEWAY_SERVICE_KEY_FILE", &key)
+            .env("ZEROSHIP_GATEWAY_SERVICE_PEERS_FILE", &peers)
+            .env("ZEROSHIP_GATEWAY_BROKER_SECRET_FILE", &broker)
+            .args(["--port", &port.to_string(), "--worker-urls", "http://127.0.0.1:1"])
+            // Pin the announcement's format so this reader does not depend on
+            // the child's stderr being a non-terminal.
+            .args(["--observability-log-format", "json"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::from(sink))
+            .spawn()
+            .expect("spawn zeroship-gate");
+        Self {
+            child,
+            stderr,
+            _fixture: fixture,
+        }
+    }
+
+    fn stderr(&self) -> String {
+        std::fs::read_to_string(&self.stderr).unwrap_or_default()
+    }
+}
+
+impl Drop for Serving {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// How a watch of a child's tracing stream ended.
+enum Announce {
+    /// The listening line was read, naming its advertised port.
+    Port(u16),
+    /// The stream ended first, carrying everything read.
+    Ended(String),
+}
+
+/// Read `stdout` on a background thread until it announces `marker`, then keep
+/// draining so the child never blocks on a full pipe. The test thread waits on
+/// the returned channel with `recv_timeout`, so a child that stalls fails by
+/// timeout rather than hanging the run, and nothing polls on a sleep.
+fn await_announcement(stdout: ChildStdout, marker: &'static str) -> mpsc::Receiver<Announce> {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut log = String::new();
+        let mut announced = false;
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) => {
+                    if !announced {
+                        let _ = sender.send(Announce::Ended(log));
+                    }
+                    return;
+                }
+                Ok(_) => {
+                    if !announced {
+                        if let Some(port) = announced_port(&line, marker) {
+                            let _ = sender.send(Announce::Port(port));
+                            announced = true;
+                        }
+                    }
+                    log.push_str(&line);
+                }
+                Err(error) => {
+                    let _ = sender.send(Announce::Ended(format!("{log}\nread error: {error}")));
+                    return;
+                }
+            }
+        }
+    });
+    receiver
+}
+
+/// The port a single log line announced, if it carried `marker`.
+///
+/// The tracing line is JSON on a non-TTY stream; a plain `bind=host:port`
+/// spelling is accepted too, so this reader is not pinned to one format.
+fn announced_port(line: &str, marker: &str) -> Option<u16> {
+    if !line.contains(marker) {
+        return None;
+    }
+    let field = serde_json::from_str::<serde_json::Value>(line)
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/fields/bind")
+                .or_else(|| value.get("bind"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .or_else(|| {
+            line.split("bind=")
+                .nth(1)
+                .map(|rest| rest.split_whitespace().next().unwrap_or("").to_owned())
+        })?;
+    field.parse::<std::net::SocketAddr>().ok().map(|a| a.port())
+}
+
+/// A port another process holds is not this gateway listening: the gateway must
+/// stop on the collision without ever claiming it is listening.
+#[test]
+fn a_held_port_is_never_announced_as_listening() {
+    let foreign = std::net::TcpListener::bind("127.0.0.1:0").expect("hold a port");
+    let port = foreign.local_addr().expect("the held port").port();
+    let mut serving = Serving::start(port);
+    let announcement = await_announcement(
+        serving.child.stdout.take().expect("piped stdout"),
+        "gateway listening",
+    );
+    match announcement.recv_timeout(Duration::from_mins(1)) {
+        Ok(Announce::Port(port)) => panic!(
+            "the gateway claimed to be listening on port {port} it never bound; stderr:\n{}",
+            serving.stderr()
+        ),
+        Ok(Announce::Ended(log)) => assert!(
+            !log.contains("gateway listening"),
+            "the gateway claimed to be listening on a port it never bound:\n{log}"
+        ),
+        Err(error) => panic!(
+            "the gateway never stopped on the port another process holds ({error}); stderr:\n{}",
+            serving.stderr()
+        ),
+    }
+    assert!(
+        serving.stderr().contains("Address already in use"),
+        "the gateway did not name the address collision:\n{}",
+        serving.stderr()
+    );
+    drop(foreign);
+}
+
+/// A `--port 0` boot announces the port it actually bound, and the process
+/// really listens there. The socket is in the LISTEN state before the line is
+/// logged, so the ownership check after the announcement races nothing.
+#[test]
+fn a_zero_port_boot_announces_the_port_it_bound() {
+    let mut serving = Serving::start(0);
+    let announcement = await_announcement(
+        serving.child.stdout.take().expect("piped stdout"),
+        "gateway listening",
+    );
+    let port = match announcement.recv_timeout(Duration::from_mins(1)) {
+        Ok(Announce::Port(port)) => port,
+        Ok(Announce::Ended(log)) => panic!(
+            "the gateway exited before announcing a bound port:\n{log}\nstderr:\n{}",
+            serving.stderr()
+        ),
+        Err(error) => panic!(
+            "the gateway never announced a bound port ({error}); stderr:\n{}",
+            serving.stderr()
+        ),
+    };
+    assert_ne!(port, 0, "a --port 0 boot announced the requested port, not the bound one");
+    assert!(
+        zeroship_testkit::listen::child_listens(serving.child.id(), port),
+        "the gateway announced port {port} but does not own a listening socket on it; stderr:\n{}",
+        serving.stderr()
     );
 }

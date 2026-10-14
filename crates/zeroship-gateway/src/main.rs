@@ -24,6 +24,14 @@ use zeroship_gateway::{
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// Pending-connection backlog every listener is created with.
+///
+/// `ntex::server::bind_addr` takes the backlog explicitly; this is the value
+/// `HttpServer` passes to it by default, so binding a listener here and handing
+/// it to `HttpServer::listen` leaves the socket exactly as `HttpServer::bind`
+/// would have made it.
+const HTTP_LISTEN_BACKLOG: i32 = 1024;
+
 /// Operator-facing spelling of the control key, for a diagnostic that has to
 /// name something the operator can actually set.
 const CONTROL_KEY_LABEL: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file";
@@ -740,9 +748,17 @@ fn main() -> std::io::Result<()> {
             )));
         }
     }
-    tracing::info!(bind = %bind_addr, "gateway listening");
+    // Bind HERE rather than letting `HttpServer::bind` do it below, so the
+    // announcement names the address actually BOUND: the server builder keeps
+    // its listeners private, so a `--port 0` run would otherwise announce the
+    // port it asked for. `ntex::server::bind_addr` is the call
+    // `HttpServer::bind` makes, socket options included.
+    let listeners = ntex::server::bind_addr(&bind_addr, HTTP_LISTEN_BACKLOG)?;
+    for listener in &listeners {
+        tracing::info!(bind = %listener.local_addr()?, "gateway listening");
+    }
 
-    web::server(async move || {
+    let mut server = web::server(async move || {
         web::App::new()
             .state(state.clone())
             .state(readiness.clone())
@@ -810,10 +826,11 @@ fn main() -> std::io::Result<()> {
                     .route(web::route().to(router::handle_subdomain)),
             )
     })
-    .workers(http_threads)
-    .bind(&bind_addr)?
-    .run()
-    .await
+    .workers(http_threads);
+    for listener in listeners {
+        server = server.listen(listener)?;
+    }
+    server.run().await
         })
 }
 

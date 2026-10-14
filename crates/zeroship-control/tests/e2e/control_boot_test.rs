@@ -12,8 +12,9 @@
 
 use crate::support::workflow_postgres;
 
-use std::io::{Read as _, Write as _};
-use std::process::{Command, Stdio};
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::process::{Child, ChildStdout, Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -111,12 +112,11 @@ fn arbiter_ids(log: &str) -> std::collections::BTreeSet<u32> {
 
 /// A free loopback port for the child to bind.
 ///
-/// Control logs the address it was CONFIGURED with rather than the one it
-/// bound, so `--port 0` announces `127.0.0.1:0` and the real port cannot be
-/// recovered from the log. The port comes from a probe listener instead, which
-/// the caller releases immediately before spawning; a child that loses the port
-/// to another process exits naming the address in use, and the caller
-/// relaunches on a fresh port.
+/// The port comes from a probe listener, which the caller releases immediately
+/// before spawning; a child that loses the port to another process exits
+/// naming the address in use, and the caller relaunches on a fresh port. A case
+/// that needs the port the child actually bound boots it with `--port 0` and
+/// reads the announcement.
 fn free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("probe listener");
     listener
@@ -235,6 +235,232 @@ fn readiness_is_not_taken_from_a_port_another_process_holds() {
     );
     let _ = never.kill();
     let _ = never.wait();
+}
+
+/// A serving Control boot's fixtures: the migrated database, the platform JWKS,
+/// the service-identity files and the scratch paths, held together so a case
+/// only chooses a port.
+struct ServingBoot {
+    database: workflow_postgres::Database,
+    platform: crate::support::PlatformJwks,
+    scratch: tempfile::TempDir,
+    key: std::path::PathBuf,
+    peers: std::path::PathBuf,
+    stderr: std::path::PathBuf,
+}
+
+impl ServingBoot {
+    fn new() -> Self {
+        let database = workflow_postgres::Database::new();
+        let platform = crate::support::PlatformJwks::start();
+        let scratch = tempfile::tempdir().expect("scratch directory");
+        let (key, peers) = service_identity(&scratch.path().join("keys"));
+        let stderr = scratch.path().join("control.err");
+        Self {
+            database,
+            platform,
+            scratch,
+            key,
+            peers,
+            stderr,
+        }
+    }
+
+    /// Spawn Control on `port`, piping its tracing stream and capturing its
+    /// `stderr`.
+    fn spawn(&self, port: u16) -> ServingChild {
+        let sink = std::fs::File::create(&self.stderr).expect("control stderr log");
+        ServingChild(
+            Command::new(env!("CARGO_BIN_EXE_zeroship-control"))
+                .env_clear()
+                .env("ZEROSHIP_CONTROL_KEY", STRONG_HEX)
+                .env("ZEROSHIP_PAIRWISE_SALT", STRONG_HEX)
+                .env("ZEROSHIP_CONTROL_MASTER_KEY", STRONG_HEX)
+                .env("ZEROSHIP_CONTROL_DATABASE_URL", self.database.url())
+                .arg("--no-config")
+                .arg("--auth-platform-issuer")
+                .arg(issuer_of(&self.platform.jwks_url()))
+                .arg("--service-key-file")
+                .arg(&self.key)
+                .arg("--service-peers-file")
+                .arg(&self.peers)
+                .arg("--allow-unsupported-billing")
+                // ONE serving thread, so a case that boots Control does not
+                // claim one io_uring ring per core from the host's `ulimit -l`
+                // budget.
+                .arg("--threads")
+                .arg("1")
+                // Pin the announcement's format so this reader does not depend
+                // on the child's stderr being a non-terminal.
+                .args(["--observability-log-format", "json"])
+                .arg("--port")
+                .arg(port.to_string())
+                .arg("--blob-store")
+                .arg(self.scratch.path().join("blobs"))
+                .arg("--deploy-tmp-dir")
+                .arg(self.scratch.path().join("deploy"))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::from(sink))
+                .spawn()
+                .expect("spawn zeroship-control"),
+        )
+    }
+
+    fn stderr(&self) -> String {
+        std::fs::read_to_string(&self.stderr).unwrap_or_default()
+    }
+}
+
+/// A spawned Control child, killed and reaped when dropped so a panicking case
+/// does not leak a process.
+struct ServingChild(Child);
+
+impl Drop for ServingChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// How a watch of a child's tracing stream ended.
+enum Announce {
+    /// The listening line was read, naming its advertised port.
+    Port(u16),
+    /// The stream ended first, carrying everything read.
+    Ended(String),
+}
+
+/// Read `stdout` on a background thread until it announces `marker`, then keep
+/// draining so the child never blocks on a full pipe. The test thread waits on
+/// the returned channel with `recv_timeout`, so a child that stalls fails by
+/// timeout rather than hanging the run, and nothing polls on a sleep.
+fn await_announcement(stdout: ChildStdout, marker: &'static str) -> mpsc::Receiver<Announce> {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut log = String::new();
+        let mut announced = false;
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) => {
+                    if !announced {
+                        let _ = sender.send(Announce::Ended(log));
+                    }
+                    return;
+                }
+                Ok(_) => {
+                    if !announced {
+                        if let Some(port) = announced_port(&line, marker) {
+                            let _ = sender.send(Announce::Port(port));
+                            announced = true;
+                        }
+                    }
+                    log.push_str(&line);
+                }
+                Err(error) => {
+                    let _ = sender.send(Announce::Ended(format!("{log}\nread error: {error}")));
+                    return;
+                }
+            }
+        }
+    });
+    receiver
+}
+
+/// The port a single log line announced, if it carried `marker`.
+///
+/// The tracing line is JSON on a non-TTY stream; a plain `bind=host:port`
+/// spelling is accepted too, so this reader is not pinned to one format.
+fn announced_port(line: &str, marker: &str) -> Option<u16> {
+    if !line.contains(marker) {
+        return None;
+    }
+    let field = serde_json::from_str::<serde_json::Value>(line)
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/fields/bind")
+                .or_else(|| value.get("bind"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .or_else(|| {
+            line.split("bind=")
+                .nth(1)
+                .map(|rest| rest.split_whitespace().next().unwrap_or("").to_owned())
+        })?;
+    field.parse::<std::net::SocketAddr>().ok().map(|a| a.port())
+}
+
+/// A port another process holds is not this Control listening: Control must
+/// stop on the collision without ever claiming it is listening.
+#[test]
+fn a_held_port_is_never_announced_as_listening() {
+    let boot = ServingBoot::new();
+    let foreign = std::net::TcpListener::bind("127.0.0.1:0").expect("hold a port");
+    let port = foreign.local_addr().expect("the held port").port();
+    let mut child = boot.spawn(port);
+    let announcement = await_announcement(
+        child.0.stdout.take().expect("piped stdout"),
+        "zeroship-control listening",
+    );
+    match announcement.recv_timeout(Duration::from_mins(1)) {
+        Ok(Announce::Port(port)) => panic!(
+            "control claimed to be listening on port {port} it never bound; stderr:\n{}",
+            boot.stderr()
+        ),
+        Ok(Announce::Ended(log)) => assert!(
+            !log.contains("zeroship-control listening"),
+            "control claimed to be listening on a port it never bound:\n{log}"
+        ),
+        Err(error) => panic!(
+            "control never stopped on the port another process holds ({error}); stderr:\n{}",
+            boot.stderr()
+        ),
+    }
+    let status = child.0.wait().expect("reap zeroship-control");
+    assert!(
+        !status.success(),
+        "control exited cleanly despite the port another process holds; stderr:\n{}",
+        boot.stderr()
+    );
+    assert!(
+        boot.stderr().contains("Address already in use"),
+        "control did not name the address collision:\n{}",
+        boot.stderr()
+    );
+    drop(foreign);
+}
+
+/// A `--port 0` boot announces the port it actually bound, and the process
+/// really listens there. The socket is in the LISTEN state before the line is
+/// logged, so the ownership check after the announcement races nothing.
+#[test]
+fn a_zero_port_boot_announces_the_port_it_bound() {
+    let boot = ServingBoot::new();
+    let mut child = boot.spawn(0);
+    let announcement = await_announcement(
+        child.0.stdout.take().expect("piped stdout"),
+        "zeroship-control listening",
+    );
+    let port = match announcement.recv_timeout(Duration::from_mins(1)) {
+        Ok(Announce::Port(port)) => port,
+        Ok(Announce::Ended(log)) => panic!(
+            "control exited before announcing a bound port:\n{log}\nstderr:\n{}",
+            boot.stderr()
+        ),
+        Err(error) => panic!(
+            "control never announced a bound port ({error}); stderr:\n{}",
+            boot.stderr()
+        ),
+    };
+    assert_ne!(port, 0, "a --port 0 boot announced the requested port, not the bound one");
+    assert!(
+        zeroship_testkit::listen::child_listens(child.0.id(), port),
+        "control announced port {port} but does not own a listening socket on it; stderr:\n{}",
+        boot.stderr()
+    );
 }
 
 #[test]
