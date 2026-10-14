@@ -2,13 +2,14 @@
 //! isolates of the same app on a worker thread. Dropping an isolate releases
 //! its sources and permits; a new deploy cannot inherit old stream handles.
 //! A download opened for a request is released when that request ends early,
-//! since nothing it left running may read it any more.
+//! since nothing it left running may read it any more, or when its isolate
+//! stops, so a stopped isolate holds none of its app's shared budget.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
-use zeroship_runtime::state::{EndListener, RequestLink};
+use zeroship_runtime::state::{EndRegistration, RequestLink};
 
 use crate::download::Download;
 
@@ -17,9 +18,10 @@ pub(crate) type StreamSlot = Rc<RefCell<StreamEntry>>;
 pub(crate) struct StreamEntry {
     pub download: Option<Download>,
     _permit: Permit,
-    /// Closes the download when the request it was opened for ends early.
-    /// Withdrawn with the entry once the download closes on its own.
-    _release_on_end: Option<EndListener>,
+    /// Closes the download when the request that opened it ends early or its
+    /// isolate stops. Withdrawn with the entry once the download closes
+    /// on its own.
+    _release_on_end: Option<EndRegistration>,
 }
 
 struct Budget {
@@ -77,30 +79,33 @@ impl LiveStreams {
     }
 
     /// Open a download for the request `link` names, closing it when that
-    /// request ends early, or at once if it already has.
+    /// request ends early or its isolate stops, or at once if either already
+    /// has.
     pub fn open_for(self: &Rc<Self>, download: Download, link: &RequestLink) -> Result<u32, String> {
         let streams = Rc::downgrade(self);
-        let id = self.open_with(download, |id, entry| {
+        let (id, ended) = self.open_with(download, |id, entry| {
             let entry = entry.clone();
-            link.on_end(move || {
+            Some(link.on_end_or_isolate_stop(move || {
                 if let (Some(streams), Some(entry)) = (streams.upgrade(), entry.upgrade()) {
                     streams.close_slot(id, &entry);
                 }
-            })
+            }))
         })?;
-        // A request that had already ended ran its release before the
-        // download was live, so it is closed here instead.
-        if link.has_ended() {
+        // An end that came first runs the release before the download is
+        // live, when it finds nothing to close, so it is closed here.
+        if ended {
             self.close(id);
         }
         Ok(id)
     }
 
+    /// Open a download, registering `release_on_end` for it: its id, and
+    /// whether an end had already run that release.
     fn open_with(
         &self,
         download: Download,
-        release_on_end: impl FnOnce(u32, &Weak<RefCell<StreamEntry>>) -> Option<EndListener>,
-    ) -> Result<u32, String> {
+        release_on_end: impl FnOnce(u32, &Weak<RefCell<StreamEntry>>) -> Option<EndRegistration>,
+    ) -> Result<(u32, bool), String> {
         if self.budget.live.get() >= self.cap {
             return Err(format!(
                 "storage: too many live download streams ({} max per app); read one to the end, or cancel it",
@@ -115,17 +120,20 @@ impl LiveStreams {
             }
         };
         self.budget.live.set(self.budget.live.get() + 1);
+        let mut ended = false;
         streams.insert(
             id,
             Rc::new_cyclic(|entry| {
+                let release = release_on_end(id, entry);
+                ended = release.as_ref().is_some_and(EndRegistration::has_ended);
                 RefCell::new(StreamEntry {
                     download: Some(download),
                     _permit: Permit(Rc::clone(&self.budget)),
-                    _release_on_end: release_on_end(id, entry),
+                    _release_on_end: release,
                 })
             }),
         );
-        Ok(id)
+        Ok((id, ended))
     }
 
     pub fn slot(&self, id: u32) -> Option<StreamSlot> {
@@ -176,7 +184,7 @@ mod tests {
     impl LiveStreams {
         /// Open a download for no request, which nothing releases early.
         fn open(&self, download: Download) -> Result<u32, String> {
-            self.open_with(download, |_, _| None)
+            self.open_with(download, |_, _| None).map(|(id, _)| id)
         }
     }
 

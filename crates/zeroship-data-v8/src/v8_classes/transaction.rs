@@ -12,7 +12,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
-use zeroship_runtime::state::{EndListener, OpError, OpResult, RequestLink, ResolveValue, SharedState};
+use zeroship_runtime::state::{EndRegistration, OpError, OpResult, RequestLink, ResolveValue, SharedState};
 use zeroship_runtime_macros::v8_class;
 
 use crate::op_error::ToOpError;
@@ -199,11 +199,14 @@ struct TxFinalizer {
     /// [`settle_after_body`]).
     link: RequestLink,
     /// Rolls a top-level transaction back as soon as the request that opened
-    /// it ends early, so its lane is released then rather than when its
-    /// execution deadline expires: a callback stopped mid-way never settles,
-    /// and nothing else would end it. Withdrawn once the callback settles,
-    /// after which the settle itself decides the commit.
-    abandon_on_end: Option<EndListener>,
+    /// it ends early, or the isolate it runs in stops, so its lane is released
+    /// then rather than when its execution deadline expires: a callback
+    /// stopped mid-way never settles, and nothing else would end it. The
+    /// isolate's stop still ends a transaction whose request already has its
+    /// answer. When the callback settles, the request's end is withdrawn and
+    /// the settle decides the commit; the isolate's stop is withdrawn only
+    /// once that settle has run ([`withdraw_early_end`]).
+    abandon_on_end: Option<EndRegistration>,
     /// `None` ⇒ this `transaction()` opened the outermost `BEGIN`
     /// (settle = `COMMIT` / `ROLLBACK`, then dispose of the session).
     /// `Some(frame)` ⇒ this `transaction()` opened a nested `SAVEPOINT`
@@ -381,9 +384,9 @@ pub fn transaction_dispatch<'s>(
                 // release is now the protocol's rather than this future's - and
                 // an unsettling callback is bounded by the execution deadline
                 // rather than by nothing.
-                let abandon_on_end = admission.and_then(|admission| {
+                let abandon_on_end = admission.map(|admission| {
                     let abandon = admission.handed_to_reducer_abandonable();
-                    link.on_end(move || abandon.abandon())
+                    link.on_end_or_isolate_stop(move || abandon.abandon())
                 });
                 // Hand back a continuation that mints the tx-view, calls
                 // the creator callback, and attaches commit/rollback
@@ -657,13 +660,13 @@ fn settle_after_body(
     let TxFinalizer {
         outer,
         link,
-        abandon_on_end,
+        mut abandon_on_end,
         frame,
         route,
         parent_claim,
         ..
     } = *finalizer;
-    drop(abandon_on_end);
+    withdraw_early_end(&mut abandon_on_end);
 
     let success = body_ok.is_some();
     let body = if success { body_ok } else { body_err };
@@ -686,6 +689,7 @@ fn settle_after_body(
     let opener = link.clone();
     state.borrow_mut().spawn_follow_up(&link, async move {
         let settle_result = ended_request_outcome(&opener, settle.await);
+        drop(abandon_on_end);
         drop(parent_claim);
         let value = build_settle_resolve_value(settle_result, success, body);
         OpResult::JsValue {
@@ -693,6 +697,18 @@ fn settle_after_body(
             value,
         }
     });
+}
+
+/// The callback settled, so the settle now decides the commit: from here on the
+/// request's early end does not roll the transaction back, since a commit
+/// refused for an ended request rolls back on its own. The isolate's stop still does,
+/// until the settle has run: the settle waits in a queued follow-up, which a
+/// stop drops before it reaches the database, and nothing else would end the
+/// transaction then.
+fn withdraw_early_end(abandon: &mut Option<EndRegistration>) {
+    if let Some(abandon) = abandon {
+        abandon.withdraw_early_end();
+    }
 }
 
 /// A transaction whose request ended early is rolled back, by the end itself
@@ -735,13 +751,13 @@ fn settle_failed_before_body(
     let TxFinalizer {
         outer,
         link,
-        abandon_on_end,
+        mut abandon_on_end,
         frame,
         route,
         parent_claim,
         ..
     } = finalizer;
-    drop(abandon_on_end);
+    withdraw_early_end(&mut abandon_on_end);
     let err_global = {
         // Materialise the JS exception now, while we have a scope, so the
         // async settle op can reject with the real value.
@@ -753,6 +769,7 @@ fn settle_failed_before_body(
     let opener = link.clone();
     state.borrow_mut().spawn_follow_up(&link, async move {
         let settle_result = ended_request_outcome(&opener, settle.await);
+        drop(abandon_on_end);
         drop(parent_claim);
         OpResult::JsValue {
             resolver: outer,

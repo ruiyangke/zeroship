@@ -110,17 +110,7 @@ impl RequestControl {
         // nothing to withdraw.
         let waiting = self.on_end.take();
         for (_, action) in waiting {
-            // An action is native cleanup a binding registered. One that
-            // panics must not keep the actions after it, or whoever is ending
-            // the request, from finishing: a stop still answers the isolate's
-            // other requests and quarantines it.
-            if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)) {
-                tracing::error!(
-                    request = self.id,
-                    panic = %crate::panic_util::panic_message(&*panic),
-                    "panic in an action waiting on a request's early end; the request still ends"
-                );
-            }
+            run_end_action(action, "a request's early end");
         }
         mid_commit
     }
@@ -179,6 +169,155 @@ impl Drop for EndListener {
         if let Some(control) = self.control.upgrade() {
             control.on_end.borrow_mut().retain(|(id, _)| *id != self.id);
         }
+    }
+}
+
+/// Run `action`, native cleanup a binding registered for `end`. One that
+/// panics must not keep the actions after it, or whoever is ending the work,
+/// from finishing: a stop still answers the isolate's other requests and
+/// quarantines it.
+fn run_end_action(action: EndAction, end: &'static str) {
+    if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)) {
+        tracing::error!(
+            end,
+            panic = %crate::panic_util::panic_message(&*panic),
+            "panic in an action waiting on an end; the end still completes"
+        );
+    }
+}
+
+/// An action that runs at most once, shared by every end it waits on. Taking
+/// it out runs it or withdraws it, so whichever comes first wins and the rest
+/// find it gone.
+type PendingAction = Rc<RefCell<Option<EndAction>>>;
+
+/// Run `pending`'s action, if nothing has run or withdrawn it yet. Taken
+/// before it runs, so no borrow is held while it does.
+fn run_pending(pending: &PendingAction, end: &'static str) {
+    let action = pending.borrow_mut().take();
+    if let Some(action) = action {
+        run_end_action(action, end);
+    }
+}
+
+/// What an isolate must end when it stops: native actions bindings registered
+/// for work that can outlive the request that started it, such as a
+/// transaction or a download a request opened and did not wait for.
+///
+/// The runtime runs every action once, contained, when it quarantines the
+/// isolate, whatever stopped it, and when it drops the isolate, so an isolate
+/// replaced without a stop ends its work too. An action registered after that
+/// runs at once. Work that finishes on its own withdraws its action by emptying
+/// it; an emptied action is pruned when the next one registers, and skipped by
+/// the stop. No action enters V8.
+#[derive(Default)]
+pub struct IsolateEnds {
+    ended: Cell<bool>,
+    actions: RefCell<Vec<PendingAction>>,
+}
+
+impl std::fmt::Debug for IsolateEnds {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("IsolateEnds")
+            .field("ended", &self.ended.get())
+            .field("waiting", &self.actions.borrow().len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl IsolateEnds {
+    /// Run `pending` when the isolate stops: now, if it already has.
+    fn on_stop(&self, pending: &PendingAction) {
+        if self.ended.get() {
+            run_pending(pending, "an isolate's stop");
+            return;
+        }
+        let mut actions = self.actions.borrow_mut();
+        // An action another end already ran, or its owner withdrew, is
+        // dropped here rather than kept until the isolate stops.
+        actions.retain(|waiting| waiting.borrow().is_some());
+        actions.push(Rc::clone(pending));
+    }
+
+    /// Run every action still waiting, once. A registration dropped while
+    /// this runs has already emptied its action, which is then not run.
+    pub(crate) fn end(&self) {
+        self.ended.set(true);
+        let waiting = self.actions.take();
+        for pending in waiting {
+            run_pending(&pending, "an isolate's stop");
+        }
+    }
+}
+
+/// An action waiting on a request's early end and on its isolate's stop.
+///
+/// Made by [`crate::state::RequestLink::on_end_or_isolate_stop`]. Whichever end
+/// comes first runs the action, once. Dropping this withdraws it from both,
+/// even from an end that is already running.
+#[must_use = "dropping the registration withdraws its action at once, so it never runs"]
+pub struct EndRegistration {
+    pending: PendingAction,
+    request: Option<EndListener>,
+}
+
+impl std::fmt::Debug for EndRegistration {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EndRegistration")
+            .field("pending", &self.pending.borrow().is_some())
+            .field("request", &self.request)
+            .finish()
+    }
+}
+
+impl EndRegistration {
+    /// Register `action` on `control`'s early end, when there is a request,
+    /// and on `isolate`'s stop, so that whichever comes first runs it.
+    pub(crate) fn new(
+        control: Option<&Rc<RequestControl>>,
+        isolate: &Rc<IsolateEnds>,
+        action: EndAction,
+    ) -> Self {
+        let pending: PendingAction = Rc::new(RefCell::new(Some(action)));
+        let request = control.and_then(|control| {
+            let pending = Rc::clone(&pending);
+            control.on_end(Box::new(move || run_pending(&pending, "a request's early end")))
+        });
+        // A request that had already ended ran the action just now, so the
+        // isolate has nothing left to wait on. Read in its own statement, so
+        // no borrow is held when an isolate that has already stopped runs the
+        // action at once.
+        let waiting = pending.borrow().is_some();
+        if waiting {
+            isolate.on_stop(&pending);
+        }
+        Self { pending, request }
+    }
+
+    /// Withdraw the action from the request's early end and keep it on the
+    /// isolate's stop: for work whose own completion is under way, which the
+    /// request's end must not interrupt from now on, but which the isolate's
+    /// stop still has to end if that completion never arrives.
+    pub fn withdraw_early_end(&mut self) {
+        self.request = None;
+    }
+
+    /// Whether an end has already run the action: the request's early end or
+    /// the isolate's stop, whether it came before the registration or since.
+    #[must_use]
+    pub fn has_ended(&self) -> bool {
+        self.pending.borrow().is_none()
+    }
+}
+
+impl Drop for EndRegistration {
+    fn drop(&mut self) {
+        // Taken into a local first, so no borrow is held while the action,
+        // and whatever it captured, drops.
+        let action = self.pending.borrow_mut().take();
+        drop(action);
     }
 }
 
@@ -612,6 +751,13 @@ mod tests {
     fn the_op_gate_refuses_code_whose_frame_it_cannot_read() {
         crate::init_v8();
         let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+        // Every isolate that runs ops carries its runtime state, whose ends
+        // the gate hands to every op it admits.
+        isolate.set_slot::<SharedState>(Rc::new(RefCell::new(crate::state::RuntimeState::new(
+            std::collections::HashMap::new(),
+            None,
+            None,
+        ))));
         v8::scope!(let handles, &mut isolate);
         let context = v8::Context::new(handles, v8::ContextOptions::default());
         let scope = &mut v8::ContextScope::new(handles, context);
@@ -631,5 +777,69 @@ mod tests {
         scope.set_continuation_preserved_embedder_data(frame.into());
         assert!(matches!(current_request(scope), RequestRead::Malformed));
         assert!(refused_as_ended(scope), "a frame the gate cannot read is refused");
+    }
+
+    /// A counter an end action bumps, and the action that bumps it.
+    fn counted() -> (Rc<Cell<u32>>, EndAction) {
+        let runs = Rc::new(Cell::new(0));
+        let counter = Rc::clone(&runs);
+        (runs, Box::new(move || counter.set(counter.get() + 1)))
+    }
+
+    /// Work whose own completion is under way withdraws its action from the
+    /// request's early end and keeps it on the isolate's stop: the request's
+    /// end then runs nothing, and the isolate's stop still runs it, once. The
+    /// control is the same registration left whole, which the request's end
+    /// runs and the isolate's stop then finds spent.
+    #[test]
+    fn withdrawing_the_early_end_keeps_the_action_on_the_isolate_stop() {
+        for withdrawn in [true, false] {
+            let control = RequestControl::new(1, CancelFlag::new());
+            let ends = Rc::new(IsolateEnds::default());
+            let (runs, action) = counted();
+            let mut registration = EndRegistration::new(Some(&control), &ends, action);
+            if withdrawn {
+                registration.withdraw_early_end();
+            }
+            control.stop();
+            assert_eq!(runs.get(), u32::from(!withdrawn), "the request's end, withdrawn: {withdrawn}");
+            ends.end();
+            assert_eq!(runs.get(), 1, "the action runs once in all, withdrawn: {withdrawn}");
+            drop(registration);
+        }
+    }
+
+    /// An action the request's end already ran is pruned from the isolate's
+    /// list when the next one registers, rather than kept until its
+    /// registration goes, which for a transaction that never settles is never.
+    #[test]
+    fn an_action_the_request_end_ran_is_pruned_from_the_isolate_list() {
+        let control = RequestControl::new(1, CancelFlag::new());
+        let ends = Rc::new(IsolateEnds::default());
+        let (runs, action) = counted();
+        let fired = EndRegistration::new(Some(&control), &ends, action);
+        control.stop();
+        assert_eq!(runs.get(), 1, "the request's end ran the action");
+        let (_, action) = counted();
+        let next = EndRegistration::new(None, &ends, action);
+        assert_eq!(ends.actions.borrow().len(), 1, "only the live action is waiting");
+        drop((fired, next));
+    }
+
+    /// A registration dropped while the isolate's stop is running is withdrawn
+    /// from it too: an action that ends another's work, dropping its
+    /// registration, keeps that work's action from running.
+    #[test]
+    fn a_registration_dropped_while_the_isolate_stop_runs_is_withdrawn() {
+        let ends = Rc::new(IsolateEnds::default());
+        let later = Rc::new(RefCell::new(None::<EndRegistration>));
+        let dropper = Rc::clone(&later);
+        let first = EndRegistration::new(None, &ends, Box::new(move || drop(dropper.take())));
+        let (runs, action) = counted();
+        *later.borrow_mut() = Some(EndRegistration::new(None, &ends, action));
+        ends.end();
+        assert!(later.borrow().is_none(), "the first action dropped the second registration");
+        assert_eq!(runs.get(), 0, "a withdrawn action does not run");
+        drop(first);
     }
 }

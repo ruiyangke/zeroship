@@ -27,7 +27,7 @@
 //! `cargo test` the case re-executes this binary for just itself.
 
 use crate::support;
-use support::commits;
+use support::{commits, ends};
 use support::*;
 use crate::in_own_process;
 
@@ -950,6 +950,49 @@ fn a_panic_during_dispatch_quarantines_the_isolate() {
         assert_eq!(answered, (200, "Error: internal error".to_owned()), "the panic is thrown into the handler");
         assert_eq!(zeroship_runtime::callback::caught_panics() - panics_before, 1);
         assert!(runtime.is_quarantined(), "the isolate the panic happened in is quarantined");
+    });
+}
+
+/// Work a request left running past its answer is ended when a callback
+/// panics in its isolate: the end it registered runs once at the panic's
+/// stop, which another request's dispatch takes as it returns.
+#[test]
+fn an_isolate_end_runs_when_a_panic_stops_its_isolate() {
+    in_own_process!(an_isolate_end_runs_when_a_panic_stops_its_isolate, {
+        init_v8();
+        let runtime = Runtime::builder()
+            .plugin(PanickingPlugin)
+            .plugin(ends::Probe)
+            .modules(m(r#"
+            export default {
+                fetch(request, env) {
+                    if (new URL(request.url).pathname === "/hold-end") {
+                        env.ends.hold();
+                        return new Response("held");
+                    }
+                    try { env.boom.explode(); } catch {}
+                    return new Response("answered after the panic");
+                }
+            };
+            "#))
+            .build();
+        let end = ends::watch();
+        let FetchOutcome::Response { status, .. } = runtime.call_fetch_handler(
+            "GET",
+            "http://localhost/hold-end",
+            &[],
+            "",
+            &EnvSnapshot::empty(),
+            RequestCtx::new(CancelFlag::new()),
+        ) else {
+            panic!("the request holding the end is answered at once");
+        };
+        assert_eq!(status, 200);
+        assert!(end.held(), "the answered request registered its end");
+        assert_eq!(end.runs(), 0, "nothing has ended the work yet");
+        assert_eq!(settle(&runtime), (200, "answered after the panic".to_owned()));
+        assert!(runtime.is_quarantined(), "the isolate the panic happened in is quarantined");
+        assert_eq!(end.runs(), 1, "the panic's stop ends what the isolate owned");
     });
 }
 

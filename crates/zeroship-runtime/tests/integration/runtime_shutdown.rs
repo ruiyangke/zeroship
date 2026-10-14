@@ -1,8 +1,8 @@
-use crate::support::commits;
+use crate::support::{commits, ends};
 use futures::FutureExt;
 use std::{cell::{Cell, RefCell}, rc::Rc, time::Duration};
 use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
-use zeroship_runtime::state::{SharedState, admit_op};
+use zeroship_runtime::state::{RequestLink, SharedState, admit_op};
 use zeroship_runtime::{
     CancelFlag, EnvSnapshot, FetchOutcome, ModuleEntry, OpResult, RequestCtx, ResultReceiver,
     Runtime, SettledFetch,
@@ -45,7 +45,33 @@ impl NativePlugin for ProbePlugin {
     fn register(&self, r: &mut NativeRegistrar) {
         r.add("hang", hang_callback);
         r.add("panicOnEnd", panic_on_end_callback);
+        r.add("keepLink", keep_link_callback);
     }
+}
+
+thread_local! {
+    /// The link the latest `env.probe.keepLink()` kept.
+    static KEPT_LINK: RefCell<Option<RequestLink>> = const { RefCell::new(None) };
+}
+
+/// `env.probe.keepLink()` keeps the link to its request, as a binding keeps
+/// one for work that goes on after the callback, so the case can register
+/// cleanup on it whenever that work would.
+fn keep_link_callback(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let owner = admit_op(scope).expect("the request is live");
+    let link = owner.retain();
+    KEPT_LINK.with_borrow_mut(|kept| *kept = Some(link));
+}
+
+/// The link the latest `env.probe.keepLink()` kept.
+fn kept_link() -> RequestLink {
+    KEPT_LINK
+        .with_borrow_mut(Option::take)
+        .expect("the request kept its link")
 }
 
 /// `env.probe.panicOnEnd()` registers an action on its request's early end
@@ -63,7 +89,7 @@ fn panic_on_end_callback(
     let owner = admit_op(scope).expect("the request is live");
     let ended = owner
         .retain()
-        .on_end(|| panic!("an action waiting on a request's end panicked"));
+        .on_end_or_isolate_stop(|| panic!("an action waiting on a request's end panicked"));
     state.borrow_mut().spawn_op(owner, async move {
         let _registered = ended;
         std::future::pending::<OpResult>().await
@@ -100,11 +126,16 @@ fn runtime() -> Runtime {
                      if (path === '/hang') env.probe.hang(); \
                      if (path === '/commit') env.commits.hold(); \
                      if (path === '/panic-on-end') env.probe.panicOnEnd(); \
+                     if (path === '/hold-end') { env.ends.hold(); return new Response('held'); } \
+                     if (path === '/hold-end-pending') env.ends.hold(); \
+                     if (path === '/keep-link') { env.probe.keepLink(); return new Response('kept'); } \
+                     if (path === '/keep-link-pending') env.probe.keepLink(); \
                      return await new Promise(() => {}); } };"
                 .into(),
         }])
         .plugin(ProbePlugin)
         .plugin(commits::Probe)
+        .plugin(ends::Probe)
         .build()
 }
 
@@ -470,4 +501,169 @@ async fn quarantine_retains_v8_until_native_destructors_have_finished() {
     .await
     .expect("quarantined isolate must be disposed after native teardown");
     assert!(dropped.get());
+}
+
+/// Dispatch `path` on `runtime`, entered, and hand back what it answered.
+fn dispatched(runtime: &Runtime, path: &str) -> FetchOutcome {
+    runtime.enter_isolate();
+    let outcome = runtime.call_fetch_handler(
+        "GET",
+        &format!("http://local{path}"),
+        &[],
+        [],
+        &EnvSnapshot::empty(),
+        RequestCtx::new(CancelFlag::new()),
+    );
+    runtime.exit_isolate();
+    outcome
+}
+
+/// Register an isolate end through a request that is answered at once, park
+/// another request, interrupt the isolate from another thread, and answer how
+/// many times the end ran once the stop has answered the parked request.
+/// `withdraw` withdraws the end before the interrupt, as work that finishes
+/// on its own does.
+async fn isolate_end_runs_at_an_interrupt(withdraw: bool) -> u32 {
+    let runtime = runtime();
+    runtime.exit_isolate();
+    runtime.start_pump();
+    let end = ends::watch();
+    let FetchOutcome::Response { status, .. } = dispatched(&runtime, "/hold-end") else {
+        panic!("the request holding the end is answered at once");
+    };
+    assert_eq!(status, 200);
+    assert!(end.held(), "the answered request registered its end");
+    if withdraw {
+        end.withdraw();
+    }
+    let FetchOutcome::Pending { rx: parked, .. } = dispatched(&runtime, "/") else {
+        panic!("the parked request is pending");
+    };
+    let interrupt = runtime.interrupt_handle();
+    std::thread::spawn(move || interrupt.cancel()).join().unwrap();
+    let answer = compio::time::timeout(Duration::from_secs(5), parked.recv()).await;
+    compio::time::timeout(Duration::from_secs(5), runtime.shutdown())
+        .await
+        .expect("an interrupted isolate's native work must join");
+    assert!(
+        answer.expect("the stop answers the parked request").is_err(),
+        "the parked request is ended by the stop"
+    );
+    end.runs()
+}
+
+/// Work a request left running past its answer is ended when its isolate
+/// stops: its end action runs once at the stop, though the request that
+/// registered it already has its answer.
+#[compio::test]
+async fn an_isolate_end_registered_by_an_answered_request_runs_at_the_stop() {
+    assert_eq!(isolate_end_runs_at_an_interrupt(false).await, 1);
+}
+
+/// The control beside it: work that finished on its own withdrew its end, so
+/// the stop does not run it.
+#[compio::test]
+async fn a_withdrawn_isolate_end_does_not_run_at_the_stop() {
+    assert_eq!(isolate_end_runs_at_an_interrupt(true).await, 0);
+}
+
+/// An end registered by a request still pending runs once when the isolate
+/// stops: the stop ends the request, which runs it, and the isolate's own end
+/// does not run it again.
+#[compio::test]
+async fn an_isolate_end_of_a_pending_request_runs_once_at_the_stop() {
+    let runtime = runtime();
+    runtime.exit_isolate();
+    runtime.start_pump();
+    let end = ends::watch();
+    let FetchOutcome::Pending { rx: holding, .. } = dispatched(&runtime, "/hold-end-pending") else {
+        panic!("the request holding the end is pending");
+    };
+    assert!(end.held(), "the pending request registered its end");
+    let interrupt = runtime.interrupt_handle();
+    std::thread::spawn(move || interrupt.cancel()).join().unwrap();
+    let answer = compio::time::timeout(Duration::from_secs(5), holding.recv()).await;
+    compio::time::timeout(Duration::from_secs(5), runtime.shutdown())
+        .await
+        .expect("an interrupted isolate's native work must join");
+    assert!(answer.expect("the stop answers the request").is_err());
+    assert_eq!(end.runs(), 1, "the end runs once, not once per end that reaches it");
+}
+
+/// An isolate dropped without a stop, as a cache drops the one it evicts,
+/// ends the work a request left running past its answer too.
+#[compio::test]
+async fn an_isolate_end_runs_when_the_isolate_is_dropped_without_a_stop() {
+    let runtime = runtime();
+    runtime.exit_isolate();
+    let end = ends::watch();
+    let FetchOutcome::Response { status, .. } = dispatched(&runtime, "/hold-end") else {
+        panic!("the request holding the end is answered at once");
+    };
+    assert_eq!(status, 200);
+    assert!(!runtime.is_quarantined(), "nothing stopped the isolate");
+    assert_eq!(end.runs(), 0, "nothing has ended the work yet");
+    drop(runtime);
+    assert_eq!(end.runs(), 1, "dropping the isolate ends what it owned");
+}
+
+
+/// Work still going when its isolate has ended, as an op in flight when a
+/// cache drops the isolate it evicts, registers its cleanup afterwards, as a
+/// transaction whose BEGIN answers then does. The cleanup runs at once: the
+/// isolate that would have ended the work is gone. The control is the same
+/// registration made while the isolate is live, which waits.
+#[compio::test]
+async fn an_end_registered_after_its_isolate_has_ended_runs_at_once() {
+    let runtime = runtime();
+    runtime.exit_isolate();
+    let FetchOutcome::Response { status, .. } = dispatched(&runtime, "/keep-link") else {
+        panic!("the request keeping its link is answered at once");
+    };
+    assert_eq!(status, 200);
+    let link = kept_link();
+    let runs = Rc::new(Cell::new(0));
+    let counter = Rc::clone(&runs);
+    let live = link.on_end_or_isolate_stop(move || counter.set(counter.get() + 1));
+    assert_eq!(runs.get(), 0, "a registration on a live isolate waits");
+    drop(live);
+    drop(runtime);
+    let counter = Rc::clone(&runs);
+    let _late = link.on_end_or_isolate_stop(move || counter.set(counter.get() + 1));
+    assert_eq!(runs.get(), 1, "a registration on an ended isolate runs at once");
+}
+
+/// Cleanup registered for a request that has already ended runs at once, and
+/// a panic in it is contained: whoever registers it carries on.
+#[compio::test]
+async fn an_end_registered_for_an_ended_request_runs_at_once_and_contains_a_panic() {
+    let runtime = runtime();
+    runtime.exit_isolate();
+    let cancel = CancelFlag::new();
+    runtime.enter_isolate();
+    let outcome = runtime.call_fetch_handler(
+        "GET",
+        "http://local/keep-link-pending",
+        &[],
+        [],
+        &EnvSnapshot::empty(),
+        RequestCtx::new(cancel.clone()),
+    );
+    runtime.exit_isolate();
+    let FetchOutcome::Pending { .. } = outcome else {
+        panic!("the request keeping its link is pending");
+    };
+    let link = kept_link();
+    cancel.cancel();
+    assert!(link.has_ended(), "the host cancelled the request");
+    let ran = Rc::new(Cell::new(false));
+    let marker = Rc::clone(&ran);
+    let _ended = link.on_end_or_isolate_stop(move || {
+        marker.set(true);
+        panic!("cleanup for an ended request panicked");
+    });
+    assert!(ran.get(), "cleanup for an ended request runs at once, and its panic stays inside it");
+    compio::time::timeout(Duration::from_secs(5), runtime.shutdown())
+        .await
+        .expect("the isolate's native work must join");
 }

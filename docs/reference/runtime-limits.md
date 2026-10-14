@@ -162,13 +162,15 @@ isolate was doing:
   has no wall timeout, nothing else would ever answer those requests.
 - Each request still waiting on the isolate ends as a request stopped for
   CPU does (see [What a stopped request can still
-  do](#what-a-stopped-request-can-still-do)): a transaction it opened is
-  rolled back at the stop, and when a commit it asked for is already sent, its
-  answer's `message` adds
+  do](#what-a-stopped-request-can-still-do)): when a commit it asked for is
+  already sent, its answer's `message` adds
   `; a transaction commit was in flight, so whether it applied is unknown` and
-  the body carries `"code":"commit_failed_indeterminate"`. A transaction
-  whose request already has its answer is not rolled back at the stop: it
-  ends at its own time limit.
+  the body carries `"code":"commit_failed_indeterminate"`.
+- Every transaction your code has open in the isolate is rolled back at the
+  stop, including one whose request already has its answer and one whose
+  callback has returned but whose commit is not sent yet, so your app's next
+  isolate can begin its own at once; a commit already sent still completes.
+  Every download it holds open is closed.
 - A response that is already streaming its body is cut off. The connection
   closes before the body's end, so a client reading the body sees the read
   fail rather than a body that ended normally.
@@ -337,13 +339,15 @@ stop ends everything that isolate was doing:
   nothing.
 - Each request still waiting on the isolate ends as a request stopped for
   CPU does (see [What a stopped request can still
-  do](#what-a-stopped-request-can-still-do)): a transaction it opened is
-  rolled back at the stop, and when a commit it asked for is already sent, its
-  answer's `message` adds
+  do](#what-a-stopped-request-can-still-do)): when a commit it asked for is
+  already sent, its answer's `message` adds
   `; a transaction commit was in flight, so whether it applied is unknown` and
-  the body carries `"code":"commit_failed_indeterminate"`. A transaction
-  whose request already has its answer is not rolled back at the stop: it
-  ends at its own time limit.
+  the body carries `"code":"commit_failed_indeterminate"`.
+- Every transaction your code has open in the isolate is rolled back at the
+  stop, including one whose request already has its answer and one whose
+  callback has returned but whose commit is not sent yet, so your app's next
+  isolate can begin its own at once; a commit already sent still completes.
+  Every download it holds open is closed.
 - None of your code runs in that isolate again. Its timers and pending
   operations are cancelled, and work your code had already queued, such as a
   promise callback, never runs.

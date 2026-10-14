@@ -488,7 +488,7 @@ pub mod commits {
         let link = owner.retain();
         let commit = link.commit_guard().expect("a live request admits its commit");
         let on_end = Rc::clone(&reports);
-        let ended = link.on_end(move || on_end.ended.set(true));
+        let ended = link.on_end_or_isolate_stop(move || on_end.ended.set(true));
         reports.held.set(true);
         state.borrow_mut().spawn_op(owner, async move {
             let _in_flight = (commit, ended);
@@ -527,6 +527,80 @@ pub mod commits {
             assert_eq!(error.code, Some(COMMIT_FAILED_INDETERMINATE), "{error:?}");
             assert!(error.message.starts_with(cause), "the answer names the stop: {error:?}");
             assert!(self.0.ended.get(), "the stop ends the request, so what waits on its end runs");
+        }
+    }
+}
+
+/// `env.ends.hold()` registers native cleanup on the request's early end or
+/// its isolate's stop, the way a binding registers the end of a transaction
+/// or a download a request opened, and keeps the registration alive past the
+/// request's answer. A case reads how often the cleanup ran, and withdraws
+/// it, through the [`Watch`] it makes before dispatching.
+pub mod ends {
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+    use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
+    use zeroship_runtime::state::{admit_op, EndRegistration};
+
+    /// What one watch's hold reported, and the registration it holds.
+    #[derive(Default)]
+    struct Reports {
+        runs: Cell<u32>,
+        registration: RefCell<Option<EndRegistration>>,
+    }
+
+    thread_local! {
+        /// Where this thread's next hold reports: the latest [`watch`].
+        static WATCHED: RefCell<Rc<Reports>> = RefCell::default();
+    }
+
+    /// The `ends` namespace with its one `hold` method.
+    pub struct Probe;
+
+    impl NativePlugin for Probe {
+        fn namespace(&self) -> &'static str {
+            "ends"
+        }
+
+        fn register(&self, registrar: &mut NativeRegistrar) {
+            registrar.add("hold", hold);
+        }
+    }
+
+    fn hold(scope: &mut v8::PinScope, _args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
+        let reports = WATCHED.with_borrow(Rc::clone);
+        let owner = admit_op(scope).expect("the request is live");
+        let counted = Rc::clone(&reports);
+        let registration = owner
+            .retain()
+            .on_end_or_isolate_stop(move || counted.runs.set(counted.runs.get() + 1));
+        *reports.registration.borrow_mut() = Some(registration);
+    }
+
+    /// What the hold this thread makes after it reports.
+    pub struct Watch(Rc<Reports>);
+
+    /// Watch the hold this thread makes from now on.
+    pub fn watch() -> Watch {
+        let reports = Rc::new(Reports::default());
+        WATCHED.set(Rc::clone(&reports));
+        Watch(reports)
+    }
+
+    impl Watch {
+        /// Whether a request registered the cleanup.
+        pub fn held(&self) -> bool {
+            self.0.registration.borrow().is_some()
+        }
+
+        /// How many times the cleanup ran.
+        pub fn runs(&self) -> u32 {
+            self.0.runs.get()
+        }
+
+        /// Withdraw the cleanup, as work that finishes on its own does.
+        pub fn withdraw(&self) {
+            drop(self.0.registration.borrow_mut().take());
         }
     }
 }

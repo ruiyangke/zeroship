@@ -724,6 +724,278 @@ fn a_transaction_open_when_a_panic_stops_its_isolate_is_rolled_back_at_the_stop(
     });
 }
 
+/// Opened without being awaited by a request that then answers, and parked
+/// inside its callback when a native callback panics in another request of
+/// the same isolate. Its request already has its answer, so no request's end
+/// reaches it: the isolate's stop ends it, rolling it back and releasing its
+/// lane at once. The isolate a host builds to replace the stopped one, on the
+/// same database, begins a transaction and commits it before the open
+/// transaction's execution deadline could have expired, which is when the
+/// lane is released without the rollback.
+const LEAVES_ITS_TRANSACTION_OPEN: &str = r#"async function () {
+    env.db.transaction(async (tx) => {
+      await tx.collection(COLLECTION).insert({ title: "open-at-stop" });
+      await env.latch.wait();
+    });
+    return { answered: true };
+  }"#;
+
+#[test]
+fn a_transaction_its_answered_request_left_open_is_rolled_back_when_a_panic_stops_its_isolate() {
+    run(async {
+        let app = App::new(
+            &format!("opener: {LEAVES_ITS_TRANSACTION_OPEN}, {PANICS} {COMMITS_ITS_OWN}"),
+            Duration::from_millis(200),
+        )
+        .await;
+        // The open transaction begins after this, so its execution deadline is
+        // no earlier than this plus the execution budget.
+        let dispatched = Instant::now();
+        let parked = latch_parked();
+        let opened = app.runtime.call_fetch_handler(
+            "POST",
+            "http://localhost/__zeroship/v1/opener",
+            &[("content-type".into(), "application/json".into())],
+            r#"{"json":null}"#,
+            &EnvSnapshot::empty(),
+            RequestCtx::new(CancelFlag::new()),
+        );
+        let (status, body) = match opened {
+            FetchOutcome::Pending { rx, .. } => completed(answer(rx, "the opener").await),
+            FetchOutcome::Response { status, body, .. } => {
+                (status, serde_json::from_slice(&body).expect("the opener answers JSON"))
+            }
+            _ => panic!("the opener answers with a buffered response"),
+        };
+        assert_eq!(
+            (status, &body["json"]),
+            (200, &serde_json::json!({"answered": true})),
+            "the request that opened the transaction has its answer: {body}"
+        );
+        compio::time::timeout(Duration::from_secs(30), parked)
+            .await
+            .expect("the transaction parks inside its callback")
+            .expect("the latch reports its park");
+        drop(app.runtime.call_fetch_handler(
+            "POST",
+            "http://localhost/__zeroship/v1/explode",
+            &[("content-type".into(), "application/json".into())],
+            r#"{"json":null}"#,
+            &EnvSnapshot::empty(),
+            RequestCtx::new(CancelFlag::new()),
+        ));
+        assert!(app.runtime.is_quarantined(), "the isolate the panic happened in is quarantined");
+
+        let replacement = app.replacement().await;
+        let deadline = dispatched
+            + Duration::from_millis(u64::from(zeroship_data_orm::budgets::DB_IDLE_IN_TX_TIMEOUT_MS));
+        let after_stop = call_on(&replacement, "afterStop", CancelFlag::new());
+        let before_the_deadline = futures::future::select(
+            Box::pin(answer_of(after_stop)),
+            Box::pin(compio::time::sleep(deadline.saturating_duration_since(Instant::now()))),
+        )
+        .await;
+        let futures::future::Either::Left((answer, _)) = before_the_deadline else {
+            panic!(
+                "the replacement's transaction waited for the open transaction's execution \
+                 deadline instead of beginning at the stop"
+            );
+        };
+        let committed = completed(answer);
+        assert_eq!(committed.1["json"], "committed", "the replacement commits: {committed:?}");
+        assert_eq!(
+            app.titles().await,
+            ["after-stop-sibling"],
+            "the open transaction's write is rolled back, the replacement's committed"
+        );
+    });
+}
+
+/// Its callback returns once the latch opens, which queues the settle, and a
+/// microtask chain behind that return panics a native callback before the
+/// settle reaches the database. The stop drops the queued settle, so the
+/// isolate's stop is what ends the transaction: it rolls it back and releases
+/// its lane at once. The isolate a host builds to replace the stopped one
+/// begins a transaction and commits it before the deadline. The parked
+/// procedure is answered by the stop, which tells the case the stop has run.
+///
+/// The latch opens on the event pump, so the panic is taken at the end of a
+/// pump window, by which time the pump has moved the settle among the ops it
+/// polls: this drives the stop dropping the pump's own ops. The settle the
+/// stop finds still queued is driven by
+/// `a_transaction_whose_settle_a_dispatch_queued_before_its_panic_is_rolled_back_at_the_stop`.
+const SETTLES_THEN_PANICS: &str = r#"async function () {
+    let returned;
+    const callbackReturned = new Promise((resolve) => { returned = resolve; });
+    env.db.transaction(async (tx) => {
+      await tx.collection(COLLECTION).insert({ title: "open-at-stop" });
+      await env.latch.wait();
+      returned();
+    });
+    callbackReturned.then(() => Promise.resolve()).then(() => env.boom.explode());
+    return { answered: true };
+  }"#;
+
+const PARKS: &str = r"async parked() {
+    await new Promise(() => {});
+  },";
+
+#[test]
+fn a_transaction_whose_settle_a_panic_stop_drops_is_rolled_back_at_the_stop() {
+    run(async {
+        let app = App::new(
+            &format!("settler: {SETTLES_THEN_PANICS}, {PANICS} {PARKS} {COMMITS_ITS_OWN}"),
+            Duration::from_millis(200),
+        )
+        .await;
+        // The transaction begins after this, so its execution deadline is no
+        // earlier than this plus the execution budget.
+        let dispatched = Instant::now();
+        let parked = latch_parked();
+        let settler = app.runtime.call_fetch_handler(
+            "POST",
+            "http://localhost/__zeroship/v1/settler",
+            &[("content-type".into(), "application/json".into())],
+            r#"{"json":null}"#,
+            &EnvSnapshot::empty(),
+            RequestCtx::new(CancelFlag::new()),
+        );
+        if let FetchOutcome::Pending { rx, .. } = settler {
+            completed(answer(rx, "the settler").await);
+        }
+        compio::time::timeout(Duration::from_secs(30), parked)
+            .await
+            .expect("the transaction parks inside its callback")
+            .expect("the latch reports its park");
+        let waiting = app.call("parked");
+        release_latch();
+        match answer(waiting, "the parked request").await {
+            Err(error) => assert_eq!(error.message, "internal error", "the panic's stop ends it"),
+            Ok(_) => panic!("the parked request must be ended by the panic's stop"),
+        }
+        assert!(app.runtime.is_quarantined(), "the isolate the panic happened in is quarantined");
+
+        let replacement = app.replacement().await;
+        let deadline = dispatched
+            + Duration::from_millis(u64::from(zeroship_data_orm::budgets::DB_IDLE_IN_TX_TIMEOUT_MS));
+        let after_stop = call_on(&replacement, "afterStop", CancelFlag::new());
+        let before_the_deadline = futures::future::select(
+            Box::pin(answer_of(after_stop)),
+            Box::pin(compio::time::sleep(deadline.saturating_duration_since(Instant::now()))),
+        )
+        .await;
+        let futures::future::Either::Left((answer, _)) = before_the_deadline else {
+            panic!(
+                "the replacement's transaction waited for the stopped transaction's execution \
+                 deadline instead of beginning at the stop"
+            );
+        };
+        let committed = completed(answer);
+        assert_eq!(committed.1["json"], "committed", "the replacement commits: {committed:?}");
+        assert_eq!(
+            app.titles().await,
+            ["after-stop-sibling"],
+            "the transaction whose settle the stop dropped is rolled back, the replacement's committed"
+        );
+    });
+}
+
+/// A gate the opener's callback waits on and a later dispatch opens.
+const GATED: &str = r"let openGate;
+const gate = new Promise((resolve) => { openGate = resolve; });";
+
+/// Opened by a request that then answers, its callback parks on a gate after
+/// marking the latch. Another request's dispatch opens the gate and, two turns
+/// later in the same dispatch, panics a native callback: by then the callback
+/// has returned and its settle is queued, and the dispatch's return takes the
+/// stop before the pump ever sees that settle. The stop must end the
+/// transaction before it drops the queued settle, which holds the
+/// transaction's end: it rolls it back and releases its lane at once, and the
+/// isolate a host builds to replace the stopped one commits before the
+/// deadline.
+const PARKS_ON_THE_GATE: &str = r#"async function () {
+    env.db.transaction(async (tx) => {
+      await tx.collection(COLLECTION).insert({ title: "open-at-stop" });
+      env.latch.wait();
+      await gate;
+    });
+    return { answered: true };
+  }"#;
+
+const OPENS_THE_GATE_THEN_PANICS: &str = r"async releaser() {
+    openGate();
+    await null;
+    await null;
+    env.boom.explode();
+  },";
+
+#[test]
+fn a_transaction_whose_settle_a_dispatch_queued_before_its_panic_is_rolled_back_at_the_stop() {
+    run(async {
+        let app = App::with_prelude(
+            GATED,
+            &format!("opener: {PARKS_ON_THE_GATE}, {OPENS_THE_GATE_THEN_PANICS} {COMMITS_ITS_OWN}"),
+            Duration::from_millis(200),
+        )
+        .await;
+        // The transaction begins after this, so its execution deadline is no
+        // earlier than this plus the execution budget.
+        let dispatched = Instant::now();
+        let parked = latch_parked();
+        let opener = app.runtime.call_fetch_handler(
+            "POST",
+            "http://localhost/__zeroship/v1/opener",
+            &[("content-type".into(), "application/json".into())],
+            r#"{"json":null}"#,
+            &EnvSnapshot::empty(),
+            RequestCtx::new(CancelFlag::new()),
+        );
+        if let FetchOutcome::Pending { rx, .. } = opener {
+            completed(answer(rx, "the opener").await);
+        }
+        compio::time::timeout(Duration::from_secs(30), parked)
+            .await
+            .expect("the callback reaches the gate")
+            .expect("the latch reports its mark");
+        drop(app.runtime.call_fetch_handler(
+            "POST",
+            "http://localhost/__zeroship/v1/releaser",
+            &[("content-type".into(), "application/json".into())],
+            r#"{"json":null}"#,
+            &EnvSnapshot::empty(),
+            RequestCtx::new(CancelFlag::new()),
+        ));
+        assert!(
+            app.runtime.is_quarantined(),
+            "the releaser's dispatch takes the panic's stop as it returns"
+        );
+
+        let replacement = app.replacement().await;
+        let deadline = dispatched
+            + Duration::from_millis(u64::from(zeroship_data_orm::budgets::DB_IDLE_IN_TX_TIMEOUT_MS));
+        let after_stop = call_on(&replacement, "afterStop", CancelFlag::new());
+        let before_the_deadline = futures::future::select(
+            Box::pin(answer_of(after_stop)),
+            Box::pin(compio::time::sleep(deadline.saturating_duration_since(Instant::now()))),
+        )
+        .await;
+        let futures::future::Either::Left((answer, _)) = before_the_deadline else {
+            panic!(
+                "the replacement's transaction waited for the stopped transaction's execution \
+                 deadline instead of beginning at the stop"
+            );
+        };
+        let committed = completed(answer);
+        assert_eq!(committed.1["json"], "committed", "the replacement commits: {committed:?}");
+        assert_eq!(
+            app.titles().await,
+            ["after-stop-sibling"],
+            "the transaction whose settle the stop found queued is rolled back, the replacement's \
+             committed"
+        );
+    });
+}
+
 /// Stopped while a commit it asked for is held by the database. Whether that
 /// commit applies is decided after the stop, so the stopped request's caller is
 /// answered that the outcome is unknown, under the transaction code for that,

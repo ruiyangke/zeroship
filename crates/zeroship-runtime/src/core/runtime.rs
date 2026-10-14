@@ -1433,6 +1433,11 @@ impl Drop for RuntimeInner {
     /// order would panic on the very first one because none of them is
     /// currently entered.
     fn drop(&mut self) {
+        // An isolate replaced without a stop, such as one evicted from a
+        // cache, ends what it owns too. Before the isolate is entered below,
+        // so no action runs inside it.
+        let isolate_ends = Rc::clone(&self.state.borrow().isolate_ends);
+        isolate_ends.end();
         for request in self.waiting_startup_requests.drain(..) {
             request.reply.send(Err("Runtime dropped during startup".into()));
         }
@@ -1624,7 +1629,8 @@ impl RuntimeInner {
     /// startup are refused with, and what every response body still being
     /// forwarded is failed with. Requests still pending on the pump are
     /// cancelled; a caller that owes them a more specific answer settles them
-    /// first.
+    /// first. Work the isolate owns past its requests' answers, such as a
+    /// transaction a request left open, is then ended ([`crate::core::invocation::IsolateEnds`]).
     ///
     /// Takes the shared cell rather than `&mut self` because the supervisor it
     /// may spawn has to keep the isolate alive until native teardown finishes.
@@ -1649,6 +1655,15 @@ impl RuntimeInner {
             drop(s);
             (queued, state)
         };
+        // After the requests: one that ended early has already run what it
+        // owned. What is left is work no pending request owns, such as a
+        // transaction a request left running past its answer. Run with no
+        // runtime borrow held, entering no V8. Before the queued ops are
+        // dropped: a queued op can hold the registration of the work it is
+        // about to finish, such as a transaction's settle, and dropping it
+        // first would withdraw that work's end before it runs.
+        let isolate_ends = Rc::clone(&state.borrow().isolate_ends);
+        isolate_ends.end();
         drop(queued);
         crate::streams::stream_forwarder::fail_all(&state, reason);
         crate::node::net::state::destroy_all_sockets(&state);

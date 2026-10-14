@@ -16,7 +16,7 @@ use zeroship_runtime::channel::{CancelFlag, StreamReader};
 use zeroship_runtime::runtime::DispatchError;
 use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, RequestCtx, Runtime, SettledFetch};
 
-use crate::support::{commits, m};
+use crate::support::{commits, ends, m};
 
 /// Short enough that a case reaches the stop promptly, long enough that the
 /// light route below spans several windows.
@@ -34,6 +34,7 @@ const SETTLE_WITHIN: Duration = Duration::from_secs(10);
 /// - `/park` waits on a promise nothing resolves.
 /// - `/commit` holds a commit whose outcome it never learns (`commits`) and
 ///   waits on a promise nothing resolves.
+/// - `/hold-end` registers cleanup on its isolate's stop (`ends`) and answers.
 /// - `/stream` answers at once with a body whose every chunk is produced by a
 ///   continuation that holds the pump the way `/spin` does.
 /// - `/drip` answers at once with a body that streams a light chunk every few
@@ -61,6 +62,10 @@ const SOURCE: &str = r#"
             if (path === "/commit") {
                 env.commits.hold();
                 return new Promise(() => {});
+            }
+            if (path === "/hold-end") {
+                env.ends.hold();
+                return new Response("held");
             }
             if (path === "/stream") {
                 const encoder = new TextEncoder();
@@ -119,6 +124,7 @@ fn budgeted() -> zeroship_runtime::RuntimeBuilder {
     Runtime::builder()
         .modules(m(SOURCE))
         .plugin(commits::Probe)
+        .plugin(ends::Probe)
         .idle_gc_after_ms(0)
         .pump_cpu_budget(WINDOW, MAX_FRACTION)
 }
@@ -212,6 +218,23 @@ fn exceeding_the_pump_share_fails_every_pending_request_and_stops_the_isolate() 
             ),
             "a stopped isolate refuses dispatch with its cause, and runs no handler"
         );
+    });
+}
+
+/// Work a request left running past its answer is ended when the pump share
+/// stops its isolate: the end it registered runs once at the stop, though the
+/// request already has its answer.
+#[test]
+fn an_isolate_end_runs_when_the_pump_share_stops_its_isolate() {
+    let runtime = budgeted().build();
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        runtime.start_pump();
+        let end = ends::watch();
+        assert_eq!(answered(&runtime, "/hold-end"), (200, "held".into()));
+        assert!(end.held(), "the answered request registered its end");
+        let spinning = pending(&runtime, "/spin");
+        assert_cpu_stop("/spin", settled("/spin", &spinning).await);
+        assert_eq!(end.runs(), 1, "the pump share's stop ends what the isolate owned");
     });
 }
 

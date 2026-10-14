@@ -156,3 +156,157 @@ fn a_stopped_request_releases_its_downloads_and_is_refused_its_storage_calls() {
         );
     });
 }
+
+/// `/hold` opens a download, reads none of it and answers, leaving the
+/// download open past its request's answer; `/read` reads the whole object.
+const HOLDS: &str = r#"
+export default {
+    async fetch(request, env) {
+        const handle = JSON.parse(await env.storage.getStream("uploads", "big.bin"));
+        if (new URL(request.url).pathname === "/read") {
+            let total = 0;
+            for (;;) {
+                const chunk = await env.storage.readChunk(handle.streamId);
+                if (chunk === undefined) break;
+                total += chunk.length;
+            }
+            return Response.json({ size: handle.size, total });
+        }
+        return Response.json({ held: true });
+    },
+};
+"#;
+
+/// An isolate whose answered requests left the app's every live download open
+/// is stopped and kept, and another isolate of the same app on the thread
+/// then opens the object and reads it to its end: the stop released the
+/// downloads, which count against a cap the app's isolates share, though no
+/// request's end reached them. The control is the stopped isolate's own last
+/// open, refused at the cap before the stop.
+#[test]
+fn downloads_answered_requests_left_open_are_released_when_their_isolate_stops() {
+    const APP_ID: &str = "app_held_readers";
+    let root = tempfile::tempdir().unwrap();
+    let store = StorageStore::from_backend(Arc::new(LocalFs::new(root.path())));
+    let size = 2 * DOWNLOAD_CHUNK_BYTES + 1;
+    let storage = store.namespace(Namespace::app(APP_ID).unwrap());
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        storage.put_stream("uploads", "big.bin", Box::new(Whole(Bytes::from(vec![7; size]))), None).await.unwrap();
+    });
+
+    compio::runtime::Runtime::new().unwrap().block_on(async move {
+        init_v8();
+        let isolate = || {
+            let plugin: Arc<dyn NativePlugin> = Arc::new(StorageBinding::new(store.clone(), None));
+            let runtime = Runtime::builder()
+                .modules(vec![ModuleEntry { specifier: "index.js".into(), source: HOLDS.into() }])
+                .env_vars(HashMap::from([("APP_ID".to_owned(), APP_ID.to_owned())]))
+                .plugins(vec![plugin])
+                .build();
+            runtime.start_pump();
+            runtime
+        };
+        let holding = isolate();
+        for reader in 0..max_live_get_streams_per_app() {
+            assert_eq!(
+                json(call(&holding, "/hold").await),
+                serde_json::json!({ "held": true }),
+                "holding reader {reader} opens its download and answers",
+            );
+        }
+        assert!(
+            call(&holding, "/hold").await.map_or(true, |(status, _)| status != 200),
+            "the app's live downloads are at the cap"
+        );
+        holding.quarantine();
+        let replacement = isolate();
+        assert_eq!(
+            json(call(&replacement, "/read").await),
+            serde_json::json!({ "size": size, "total": size }),
+            "another isolate of the app opens a download once the holding isolate is stopped",
+        );
+        // Each isolate is still entered from its creation, so the later one
+        // goes first.
+        drop(replacement);
+        drop(holding);
+    });
+}
+
+/// `/opens-late?of=N` asks for a download without waiting for it and spins
+/// until it is stopped, so its download opens after the stop; the N-th such
+/// open settles `/opened`. `/read` reads the whole object.
+const OPENS_LATE: &str = r#"
+let opened = 0;
+let everyOpen;
+const allOpened = new Promise((resolve) => { everyOpen = resolve; });
+export default {
+    async fetch(request, env) {
+        const url = new URL(request.url);
+        if (url.pathname === "/opened") return Response.json({ opened: await allOpened });
+        if (url.pathname === "/read") {
+            const handle = JSON.parse(await env.storage.getStream("uploads", "big.bin"));
+            let total = 0;
+            for (;;) {
+                const chunk = await env.storage.readChunk(handle.streamId);
+                if (chunk === undefined) break;
+                total += chunk.length;
+            }
+            return Response.json({ size: handle.size, total });
+        }
+        const want = Number(url.searchParams.get("of"));
+        env.storage.getStream("uploads", "big.bin").then(() => {
+            opened += 1;
+            if (opened === want) everyOpen(opened);
+        });
+        let x = 0;
+        for (;;) { x = (x + 1) % 2147483647; }
+    },
+};
+"#;
+
+/// More requests than the app may hold downloads open each ask for one and
+/// are stopped for CPU before it opens, and a live request still opens the
+/// object and reads it to its end: a download that opens for a request that
+/// has already ended is closed as it opens, holding none of the app's shared
+/// budget.
+#[test]
+fn a_download_that_opens_after_its_request_ended_is_closed_as_it_opens() {
+    const APP_ID: &str = "app_late_readers";
+    let root = tempfile::tempdir().unwrap();
+    let store = StorageStore::from_backend(Arc::new(LocalFs::new(root.path())));
+    let size = 2 * DOWNLOAD_CHUNK_BYTES + 1;
+    let storage = store.namespace(Namespace::app(APP_ID).unwrap());
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        storage.put_stream("uploads", "big.bin", Box::new(Whole(Bytes::from(vec![7; size]))), None).await.unwrap();
+    });
+
+    let late_readers = max_live_get_streams_per_app() + 1;
+    compio::runtime::Runtime::new().unwrap().block_on(async move {
+        init_v8();
+        let plugin: Arc<dyn NativePlugin> = Arc::new(StorageBinding::new(store, None));
+        let runtime = Runtime::builder()
+            .modules(vec![ModuleEntry { specifier: "index.js".into(), source: OPENS_LATE.into() }])
+            .env_vars(HashMap::from([("APP_ID".to_owned(), APP_ID.to_owned())]))
+            .plugins(vec![plugin])
+            .cpu_limit(Duration::from_millis(20))
+            .build();
+        runtime.start_pump();
+        for reader in 0..late_readers {
+            let answer = call(&runtime, &format!("/opens-late?of={late_readers}")).await;
+            assert!(
+                answer.as_ref().map_or(true, |(status, _)| *status != 200),
+                "late reader {reader} must be stopped for CPU, not answered: {answer:?}"
+            );
+        }
+        assert_eq!(
+            json(call(&runtime, "/opened").await),
+            serde_json::json!({ "opened": late_readers }),
+            "every stopped request's download opened after its stop",
+        );
+        assert_eq!(
+            json(call(&runtime, "/read").await),
+            serde_json::json!({ "size": size, "total": size }),
+            "a live request still opens a download and reads it to its end",
+        );
+    });
+}

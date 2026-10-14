@@ -24,7 +24,7 @@
 //! the cap, and not some other failure, refused the request.
 
 use crate::support;
-use support::commits;
+use support::{commits, ends};
 use support::*;
 use crate::in_own_process;
 
@@ -349,6 +349,7 @@ const SETTLE_WITHIN: Duration = Duration::from_secs(30);
 /// - `/park` waits on a promise nothing settles.
 /// - `/commit` holds a commit whose outcome it never learns (`commits`) and
 ///   waits on a promise nothing settles.
+/// - `/hold-end` registers cleanup on its isolate's stop (`ends`) and answers.
 /// - anything else answers at once.
 const STOP_SOURCE: &str = r#"
     const later = (work) => new Promise(() => setTimeout(work, 0));
@@ -401,6 +402,10 @@ const STOP_SOURCE: &str = r#"
                 env.commits.hold();
                 return new Promise(() => {});
             }
+            if (path === "/hold-end") {
+                env.ends.hold();
+                return new Response("held");
+            }
             return new Response("served");
         }
     };
@@ -436,6 +441,7 @@ fn tenant(heap_limit_mb: Option<u32>) -> Runtime {
         .modules(m(STOP_SOURCE))
         .plugin(Probe)
         .plugin(commits::Probe)
+        .plugin(ends::Probe)
         .idle_gc_after_ms(0);
     if let Some(mb) = heap_limit_mb {
         builder = builder.heap_limit_mb(mb);
@@ -549,6 +555,30 @@ fn one_allocation_past_the_cap_stops_its_isolate_and_not_the_process() {
 fn gradual_growth_past_the_cap_stops_its_isolate_and_not_the_process() {
     in_own_process!(gradual_growth_past_the_cap_stops_its_isolate_and_not_the_process, {
         assert_route_stops_only_its_isolate("/grow");
+    });
+}
+
+/// Work a request left running past its answer is ended when its isolate
+/// reaches the cap: the end it registered runs once at the stop, though the
+/// request already has its answer.
+#[test]
+fn an_isolate_end_runs_when_the_cap_stops_its_isolate() {
+    in_own_process!(an_isolate_end_runs_when_the_cap_stops_its_isolate, {
+        let capped = tenant(Some(STOP_CAP_MB));
+        compio::runtime::Runtime::new().expect("compio runtime").block_on(async {
+            capped.start_pump();
+            let end = ends::watch();
+            assert_eq!(answered(&capped, "/hold-end"), (200, "held".to_owned()));
+            assert!(end.held(), "the answered request registered its end");
+            let hits_before = zeroship_runtime::heap_limit_callback_hits();
+            let reaching = pending(&capped, "/huge");
+            assert_cap_error("/huge", &reaching).await;
+            assert!(
+                zeroship_runtime::heap_limit_callback_hits() > hits_before,
+                "the near-heap-limit callback never fired, so the cap did not stop the isolate",
+            );
+            assert_eq!(end.runs(), 1, "the cap's stop ends what the isolate owned");
+        });
     });
 }
 

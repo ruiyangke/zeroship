@@ -438,6 +438,11 @@ pub struct RuntimeState {
     /// climb into OOM-by-sockets territory when the upstream is slow.
     pub in_flight_fetches: Rc<Cell<usize>>,
 
+    /// What this isolate must end when it stops: work bindings registered
+    /// through [`RequestLink::on_end_or_isolate_stop`]. Kept with the state, so
+    /// every isolate that runs ops carries one; its runtime ends it.
+    pub(crate) isolate_ends: Rc<crate::core::invocation::IsolateEnds>,
+
     /// The byte budget this runtime's uploads share
     /// ([`MAX_UPLOAD_BUFFER_BYTES`]).
     pub upload_share: Rc<crate::channel::StreamShare>,
@@ -718,6 +723,7 @@ impl RuntimeState {
             spawned_timers: Vec::new(),
             ready_timers: VecDeque::new(),
             in_flight_fetches: Rc::new(Cell::new(0)),
+            isolate_ends: Rc::default(),
             upload_share: crate::channel::StreamShare::new(MAX_UPLOAD_BUFFER_BYTES),
 
             executing_request_id: None,
@@ -1179,6 +1185,7 @@ pub enum OpResult {
 #[derive(Debug)]
 pub struct OpOwner<'s> {
     request: Option<crate::core::invocation::RequestToken>,
+    isolate: Rc<crate::core::invocation::IsolateEnds>,
     scope: std::marker::PhantomData<&'s ()>,
 }
 
@@ -1196,6 +1203,7 @@ impl OpOwner<'_> {
     pub fn retain(&self) -> RequestLink {
         RequestLink {
             request: self.request.clone(),
+            isolate: self.isolate.clone(),
         }
     }
 }
@@ -1207,6 +1215,8 @@ impl OpOwner<'_> {
 #[derive(Clone, Debug)]
 pub struct RequestLink {
     request: Option<crate::core::invocation::RequestToken>,
+    /// What the isolate that admitted the op must end when it stops.
+    isolate: Rc<crate::core::invocation::IsolateEnds>,
 }
 
 impl RequestLink {
@@ -1224,15 +1234,21 @@ impl RequestLink {
         self.request.as_ref().is_some_and(|token| token.control().has_ended())
     }
 
-    /// Run `action` when the request ends early, or now if it already has.
-    /// Dropping the returned listener withdraws the action. A request that is
-    /// answered with its own result never ends early, and an op made for no
-    /// request has none to end, so neither runs `action`.
-    #[must_use]
-    pub fn on_end(&self, action: impl FnOnce() + 'static) -> Option<EndListener> {
-        self.request
-            .as_ref()
-            .and_then(|token| token.control().on_end(Box::new(action)))
+    /// Run `action` once: when the request ends early, or when the isolate that
+    /// admitted the op stops, whichever comes first, and now if the request
+    /// already has. The request's own answer does not withdraw it, so work the
+    /// request left running past its answer is still ended when its isolate
+    /// stops; an op made for no request is ended by that stop alone. `action`
+    /// is native cleanup: it runs with no JavaScript and no V8 entry, and a
+    /// panic in it is contained. Dropping the returned registration, once the
+    /// work has finished on its own, withdraws it from both.
+    #[must_use = "dropping the registration withdraws its action at once, so it never runs"]
+    pub fn on_end_or_isolate_stop(&self, action: impl FnOnce() + 'static) -> EndRegistration {
+        EndRegistration::new(
+            self.request.as_ref().map(crate::core::invocation::RequestToken::control),
+            &self.isolate,
+            Box::new(action),
+        )
     }
 
     /// Admit a commit the op asked for: `None` once the request has ended,
@@ -1248,7 +1264,7 @@ impl RequestLink {
     }
 }
 
-pub use crate::core::invocation::{CommitGuard, EndListener};
+pub use crate::core::invocation::{CommitGuard, EndRegistration};
 
 /// The `e.code` of the error a host op is refused with when the request it is
 /// made for has ended early.
@@ -1276,6 +1292,11 @@ pub fn request_cancelled_error() -> OpError {
 ///
 /// # Errors
 /// [`request_cancelled_error`] when the request has ended early.
+///
+/// # Panics
+/// When the isolate carries no runtime state, which every isolate a
+/// [`crate::Runtime`] builds does: an isolate that runs ops without one is a
+/// host defect, not something creator code can reach.
 pub fn admit_op<'s>(scope: &mut v8::PinScope<'s, '_>) -> Result<OpOwner<'s>, OpError> {
     use crate::core::invocation::RequestRead;
     let request = match crate::core::invocation::current_request(scope) {
@@ -1290,6 +1311,10 @@ pub fn admit_op<'s>(scope: &mut v8::PinScope<'s, '_>) -> Result<OpOwner<'s>, OpE
     };
     Ok(OpOwner {
         request,
+        isolate: scope
+            .get_slot::<SharedState>()
+            .map(|state| Rc::clone(&state.borrow().isolate_ends))
+            .expect("an isolate that runs ops carries its runtime state"),
         scope: std::marker::PhantomData,
     })
 }
