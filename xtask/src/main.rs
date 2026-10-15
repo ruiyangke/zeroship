@@ -1,3 +1,4 @@
+mod artifacts;
 mod data;
 mod examples;
 mod images;
@@ -44,6 +45,9 @@ enum Task {
         #[command(subcommand)]
         action: ShardsAction,
     },
+    /// Build the workflow-process executables, stamp them as cargo-verified,
+    /// and warm the ORM compile-fail target.
+    BuildTestArtifacts,
     /// The container images the test fixtures start, which CI restores from
     /// its cache instead of pulling.
     Images {
@@ -104,6 +108,7 @@ fn main() -> ExitCode {
         Task::Shards {
             action: ShardsAction::Verify { directory },
         } => shard::workspace_metadata().and_then(|metadata| verify::run(&directory, &metadata)),
+        Task::BuildTestArtifacts => artifacts::build_test_artifacts(),
         Task::Images { action } => images::run(action),
     };
     match result {

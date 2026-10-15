@@ -159,9 +159,16 @@ fn migration_compiler_sources() -> Vec<String> {
 ///
 /// The sources are keyed per package rather than unioned across every package
 /// the service build selects. Cargo relinks only a binary whose own inputs
-/// moved, so a union flags a binary stale for a crate it never compiles, and the
-/// rebuild command does not clear the flag. Pairing an executable with its own
-/// package's closure makes it stale only when a source it compiles is newer.
+/// moved, so a union flags a binary stale for a crate it never compiles, and
+/// the failure names a source that package does not build. Pairing an
+/// executable with its own package's closure makes it stale only when a source
+/// it compiles is newer, so the failure points at the crate whose code moved.
+///
+/// The remedy clears the rule whichever sources it lists. The manifest and the
+/// lockfile are why an edit that relinks nothing can leave an artifact older
+/// than them; `cargo xtask build-test-artifacts` stamps each artifact after
+/// cargo has built exactly the target that produces it, and that stamp is
+/// cargo's own proof the artifact is current with respect to every input.
 fn executable_package_sources(package: &str) -> Vec<String> {
     let workspace: BTreeSet<String> = repo::workspace()
         .iter()
@@ -755,9 +762,10 @@ fn embedded_package_bundles() -> BTreeSet<String> {
     found
 }
 
-/// The root `build:test-artifacts` script must run the same cargo invocation
-/// the control workflow test areas run, so the build-input gate's rebuild
-/// command and the test-side failure both name one command.
+/// The root `build:test-artifacts` script must run the xtask command that owns
+/// the service build, so the build-input gate's rebuild command and the command
+/// that clears the flag name one path. The cargo argument list lives in
+/// `prebuilt::BUILD_ARGS` alone.
 #[test]
 fn the_root_build_script_runs_the_test_artifact_build() {
     let manifest: Value =
@@ -767,7 +775,7 @@ fn the_root_build_script_runs_the_test_artifact_build() {
         .expect("the root package declares build:test-artifacts");
     assert_eq!(
         script,
-        prebuilt::build_command(),
-        "the root script and the test areas must name one cargo invocation"
+        prebuilt::BUILD_TEST_ARTIFACTS,
+        "the root script must run the xtask command that builds and stamps the executables"
     );
 }

@@ -135,6 +135,9 @@ pub const ARTIFACTS: &[&str] = &[
 
 /// The command that rebuilds every executable above and warms the ORM
 /// compile-fail project's trybuild target.
+///
+/// It resolves to [`BUILD_TEST_ARTIFACTS`], the xtask command that builds,
+/// stamps and warms.
 pub const REBUILD: &str = "pnpm build:test-artifacts";
 
 /// The `cargo test` invocation that warms the ORM compile-fail project's
@@ -155,17 +158,19 @@ pub const WARM_ARGS: &[&str] = &[
     "integration::derive_contract",
 ];
 
-/// [`BUILD_ARGS`] and [`WARM_ARGS`] as one command line, so a package script
-/// and the build-input gate name the same invocation.
-pub fn build_command() -> String {
-    let invocation = |args: &[&str]| {
-        std::iter::once("cargo")
-            .chain(args.iter().copied())
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
-    format!("{} && {}", invocation(BUILD_ARGS), invocation(WARM_ARGS))
-}
+/// The command that rebuilds every executable above, stamps each artifact as
+/// cargo-verified, and warms the ORM compile-fail project's trybuild target.
+///
+/// The command runs [`BUILD_ARGS`], sets every [`EXECUTABLES`] artifact's
+/// modification time to now, then runs [`WARM_ARGS`]. Cargo relinks a binary
+/// only when one of its own inputs moved, so a change to the root manifest or
+/// the lockfile that touches no source a given executable compiles leaves it
+/// older than `Cargo.toml` or `Cargo.lock` while `cargo build` correctly
+/// rebuilds nothing. The stamp records that cargo built exactly the target
+/// that produces the artifact, which is cargo's own proof that the artifact is
+/// current with respect to every input, and it is what clears the build-input
+/// freshness gate.
+pub const BUILD_TEST_ARTIFACTS: &str = "cargo xtask build-test-artifacts";
 
 /// The cargo profile directory the running test binary was built into.
 ///
