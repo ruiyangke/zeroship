@@ -18,6 +18,7 @@ use uuid::Uuid;
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::spend_recompute::{self, SpendRecomputeConfig, SpendRecomputeError};
 use zeroship_control::cron::spend_reconcile;
+use zeroship_control::registry::RegistryError;
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
@@ -451,6 +452,345 @@ async fn reconcile_walks_spend_bands_and_holds_deadband() {
     );
 }
 
+/// An over-limit app whose pending `allow` -> `block` write is held behind a
+/// row lock another connection owns, on a database cloned for the case.
+///
+/// Both deadline cases force the same interleaving: the sweep reads `allow` (a
+/// plain SELECT does not block), computes the transition, and then blocks at
+/// the compare-and-swap write until a deadline cuts it. The clone holds no
+/// sibling's apps, so the lock reaches only this case's own row.
+struct HeldCycle {
+    fresh: zeroship_testkit::postgres::FreshDatabase,
+    fx: Fixture,
+    app: AppId,
+    holder: compio_postgres::Client,
+}
+
+async fn held_over_limit_app(label: &str) -> HeldCycle {
+    let fresh = crate::support::fresh_control_db();
+    let url = fresh.admin_url().to_string();
+    let fx = build_state(&url, label).await;
+
+    // 100-cent cap, 1 cent/request, 100 requests => 100% => a pending
+    // Allow -> Block transition.
+    let app = make_over_limit_app(&fx.state, 100).await;
+    let period = zeroship_control::metering::current_period_start_unix();
+    crate::support::seed_usage_delta(&fx.state.control_pg, &app, period, "requests", 100).await;
+
+    // Pre-create the state row at `allow` so the cycle's compare-and-swap write
+    // collides with a row lock rather than inserting a fresh row.
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.app_spend_state \
+               (app_id, state, spend_cents, eval_limit_cents, period, evaluated_at) \
+             VALUES ($1, 'allow', 0, 0, $2::date, NOW())",
+            &[&app.as_str(), &crate::support::period_date(period)],
+        )
+        .await
+        .expect("pre-create allow state");
+
+    // A side session holds a row lock on that state row.
+    let (holder, holder_conn) = compio_postgres::connect(&url, compio_postgres::NoTls)
+        .await
+        .expect("holder connect");
+    crate::support::live::spawn(async move {
+        let _ = holder_conn.run().await;
+    });
+    holder.batch_execute("BEGIN").await.expect("begin holder tx");
+    holder
+        .query(
+            "SELECT 1 FROM zeroship.app_spend_state WHERE app_id = $1 FOR UPDATE",
+            &[&app.as_str()],
+        )
+        .await
+        .expect("hold the state row");
+
+    HeldCycle {
+        fresh,
+        fx,
+        app,
+        holder,
+    }
+}
+
+async fn app_state(pg: &compio_postgres::Client, app: &AppId) -> Option<String> {
+    pg.query(
+        "SELECT state::text AS s FROM zeroship.app_spend_state WHERE app_id = $1",
+        &[&app.as_str()],
+    )
+    .await
+    .expect("read state")
+    .first()
+    .map(|r| r.get("s"))
+}
+
+async fn history_count(pg: &compio_postgres::Client, app: &AppId) -> i64 {
+    pg.query(
+        "SELECT COUNT(*)::bigint AS n FROM zeroship.spend_state_history WHERE app_id = $1",
+        &[&app.as_str()],
+    )
+    .await
+    .expect("count history")[0]
+    .get("n")
+}
+
+/// A spend cycle whose write is held behind a row lock another connection holds
+/// must end at its deadline, roll its transaction back, leave the spend state
+/// unchanged, and let the next cycle succeed once the lock is released.
+///
+/// WHAT IT CATCHES: a cycle that runs its queries with no bound, so a lock wait
+/// (or a stalled server) holds enforcement indefinitely - the runaway app keeps
+/// running past its cap for as long as the lock is held.
+///
+/// This binds the cycle deadline as a whole; `a_held_cycle_ends_at_the_server_statement_timeout`
+/// binds the server half on its own.
+#[compio::test(crate = "crate::support::live")]
+async fn a_spend_cycle_held_behind_a_lock_is_cut_at_its_deadline() {
+    let cycle = held_over_limit_app("deadline").await;
+
+    // A one-second interval gives a 750ms server bound, so the cycle is cut in
+    // well under the detection bound.
+    let short = zeroship_control::deadline::CycleDeadline::from_interval(Duration::from_secs(1));
+
+    // The detection bound is what makes an unbounded cycle FAIL rather than
+    // HANG: if the deadline is ignored, this timeout expires and the test
+    // reports the missing cut.
+    let (guard, events) = log_capture::capture_log();
+    let outcome = compio::time::timeout(
+        Duration::from_secs(10),
+        Box::pin(spend_reconcile::tick_within(&cycle.fx.state, short)),
+    )
+    .await;
+    drop(guard);
+
+    match outcome {
+        Ok(Err(RegistryError::CycleDeadline { .. })) => {}
+        Ok(Ok(n)) => panic!("the locked cycle must be cut, not complete with {n} transition(s)"),
+        Ok(Err(other)) => panic!("expected a cycle-deadline cut, got {other:?}"),
+        Err(error) => panic!(
+            "the cycle did not end within the detection bound; it was held past its deadline: \
+             {error:?}"
+        ),
+    }
+
+    // Exactly one cut line, named by the outermost boundary. An inner layer
+    // that re-wrapped (`tick_bounded` calling `evaluate_all_within`) would log
+    // the same cut again under a second operation tag.
+    let cut_operations: Vec<String> = events
+        .lock()
+        .expect("captured log mutex poisoned")
+        .iter()
+        .filter(|fields| {
+            fields
+                .get("message")
+                .is_some_and(|message| message.contains("cycle cut at its deadline"))
+        })
+        .filter_map(|fields| fields.get("operation").cloned())
+        .collect();
+    assert_eq!(
+        cut_operations,
+        vec!["spend_reconcile".to_string()],
+        "a held cycle must log exactly one cut line, under the outermost operation; got {cut_operations:?}"
+    );
+
+    // The cut rolled the cycle's transaction back: the state row is unchanged
+    // and no history row was appended.
+    assert_eq!(
+        app_state(&cycle.fx.state.control_pg, &cycle.app).await.as_deref(),
+        Some("allow"),
+        "a cut cycle leaves the spend state unchanged"
+    );
+    assert_eq!(
+        history_count(&cycle.fx.state.control_pg, &cycle.app).await,
+        0,
+        "a cut cycle writes no history row"
+    );
+
+    // Release the lock; the next cycle (a fresh tick) succeeds and applies the
+    // transition the cut deferred. Its deadline is a full configured interval,
+    // not the short one, so a now-successful write cannot itself be cut under
+    // load.
+    cycle.holder.batch_execute("ROLLBACK").await.expect("release the row");
+    let generous = zeroship_control::deadline::CycleDeadline::from_interval(Duration::from_secs(
+        zeroship_control::cron::spend_recompute::DEFAULT_RECOMPUTE_INTERVAL_SECS,
+    ));
+    let transitions = spend_reconcile::tick_within(&cycle.fx.state, generous)
+        .await
+        .expect("the next cycle succeeds once the lock is released");
+    assert_eq!(
+        transitions, 1,
+        "the next cycle applies exactly the deferred transition"
+    );
+    assert_eq!(
+        app_state(&cycle.fx.state.control_pg, &cycle.app).await.as_deref(),
+        Some("block"),
+        "the next cycle transitions the app once the lock is gone"
+    );
+
+    drop(cycle.holder);
+    drop(cycle.fresh);
+}
+
+/// The SERVER-side bound on its own: with the client backstop absent, a cycle
+/// whose write is held behind a row lock must still end, because `PostgreSQL`
+/// cancels the statement at `statement_timeout`.
+///
+/// WHAT IT CATCHES: a cycle that installs no server bound, which the backstop
+/// alone would mask. Here there is no backstop (`evaluate_all_server_bounded`
+/// is the raw body), so only the server can end it; the detection bound fails
+/// rather than hangs when the server never cancels.
+#[compio::test(crate = "crate::support::live")]
+async fn a_held_cycle_ends_at_the_server_statement_timeout() {
+    let cycle = held_over_limit_app("server-bound").await;
+
+    let deadline = zeroship_control::deadline::CycleDeadline::from_interval(Duration::from_secs(1));
+    let outcome = compio::time::timeout(
+        Duration::from_secs(10),
+        Box::pin(
+            zeroship_control::spend::SpendEngine::new(cycle.fx.state.registry.clone())
+                .evaluate_all_server_bounded(deadline),
+        ),
+    )
+    .await;
+
+    match outcome {
+        Ok(Err(RegistryError::QueryCanceled(_))) => {}
+        Ok(Ok(n)) => panic!(
+            "the locked sweep must be canceled by the server, not complete with {} transition(s)",
+            n.len()
+        ),
+        Ok(Err(other)) => panic!("expected the server cancellation, got {other:?}"),
+        Err(error) => panic!(
+            "the sweep did not end within the detection bound; the server bound did not fire: \
+             {error:?}"
+        ),
+    }
+    assert_eq!(
+        app_state(&cycle.fx.state.control_pg, &cycle.app).await.as_deref(),
+        Some("allow"),
+        "the canceled transaction left the spend state unchanged"
+    );
+    assert_eq!(
+        history_count(&cycle.fx.state.control_pg, &cycle.app).await,
+        0,
+        "the canceled transaction wrote no history row"
+    );
+
+    drop(cycle.holder);
+    drop(cycle.fresh);
+}
+
+/// The metering period rewrite's SERVER-side bound on its own: with the client
+/// backstop absent, a rewrite whose first read is held behind a table lock must
+/// still end, because `PostgreSQL` cancels the statement at the transaction's
+/// `SET LOCAL statement_timeout`.
+///
+/// WHAT IT CATCHES: a rewrite that installs no server bound, which the backstop
+/// alone would mask. Here there is no backstop
+/// (`replace_period_snapshot_server_bounded` is the raw body), so only the
+/// server can end it; the detection bound fails rather than hangs.
+#[compio::test(crate = "crate::support::live")]
+async fn a_metering_snapshot_write_held_behind_a_lock_ends_at_the_server_statement_timeout() {
+    let fresh = crate::support::fresh_control_db();
+    let url = fresh.admin_url().to_string();
+    let fx = build_state(&url, "metering-bound").await;
+
+    let app = crate::support::seed_app(
+        &fx.state.control_pg,
+        &format!("metering-{}", Uuid::new_v4()),
+        &zeroship_control::plan_catalog::free_plan_id(),
+    )
+    .await;
+    let period = zeroship_control::metering::current_period_start_unix();
+    crate::support::seed_usage_delta(&fx.state.control_pg, &app, period, "requests", 42).await;
+
+    // A side session holds a row lock on the seeded aggregate, so the rewrite's
+    // prior read (a plain SELECT) does not block but its DELETE does. A
+    // table-wide lock would also block the reads this case makes after the cut.
+    let (holder, holder_conn) = compio_postgres::connect(&url, compio_postgres::NoTls)
+        .await
+        .expect("holder connect");
+    crate::support::live::spawn(async move {
+        let _ = holder_conn.run().await;
+    });
+    holder.batch_execute("BEGIN").await.expect("begin holder tx");
+    holder
+        .query(
+            "SELECT 1 FROM zeroship.usage_aggregates \
+              WHERE app_id = $1 AND period = $2::date AND metric = 'requests' FOR UPDATE",
+            &[&app.as_str(), &crate::support::period_date(period)],
+        )
+        .await
+        .expect("hold the aggregate row");
+
+    let short = zeroship_control::deadline::CycleDeadline::from_interval(Duration::from_secs(1));
+    let aggregates = vec![zeroship_control::metering::UsageAggregate {
+        app_id: app.clone(),
+        metric: "requests".to_string(),
+        total: 99,
+    }];
+    let metering = zeroship_control::metering::Metering::new(fx.state.registry.clone());
+    let outcome = compio::time::timeout(
+        Duration::from_secs(10),
+        Box::pin(metering.replace_period_snapshot_server_bounded(period, &aggregates, short)),
+    )
+    .await;
+
+    match outcome {
+        Ok(Err(RegistryError::QueryCanceled(_))) => {}
+        Ok(Ok(write)) => panic!(
+            "the locked rewrite must be canceled by the server, not complete with {} row(s)",
+            write.written
+        ),
+        Ok(Err(other)) => panic!("expected the server cancellation, got {other:?}"),
+        Err(error) => panic!(
+            "the rewrite did not end within the detection bound; the server bound did not fire: \
+             {error:?}"
+        ),
+    }
+
+    // The canceled transaction left the period unchanged.
+    let total = period_total(&fx.state.control_pg, &app, period).await;
+    assert_eq!(total, Some(42), "the canceled rewrite left the period unchanged");
+
+    // Release the lock; the same write succeeds and replaces the total under a
+    // generous deadline so a now-successful rewrite cannot itself be cut.
+    holder
+        .batch_execute("ROLLBACK")
+        .await
+        .expect("release usage_aggregates");
+    let generous = zeroship_control::deadline::CycleDeadline::from_interval(Duration::from_secs(
+        zeroship_control::cron::spend_recompute::DEFAULT_RECOMPUTE_INTERVAL_SECS,
+    ));
+    let write = metering
+        .replace_period_snapshot_within(period, &aggregates, generous)
+        .await
+        .expect("the rewrite succeeds once the lock is released");
+    assert_eq!(write.written, 1, "the rewrite writes the one aggregate");
+    let total = period_total(&fx.state.control_pg, &app, period).await;
+    assert_eq!(total, Some(99), "the released rewrite replaced the period total");
+
+    drop(holder);
+    drop(fresh);
+}
+
+async fn period_total(
+    pg: &compio_postgres::Client,
+    app: &AppId,
+    period_start_unix: i64,
+) -> Option<i64> {
+    pg.query(
+        "SELECT total FROM zeroship.usage_aggregates \
+          WHERE app_id = $1 AND period = $2::date AND metric = 'requests'",
+        &[&app.as_str(), &crate::support::period_date(period_start_unix)],
+    )
+    .await
+    .expect("read total")
+    .first()
+    .map(|r| r.get("total"))
+}
+
 /// A one-partition stream whose captured end is never reached: every poll
 /// answers with nothing new, so a scan against it goes the whole stall
 /// timeout without advancing and [`spend_recompute::recompute_and_reconcile`]
@@ -535,7 +875,7 @@ async fn a_stalled_recompute_still_runs_the_evaluator() {
     let stall = Duration::from_millis(100);
     let stream: Arc<dyn StreamTransport> = Arc::new(NeverAdvancesStream { stall });
     let cfg = SpendRecomputeConfig {
-        interval: Duration::from_secs(1),
+        interval: Duration::from_secs(spend_recompute::DEFAULT_RECOMPUTE_INTERVAL_SECS),
         settle_window: Duration::from_secs(
             zeroship_control::cron::billing_reconcile::DEFAULT_SETTLE_WINDOW_SECS,
         ),
@@ -605,7 +945,7 @@ async fn a_double_failure_still_logs_the_recompute_stall() {
     let stall = Duration::from_millis(100);
     let stream: Arc<dyn StreamTransport> = Arc::new(NeverAdvancesStream { stall });
     let cfg = SpendRecomputeConfig {
-        interval: Duration::from_secs(1),
+        interval: Duration::from_secs(spend_recompute::DEFAULT_RECOMPUTE_INTERVAL_SECS),
         settle_window: Duration::from_secs(
             zeroship_control::cron::billing_reconcile::DEFAULT_SETTLE_WINDOW_SECS,
         ),
@@ -651,10 +991,62 @@ async fn a_double_failure_still_logs_the_recompute_stall() {
     );
 }
 
+/// The recompute cron's per-cycle reporter must not log a cut a second time:
+/// the boundary that cut the cycle already logged it, so a `CycleDeadline`
+/// outcome is only named at debug level. Another failure still logs its
+/// failure line.
+///
+/// WHAT IT CATCHES: the reporter's `CycleDeadline` arm logging the cut again at
+/// error level, which doubles every recompute cut line.
+#[test]
+fn a_deadline_outcome_is_not_logged_again_by_the_cycle_reporter() {
+    let (guard, events) = log_capture::capture_log();
+
+    spend_recompute::report_cycle(&Err(SpendRecomputeError::CycleDeadline {
+        operation: "replace_period_snapshot",
+        deadline_ms: 750,
+        bound: zeroship_control::deadline::DeadlineBound::Server,
+    }));
+    spend_recompute::report_cycle(&Err(SpendRecomputeError::Registry("boom".to_string())));
+
+    drop(guard);
+
+    let cut_lines = {
+        let events = events.lock().expect("captured log mutex poisoned");
+        events
+            .iter()
+            .filter(|fields| {
+                fields
+                    .get("message")
+                    .is_some_and(|message| message.contains("cycle cut at its deadline"))
+            })
+            .count()
+    };
+    let failure_lines = {
+        let events = events.lock().expect("captured log mutex poisoned");
+        events
+            .iter()
+            .filter(|fields| {
+                fields
+                    .get("message")
+                    .is_some_and(|message| message.contains("cycle failed"))
+            })
+            .count()
+    };
+    assert_eq!(
+        cut_lines, 0,
+        "a cut already logged at its boundary must not be logged again by the reporter"
+    );
+    assert!(
+        failure_lines >= 1,
+        "a non-deadline failure still logs its failure line"
+    );
+}
+
 /// Capture `tracing` events raised during a test, so an assertion can read
 /// what reached the log without parsing stdout or sleeping for a flush.
 /// Local to this file (rather than a shared `tests/support` fixture) because
-/// this is its only caller: a helper added to that shared tree compiles into
+/// every caller is here: a helper added to that shared tree compiles into
 /// every test binary that links it, and one with no caller in a GIVEN binary
 /// is dead code there even though another binary uses it.
 mod log_capture {

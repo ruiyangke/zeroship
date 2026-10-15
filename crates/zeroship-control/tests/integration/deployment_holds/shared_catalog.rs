@@ -67,6 +67,9 @@ async fn bounded(fixture: &Fixture, bound: usize) -> (Registry, BTreeSet<i32>) {
         CatalogOptions {
             max_connections: NonZeroUsize::MIN,
         },
+        std::time::Duration::from_secs(
+            zeroship_control::registry::DEFAULT_REQUEST_CONNECT_TIMEOUT_SECS,
+        ),
     )
     .await
     .unwrap();

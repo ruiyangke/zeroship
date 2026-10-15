@@ -787,6 +787,13 @@ pub struct Config {
     pub(crate) hostaddr: Vec<Option<IpAddr>>,
     pub(crate) port: Vec<u16>,
     pub(crate) connect_timeout: Option<Duration>,
+    /// Whether a parsed connection string NAMED `connect_timeout`, whatever its
+    /// value. `get_connect_timeout` collapses an explicit zero (libpq's "wait
+    /// indefinitely") to `None`, the same value an absent key yields; this
+    /// keeps the two apart so a caller can apply its own default only when the
+    /// string did not name the key. Set where the parser handles the key, never
+    /// by the programmatic setter.
+    pub(crate) connect_timeout_named: bool,
     /// Programmatic-only post-startup socket-read policy. It is deliberately
     /// absent from the libpq connection-string parser.
     pub(crate) read_timeout: Option<Duration>,
@@ -844,6 +851,7 @@ impl Config {
             hostaddr: vec![],
             port: vec![],
             connect_timeout: None,
+            connect_timeout_named: false,
             read_timeout: None,
             tcp_user_timeout: None,
             keepalives: true,
@@ -1592,6 +1600,21 @@ impl Config {
         self.connect_timeout.as_ref()
     }
 
+    /// Whether a parsed connection string named `connect_timeout`, whatever its
+    /// value.
+    ///
+    /// [`Config::get_connect_timeout`] reports an explicit `connect_timeout=0`
+    /// (libpq's "wait indefinitely") as `None`, exactly as it reports an absent
+    /// key. This accessor tells the two apart, so a caller that wants to apply
+    /// its own default only when the string did not name the key can do so
+    /// without re-reading the DSN text. It is `true` for a positive value, a
+    /// zero, and a negative (libpq clamps it to zero), and `false` for an
+    /// absent key or a programmatically built [`Config`].
+    #[must_use]
+    pub const fn connect_timeout_named(&self) -> bool {
+        self.connect_timeout_named
+    }
+
     /// Sets the maximum period in which a successfully flushed protocol
     /// response may make no socket-read progress. Defaults to no limit.
     ///
@@ -2160,6 +2183,11 @@ impl Config {
                 }
             }
             OptionName::ConnectTimeout => {
+                // The key was NAMED, whatever its value: an explicit zero or
+                // negative is libpq's "wait indefinitely", which
+                // `get_connect_timeout` reports as `None` and
+                // `connect_timeout_named` keeps distinct from an absent key.
+                self.connect_timeout_named = true;
                 let timeout = parse_libpq_integer(value, "connect_timeout")?;
                 if timeout > 0 {
                     // TAKEN LITERALLY, INCLUDING 1. PostgreSQL 16 and older
@@ -2511,6 +2539,7 @@ impl fmt::Debug for Config {
             .field("hostaddr", &self.hostaddr)
             .field("port", &self.port)
             .field("connect_timeout", &self.connect_timeout)
+            .field("connect_timeout_named", &self.connect_timeout_named)
             .field("read_timeout", &self.read_timeout)
             .field("tcp_user_timeout", &self.tcp_user_timeout)
             .field("keepalives", &self.keepalives);
@@ -4011,6 +4040,64 @@ mod tests {
             assert_eq!(parse("tcp_user_timeout=0").get_tcp_user_timeout(), None);
         }
 
+        /// `get_connect_timeout` reports an explicit `connect_timeout=0` and an
+        /// absent key the same way; `connect_timeout_named` keeps them apart,
+        /// in both DSN forms, which is what lets a caller apply its own default
+        /// only when the string did not name the key.
+        #[test]
+        fn connect_timeout_named_distinguishes_an_explicit_zero_from_an_absent_key() {
+            let absent = parse("");
+            assert!(!absent.connect_timeout_named());
+            assert_eq!(absent.get_connect_timeout(), None);
+
+            let positive = parse("connect_timeout=10");
+            assert!(positive.connect_timeout_named());
+            assert_eq!(positive.get_connect_timeout(), Some(&Duration::from_secs(10)));
+
+            let zero = parse("connect_timeout=0");
+            assert!(zero.connect_timeout_named(), "an explicit zero named the key");
+            assert_eq!(
+                zero.get_connect_timeout(),
+                None,
+                "libpq reads zero as wait-indefinitely, which is the unset value"
+            );
+
+            let negative = parse("connect_timeout=-1");
+            assert!(negative.connect_timeout_named(), "libpq clamps a negative to zero");
+            assert_eq!(negative.get_connect_timeout(), None);
+
+            // The URL form reaches the same key through `ParsedParameters::apply`.
+            let url_absent: Config = "postgresql://h/db".parse().expect("URL parses");
+            assert!(!url_absent.connect_timeout_named());
+
+            let url_positive: Config = "postgresql://h/db?connect_timeout=10"
+                .parse()
+                .expect("URL parses");
+            assert!(url_positive.connect_timeout_named());
+            assert_eq!(url_positive.get_connect_timeout(), Some(&Duration::from_secs(10)));
+
+            let url_zero: Config = "postgresql://h/db?connect_timeout=0"
+                .parse()
+                .expect("URL parses");
+            assert!(url_zero.connect_timeout_named(), "an explicit URL zero named the key");
+            assert_eq!(url_zero.get_connect_timeout(), None);
+        }
+
+        /// A programmatically built [`Config`] never reports the key as named:
+        /// the flag records what a PARSED DSN said, and the setter is not a DSN.
+        #[test]
+        fn a_programmatic_config_does_not_report_connect_timeout_named() {
+            let mut config = Config::new();
+            assert!(!config.connect_timeout_named());
+
+            config.connect_timeout(Duration::from_secs(5));
+            assert!(
+                !config.connect_timeout_named(),
+                "the setter is not a parsed DSN and must not name the key"
+            );
+            assert_eq!(config.get_connect_timeout(), Some(&Duration::from_secs(5)));
+        }
+
         #[test]
         fn a_programmatic_zero_connect_timeout_is_indefinite() {
             let mut config = Config::new();
@@ -4502,6 +4589,8 @@ mod tests {
     /// rather than going through the file lookup, which reads process-wide
     /// environment variables.
     mod service_precedence {
+        use std::time::Duration;
+
         use crate::Config;
 
         fn service_params() -> Vec<(String, String)> {
@@ -4541,6 +4630,52 @@ mod tests {
             // The keys that were NOT explicit still come from the service, or
             // this test would pass for a `fill_unset` that does nothing at all.
             assert_eq!(config.get_user(), Some("service_user"));
+        }
+
+        /// The service route reaches the same parser arm as a DSN, so a
+        /// `connect_timeout` a service supplies is a NAMED key too - including
+        /// an explicit zero, which must stay indefinite rather than being
+        /// reported as an absent key.
+        #[test]
+        fn a_service_named_connect_timeout_is_named_and_a_zero_is_indefinite() {
+            let mut config = Config::new();
+            config
+                .fill_unset(vec![("connect_timeout".to_owned(), "0".to_owned())], &[])
+                .expect("the service parameter is valid");
+            assert!(
+                config.connect_timeout_named(),
+                "the service named connect_timeout"
+            );
+            assert_eq!(
+                config.get_connect_timeout(),
+                None,
+                "an explicit zero is libpq's wait-indefinitely"
+            );
+
+            let mut config = Config::new();
+            config
+                .fill_unset(vec![("connect_timeout".to_owned(), "7".to_owned())], &[])
+                .expect("the service parameter is valid");
+            assert!(config.connect_timeout_named());
+            assert_eq!(
+                config.get_connect_timeout(),
+                Some(&Duration::from_secs(7))
+            );
+
+            // The precedence control: an explicit key blocks the service value,
+            // so the config reports the key as NOT named.
+            let mut config = Config::new();
+            config
+                .fill_unset(
+                    vec![("connect_timeout".to_owned(), "7".to_owned())],
+                    &["connect_timeout".to_owned()],
+                )
+                .expect("the service parameter is valid");
+            assert!(
+                !config.connect_timeout_named(),
+                "a service value skipped as explicit must not name the key"
+            );
+            assert_eq!(config.get_connect_timeout(), None);
         }
 
         #[test]

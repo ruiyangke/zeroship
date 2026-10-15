@@ -172,6 +172,9 @@ pub struct ControlSection {
     pub spend_recompute_group_id: Option<String>,
     /// Spend recompute interval in seconds.
     pub spend_recompute_interval: Option<u64>,
+    /// Connect deadline in seconds for request connections whose DSN does not
+    /// name `connect_timeout`.
+    pub request_connect_timeout_secs: Option<u64>,
     /// Tax provider backend.
     pub tax_provider: Option<String>,
     /// Stripe REST API base URL.

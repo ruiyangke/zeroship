@@ -151,11 +151,38 @@ pub struct ControlSettings {
 
     /// Interval in seconds for the stream-backed spend recompute cron. Default
     /// is hourly per billing-provider-platform v7 enforcement.
+    ///
+    /// The enforcement cycle's deadline DERIVES from this: the server-side
+    /// `statement_timeout` is three quarters of it and the client backstop is
+    /// the whole of it (see `crate::deadline::CycleDeadline`). One recompute
+    /// cycle re-reads the whole retained stream and rewrites the period, so a
+    /// value that is short of the time one full recompute takes cuts every
+    /// cycle before it writes anything; leave it above that. A sub-minute
+    /// interval in particular cannot fit a full-stream recompute.
     #[config(
         name = "control.spend_recompute_interval",
         default = crate::cron::spend_recompute::DEFAULT_RECOMPUTE_INTERVAL_SECS
     )]
     pub spend_recompute_interval: Operational<u64>,
+
+    /// Connect deadline in seconds applied to every request connection Control
+    /// opens (`Registry::conn`) when the configured `database_url` does not
+    /// name `connect_timeout` of its own.
+    ///
+    /// It bounds the TCP dial, TLS negotiation, startup and authentication of
+    /// ONE request connection per resolved address, so a database that accepts
+    /// the socket and then never answers cannot hold a request or an
+    /// enforcement cycle open. The default (see
+    /// `crate::registry::DEFAULT_REQUEST_CONNECT_TIMEOUT_SECS`) is far below
+    /// Linux's default SYN retry budget, so a black-holed address fails in
+    /// seconds rather than minutes. An operator's `connect_timeout` in the DSN
+    /// wins, whatever its value (an explicit zero stays indefinite); zero here
+    /// means Control imposes none.
+    #[config(
+        name = "control.request_connect_timeout_secs",
+        default = crate::registry::DEFAULT_REQUEST_CONNECT_TIMEOUT_SECS
+    )]
+    pub request_connect_timeout_secs: Operational<u64>,
 
     /// Tax provider backend. `native` (default) computes `0` - the USD launch
     /// owes no tax. The seam exists so enabling a real `StripeTaxProvider`

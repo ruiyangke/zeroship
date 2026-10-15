@@ -151,7 +151,14 @@ async fn run(cli: Cli) -> Result<zeroship_core::types::AppRecord, DevProvisionEr
     let one = zeroship_control::publication::CatalogOptions {
         max_connections: std::num::NonZeroUsize::MIN,
     };
-    let registry = Registry::connect(&cli.db, one, one)
+    let registry = Registry::connect(
+        &cli.db,
+        one,
+        one,
+        std::time::Duration::from_secs(
+            zeroship_control::registry::DEFAULT_REQUEST_CONNECT_TIMEOUT_SECS,
+        ),
+    )
     .await
     .map_err(|e| err(format!("connect registry: {e}")))?;
     seed_plans(&registry)

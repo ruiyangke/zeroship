@@ -584,6 +584,7 @@ fn main() -> std::io::Result<()> {
     let expected_oauth_audience = settings.oauth_audience.get().clone();
     let app_base_domain = settings.app_base_domain.get().clone();
     let spend_recompute_interval = *settings.spend_recompute_interval.get();
+    let request_connect_timeout_secs = *settings.request_connect_timeout_secs.get();
     let audit_retention_months = *settings.audit_retention_months.get();
     let audit_retention_check_secs = *settings.audit_retention_check_secs.get();
 
@@ -768,6 +769,10 @@ fn main() -> std::io::Result<()> {
             CheckValue::Count(spend_recompute_interval as usize),
         );
         report.field(
+            "request_connect_timeout_secs",
+            CheckValue::Count(usize::try_from(request_connect_timeout_secs).unwrap_or(usize::MAX)),
+        );
+        report.field(
             "deploy_tmp_dir",
             CheckValue::Plain(deploy_tmp_dir.display().to_string()),
         );
@@ -855,6 +860,7 @@ fn main() -> std::io::Result<()> {
         zeroship_control::publication::CatalogOptions {
             max_connections: retention_max_connections,
         },
+        std::time::Duration::from_secs(request_connect_timeout_secs),
     )
     .await
     .expect("failed to connect to database");

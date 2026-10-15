@@ -20,7 +20,9 @@ use compio_postgres::{connect, NoTls};
 use uuid::Uuid;
 
 use zeroship_control::cron::billing_reconcile::DEFAULT_SETTLE_WINDOW_SECS;
-use zeroship_control::cron::spend_recompute::{recompute_usage_aggregates, SpendRecomputeConfig};
+use zeroship_control::cron::spend_recompute::{
+    recompute_usage_aggregates, SpendRecomputeConfig, DEFAULT_RECOMPUTE_INTERVAL_SECS,
+};
 use zeroship_control::metering::current_period_start_unix;
 use zeroship_control::Registry;
 use zeroship_core::app_id::AppId;
@@ -386,7 +388,7 @@ async fn producer_to_redpanda_to_recompute_to_spend_block_end_to_end() {
             "the recompute's stall bound is the configured stall timeout"
         );
         let cfg = SpendRecomputeConfig {
-            interval: Duration::from_secs(1),
+            interval: Duration::from_secs(DEFAULT_RECOMPUTE_INTERVAL_SECS),
             settle_window: Duration::from_secs(DEFAULT_SETTLE_WINDOW_SECS),
             batch_max: 16,
             ..Default::default()
@@ -538,7 +540,7 @@ async fn a_recompute_cycle_rejoins_after_the_consumer_idles_past_max_poll() {
             )
             .expect("redpanda recompute transport");
         let cfg = SpendRecomputeConfig {
-            interval: Duration::from_secs(1),
+            interval: Duration::from_secs(DEFAULT_RECOMPUTE_INTERVAL_SECS),
             settle_window: Duration::from_secs(DEFAULT_SETTLE_WINDOW_SECS),
             batch_max: 16,
             ..Default::default()

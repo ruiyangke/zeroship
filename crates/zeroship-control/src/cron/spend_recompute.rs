@@ -17,6 +17,7 @@ use zeroship_stream::{
     unless_stalled, Clock, PartitionEnd, StreamError, StreamRecord, StreamTransport, SystemClock,
 };
 
+use crate::deadline::{CycleDeadline, DeadlineBound};
 use crate::metering::{period_start_unix, Metering, UsageAggregate};
 use crate::registry::{Registry, RegistryError};
 use crate::AppState;
@@ -53,6 +54,19 @@ impl Default for SpendRecomputeConfig {
 }
 
 impl SpendRecomputeConfig {
+    /// The deadline this cycle's database work runs under, derived from
+    /// [`Self::interval`].
+    ///
+    /// The same knob that sets the enforcement cadence sets the bound on each
+    /// cycle's database work, so a cycle cannot outlive its slot: the server
+    /// cancels and rolls back at [`CycleDeadline::server`], the client
+    /// backstop drops the connection at [`CycleDeadline::backstop`], and the
+    /// next tick retries.
+    #[must_use]
+    pub fn cycle_deadline(&self) -> CycleDeadline {
+        CycleDeadline::from_interval(self.interval)
+    }
+
     /// Override the clock [`recompute_usage_aggregates`] reads elapsed time
     /// from. Production never calls this; a test injects a clock it advances
     /// itself, so a scripted stream that paces delivery can make the
@@ -152,6 +166,20 @@ pub enum SpendRecomputeError {
         stall_ms: u64,
         unfinished: Vec<UnfinishedPartition>,
     },
+    /// The cycle's database work did not finish within the deadline derived
+    /// from its configured interval. `bound` names which of the cycle's two
+    /// bounds fired (the server `statement_timeout` or the client backstop),
+    /// and `deadline_ms` its value; the transaction was rolled back, and the
+    /// next tick retries.
+    #[error(
+        "cycle deadline: {operation} exceeded its {deadline_ms}ms {bound} bound; the transaction \
+         was rolled back and the next tick retries"
+    )]
+    CycleDeadline {
+        operation: &'static str,
+        deadline_ms: u64,
+        bound: DeadlineBound,
+    },
 }
 
 /// Where one still-unfinished partition sat when a scan gave up.
@@ -184,7 +212,18 @@ fn format_unfinished_partitions(unfinished: &[UnfinishedPartition]) -> String {
 
 impl From<RegistryError> for SpendRecomputeError {
     fn from(value: RegistryError) -> Self {
-        Self::Registry(value.to_string())
+        match value {
+            RegistryError::CycleDeadline {
+                operation,
+                deadline_ms,
+                bound,
+            } => Self::CycleDeadline {
+                operation,
+                deadline_ms,
+                bound,
+            },
+            other => Self::Registry(other.to_string()),
+        }
     }
 }
 
@@ -209,32 +248,50 @@ pub async fn run(
 ) {
     tracing::info!(
         interval_secs = cfg.interval.as_secs(),
+        deadline_ms = cfg.cycle_deadline().server_ms(),
         batch_max = cfg.batch_max,
         stream = stream.id(),
         "control spend_recompute cron starting"
     );
     loop {
-        match tick(&state, stream.as_ref(), &cfg).await {
-            Ok(cycle) => {
-                tracing::info!(
-                    polled = cycle.polled,
-                    decoded = cycle.decoded,
-                    skipped_other_period = cycle.skipped_other_period,
-                    skipped_duplicate = cycle.skipped_duplicate,
-                    skipped_no_app = cycle.skipped_no_app,
-                    skipped_zero_value = cycle.skipped_zero_value,
-                    skipped_undecodable = cycle.skipped_undecodable,
-                    aggregates = cycle.aggregates,
-                    written = cycle.written,
-                    transitions = cycle.transitions,
-                    "control spend_recompute cycle completed"
-                );
-            }
-            Err(err) => {
-                tracing::error!(error = %err, "control spend_recompute cycle failed");
-            }
-        }
+        report_cycle(&tick(&state, stream.as_ref(), &cfg).await);
         compio::time::sleep(cfg.interval).await;
+    }
+}
+
+/// Report one cycle's outcome to the log.
+///
+/// The boundary that cut a cycle already logged the cut once, with its
+/// operation, bound and value (see `crate::deadline::within` and
+/// `crate::deadline::backstop`), so a [`SpendRecomputeError::CycleDeadline`]
+/// outcome is only NAMED here at debug level rather than logged a second time.
+/// Every other failure keeps its error-level line.
+pub fn report_cycle(outcome: &Result<SpendRecomputeCycle, SpendRecomputeError>) {
+    match outcome {
+        Ok(cycle) => {
+            tracing::info!(
+                polled = cycle.polled,
+                decoded = cycle.decoded,
+                skipped_other_period = cycle.skipped_other_period,
+                skipped_duplicate = cycle.skipped_duplicate,
+                skipped_no_app = cycle.skipped_no_app,
+                skipped_zero_value = cycle.skipped_zero_value,
+                skipped_undecodable = cycle.skipped_undecodable,
+                aggregates = cycle.aggregates,
+                written = cycle.written,
+                transitions = cycle.transitions,
+                "control spend_recompute cycle completed"
+            );
+        }
+        Err(SpendRecomputeError::CycleDeadline { operation, .. }) => {
+            tracing::debug!(
+                operation,
+                "control spend_recompute cycle ended at its deadline (already logged at its boundary)"
+            );
+        }
+        Err(err) => {
+            tracing::error!(error = %err, "control spend_recompute cycle failed");
+        }
     }
 }
 
@@ -254,20 +311,55 @@ pub async fn run(
 /// skipping its poll leaves nothing unread.
 ///
 /// The lock wraps only the recompute. `spend_reconcile::tick` keeps its own.
+///
+/// The advisory-lock acquire, the recompute cycle and the unlock all run under
+/// `deadline`'s client-side backstop, so a network that never answers ends the
+/// tick at the deadline and a server-side cancellation anywhere in it is
+/// reported as [`SpendRecomputeError::CycleDeadline`].
+///
+/// # Errors
+/// Returns [`SpendRecomputeError::CycleDeadline`] when the deadline cut the
+/// tick, the recompute's own stream or database errors otherwise.
 #[allow(clippy::future_not_send)]
 pub async fn tick(
     state: &AppState,
     stream: &dyn StreamTransport,
     cfg: &SpendRecomputeConfig,
 ) -> Result<SpendRecomputeCycle, SpendRecomputeError> {
+    let deadline = cfg.cycle_deadline();
+    crate::deadline::backstop(
+        deadline,
+        "spend_recompute",
+        Box::pin(tick_bounded(state, stream, cfg, deadline)),
+        |operation, deadline_ms, bound| SpendRecomputeError::CycleDeadline {
+            operation,
+            deadline_ms,
+            bound,
+        },
+    )
+    .await
+}
+
+/// The lock-held body. Separate so the lock, the recompute cycle and the unlock
+/// run under one [`crate::deadline::backstop`] without nesting the recompute's
+/// future inside the backstop's.
+async fn tick_bounded(
+    state: &AppState,
+    stream: &dyn StreamTransport,
+    cfg: &SpendRecomputeConfig,
+    deadline: CycleDeadline,
+) -> Result<SpendRecomputeCycle, SpendRecomputeError> {
     let lock_conn = state.registry.conn().await?;
+    crate::deadline::set_session_statement_timeout(&lock_conn, deadline)
+        .await
+        .map_err(|e| deadline.classify("advisory_lock", e))?;
     let got = lock_conn
         .query(
             "SELECT pg_try_advisory_lock($1) AS locked",
             &[&super::lock_keys::SPEND_RECOMPUTE],
         )
         .await
-        .map_err(|e| SpendRecomputeError::Registry(e.to_string()))?;
+        .map_err(|e| deadline.classify("advisory_lock", RegistryError::from(e)))?;
     let acquired = got.first().is_some_and(|r| r.get::<_, bool>("locked"));
     if !acquired {
         tracing::debug!(
@@ -277,7 +369,7 @@ pub async fn tick(
         // is not a second unguarded path, and a replica that loses the
         // recompute race should not also sit out enforcement.
         let cycle = SpendRecomputeCycle {
-            transitions: super::spend_reconcile::tick(state).await?,
+            transitions: super::spend_reconcile::tick_within(state, deadline).await?,
             ..Default::default()
         };
         return Ok(cycle);
@@ -324,7 +416,7 @@ pub async fn recompute_and_reconcile(
         cfg,
     )
     .await;
-    let transitions = match super::spend_reconcile::tick(state).await {
+    let transitions = match super::spend_reconcile::tick_within(state, cfg.cycle_deadline()).await {
         Ok(transitions) => transitions,
         Err(evaluator_error) => {
             log_recompute_error_lost_to_evaluator_failure(&recomputed);
@@ -505,7 +597,7 @@ pub async fn recompute_usage_aggregates(
     });
     cycle.aggregates = aggregates.len();
     let write = Metering::new(registry.clone())
-        .replace_period_snapshot(period_start, &aggregates)
+        .replace_period_snapshot_within(period_start, &aggregates, cfg.cycle_deadline())
         .await?;
     cycle.written = write.written;
 
@@ -1050,7 +1142,7 @@ mod live_db_tests {
             event("evt_old_period", &block_app, &organization, 999, period.saturating_sub(60)),
         ]);
         let cfg = SpendRecomputeConfig {
-            interval: Duration::from_secs(1),
+            interval: Duration::from_secs(DEFAULT_RECOMPUTE_INTERVAL_SECS),
             settle_window: Duration::from_secs(
                 super::super::billing_reconcile::DEFAULT_SETTLE_WINDOW_SECS,
             ),
@@ -1109,7 +1201,7 @@ mod live_db_tests {
         let app = seed_priced_app(&client, &plan_id, "recompute-nowipe").await;
         let organization = zeroship_core::typed_id::generate("org");
         let cfg = SpendRecomputeConfig {
-            interval: Duration::from_secs(1),
+            interval: Duration::from_secs(DEFAULT_RECOMPUTE_INTERVAL_SECS),
             settle_window: Duration::from_secs(
                 super::super::billing_reconcile::DEFAULT_SETTLE_WINDOW_SECS,
             ),
@@ -1151,7 +1243,7 @@ mod live_db_tests {
             event("evt_distinct", &app, &organization, 2, period + 11),
         ]);
         let cfg = SpendRecomputeConfig {
-            interval: Duration::from_secs(1),
+            interval: Duration::from_secs(DEFAULT_RECOMPUTE_INTERVAL_SECS),
             settle_window: Duration::from_secs(
                 super::super::billing_reconcile::DEFAULT_SETTLE_WINDOW_SECS,
             ),
@@ -1208,7 +1300,7 @@ mod live_db_tests {
             record_from_event(2, event("evt_after_poison", &app, &organization, 7, period + 11)),
         ]);
         let cfg = SpendRecomputeConfig {
-            interval: Duration::from_secs(1),
+            interval: Duration::from_secs(DEFAULT_RECOMPUTE_INTERVAL_SECS),
             settle_window: Duration::from_secs(
                 super::super::billing_reconcile::DEFAULT_SETTLE_WINDOW_SECS,
             ),
@@ -1249,7 +1341,7 @@ mod live_db_tests {
             event("evt_current_unsettled", &app, &organization, 59, current + 10),
         ]);
         let cfg = SpendRecomputeConfig {
-            interval: Duration::from_secs(1),
+            interval: Duration::from_secs(DEFAULT_RECOMPUTE_INTERVAL_SECS),
             settle_window: Duration::from_secs(3600),
             batch_max: 1,
             ..Default::default()
@@ -1521,7 +1613,7 @@ mod live_db_tests {
 
     fn scan_cfg(batch_max: usize) -> SpendRecomputeConfig {
         SpendRecomputeConfig {
-            interval: Duration::from_secs(1),
+            interval: Duration::from_secs(DEFAULT_RECOMPUTE_INTERVAL_SECS),
             settle_window: Duration::from_secs(
                 super::super::billing_reconcile::DEFAULT_SETTLE_WINDOW_SECS,
             ),

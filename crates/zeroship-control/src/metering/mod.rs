@@ -17,6 +17,7 @@ use uuid::Uuid;
 use zeroship_core::app_id::AppId;
 use zeroship_core::usage_event::{UsageEvent, UsageSubject};
 
+use crate::deadline::CycleDeadline;
 use crate::registry::{Registry, RegistryError};
 use crate::BillingStreamConfig;
 
@@ -235,13 +236,72 @@ impl Metering {
     /// Reporting only. This does not refuse the write - refusing would block legitimate
     /// downward corrections (a dedup fix, a purge of bad events) and could freeze
     /// enforcement at a wrong high value. Whether to refuse is an operator policy call.
+    ///
+    /// # Errors
+    /// Returns [`RegistryError::CycleDeadline`] when the compiled default
+    /// interval's deadline cut the rewrite, and any database error otherwise.
     pub async fn replace_period_snapshot(
         &self,
         period_start_unix_secs: i64,
         aggregates: &[UsageAggregate],
     ) -> Result<PeriodSnapshotWrite, RegistryError> {
+        Box::pin(self.replace_period_snapshot_within(
+            period_start_unix_secs,
+            aggregates,
+            crate::cron::spend_recompute::SpendRecomputeConfig::default().cycle_deadline(),
+        ))
+        .await
+    }
+
+    /// As [`Self::replace_period_snapshot`] but under `deadline`, derived from
+    /// the enforcement cycle's configured interval.
+    ///
+    /// The rewrite runs in ONE transaction carrying `deadline`'s
+    /// `SET LOCAL statement_timeout`, so `PostgreSQL` cancels a held query and
+    /// rolls the whole rewrite back rather than leaving a period half-written;
+    /// the client-side backstop drops the connection if the server never
+    /// answers. The next cycle's scan retries.
+    ///
+    /// # Errors
+    /// Returns [`RegistryError::CycleDeadline`] when `deadline` cut the rewrite,
+    /// and any database error otherwise.
+    pub async fn replace_period_snapshot_within(
+        &self,
+        period_start_unix_secs: i64,
+        aggregates: &[UsageAggregate],
+        deadline: CycleDeadline,
+    ) -> Result<PeriodSnapshotWrite, RegistryError> {
+        crate::deadline::within(
+            deadline,
+            "replace_period_snapshot",
+            Box::pin(self.replace_period_snapshot_server_bounded(period_start_unix_secs, aggregates, deadline)),
+        )
+        .await
+    }
+
+    /// The rewrite body under `deadline`'s SERVER-side `SET LOCAL
+    /// statement_timeout` only, with no client-side backstop. Production wraps
+    /// this in [`Self::replace_period_snapshot_within`]; exposed so a test can
+    /// bind the server bound on its own.
+    ///
+    /// # Errors
+    /// Returns [`RegistryError::QueryCanceled`] when the server bound cuts a
+    /// statement, and any other database error otherwise. The enclosing
+    /// `crate::deadline::within` boundary relabels the cancellation as
+    /// [`RegistryError::CycleDeadline`].
+    pub async fn replace_period_snapshot_server_bounded(
+        &self,
+        period_start_unix_secs: i64,
+        aggregates: &[UsageAggregate],
+        deadline: CycleDeadline,
+    ) -> Result<PeriodSnapshotWrite, RegistryError> {
         let mut conn = self.registry.conn().await?;
         let tx = conn.transaction().await?;
+        tx.batch_execute(&format!(
+            "SET LOCAL statement_timeout = {}",
+            deadline.statement_timeout()
+        ))
+        .await?;
         let period = period_date(period_start_unix_secs);
 
         // Read BEFORE the DELETE below: it is the only moment the prior totals still

@@ -130,7 +130,7 @@ async fn memory_forwarder_and_recompute_consumers_do_not_interfere() {
     );
 
     let recompute_cfg = spend_recompute::SpendRecomputeConfig {
-        interval: Duration::from_secs(1),
+        interval: Duration::from_secs(spend_recompute::DEFAULT_RECOMPUTE_INTERVAL_SECS),
         settle_window: Duration::from_secs(1),
         batch_max: 2,
         ..Default::default()
@@ -259,7 +259,7 @@ async fn control_direct_usage_event_survives_repeated_snapshot_recompute() {
 
     let recompute = streams.build_recompute().expect("recompute consumer");
     let recompute_cfg = spend_recompute::SpendRecomputeConfig {
-        interval: Duration::from_secs(1),
+        interval: Duration::from_secs(spend_recompute::DEFAULT_RECOMPUTE_INTERVAL_SECS),
         settle_window: Duration::from_secs(1),
         batch_max: 10,
         ..Default::default()

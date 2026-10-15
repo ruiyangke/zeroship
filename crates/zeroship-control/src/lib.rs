@@ -20,6 +20,7 @@ pub mod config;
 pub mod credit;
 pub mod databases;
 pub mod cron;
+pub mod deadline;
 pub mod deploy;
 pub mod deploy_inflight;
 pub mod device_handlers;

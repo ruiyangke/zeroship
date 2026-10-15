@@ -165,6 +165,22 @@ fn error_response(e: RegistryError) -> web::HttpResponse {
             "registry database error",
             msg,
         ),
+        // The server canceled the statement, or an enforcement cycle was cut at
+        // its deadline. Either is infrastructure, not the caller's request.
+        RegistryError::QueryCanceled(msg) => infrastructure_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "registry query canceled",
+            msg,
+        ),
+        RegistryError::CycleDeadline {
+            operation,
+            deadline_ms,
+            bound,
+        } => infrastructure_error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "enforcement cycle deadline exceeded",
+            format!("{operation} exceeded its {deadline_ms}ms {bound} bound"),
+        ),
         RegistryError::FxUnresolved => infrastructure_error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "pricing misconfigured",

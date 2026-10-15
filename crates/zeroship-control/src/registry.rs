@@ -9,6 +9,7 @@ use zeroship_core::app_id::AppId;
 use zeroship_core::database_role::DatabaseCapability;
 use zeroship_core::{BindingId, DatabaseId};
 
+use crate::deadline::DeadlineBound;
 use crate::plan_catalog::{heap_cap_from_column, PlanTimeLimits};
 use crate::publication::{
     catalog, Acceptance, AcceptanceResult, Catalog, CatalogError, CatalogOptions, CatalogRole,
@@ -31,6 +32,22 @@ pub enum RegistryError {
     NotFound(String),
     AlreadyExists(String),
     Database(String),
+    /// The server canceled a statement itself (SQLSTATE `57014`), as
+    /// `statement_timeout` does. An enforcement cycle maps this to the
+    /// [`crate::deadline::CycleDeadline`] it installed; on any other path it
+    /// names that the server cut the statement rather than that the database
+    /// failed.
+    QueryCanceled(String),
+    /// An enforcement cycle's database work did not finish within the deadline
+    /// derived from its configured interval. `bound` names which of the cycle's
+    /// two bounds fired (the server `statement_timeout` or the client
+    /// backstop), and `deadline_ms` its value; the transaction was rolled back,
+    /// and the next tick retries.
+    CycleDeadline {
+        operation: &'static str,
+        deadline_ms: u64,
+        bound: DeadlineBound,
+    },
     InvalidInput(String),
     /// The operation is refused because it would violate a business invariant
     /// that is not a simple uniqueness clash — e.g. hard-deleting an app that has
@@ -68,6 +85,16 @@ impl std::fmt::Display for RegistryError {
             Self::NotFound(s) => write!(f, "not found: {s}"),
             Self::AlreadyExists(s) => write!(f, "already exists: {s}"),
             Self::Database(s) => write!(f, "database: {s}"),
+            Self::QueryCanceled(s) => write!(f, "query canceled by the server: {s}"),
+            Self::CycleDeadline {
+                operation,
+                deadline_ms,
+                bound,
+            } => write!(
+                f,
+                "cycle deadline: {operation} exceeded its {deadline_ms}ms {bound} bound; the \
+                 transaction was rolled back and the next tick retries"
+            ),
             Self::InvalidInput(s) => write!(f, "invalid input: {s}"),
             Self::Conflict(s) => write!(f, "conflict: {s}"),
             Self::ReservedName(s) => write!(f, "reserved name: {s}"),
@@ -93,6 +120,12 @@ impl From<compio_postgres::Error> for RegistryError {
             Self::AlreadyExists("resource already exists".into())
         } else if e.code() == Some(&SqlState::T_R_DEADLOCK_DETECTED) {
             Self::Database(format!("retryable deadlock: {e}"))
+        } else if e.code() == Some(&SqlState::QUERY_CANCELED) {
+            // The server cut the statement, not the connection: a
+            // `statement_timeout` or an explicit cancel. Named apart from a
+            // database failure so an enforcement cycle can report the deadline
+            // it installed; everywhere else it says the server canceled.
+            Self::QueryCanceled(e.to_string())
         } else {
             let msg = e.to_string();
             let full = match source_chain(&e) {
@@ -147,27 +180,70 @@ fn source_chain(err: &dyn std::error::Error) -> Option<String> {
 // Registry
 // ---------------------------------------------------------------------------
 
+/// The connect deadline (seconds) Control imposes on a request connection when
+/// the configured `database_url` does not name `connect_timeout` of its own.
+///
+/// It bounds the TCP dial, TLS negotiation, startup and authentication of one
+/// request connection per resolved address, so a database that accepts the
+/// socket and then never answers fails in seconds rather than on the kernel's
+/// own SYN retry schedule. Zero means "no Control-imposed deadline"; the URL
+/// governs.
+pub const DEFAULT_REQUEST_CONNECT_TIMEOUT_SECS: u64 = 10;
+
+/// Parse `url` and apply `default_timeout` as its `connect_timeout` ONLY when
+/// the DSN does not name `connect_timeout` at all.
+///
+/// [`compio_postgres::Config::connect_timeout_named`] is `true` exactly when
+/// the parsed DSN named `connect_timeout`, including an explicit
+/// `connect_timeout=0` (libpq's "wait indefinitely"), which
+/// [`compio_postgres::Config::get_connect_timeout`] reports as `None` the same
+/// way it reports an absent key. Asking the driver's own parser keeps an
+/// explicit operator choice from being overridden without re-scanning the DSN
+/// text in Control.
+fn request_config(
+    url: &str,
+    default_timeout: std::time::Duration,
+) -> Result<compio_postgres::Config, compio_postgres::Error> {
+    let mut config = url.parse::<compio_postgres::Config>()?;
+    if !config.connect_timeout_named() {
+        config.connect_timeout(default_timeout);
+    }
+    Ok(config)
+}
+
 /// Application registry backed by PostgreSQL. Stores the DB URL and creates a
 /// fresh connection per query — suitable for the low-traffic control plane.
 /// Deploy, archive and restore run their catalog transactions on the bounded
 /// [`Catalog`] every clone shares, and deployment holds and collection run on
 /// the bounded retention executor beside it.
 ///
-/// `Clone` is cheap (a `String` copy and two executor handles) so `AppState`
-/// can hold a separate handle alongside the `EnvStore`'s internal one.
+/// `Clone` is cheap (a `String` copy, a `Duration` and two executor handles) so
+/// `AppState` can hold a separate handle alongside the `EnvStore`'s internal
+/// one.
 #[derive(Clone, Debug)]
 pub struct Registry {
     /// The database URL offering [`crate::sessions::REQUEST`] as its session
-    /// name, which every [`Self::conn`] connection announces.
+    /// name, which every request connection announces.
     request_url: String,
+    /// The connect deadline each request connection applies when `request_url`
+    /// carries none of its own.
+    request_connect_timeout: std::time::Duration,
     catalog: Catalog,
     retention: Catalog,
 }
 
 /// Open a new compio-postgres connection and detach its driver task onto the
 /// compio runtime. Returns the [`Client`] handle.
-async fn open_conn(url: &str) -> Result<Client, compio_postgres::Error> {
-    let (client, connection) = compio_postgres::connect(url, NoTls).await?;
+///
+/// The connection runs under `connect_timeout` when the URL does not name
+/// `connect_timeout` of its own, so a database that accepts the socket and then
+/// never answers cannot hold the caller open.
+async fn open_conn(
+    url: &str,
+    connect_timeout: std::time::Duration,
+) -> Result<Client, compio_postgres::Error> {
+    let config = request_config(url, connect_timeout)?;
+    let (client, connection) = config.connect(NoTls).await?;
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
             tracing::error!(error = %e, "control: pg connection error");
@@ -185,8 +261,9 @@ impl Registry {
     /// compose step / `deploy/ops/db-migrate.sh`).
     /// `Registry` never creates or alters tables.
     ///
-    /// Both executors use their default session bounds; the production
-    /// binary passes its configured bounds to [`Self::connect`].
+    /// Both executors use their default session bounds and request connections
+    /// use [`DEFAULT_REQUEST_CONNECT_TIMEOUT_SECS`]; the production binary
+    /// passes its configured bounds and connect deadline to [`Self::connect`].
     ///
     /// # Errors
     /// Reports an unreachable database and an executor that cannot open.
@@ -197,6 +274,7 @@ impl Registry {
             CatalogOptions {
                 max_connections: crate::publication::shared::DEFAULT_RETENTION_MAX_CONNECTIONS,
             },
+            std::time::Duration::from_secs(DEFAULT_REQUEST_CONNECT_TIMEOUT_SECS),
         )
         .await
     }
@@ -206,12 +284,16 @@ impl Registry {
     /// `retention`'s. Opening them is the reachability check; the schema must
     /// already exist.
     ///
+    /// `request_connect_timeout` is the deadline every later request connection
+    /// applies when `db_url` does not name `connect_timeout` of its own.
+    ///
     /// # Errors
     /// Reports an unreachable database and an executor that cannot open.
     pub async fn connect(
         db_url: &str,
         catalog: CatalogOptions,
         retention: CatalogOptions,
+        request_connect_timeout: std::time::Duration,
     ) -> Result<Self, String> {
         let catalog = Catalog::start(db_url, CatalogRole::Publication, catalog)
             .await
@@ -221,6 +303,7 @@ impl Registry {
             .map_err(|error| format!("control retention executor: {error}"))?;
         Ok(Self {
             request_url: crate::sessions::named(db_url, crate::sessions::REQUEST),
+            request_connect_timeout,
             catalog,
             retention,
         })
@@ -252,7 +335,7 @@ impl Registry {
                 "a catalog lane may not open a request connection".into(),
             ));
         }
-        open_conn(&self.request_url)
+        open_conn(&self.request_url, self.request_connect_timeout)
             .await
             .map_err(RegistryError::from)
     }
@@ -1496,6 +1579,104 @@ mod name_validation_tests {
             validate_app_name(""),
             Err(RegistryError::InvalidInput(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod connect_deadline_tests {
+    use std::time::{Duration, Instant};
+
+    use super::{open_conn, request_config, DEFAULT_REQUEST_CONNECT_TIMEOUT_SECS};
+
+    /// The driver records whether the DSN named `connect_timeout`; a DSN that
+    /// did not gets the Control default, and one that named it - including an
+    /// explicit zero, libpq's "wait indefinitely" - keeps the operator's
+    /// choice.
+    #[test]
+    fn a_dsn_without_a_connect_timeout_takes_the_control_default() {
+        let default = Duration::from_secs(DEFAULT_REQUEST_CONNECT_TIMEOUT_SECS);
+        let taken = request_config("postgresql://control@db/zeroship", default)
+            .expect("parse a URL with no connect_timeout");
+        assert_eq!(
+            taken.get_connect_timeout(),
+            Some(&default),
+            "a URL that sets no deadline must take the Control default"
+        );
+
+        let kept = request_config("postgresql://control@db/zeroship?connect_timeout=3", default)
+            .expect("parse a URL carrying connect_timeout");
+        assert_eq!(
+            kept.get_connect_timeout(),
+            Some(&Duration::from_secs(3)),
+            "an operator's positive connect_timeout must win over the Control default"
+        );
+
+        // An explicit zero is libpq's "wait indefinitely": the DSN NAMED the
+        // key, so the Control default must not be applied. `get_connect_timeout`
+        // is `None` here, which is why the check must ask whether the key was
+        // named rather than whether a positive value is present.
+        let url_zero =
+            request_config("postgresql://control@db/zeroship?connect_timeout=0", default)
+                .expect("parse a URL carrying an explicit zero");
+        assert!(
+            url_zero.connect_timeout_named(),
+            "the URL named connect_timeout"
+        );
+        assert_eq!(
+            url_zero.get_connect_timeout(),
+            None,
+            "an explicit URL zero must stay indefinite, not take the Control default"
+        );
+
+        let kv_zero = request_config("host=db connect_timeout=0", default)
+            .expect("parse a key=value DSN carrying an explicit zero");
+        assert!(
+            kv_zero.connect_timeout_named(),
+            "the key=value DSN named connect_timeout"
+        );
+        assert_eq!(
+            kv_zero.get_connect_timeout(),
+            None,
+            "an explicit key=value zero must stay indefinite, not take the Control default"
+        );
+    }
+
+    /// A request connection to an address that accepts the socket and then
+    /// never answers must end at its connect deadline rather than hang.
+    ///
+    /// The listener is BOUND but never accepted: the kernel completes the
+    /// handshake for a backlogged connection, so the dial succeeds and the
+    /// connection stalls in startup - exactly the state the deadline bounds.
+    /// The outer `timeout` is a detection bound, so an `open_conn` that ignored
+    /// its deadline fails by name instead of hanging the suite.
+    #[compio::test]
+    async fn a_request_connection_to_a_silent_server_ends_at_the_connect_deadline() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a listener");
+        let addr = listener.local_addr().expect("listener address");
+        let url = format!("postgresql://control@{addr}/zeroship");
+
+        let deadline = Duration::from_millis(300);
+        let started = Instant::now();
+        let outcome =
+            compio::time::timeout(Duration::from_secs(5), Box::pin(open_conn(&url, deadline)))
+                .await;
+        let elapsed = started.elapsed();
+
+        match outcome {
+            Ok(Ok(_)) => panic!("a silent server must not yield a connection"),
+            Ok(Err(_)) => {}
+            Err(error) => panic!(
+                "the request connection did not end at its {deadline:?} deadline within the \
+                 5s detection bound: {error:?}"
+            ),
+        }
+        assert!(
+            elapsed >= deadline,
+            "the connection ended at {elapsed:?}, before its {deadline:?} deadline"
+        );
+        // The listener stays bound until the test returns, so the accepted
+        // socket is never reset while `open_conn` is waiting on it.
+        drop(listener);
     }
 }
 

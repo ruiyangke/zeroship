@@ -23,6 +23,7 @@
 use zeroship_core::app_id::AppId;
 use zeroship_core::types::SpendState;
 
+use crate::deadline::CycleDeadline;
 use crate::metering::{current_period_start_unix, period_date};
 use crate::plan_catalog::PlanCatalog;
 use crate::pricing::charge_cents;
@@ -240,8 +241,72 @@ impl SpendEngine {
     /// Evaluate every app: price current-period usage, derive the new state vs
     /// the stored previous state, and on a transition persist it. Returns ONLY
     /// the apps that transitioned.
+    ///
+    /// Bounded by the compiled default enforcement interval; the production
+    /// reconcile cycle passes its configured one to [`Self::evaluate_all_within`].
+    ///
+    /// # Errors
+    /// Returns [`RegistryError::CycleDeadline`] when the compiled default
+    /// interval's deadline cut the sweep, and any database error otherwise.
     pub async fn evaluate_all(&self) -> Result<Vec<SpendTransition>, RegistryError> {
+        Box::pin(self.evaluate_all_within(
+            crate::cron::spend_recompute::SpendRecomputeConfig::default().cycle_deadline(),
+        ))
+        .await
+    }
+
+    /// As [`Self::evaluate_all`] but under `deadline`, derived from the
+    /// enforcement cycle's configured interval.
+    ///
+    /// The sweep's connection carries `deadline`'s `statement_timeout`, so a
+    /// lock wait, a stalled server or a dead network cannot hold the cycle:
+    /// `PostgreSQL` cancels the statement and rolls its transaction back, and the
+    /// client-side backstop drops the connection if even the server never
+    /// answers. A cut cycle leaves every committed state as it found it and the
+    /// next tick retries.
+    ///
+    /// # Errors
+    /// Returns [`RegistryError::CycleDeadline`] when `deadline` cut the sweep,
+    /// and any database error otherwise.
+    pub async fn evaluate_all_within(
+        &self,
+        deadline: CycleDeadline,
+    ) -> Result<Vec<SpendTransition>, RegistryError> {
+        crate::deadline::within(
+            deadline,
+            "evaluate_all",
+            Box::pin(self.evaluate_all_server_bounded(deadline)),
+        )
+        .await
+    }
+
+    /// The sweep body under `deadline`'s SERVER-side `statement_timeout` only,
+    /// with no client-side backstop. Production wraps this in
+    /// [`Self::evaluate_all_within`]; exposed so a test can bind the server
+    /// bound on its own.
+    ///
+    /// Every connection the sweep reads on carries the bound: the app list, the
+    /// usage batch and the per-app state read on one session-scoped connection;
+    /// the plan catalog and the pricing reads on their own via
+    /// [`crate::plan_catalog::PlanCatalog::list_within`] and
+    /// [`crate::pricing_store::PricingStore::weights_within`].
+    ///
+    /// # Errors
+    /// Returns [`RegistryError::QueryCanceled`] when the server bound cuts a
+    /// statement, and any other database error otherwise. It does not relabel
+    /// a cancellation: the enclosing cycle boundary
+    /// (`crate::deadline::within`, via `CycleDeadline::classify`) reports it
+    /// as [`RegistryError::CycleDeadline`].
+    pub async fn evaluate_all_server_bounded(
+        &self,
+        deadline: CycleDeadline,
+    ) -> Result<Vec<SpendTransition>, RegistryError> {
         let mut conn = self.registry.conn().await?;
+        // The sweep reads in autocommit, outside any transaction, so the bound
+        // is installed at session scope on THIS per-cycle connection (dropped
+        // with the cycle); the per-app write transactions inherit it and the
+        // server aborts and rolls each back when it fires.
+        crate::deadline::set_session_statement_timeout(&conn, deadline).await?;
         let app_rows = conn
             .query("SELECT id FROM zeroship.apps", &[])
             .await?;
@@ -259,7 +324,7 @@ impl SpendEngine {
         // identical to the per-app reads — same plan rows, same usage totals.
         let plans: std::collections::HashMap<String, crate::plan_catalog::Plan> = self
             .catalog
-            .list()
+            .list_within(deadline)
             .await?
             .into_iter()
             .map(|p| (p.id.clone(), p))
@@ -271,8 +336,8 @@ impl SpendEngine {
         // cap comparison below is unchanged — `total_units × fx` is folded into
         // `total_cents`.
         let pricing = PricingStore::new(self.registry.clone());
-        let weights = pricing.weights().await?;
-        let default_fx = pricing.default_fx_pico_cents_per_unit().await?;
+        let weights = pricing.weights_within(deadline).await?;
+        let default_fx = pricing.default_fx_pico_cents_per_unit_within(deadline).await?;
 
         // One batched usage read for the whole fleet's current period, grouped
         // by app in Rust. Mirrors `Metering::period_totals` per app.

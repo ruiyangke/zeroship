@@ -7,6 +7,7 @@
 //! rows) and pass it as `&MetricWeights` into [`crate::pricing::charge_cents`].
 //! The default FX resolves a plan's `fx == None`.
 
+use crate::deadline::CycleDeadline;
 use crate::pricing::{MetricWeight, MetricWeights, MIN_FX_PICO_CENTS_PER_UNIT};
 use crate::registry::{Registry, RegistryError};
 
@@ -131,6 +132,21 @@ impl PricingStore {
         weights_on(&conn).await
     }
 
+    /// As [`Self::weights`] but on a connection whose statements are bounded by
+    /// `deadline`'s server-side `statement_timeout`, so a read that a lock or a
+    /// stalled server holds cannot outlive the enforcement cycle.
+    ///
+    /// # Errors
+    /// [`RegistryError`] on a driver failure; when the server bound cuts the
+    /// read the error is [`RegistryError::QueryCanceled`], which the enclosing
+    /// `crate::deadline::within` boundary relabels as
+    /// [`RegistryError::CycleDeadline`].
+    pub async fn weights_within(&self, deadline: CycleDeadline) -> Result<MetricWeights, RegistryError> {
+        let conn = self.registry.conn().await?;
+        crate::deadline::set_session_statement_timeout(&conn, deadline).await?;
+        weights_on(&conn).await
+    }
+
     /// The global default FX (pico-cents per CU) — `pricing_config.id='global'`.
     ///
     /// `None` if the singleton row is absent OR its value is BELOW the near-zero
@@ -147,6 +163,23 @@ impl PricingStore {
     /// (and covers a row written before the CHECK / by a privileged path).
     pub async fn default_fx_pico_cents_per_unit(&self) -> Result<Option<u64>, RegistryError> {
         let conn = self.registry.conn().await?;
+        default_fx_pico_cents_per_unit_on(&conn).await
+    }
+
+    /// As [`Self::default_fx_pico_cents_per_unit`] but on a connection whose
+    /// statements are bounded by `deadline`'s server-side `statement_timeout`.
+    ///
+    /// # Errors
+    /// [`RegistryError`] on a driver failure; when the server bound cuts the
+    /// read the error is [`RegistryError::QueryCanceled`], which the enclosing
+    /// `crate::deadline::within` boundary relabels as
+    /// [`RegistryError::CycleDeadline`].
+    pub async fn default_fx_pico_cents_per_unit_within(
+        &self,
+        deadline: CycleDeadline,
+    ) -> Result<Option<u64>, RegistryError> {
+        let conn = self.registry.conn().await?;
+        crate::deadline::set_session_statement_timeout(&conn, deadline).await?;
         default_fx_pico_cents_per_unit_on(&conn).await
     }
 

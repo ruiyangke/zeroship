@@ -24,6 +24,7 @@ use zeroship_core::types::{
 };
 use zeroship_core::workflow_policy::{AppPolicy, FREE_TIER_MAX_CHILD_OUTPUT_BYTES};
 
+use crate::deadline::CycleDeadline;
 use crate::pricing::PlanPrice;
 use crate::registry::{Registry, RegistryError};
 
@@ -136,31 +137,22 @@ impl PlanCatalog {
     /// NOT-NULL/CHECK schema.
     pub async fn list(&self) -> Result<Vec<Plan>, RegistryError> {
         let conn = self.registry.conn().await?;
-        let rows = conn
-            .query(
-                "SELECT id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
-                        runtime_limits_json, heap_limit_mb, net_policy_limits_json, \
-                        spend_limit_default_cents, archived, \
-                        assignable_by_creator \
-                 FROM zeroship.plans ORDER BY id",
-                &[],
-            )
-            .await?;
-        let mut plans = Vec::with_capacity(rows.len());
-        for row in &rows {
-            match row_to_plan(row) {
-                Ok(plan) => plans.push(plan),
-                Err(e) => {
-                    let id: String = row.get("id");
-                    tracing::warn!(
-                        plan_id = %id,
-                        error = %e,
-                        "plan_catalog: list: skipping unparseable plan row"
-                    );
-                }
-            }
-        }
-        Ok(plans)
+        list_on(&conn).await
+    }
+
+    /// As [`Self::list`] but on a connection whose statements are bounded by
+    /// `deadline`'s server-side `statement_timeout`, so a read that a lock or a
+    /// stalled server holds cannot outlive the enforcement cycle.
+    ///
+    /// # Errors
+    /// [`RegistryError`] on a driver failure; when the server bound cuts the
+    /// read the error is [`RegistryError::QueryCanceled`], which the enclosing
+    /// `crate::deadline::within` boundary relabels as
+    /// [`RegistryError::CycleDeadline`].
+    pub async fn list_within(&self, deadline: CycleDeadline) -> Result<Vec<Plan>, RegistryError> {
+        let conn = self.registry.conn().await?;
+        crate::deadline::set_session_statement_timeout(&conn, deadline).await?;
+        list_on(&conn).await
     }
 
     /// Insert-or-update a plan: how an operator creates a plan or changes any
@@ -337,6 +329,45 @@ impl PlanCatalog {
             .await?;
         Ok(n > 0)
     }
+}
+
+/// List every plan over a CALLER-SUPPLIED connection.
+///
+/// [`PlanCatalog::list`] is this function plus a connection from the registry.
+/// The split exists so a caller already holding a connection reads the catalog
+/// on it rather than opening a second session; [`get_on`] carries the same
+/// argument for a single plan.
+///
+/// # Errors
+/// [`RegistryError`] on a driver failure or an undecodable row.
+pub async fn list_on<C: compio_postgres::GenericClient + Sync>(
+    conn: &C,
+) -> Result<Vec<Plan>, RegistryError> {
+    let rows = conn
+        .query(
+            "SELECT id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
+                    runtime_limits_json, heap_limit_mb, net_policy_limits_json, \
+                    spend_limit_default_cents, archived, \
+                    assignable_by_creator \
+             FROM zeroship.plans ORDER BY id",
+            &[],
+        )
+        .await?;
+    let mut plans = Vec::with_capacity(rows.len());
+    for row in &rows {
+        match row_to_plan(row) {
+            Ok(plan) => plans.push(plan),
+            Err(e) => {
+                let id: String = row.get("id");
+                tracing::warn!(
+                    plan_id = %id,
+                    error = %e,
+                    "plan_catalog: list: skipping unparseable plan row"
+                );
+            }
+        }
+    }
+    Ok(plans)
 }
 
 /// Fetch one plan by id over a CALLER-SUPPLIED connection.
