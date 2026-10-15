@@ -984,17 +984,22 @@ fn main() -> std::io::Result<()> {
     // THE STOP SIGNAL, observed beside ntex rather than instead of it. ntex
     // starts the HTTP drain on SIGTERM, SIGINT or SIGQUIT; this resolves on the
     // same signal so the workflow host stops claiming at that moment rather
-    // than after HTTP has drained. Registered before the server starts
+    // than after HTTP has drained. Asked for before the server starts
     // handling signals.
-    let first_signal = ntex::server::signal();
+    let first_signal = ntex_rt::signals::signal();
     let stop_signal = async move {
         let mut next = first_signal;
-        while let Ok(signal) = next.await {
-            // SIGHUP stops nothing: ntex ignores it, and so does the host.
-            if signal != ntex::server::Signal::Hup {
+        while let Ok(signals) = next.await {
+            // One delivery can carry several signals. SIGHUP stops nothing:
+            // ntex ignores it, and so does the host. Any other signal in the
+            // batch is one ntex stops the server on.
+            if signals
+                .iter()
+                .any(|signal| !matches!(signal, ntex_rt::signals::Signal::Hup))
+            {
                 return;
             }
-            next = ntex::server::signal();
+            next = ntex_rt::signals::signal();
         }
         // The registration ended without a signal. Only the server stopping
         // can start the host's drain now, and the drain watches for that too.

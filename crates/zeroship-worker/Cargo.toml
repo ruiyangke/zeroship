@@ -33,6 +33,7 @@ zeroship-workflow-runner = { workspace = true }
 zeroship-workflow-v8 = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 ntex = { workspace = true }
+ntex-rt = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }

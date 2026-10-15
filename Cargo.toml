@@ -62,7 +62,17 @@ futures = "0.3"
 async-trait = "0.1"
 
 # HTTP
-ntex = { version = "3", features = ["compio"] }
+# ntex 3.11 requires ntex-server 3.10.4 or later, whose worker availability
+# registers its waker before it reads the flag; an older one can lose the wake
+# that resumes the accept loop, so a server binds its port and never accepts
+# on it. The tilde keeps 3.12 out: it names `Method::QUERY`, which no
+# ntex-http 1.x release defines, so it does not build.
+ntex = { version = "~3.11.0", features = ["compio"] }
+# The runtime under ntex, held below 3.17. With signal handling enabled (ntex's
+# default for a server), 3.17 installs SIGSEGV and SIGABRT handlers that print
+# a backtrace from inside the handler and return; on a real SIGSEGV the fault
+# re-executes and re-enters the handler instead of dumping core.
+ntex-rt = "~3.16.1"
 httparse = "1"
 http = "1"
 cyper = { version = "0.8", default-features = false, features = ["rustls", "json", "stream"] }
