@@ -352,6 +352,21 @@ impl ConnectionRelease {
         )
     }
 
+    /// Whether `error` is a frontend write failure a socket this side shut down
+    /// produces.
+    ///
+    /// `shutdown(Both)` makes the next write fail with EPIPE (`BrokenPipe`), or
+    /// with a reset once the peer's RST has arrived, or with `NotConnected` if
+    /// the shutdown landed first. None of these is the peer's failure, so the
+    /// caller gates on [`ConnectionDropRelease::local_teardown_started`] before
+    /// consulting this, exactly as the read path does.
+    pub(crate) fn is_local_teardown_write(error: &std::io::Error) -> bool {
+        matches!(
+            error.kind(),
+            std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::NotConnected
+        ) || Self::is_local_teardown_reset(error)
+    }
+
     #[cfg(feature = "tls")]
     pub(crate) fn set_tls_session(&mut self, session: crate::tls_sansio::SharedSession) {
         self.tls_session = Some(session);

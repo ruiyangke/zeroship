@@ -936,14 +936,31 @@ where
         error
     }
 
-    /// Prefer a complete server diagnosis already in the serialized read
-    /// buffer over the local write failure which exposed it.
-    async fn prefer_buffered_server_error(&mut self, local: Error) -> Error {
+    /// Resolve a failed frontend WRITE on the serialized path.
+    ///
+    /// Prefer a complete server diagnosis already in the read buffer over the
+    /// write failure which exposed it, matching the multiplexed loop, where a
+    /// diagnosis read ahead of the write outranks it. Otherwise attribute a
+    /// failure that follows this side's own release - EPIPE, or a reset once
+    /// the peer's RST has arrived - to that release, so the session ends
+    /// cleanly and any holder is told who closed it. Every other failure is
+    /// returned unchanged: the peer really failed.
+    async fn resolve_write(
+        &mut self,
+        local: Error,
+        read_error_release: Option<&crate::release::ConnectionDropRelease>,
+    ) -> Error {
         self.tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
-        if let Err(error) = self.drain_buffered_backend_frames().await {
+        let error = match self.drain_buffered_backend_frames().await {
+            Err(error) => error,
+            Ok(()) => local,
+        };
+        if is_local_release_write(&error, read_error_release) {
+            let error = Error::local_release();
+            self.record_terminal_read(&error);
             return error;
         }
-        local
+        error
     }
 
     /// Handle a request received from the client (serialized path).
@@ -991,7 +1008,7 @@ where
                     result = self.stream.flush().await;
                 }
                 if let Err(error) = result {
-                    result = Err(self.prefer_buffered_server_error(error).await);
+                    result = Err(self.resolve_write(error, read_error_release).await);
                 }
                 if result.is_ok() {
                     // Writes are outside clock (3). Only a frontend batch that
@@ -1027,10 +1044,10 @@ where
                                 observation.inspect_frontend(&msg);
                             }
                             if let Err(error) = write_frontend(&mut self.stream, msg) {
-                                return Err(self.prefer_buffered_server_error(error).await);
+                                return Err(self.resolve_write(error, read_error_release).await);
                             }
                             if let Err(error) = self.stream.flush().await {
-                                return Err(self.prefer_buffered_server_error(error).await);
+                                return Err(self.resolve_write(error, read_error_release).await);
                             }
                             if !initial_flushed {
                                 read_obligation.activate_initial();
@@ -1678,20 +1695,46 @@ fn is_local_release_read(
     error: &Error,
     release: Option<&crate::release::ConnectionDropRelease>,
 ) -> bool {
-    release.is_some_and(crate::release::ConnectionDropRelease::local_teardown_started)
+    release_has_started(release)
         && (is_eof(error)
             || error
                 .as_io()
                 .is_some_and(crate::release::ConnectionRelease::is_local_teardown_reset))
 }
 
+/// Whether a failed frontend WRITE is the close this side's release started.
+///
+/// The write-path sibling of [`is_local_release_read`]. A release that has
+/// already shut the socket down turns a queued request's write into EPIPE, or
+/// into a reset once the peer's RST has arrived. Attributing it is what keeps a
+/// write that follows this side's own close from being reported as a peer
+/// failure; with no release begun, the failure stays the peer's.
+fn is_local_release_write(
+    error: &Error,
+    release: Option<&crate::release::ConnectionDropRelease>,
+) -> bool {
+    release_has_started(release)
+        && error
+            .as_io()
+            .is_some_and(crate::release::ConnectionRelease::is_local_teardown_write)
+}
+
+/// Whether this side's release has already begun shutting the socket down.
+///
+/// The single flag both attribution directions read, so a read and a write that
+/// raced the same release answer "who closed the socket" identically.
+fn release_has_started(release: Option<&crate::release::ConnectionDropRelease>) -> bool {
+    release.is_some_and(crate::release::ConnectionDropRelease::local_teardown_started)
+}
+
 /// Reduce a handled request's outcome to the serialized loop's next action.
 ///
 /// Step B's post-read drain and Step C's idle arm both route their
 /// `handle_request` result through here. A local release carried out of
-/// `handle_request` (a COPY startup read that ends on this side's own release)
-/// closes the session the same way at either site. A housekeeping request whose
-/// diagnosis has no consumer closes it too, for the reason the debug line names.
+/// `handle_request` - a queued write or a COPY startup read that ends on this
+/// side's own release - closes the session the same way at either site. A
+/// housekeeping request whose diagnosis has no consumer closes it too, for the
+/// reason the debug line names.
 fn request_followup(outcome: Result<RequestOutcome, Error>) -> Result<RequestFollowup, Error> {
     match outcome {
         Ok(RequestOutcome::HousekeepingUndeliverable(error)) => {
@@ -8080,6 +8123,44 @@ mod tests {
         }
     }
 
+    /// A non-splittable duplex whose frontend write fails with EPIPE, as one on
+    /// a socket `crate::release` has already shut down does. Its read resolves
+    /// at once with a named failure rather than parking: reaching it means the
+    /// loop read before the queued write this fixture exists to fail, and a bare
+    /// EOF would let that regression pass as a clean local close.
+    struct WriteFailingDuplex;
+
+    impl AsyncRead for WriteFailingDuplex {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            BufResult(
+                Err(std::io::Error::other(
+                    "the write-failing fixture was read before its queued write",
+                )),
+                buf,
+            )
+        }
+    }
+
+    impl AsyncWrite for WriteFailingDuplex {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            BufResult(
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "scripted write after the local release",
+                )),
+                buf,
+            )
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     impl AsyncRead for SerializedSecondFlushFailure {
         async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
             read_scripted(&mut self.chunks, &mut None, buf).await
@@ -9137,6 +9218,152 @@ mod tests {
             None,
         );
         (connection, response_rx)
+    }
+
+    /// Build a serialized `Connection` over [`WriteFailingDuplex`], whose every
+    /// frontend write fails with EPIPE, with `messages` already queued as the
+    /// first request the loop handles. Returns the connection and the response
+    /// consumer.
+    ///
+    /// The request is queued before `run_serialized` starts, mirroring a client
+    /// that dropped with work still on the channel: the serialized loop writes
+    /// it only after the release has shut the socket down.
+    fn write_failing_serialized_connection(
+        messages: RequestMessages,
+    ) -> (
+        Connection<WriteFailingDuplex, WriteFailingDuplex>,
+        mpsc::Receiver<ResponseMessages>,
+    ) {
+        let (request_sender, request_receiver) = mpsc::unbounded();
+        let (response_tx, response_rx) = mpsc::channel(1);
+        request_sender
+            .unbounded_send(Request {
+                messages,
+                sender: response_tx,
+                disposition: RequestDisposition::Awaited,
+                transaction_effect: TransactionEffect::MayChange,
+                prepare_cleanup: None,
+                statement: None,
+                observation: None,
+                request_server_error: Arc::default(),
+            })
+            .expect("queue the write-failing request");
+        let connection = Connection::new(
+            BufStream::new(MaybeTlsStream::Raw(WriteFailingDuplex)),
+            VecDeque::new(),
+            HashMap::new(),
+            Arc::default(),
+            request_receiver,
+            Arc::new(AtomicU8::new(b'I')),
+            Arc::new(AtomicUsize::new(1)),
+            Arc::default(),
+            None,
+        );
+        (connection, response_rx)
+    }
+
+    /// A WRITE failure on the serialized loop after this side's release has
+    /// begun is the local close, exactly as the READ failure above is:
+    /// `run_serialized` resolves `Ok(())` and the held response is told the
+    /// reason.
+    ///
+    /// A request queued before the last client dropped is written after the
+    /// release has shut the socket, so the write fails with EPIPE. Without the
+    /// write-path attribution that EPIPE travels out of `finish_request_write`
+    /// and the loop reports a connection error for a close this side started.
+    #[compio::test]
+    async fn a_local_release_write_failure_is_a_clean_close_on_the_serialized_loop() {
+        let (connection, mut response_rx) = write_failing_serialized_connection(
+            RequestMessages::Single(FrontendMessage::Raw(bytes::Bytes::from_static(
+                b"scripted request",
+            ))),
+        );
+
+        let result = connection
+            .run_serialized(Some(locally_released_guard()))
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "a serialized write failure after the local release was reported as an error: {result:?}"
+        );
+        let delivered = response_rx
+            .next()
+            .await
+            .expect("the write-path local release told the response nothing");
+        let ResponseMessages::Observed(mut messages) = delivered else {
+            panic!("the write-path local release delivered frames rather than its error");
+        };
+        let Err(first) = messages.pop_front().expect("the delivered batch is empty") else {
+            panic!("the write-path local release delivered a frame");
+        };
+        assert!(
+            first.is_local_release(),
+            "the write-path holder was not told the connection was released: {first:?}"
+        );
+    }
+
+    /// The COPY startup WRITE attributes the same way: the opening frontend
+    /// message is written after this side's release shut the socket, so its
+    /// EPIPE is the local close rather than a connection error.
+    #[compio::test]
+    async fn a_local_release_copy_write_failure_is_a_clean_close() {
+        let (copy_in, _producer) = CopyInReceiver::for_connection_test(
+            Some(FrontendMessage::Raw(bytes::Bytes::from_static(
+                b"scripted COPY startup",
+            ))),
+            None,
+        );
+        let (connection, mut response_rx) =
+            write_failing_serialized_connection(RequestMessages::CopyIn(copy_in));
+
+        let result = connection
+            .run_serialized(Some(locally_released_guard()))
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "a COPY startup write failure after the local release was reported as an error: {result:?}"
+        );
+        let delivered = response_rx
+            .next()
+            .await
+            .expect("the COPY write-path local release told the response nothing");
+        let ResponseMessages::Observed(mut messages) = delivered else {
+            panic!("the COPY write-path local release delivered frames rather than its error");
+        };
+        let Err(first) = messages.pop_front().expect("the delivered batch is empty") else {
+            panic!("the COPY write-path local release delivered a frame");
+        };
+        assert!(
+            first.is_local_release(),
+            "the COPY write-path holder was not told the connection was released: {first:?}"
+        );
+    }
+
+    /// The write-path control: the identical EPIPE with NO release begun stays
+    /// the peer failure it is.
+    #[compio::test]
+    async fn a_write_failure_without_a_local_release_stays_a_server_failure() {
+        // A guard that exists but has not been released. The failure must be
+        // attributed to the flag, not to the guard's mere presence.
+        let (_release, guard) = unreleased_guard();
+        let (connection, _response_rx) = write_failing_serialized_connection(
+            RequestMessages::Single(FrontendMessage::Raw(bytes::Bytes::from_static(
+                b"scripted request",
+            ))),
+        );
+
+        let error = connection
+            .run_serialized(Some(guard))
+            .await
+            .expect_err("a serialized write failure with no release became clean");
+
+        assert_eq!(
+            error.as_io().map(std::io::Error::kind),
+            Some(std::io::ErrorKind::BrokenPipe),
+            "the serialized write failure lost its kind: {error:?}"
+        );
     }
 
     /// A reset on the serialized Step B read after this side's release has
